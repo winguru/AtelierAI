@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    ports:
+      - "8000:8000" # Map host port 8000 to container port 8000
+    volumes:
+      - ./backend:/app # Mount the local backend code into the container for live reloading
+      - app-data:/app/data # Create a named volume for the SQLite database
+    environment:
+      - DATABASE_URL=sqlite:///data/image_db.sqlite # Tell FastAPI where to find the DB
+
+volumes:
+  app-data:

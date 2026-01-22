@@ -1,0 +1,29 @@
+{
+  "name": "AI Image Curator",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "backend",
+  "workspaceFolder": "/app",
+
+  // Configure VS Code to install these extensions inside the container
+  "extensions": [
+    "ms-python.python",
+    "ms-python.pylance",
+    "ms-python.black-formatter",
+    "ms-python.flake8",
+    "ms-azuretools.vscode-docker"
+  ],
+
+  // Command to run after the container is created
+  "postCreateCommand": "pip install --upgrade pip",
+
+  // Port to forward for the FastAPI application
+  "forwardPorts": [8000],
+
+  // Set default Python interpreter
+  "settings": {
+    "python.defaultInterpreterPath": "/usr/local/bin/python",
+    "python.linting.enabled": true,
+    "python.linting.flake8Enabled": true,
+    "python.formatting.provider": "black"
+  }
+}

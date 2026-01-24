@@ -6,12 +6,20 @@ services:
       context: .
       dockerfile: .devcontainer/Dockerfile
     ports:
-      - "8000:8000" # Map host port 8000 to container port 8000
+      - "8000:8000"  # Map host port 8000 to container port 8000
     volumes:
-      - ./backend:/app # Mount the local backend code into the container for live reloading
-      - app-data:/app/data # Create a named volume for the SQLite database
+      - ./backend:/app  # Mount the local backend code into the container for live reloading
+      - ./frontend:/app/frontend  # Mount the local frontend code into the container for live reloading
+      - ./image_library:/var/lib/atelierai/image_library  # Mount local image library
+      - db-data:/var/lib/atelierai   # Persistent storage for the database
+
     environment:
-      - DATABASE_URL=sqlite:///data/image_db.sqlite # Tell FastAPI where to find the DB
+      # Tell FastAPI where to find the DB
+      - DATABASE_URL=sqlite:////var/lib/atelierai/image_db.sqlite
+
+    # This overrides the CMD in the Dockerfile, preventing the app from starting automatically.
+    # `tail -f /dev/null` is a common command to keep a container running indefinitely.
+    command: tail -f /dev/null
 
 volumes:
-  app-data:
+  db-data:

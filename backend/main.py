@@ -1,6 +1,7 @@
 # main.py
 import os
 import hashlib
+import shutil
 import json
 from pathlib import Path
 from datetime import datetime
@@ -32,6 +33,15 @@ from models import (
     Artist,
     SchemaVersion
 )   # Import the specific classes we need
+
+from image_utils import (
+    is_valid_image,
+    calculate_file_hash,
+    get_image_metadata,
+    find_image_by_hash,
+    create_image_record,
+    find_or_create_artist
+)
 
 class ScanRequest(BaseModel):
     folder_path: str
@@ -252,7 +262,7 @@ def read_images(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
             "id": img.id,
             "file_name": img.file_name,
             "file_hash": img.file_hash,
-            "artist": artist_info,        # Changed from author_name
+            "artist": artist_info,
             "license": license_info
         })
     return result
@@ -347,65 +357,112 @@ def scan_folder(request: ScanRequest, db: Session = Depends(get_db)):
 @app.post("/rescan_library/")
 def rescan_library(db: Session = Depends(get_db)):
     """
-    Scans the pre-configured image library folder for new images.
+    Scans the library, imports new files, removes files already in the DB,
+    and removes DB records for files that no longer exist on the filesystem.
     """
     if not os.path.isdir(IMAGE_LIBRARY_PATH):
         raise HTTPException(
             status_code=500,
-            detail=f"Image library directory not found on server: {IMAGE_LIBRARY_PATH}",
+            detail=f"Image library directory not found on server: {IMAGE_LIBRARY_PATH}"
         )
 
     images_added = 0
-    images_skipped = 0
+    files_renamed = 0
+    files_removed = 0
+    records_removed = 0  # New counter
+    errors = []
 
+    # Find all records in the DB that point to non-existent files
+    print("Starting cleanup of orphaned database records...")
+    all_db_images = db.query(ImageModel.file_path, ImageModel.id).all()
+
+    # Create a set of all file paths that actually exist on the filesystem for fast lookup
+    existing_files_on_disk = {str(p) for p in Path(IMAGE_LIBRARY_PATH).iterdir() if p.is_file()}
+
+    orphaned_ids = []
+    for file_path, image_id in all_db_images:
+        if file_path not in existing_files_on_disk:
+            orphaned_ids.append(image_id)
+
+    if orphaned_ids:
+        print(f"Found {len(orphaned_ids)} orphaned records. Deleting them...")
+        # Delete all records with IDs in the orphaned_ids list
+        db.query(ImageModel).filter(ImageModel.id.in_(orphaned_ids)).delete(synchronize_session=False)
+        records_removed = len(orphaned_ids)
+        db.commit()  # Commit the deletions
+        print("Cleanup complete.")
+    else:
+        print("No orphaned records found.")
+
+    print("Starting filesystem scan...")
     path = Path(IMAGE_LIBRARY_PATH)
     # We don't need rglob here, just the top-level of the library folder
     for image_file in path.iterdir():
-        if image_file.is_file() and image_file.suffix.lower() in [
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
+        if not image_file.is_file() or image_file.suffix.lower() not in [
+            '.png', '.jpg', '.jpeg', '.webp'
         ]:
-            try:
-                file_hash = get_file_hash(str(image_file))
+            continue
 
-                if (
-                    db.query(ImageModel)
-                    .filter(ImageModel.file_hash == file_hash)
-                    .first()
-                ):
-                    images_skipped += 1
-                    continue
+        try:
+            # 1. Read the file and calculate its hash
+            with open(image_file, 'rb') as f:
+                contents = f.read()
+            file_hash = hashlib.sha256(contents).hexdigest()
 
-                with Image.open(image_file) as img:
-                    width, height = img.size
+            # 2. Check if this file is ALREADY in the database
+            db_image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
 
-                stat = image_file.stat()
+            if db_image:
+                # File is already imported. Remove it from the filesystem.
+                print(f"Removing already-imported file: {image_file.name}")
+                os.remove(image_file)
+                files_removed += 1
+                continue
 
-                new_image = ImageModel(
-                    file_path=str(image_file),
-                    file_name=image_file.name,
-                    file_hash=file_hash,
-                    file_size=stat.st_size,
-                    width=width,
-                    height=height,
-                    date_created=datetime.fromtimestamp(stat.st_ctime),
-                    date_modified=datetime.fromtimestamp(stat.st_mtime),
-                    exif_data=get_exif_data(str(image_file)),
-                )
-                db.add(new_image)
-                images_added += 1
-            except Exception as e:
-                print(f"Could not process {image_file.name}: {e}")
+            # 3. If we're here, the file is NEW and needs to be imported.
+            file_extension = image_file.suffix.lower()
+            final_filename = f"{file_hash}{file_extension}"
+            destination_path = image_file.parent / final_filename
 
+            # 4. Rename the file if its name is not already the hash-based name
+            if image_file.name != final_filename:
+                print(f"Renaming {image_file.name} to {final_filename}")
+                shutil.move(image_file, destination_path)
+                files_renamed += 1
+
+            # 5. Get image metadata
+            with Image.open(destination_path) as img:
+                width, height = img.size
+                exif_data = get_exif_data(str(destination_path))
+
+            # 6. Create the database record
+            new_image = ImageModel(
+                file_path=str(destination_path),
+                file_name=image_file.name,
+                file_hash=file_hash,
+                file_size=os.path.getsize(destination_path),
+                width=width,
+                height=height,
+                date_created=datetime.fromtimestamp(image_file.stat().st_ctime),
+                date_modified=datetime.fromtimestamp(image_file.stat().st_mtime),
+                exif_data=exif_data
+            )
+            db.add(new_image)
+            images_added += 1
+
+        except Exception as e:
+            errors.append(f"Could not process {image_file.name}: {e}")
+
+    # Commit all new records to the database
     db.commit()
 
     return {
-        "message": f"Library scan complete. Processed {images_added + images_skipped} images.",
+        "message": "Library scan and synchronization complete.",
         "images_added": images_added,
-        "images_skipped": images_skipped,
-        "library_path": IMAGE_LIBRARY_PATH,
+        "files_renamed": files_renamed,
+        "files_removed": files_removed,
+        "records_removed": records_removed,
+        "errors": errors
     }
 
 
@@ -417,10 +474,11 @@ async def upload_images(
     artist_name: Optional[str] = Form(None),
     source_url: Optional[str] = Form(None),
     license_id: Optional[int] = Form(None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
     """
     Uploads one or more images, saves them to the library, and adds them to the database.
+    This version is robust against filesystem/database mismatches.
     """
     images_added = 0
     images_skipped = 0
@@ -431,76 +489,70 @@ async def upload_images(
 
     for file in files:
         try:
-            # Read file content into memory
+            # 1. Read file content and calculate hash
             contents = await file.read()
-
-            # 1. Get the file hash to check for duplicates and use as a filename
             file_hash = hashlib.sha256(contents).hexdigest()
+            file_extension = os.path.splitext(file.filename or "")[1].lower()
 
-            # Check if this image (by hash) already exists in the database
+            # 2. Check for true duplicates in the DATABASE first
             if db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first():
                 images_skipped += 1
-                continue
+                continue  # Skip to the next file
 
-            # 2. Determine the file extension and create a safe filename
-            filename = file.filename or "file"
-            file_extension = os.path.splitext(filename)[1].lower()
-            if file_extension not in [".png", ".jpg", ".jpeg", ".webp"]:
+            # 3. If it's a new file, determine its final path on the filesystem
+            if file_extension not in ['.png', '.jpg', '.jpeg', '.webp']:
                 errors.append(f"Skipped {file.filename}: Unsupported file type.")
                 continue
 
-            # Use the hash as the filename to ensure uniqueness and prevent overwrites
-            safe_filename = f"{file_hash}{file_extension}"
-            destination_path = os.path.join(IMAGE_LIBRARY_PATH, safe_filename)
+            final_filename = f"{file_hash}{file_extension}"
+            destination_path = os.path.join(IMAGE_LIBRARY_PATH, final_filename)
 
-            # 3. Save the file to the image library
+            # 4. Save the file (overwriting if it exists to fix DB/filesystem mismatches)
             with open(destination_path, "wb") as f:
                 f.write(contents)
 
-            # 4. Get image metadata (width, height, EXIF)
+            # 5. Get image metadata
             with Image.open(destination_path) as img:
                 width, height = img.size
                 exif_data = get_exif_data(destination_path)
 
-            # 5. Handle the artist
+            # 6. Handle the artist
             artist_obj = None
             if artist_name:
-                # Check if the artist already exists
                 artist_obj = db.query(Artist).filter(Artist.name == artist_name).first()
                 if not artist_obj:
-                    # If not, create a new one
                     artist_obj = Artist(name=artist_name)
                     db.add(artist_obj)
-                    db.commit()  # Commit to get the new artist's ID
-                    db.refresh(artist_obj)  # Refresh to get the new ID from the DB
+                    db.commit()
+                    db.refresh(artist_obj)
 
-            # 6. Create the database record
+            # 7. Create the database record
             new_image = ImageModel(
-                file_path=destination_path,
-                file_name=file.filename,  # Keep original filename
+                file_path=destination_path,  # The path to the hash-based file
+                file_name=file.filename,   # The ORIGINAL filename from the user
                 file_hash=file_hash,
                 file_size=len(contents),
                 width=width,
                 height=height,
                 date_created=datetime.now(),
                 date_modified=datetime.now(),
-                # Populate with batch metadata
                 artist_id=artist_obj.id if artist_obj else None,
+                source_url=source_url,
                 license_id=license_id if license_id else None,
+                exif_data=exif_data
             )
             db.add(new_image)
-            # Note: We commit once at the end of the loop for performance
             images_added += 1
 
         except Exception as e:
             errors.append(f"Could not process {file.filename}: {e}")
 
-    # Commit all new image records to the database
+    # Commit all new records at the end
     db.commit()
 
     return {
         "message": "Upload complete.",
         "images_added": images_added,
         "images_skipped": images_skipped,
-        "errors": errors,
+        "errors": errors
     }

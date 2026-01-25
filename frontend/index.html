@@ -1,31 +1,36 @@
-<!-- ... (head section is the same) ... -->
+<!DOCTYPE html>
+<html lang="en">
+
 <body>
     <h1>AtelierAI</h1>
 
     <!-- UPDATED SECTION FOR SCANNING -->
     <div class="card">
         <h2>1. Manage Image Library</h2>
-        <p>Add images to the <code>./image_library</code> folder in your project directory, then click the button below to scan them into the database.</p>
-        <button id="rescan-btn">Rescan Image Library</button>
+        <p>
+            Add images to the <code>./image_library</code> folder, then click the button below.
+            This will clean up orphaned records, import new files, rename them to their hash, and remove any files
+            already in the database.
+        </p>
+        <button id="rescan-btn">Rescan & Sync Library</button>
         <pre id="scan-output"></pre>
     </div>
-
     <hr>
-
     <!-- NEW SECTION FOR UPLOADING -->
     <div class="card">
         <h2>3. Upload New Images</h2>
         <p>Select one or more images to upload to your library. You can also assign batch metadata.</p>
-        
+
         <form id="upload-form" enctype="multipart/form-data">
             <div class="form-group">
                 <label for="image-files">Select Images:</label>
                 <input type="file" id="image-files" name="files" multiple accept="image/png, image/jpeg, image/webp">
             </div>
-            
+
             <div class="form-group">
                 <label for="artist-name">Artist Name (Optional):</label>
-                <input list="artist-suggestions" type="text" id="artist-name" name="artist_name" placeholder="Start typing to see suggestions...">
+                <input list="artist-suggestions" type="text" id="artist-name" name="artist_name"
+                    placeholder="Start typing to see suggestions...">
                 <datalist id="artist-suggestions"></datalist>
             </div>
 
@@ -33,7 +38,7 @@
                 <label for="source-url">Source URL (Optional):</label>
                 <input type="url" id="source-url" name="source_url" placeholder="https://...">
             </div>
-            
+
             <div class="form-group">
                 <label for="license-select">License (Optional):</label>
                 <select id="license-select" name="license_id">
@@ -45,7 +50,7 @@
         </form>
         <pre id="upload-output"></pre>
     </div>
-    
+
     <hr>
 
     <!-- EXISTING SECTION FOR LOADING -->
@@ -57,4 +62,5 @@
 
     <script src="/frontend/js/main.js"></script>
 </body>
+
 </html>

@@ -44,6 +44,9 @@ wheels/
 *.swo
 *~
 
+#VSCode extensions
+.continue/
+
 # OS
 .DS_Store
 Thumbs.db

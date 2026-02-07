@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
 # Copy the backend requirements file and install Python dependencies
 COPY ./backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r dev-requirements.txt
 
 # Copy the rest of the backend application code and scripts
 COPY ./backend/ /app/

@@ -1,0 +1,144 @@
+meta:
+  api_name: CivitAI tRPC (Reverse-Engineered)
+  version: "0.1.0"
+  base_url: https://civitai.com/api/trpc
+  auth:
+    - type: session_cookie
+      name: __Secure-civitai-token
+      description: "The primary session token found in browser cookies."
+  conventions:
+    python:
+      client_class: CivitaiTrpcClient
+      default_http_lib: httpx
+
+procedures:
+  collection.getById:
+    description: |
+      Fetch detailed information about a specific collection by ID.
+    stability: stable
+    http:
+      method: GET
+      path_template: "{base_url}/collection.getById"
+      headers:
+        x-client: "web"
+        # x-client-date: "CURRENT_TIMESTAMP_MS" (Dynamic)
+        # x-client-version: "5.0.1401"
+        # x-fingerprint: "HASH" (Required, likely derived from session/device)
+    input:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: The numeric ID of the collection.
+        authed:
+          type: boolean
+          default: true
+      required: [id]
+    output:
+      type: object
+      description: Collection details (inferred structure).
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        user:
+          type: object
+        items:
+          type: array
+
+  image.getInfinite:
+    description: |
+      Infinite scroll query for images. Supports filtering by collection, sort, period, and NSFW levels.
+      Uses a cursor for pagination.
+    stability: stable
+    http:
+      method: GET
+      path_template: "{base_url}/image.getInfinite"
+      headers:
+        x-client: "web"
+    input:
+      type: object
+      properties:
+        collectionId:
+          type: integer
+          description: Filter images by a specific collection ID.
+        period:
+          type: string
+          enum: ["AllTime", "Day", "Week", "Month"]
+          default: "AllTime"
+        sort:
+          type: string
+          enum: ["Newest", "MostLiked", "MostComments"]
+          default: "Newest"
+        browsingLevel:
+          type: integer
+          description: NSFW browsing level threshold (usually 1-31).
+          default: 1
+        include:
+          type: array
+          items: { type: string }
+          description: Additional data to include (e.g., ["cosmetics"]).
+        excludedTagIds:
+          type: array
+          items: { type: integer }
+          description: List of tag IDs to exclude from results.
+        disablePoi:
+          type: boolean
+          default: true
+        disableMinor:
+          type: boolean
+          default: false
+        cursor:
+          type: string
+          nullable: true
+          description: "Pagination cursor. Use null for the first page, then the 'nextCursor' from the response."
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { type: object }
+        nextCursor:
+          type: string
+          nullable: true
+
+  system.getBrowsingSettingAddons:
+    description: |
+      Retrieves system default browsing settings (NSFW levels, excluded tags, etc.).
+      Useful for populating default parameters for image.getInfinite.
+    stability: stable
+    http:
+      method: GET
+      path_template: "{base_url}/system.getBrowsingSettingAddons"
+      headers:
+        x-client: "web"
+    input:
+      type: object
+      properties:
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: array
+      description: "Array of setting configuration groups based on browsing level type."
+      items:
+        type: object
+        properties:
+          type:
+            type: string
+          nsfwLevels:
+            type: array
+            items: { type: integer }
+          excludedTagIds:
+            type: array
+            items: { type: integer }
+          disablePoi:
+            type: boolean
+          disableMinor:
+            type: boolean
+          generationDefaultValues:
+            type: object

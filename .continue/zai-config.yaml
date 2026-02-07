@@ -1,0 +1,29 @@
+# This is an example configuration file
+# To learn more, see the full config.yaml reference: https://docs.continue.dev/reference
+
+name: Z.AI Local Config
+version: 1.0.0
+schema: v1
+
+# Define which models can be used
+# https://docs.continue.dev/customization/models
+name: Z.AI GLM-4.7 Model
+    provider: openai
+    model: glm-4.7
+    apiKey: ${ZAI_API_KEY}
+    apiBase: https://api.z.ai/api/coding/paas/v4
+    roles:
+      - chat
+      - edit
+      - apply
+      - autocomplete
+    capabilities:
+      - tool_use
+    defaultCompletionOptions:
+      maxTokens: 32768
+      contextLength: 131072
+    # with:
+    #   ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+
+# MCP Servers that Continue can access
+# https://docs.continue.dev/customization/mcp-tools

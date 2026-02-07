@@ -43,6 +43,35 @@ class ImageModel(Base):
     datasets = relationship("Dataset", secondary="dataset_images", back_populates="images")
     artist = relationship("Artist", back_populates="images")
 
+    def to_dict(self) -> dict:
+        """
+        Returns a dictionary representation of the image, suitable for an API response.
+        """
+        # Safely access the artist information
+        artist_info = None
+        if self.artist:
+            artist_info = {
+                "id": self.artist.id,
+                "name": self.artist.name,
+                "nickname": self.artist.nickname
+            }
+
+        # Safely access the license information
+        license_info = None
+        if self.license:
+            license_info = {
+                "id": self.license.id,
+                "short_name": self.license.short_name,
+                "name": self.license.name
+            }
+
+        return {
+            "id": self.id,
+            "file_name": self.file_name,
+            "file_hash": self.file_hash,
+            "artist": artist_info,
+            "license": license_info
+        }
 
 class Tag(Base):
     __tablename__ = "tags"

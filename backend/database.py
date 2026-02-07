@@ -1,15 +1,8 @@
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError
-
-# Get the database URL from an environment variable or use a default
-# This makes it easy to switch to a different database like PostgreSQL later
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/image_db.sqlite")
-
-# Define the path to the image library inside the container
-IMAGE_LIBRARY_PATH = os.getenv("IMAGE_LIBRARY_PATH", "/var/lib/atelierai/image_library")
+from config import DATABASE_URL
 
 # Create the SQLAlchemy engine
 # The `check_same_thread=False` is necessary for SQLite to work with FastAPI
@@ -37,7 +30,7 @@ def test_db_connection():
     """Tests the database connection and prints a helpful error message."""
     try:
         # Attempt to connect to the database
-        with engine.connect() as connection:
+        with engine.connect():
             print("✅ Database connection successful.")
             return True
     except OperationalError as e:

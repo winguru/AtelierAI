@@ -4,3 +4,10 @@ sqlalchemy
 pillow
 python-multipart
 exifread
+python-dotenv
+requests
+
+# Civitai automatic authentication
+
+playwright==1.40.0
+playwright-stealth

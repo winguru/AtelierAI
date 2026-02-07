@@ -87,15 +87,15 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // --- UPDATED SCANNING FUNCTIONALITY ---
-    const rescanBtn = document.getElementById('rescan-btn');
+    const scanBtn = document.getElementById('scan-btn');
     const scanOutput = document.getElementById('scan-output');
 
-    rescanBtn.addEventListener('click', async () => {
+    scanBtn.addEventListener('click', async () => {
         scanOutput.textContent = 'Scanning library... this may take a while.';
-        rescanBtn.disabled = true;
+        scanBtn.disabled = true;
 
         try {
-            const response = await fetch('/rescan_library/', {
+            const response = await fetch('/scan_library/', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
             });
@@ -112,7 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Error scanning library:', error);
             scanOutput.textContent = `Error: ${error.message}`;
         } finally {
-            rescanBtn.disabled = false;
+            scanBtn.disabled = false;
         }
     });
     

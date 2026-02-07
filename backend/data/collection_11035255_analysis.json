@@ -1,0 +1,4363 @@
+{
+  "collection_id": 11035255,
+  "total_images": 21,
+  "top_models": [
+    [
+      "AutismMix SDXL",
+      8
+    ],
+    [
+      "Pony Diffusion V6 XL",
+      4
+    ],
+    [
+      "MeichiDarkMix_Reload",
+      2
+    ],
+    [
+      "iLustMix",
+      1
+    ],
+    [
+      "Prefect Pony XL",
+      1
+    ],
+    [
+      "AniVerse - Pony XL",
+      1
+    ],
+    [
+      "Hassaku XL (Illustrious)",
+      1
+    ],
+    [
+      "Pony Realism \ud83d\udd2e",
+      1
+    ],
+    [
+      "PottingMix PDXL",
+      1
+    ],
+    [
+      "Pony \ud83e\udd84FaeTality",
+      1
+    ]
+  ],
+  "top_model_versions": [
+    [
+      "AutismMix SDXL - AutismMix_pony",
+      7
+    ],
+    [
+      "Pony Diffusion V6 XL - V6 (start with this one)",
+      4
+    ],
+    [
+      "MeichiDarkMix_Reload - MeichiDarkAnimV2_Lust",
+      2
+    ],
+    [
+      "iLustMix - v7.0 Cinematic",
+      1
+    ],
+    [
+      "Prefect Pony XL - v5.0",
+      1
+    ],
+    [
+      "AniVerse - Pony XL - v4.0",
+      1
+    ],
+    [
+      "Hassaku XL (Illustrious) - v1.3 - Style A",
+      1
+    ],
+    [
+      "Pony Realism \ud83d\udd2e - \ud83d\udce6 v2.1",
+      1
+    ],
+    [
+      "PottingMix PDXL - v1.0",
+      1
+    ],
+    [
+      "AutismMix SDXL - AutismMix_DPO",
+      1
+    ],
+    [
+      "Pony \ud83e\udd84FaeTality - v1.1",
+      1
+    ]
+  ],
+  "top_samplers": [
+    [
+      "Euler a",
+      16
+    ],
+    [
+      "DPM++ 2M Karras",
+      3
+    ],
+    [
+      "DPM++ 2M",
+      2
+    ]
+  ],
+  "top_steps": [
+    [
+      "30",
+      6
+    ],
+    [
+      "19",
+      4
+    ],
+    [
+      "29",
+      3
+    ],
+    [
+      "40",
+      3
+    ],
+    [
+      "32",
+      2
+    ],
+    [
+      "24",
+      1
+    ],
+    [
+      "57",
+      1
+    ],
+    [
+      "25",
+      1
+    ]
+  ],
+  "top_cfgs": [
+    [
+      "7",
+      6
+    ],
+    [
+      "4",
+      4
+    ],
+    [
+      "5.5",
+      3
+    ],
+    [
+      "7.5",
+      3
+    ],
+    [
+      "5",
+      2
+    ],
+    [
+      "10",
+      1
+    ],
+    [
+      "8",
+      1
+    ],
+    [
+      "6",
+      1
+    ]
+  ],
+  "top_loras": [
+    [
+      "Karryn SDXL (Pony XL)",
+      10
+    ],
+    [
+      "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+      10
+    ],
+    [
+      "Detail Tweaker XL",
+      7
+    ],
+    [
+      "Liara T'soni (Mass Effect)",
+      6
+    ],
+    [
+      "Not Artists Styles for Pony Diffusion V6 XL",
+      4
+    ],
+    [
+      "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+      4
+    ],
+    [
+      "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+      3
+    ],
+    [
+      "Mystical Furry (Style/Pony)",
+      3
+    ],
+    [
+      "Finnick | |  zootopia for pony",
+      3
+    ],
+    [
+      "Twilight Sparkle/ Original Version",
+      3
+    ],
+    [
+      "Gangbang/Group Sex Slider - Pony / Illustrious",
+      2
+    ],
+    [
+      "Sabudenego styles (Sketch)",
+      2
+    ],
+    [
+      "[DAGASI (Sega Sonic)] Miles 'Tails' Prower Character PonyXL",
+      2
+    ],
+    [
+      "(Pony XL) Cum Chugging (Gokkun)",
+      2
+    ],
+    [
+      "Aerith from Final Fantasy [IllustriousXL]",
+      1
+    ],
+    [
+      "Colored Fox Style",
+      1
+    ],
+    [
+      "Deep Throat XL",
+      1
+    ],
+    [
+      "Penis Size Slider - Pony/Illustrious",
+      1
+    ],
+    [
+      "AI\u30a4\u30e9\u30b9\u30c8\u304a\u3058\u3055\u3093",
+      1
+    ],
+    [
+      "Hands XL + SD 1.5 + F1D + Pony + Illustrious + zit",
+      1
+    ],
+    [
+      "Vixon's Pony Styles - gothic neon",
+      1
+    ],
+    [
+      "Sinfully Stylish (dramatic lighting)",
+      1
+    ],
+    [
+      "Karryn (Karryn's Prison) - [Commission]",
+      1
+    ],
+    [
+      "Realistic Anime Style (Illustrious/Pony/FLUX)",
+      1
+    ],
+    [
+      "The Polly mix Style - by IkariRH",
+      1
+    ],
+    [
+      "Hand Detail FLUX & XL",
+      1
+    ],
+    [
+      "Vixon's Classic Art Styles - detailed painting",
+      1
+    ],
+    [
+      "Pony Detail Tweaker",
+      1
+    ],
+    [
+      "Gargantua Black Hole ( From Interstellar Movie )",
+      1
+    ],
+    [
+      "ThePit Style [PonyXL]",
+      1
+    ]
+  ],
+  "lora_average_weights": {
+    "Detail Tweaker XL": 0.8071428571428573,
+    "Aerith from Final Fantasy [IllustriousXL]": 1.0,
+    "Colored Fox Style": 0.75,
+    "Karryn SDXL (Pony XL)": 0.8099999999999999,
+    "Deep Throat XL": 1.0,
+    "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1": 0.525,
+    "Penis Size Slider - Pony/Illustrious": 1.0,
+    "AI\u30a4\u30e9\u30b9\u30c8\u304a\u3058\u3055\u3093": 0.05,
+    "Hands XL + SD 1.5 + F1D + Pony + Illustrious + zit": 1.0,
+    "Vixon's Pony Styles - gothic neon": 1.0,
+    "Sinfully Stylish (dramatic lighting)": 0.05,
+    "Karryn (Karryn's Prison) - [Commission]": 1.0,
+    "Realistic Anime Style (Illustrious/Pony/FLUX)": 0.25,
+    "Gangbang/Group Sex Slider - Pony / Illustrious": 1.0,
+    "Liara T'soni (Mass Effect)": 0.7333333333333334,
+    "Sabudenego styles (Sketch)": 0.8,
+    "The Polly mix Style - by IkariRH": 0.8,
+    "Hand Detail FLUX & XL": 1.0,
+    "Vixon's Classic Art Styles - detailed painting": 0.5,
+    "Pony Detail Tweaker": 2.0,
+    "Gargantua Black Hole ( From Interstellar Movie )": 1.0,
+    "Not Artists Styles for Pony Diffusion V6 XL": 0.42500000000000004,
+    "ThePit Style [PonyXL]": 0.3,
+    "All Disney Princess XL LoRA Model from Ralph Breaks the Internet": -0.06249999999999997,
+    "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]": -0.10000000000000002,
+    "Mystical Furry (Style/Pony)": -0.15,
+    "Finnick | |  zootopia for pony": 0.9833333333333334,
+    "Twilight Sparkle/ Original Version": 0.6999999999999998,
+    "[DAGASI (Sega Sonic)] Miles 'Tails' Prower Character PonyXL": 0.65,
+    "Miles 'Tails' Prower - SD 1.5 & SDXL": 0.95,
+    "Neon Environments": 1.0,
+    "Detailed nipples XL": 0.8,
+    "Flash Glowing Runes SDXL": 0.75,
+    "Pony Realistic Tweaker": 1.0,
+    "Round Breasts - Noob vPred, Pony, and 1.5": 1.0,
+    "(Pony XL) Cum Chugging (Gokkun)": 1.0
+  },
+  "top_positive_concepts": [
+    [
+      "score_8_up",
+      19
+    ],
+    [
+      "score_9",
+      18
+    ],
+    [
+      "score_7_up",
+      18
+    ],
+    [
+      "1girl",
+      14
+    ],
+    [
+      "cleavage",
+      13
+    ],
+    [
+      "solo",
+      11
+    ],
+    [
+      "purple hair",
+      11
+    ],
+    [
+      "short hair",
+      11
+    ],
+    [
+      "blue eyes",
+      11
+    ],
+    [
+      "huge breasts",
+      10
+    ],
+    [
+      "cute",
+      8
+    ],
+    [
+      "white tank top",
+      7
+    ],
+    [
+      "midriff",
+      7
+    ],
+    [
+      "orange shorts",
+      7
+    ],
+    [
+      "karrynbarce",
+      6
+    ],
+    [
+      "masterpiece",
+      5
+    ],
+    [
+      "standing",
+      5
+    ],
+    [
+      "looking at viewer",
+      4
+    ],
+    [
+      "source_anime",
+      4
+    ],
+    [
+      "expressiveh",
+      4
+    ],
+    [
+      "break 1girl",
+      4
+    ],
+    [
+      "karrynce",
+      4
+    ],
+    [
+      "bare shoulders",
+      4
+    ],
+    [
+      "minidress",
+      4
+    ],
+    [
+      "elbow gloves",
+      4
+    ],
+    [
+      "red necktie",
+      4
+    ],
+    [
+      "peaked cap",
+      4
+    ],
+    [
+      "black side-tie panties",
+      4
+    ],
+    [
+      "thigh strap",
+      4
+    ],
+    [
+      "liarazure",
+      4
+    ],
+    [
+      "sex",
+      4
+    ],
+    [
+      "score_6_up",
+      4
+    ],
+    [
+      "score_4_up",
+      4
+    ],
+    [
+      "indoors",
+      3
+    ],
+    [
+      "realistic",
+      3
+    ],
+    [
+      "source_cartoon",
+      3
+    ],
+    [
+      "blush",
+      3
+    ],
+    [
+      "anal sex",
+      3
+    ],
+    [
+      "high quality",
+      3
+    ],
+    [
+      "perfect face",
+      3
+    ],
+    [
+      "anthro realistic spike the dragon",
+      3
+    ],
+    [
+      "my little pony",
+      3
+    ],
+    [
+      "cute dragon",
+      3
+    ],
+    [
+      "purple scales",
+      3
+    ],
+    [
+      "(( furry tails the foxy boy",
+      3
+    ],
+    [
+      "miles prawer",
+      3
+    ],
+    [
+      "completely nude",
+      3
+    ],
+    [
+      "flat chest",
+      3
+    ],
+    [
+      "body fur))",
+      3
+    ],
+    [
+      "miles prawer the fox hugs sonic the hedgehog",
+      3
+    ],
+    [
+      "adorable",
+      3
+    ],
+    [
+      "very aesthetic",
+      3
+    ],
+    [
+      "furry",
+      3
+    ],
+    [
+      "realistic fur",
+      3
+    ],
+    [
+      "zzlfashion",
+      3
+    ],
+    [
+      "g5",
+      3
+    ],
+    [
+      "they meet downtown",
+      3
+    ],
+    [
+      "uncensored",
+      3
+    ],
+    [
+      "large breasts",
+      3
+    ],
+    [
+      "sweaty",
+      3
+    ],
+    [
+      "wide hips",
+      3
+    ],
+    [
+      "prison",
+      3
+    ],
+    [
+      "cute smile",
+      2
+    ],
+    [
+      "squatting",
+      2
+    ],
+    [
+      "depth of field",
+      2
+    ],
+    [
+      "horny",
+      2
+    ],
+    [
+      "perfect eyes",
+      2
+    ],
+    [
+      "source_comic",
+      2
+    ],
+    [
+      "nude",
+      2
+    ],
+    [
+      "asari",
+      2
+    ],
+    [
+      "alien",
+      2
+    ],
+    [
+      "no hair",
+      2
+    ],
+    [
+      "gangbang",
+      2
+    ],
+    [
+      "ass",
+      2
+    ],
+    [
+      "sexy",
+      2
+    ],
+    [
+      "vaginal penetration",
+      2
+    ],
+    [
+      "group sex",
+      2
+    ],
+    [
+      "forced sex",
+      2
+    ],
+    [
+      "dynamic pose",
+      2
+    ],
+    [
+      "dynamic shot",
+      2
+    ],
+    [
+      "dominated",
+      2
+    ],
+    [
+      "fucked into submission",
+      2
+    ],
+    [
+      "humiliation",
+      2
+    ],
+    [
+      "raw sex",
+      2
+    ],
+    [
+      "running a train",
+      2
+    ],
+    [
+      "forced submission",
+      2
+    ],
+    [
+      "grimy dirty dark concrete room backround",
+      2
+    ],
+    [
+      "dim afternoon lighting",
+      2
+    ],
+    [
+      "human male",
+      2
+    ],
+    [
+      "light skinned male",
+      2
+    ],
+    [
+      "sketch",
+      2
+    ],
+    [
+      "safe_pos",
+      2
+    ],
+    [
+      "2d",
+      2
+    ],
+    [
+      "cowboy shot",
+      2
+    ],
+    [
+      "detailed",
+      2
+    ],
+    [
+      "score_5_up",
+      2
+    ],
+    [
+      "erect nipples",
+      2
+    ],
+    [
+      "penis",
+      2
+    ],
+    [
+      "balls",
+      2
+    ],
+    [
+      "neat little penis",
+      2
+    ]
+  ],
+  "top_positive_phrases": [
+    [
+      "score_8_up",
+      19
+    ],
+    [
+      "score_9",
+      18
+    ],
+    [
+      "score_7_up",
+      18
+    ],
+    [
+      "1girl",
+      14
+    ],
+    [
+      "cleavage",
+      13
+    ],
+    [
+      "solo",
+      11
+    ],
+    [
+      "purple hair",
+      11
+    ],
+    [
+      "short hair",
+      11
+    ],
+    [
+      "blue eyes",
+      11
+    ],
+    [
+      "huge breasts",
+      10
+    ],
+    [
+      "cute",
+      8
+    ],
+    [
+      "white tank top",
+      7
+    ],
+    [
+      "midriff",
+      7
+    ],
+    [
+      "orange shorts",
+      7
+    ],
+    [
+      "karrynbarce",
+      6
+    ],
+    [
+      "masterpiece",
+      5
+    ],
+    [
+      "standing",
+      5
+    ],
+    [
+      "looking at viewer",
+      4
+    ],
+    [
+      "source_anime",
+      4
+    ],
+    [
+      "expressiveh",
+      4
+    ],
+    [
+      "break 1girl",
+      4
+    ],
+    [
+      "karrynce",
+      4
+    ],
+    [
+      "bare shoulders",
+      4
+    ],
+    [
+      "minidress",
+      4
+    ],
+    [
+      "elbow gloves",
+      4
+    ],
+    [
+      "red necktie",
+      4
+    ],
+    [
+      "peaked cap",
+      4
+    ],
+    [
+      "black side-tie panties",
+      4
+    ],
+    [
+      "thigh strap",
+      4
+    ],
+    [
+      "liarazure",
+      4
+    ],
+    [
+      "sex",
+      4
+    ],
+    [
+      "score_6_up",
+      4
+    ],
+    [
+      "score_4_up",
+      4
+    ],
+    [
+      "indoors",
+      3
+    ],
+    [
+      "realistic",
+      3
+    ],
+    [
+      "source_cartoon",
+      3
+    ],
+    [
+      "blush",
+      3
+    ],
+    [
+      "anal sex",
+      3
+    ],
+    [
+      "high quality",
+      3
+    ],
+    [
+      "perfect face",
+      3
+    ],
+    [
+      "anthro realistic spike the dragon",
+      3
+    ],
+    [
+      "my little pony",
+      3
+    ],
+    [
+      "cute dragon",
+      3
+    ],
+    [
+      "purple scales",
+      3
+    ],
+    [
+      "(( furry tails the foxy boy",
+      3
+    ],
+    [
+      "miles prawer",
+      3
+    ],
+    [
+      "completely nude",
+      3
+    ],
+    [
+      "flat chest",
+      3
+    ],
+    [
+      "body fur))",
+      3
+    ],
+    [
+      "miles prawer the fox hugs sonic the hedgehog",
+      3
+    ]
+  ],
+  "top_negative_concepts": [
+    [
+      "low quality",
+      10
+    ],
+    [
+      "bad anatomy",
+      10
+    ],
+    [
+      "watermark",
+      10
+    ],
+    [
+      "censored",
+      10
+    ],
+    [
+      "signature",
+      9
+    ],
+    [
+      "3d",
+      9
+    ],
+    [
+      "score_4",
+      9
+    ],
+    [
+      "ugly",
+      8
+    ],
+    [
+      "score_6",
+      8
+    ],
+    [
+      "score_5",
+      8
+    ],
+    [
+      "bad hands",
+      7
+    ],
+    [
+      "monochrome",
+      7
+    ],
+    [
+      "))",
+      7
+    ],
+    [
+      "worst quality",
+      6
+    ],
+    [
+      "blurry",
+      6
+    ],
+    [
+      "easynegative",
+      5
+    ],
+    [
+      "artist name",
+      5
+    ],
+    [
+      "extra fingers",
+      5
+    ],
+    [
+      "bad proportions",
+      5
+    ],
+    [
+      "extra legs",
+      5
+    ],
+    [
+      "blurry face",
+      5
+    ],
+    [
+      "muscular female",
+      5
+    ],
+    [
+      "lowres",
+      4
+    ],
+    [
+      "jpeg artifacts",
+      4
+    ],
+    [
+      "text",
+      4
+    ],
+    [
+      "deformed",
+      4
+    ],
+    [
+      "pony",
+      4
+    ],
+    [
+      "ugly face",
+      4
+    ],
+    [
+      "simple background",
+      3
+    ],
+    [
+      "bad eyes",
+      3
+    ],
+    [
+      "ng_deepnegative_v1_75t",
+      3
+    ],
+    [
+      "realistic",
+      3
+    ],
+    [
+      "source_furry",
+      3
+    ],
+    [
+      "source_pony",
+      3
+    ],
+    [
+      "low res",
+      3
+    ],
+    [
+      "black and white",
+      3
+    ],
+    [
+      "extra digits",
+      2
+    ],
+    [
+      "sketch",
+      2
+    ],
+    [
+      "negativexl_d",
+      2
+    ],
+    [
+      "score_5_up",
+      2
+    ],
+    [
+      "score_4_up",
+      2
+    ],
+    [
+      "blurry eyes",
+      2
+    ],
+    [
+      "penis",
+      2
+    ],
+    [
+      "poorly drawn",
+      2
+    ],
+    [
+      "error",
+      2
+    ],
+    [
+      "normal quality",
+      2
+    ],
+    [
+      "username",
+      2
+    ],
+    [
+      "skinny",
+      2
+    ],
+    [
+      "negative_hand",
+      2
+    ],
+    [
+      "child",
+      2
+    ]
+  ],
+  "authors": [
+    [
+      "PYBY_the_Fox",
+      3
+    ],
+    [
+      "tessaiisan",
+      2
+    ],
+    [
+      "WillAInukeusallalready",
+      2
+    ],
+    [
+      "Ashong",
+      2
+    ],
+    [
+      "Yashug01",
+      2
+    ],
+    [
+      "QuickForgeAI",
+      1
+    ],
+    [
+      "Unknown",
+      1
+    ],
+    [
+      "MAMELY32",
+      1
+    ],
+    [
+      "63787",
+      1
+    ],
+    [
+      "ikarirh",
+      1
+    ],
+    [
+      "LGraph",
+      1
+    ],
+    [
+      "Haariger_Toepfer",
+      1
+    ],
+    [
+      "StevesAISlop",
+      1
+    ],
+    [
+      "Poula",
+      1
+    ],
+    [
+      "SFC",
+      1
+    ]
+  ],
+  "scraped_data": [
+    {
+      "image_id": 88474892,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/83ccf344-d5af-4ce7-a5c1-9f28295aa2be/original=true/quality=90/K0KJCP1SGF47QCT1HFS95PZVA0.jpeg",
+      "author": "QuickForgeAI",
+      "tags": null,
+      "prompt": "1girl, FF7Aerith, 1girl, brown hair, green eyes, long hair, braided ponytail, detailed face, cute smile, kimono, open kimono, removing kimono, naked body under kimono, small breasts, perky breasts, nipples, ribline slightly visible, collarbone, navel, vagina, natural pubic hair, bare legs, black thighhigh stockings, no shoes, looking at viewer, facing viewer, squatting, bouncing on viewer's cock, vaginal sex, hetero, penetration, creampie, 1boy (pov, from below, stiff cock, hands fondling another's breasts), \nindoors, traditional japanese decor, minimalist decor, \nFoxColorStyle, realistic, masterpiece, vivid colors, bokeh, depth of field, female focus, absurdres, 16k",
+      "negative_prompt": "easynegative, lowres, worst quality, low quality, bad anatomy, bad hands, jpeg artifacts, signature, watermark, text, logo, artist name, extra digits, extra fingers, censored, teeth",
+      "model": "iLustMix",
+      "model_version": "v7.0 Cinematic",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 1.2
+        },
+        {
+          "name": "Aerith from Final Fantasy [IllustriousXL]",
+          "weight": 1
+        },
+        {
+          "name": "Colored Fox Style",
+          "weight": 0.75
+        }
+      ],
+      "sampler": "DPM++ 2M",
+      "steps": 30,
+      "cfg_scale": 5.5,
+      "seed": 1517289903,
+      "raw_meta_json": {
+        "baseModel": "Illustrious",
+        "prompt": "1girl, FF7Aerith, 1girl, brown hair, green eyes, long hair, braided ponytail, detailed face, cute smile, kimono, open kimono, removing kimono, naked body under kimono, small breasts, perky breasts, nipples, ribline slightly visible, collarbone, navel, vagina, natural pubic hair, bare legs, black thighhigh stockings, no shoes, looking at viewer, facing viewer, squatting, bouncing on viewer's cock, vaginal sex, hetero, penetration, creampie, 1boy (pov, from below, stiff cock, hands fondling another's breasts), \nindoors, traditional japanese decor, minimalist decor, \nFoxColorStyle, realistic, masterpiece, vivid colors, bokeh, depth of field, female focus, absurdres, 16k",
+        "negativePrompt": "easynegative, lowres, worst quality, low quality, bad anatomy, bad hands, jpeg artifacts, signature, watermark, text, logo, artist name, extra digits, extra fingers, censored, teeth",
+        "cfgScale": 5.5,
+        "steps": 30,
+        "sampler": "DPM++ 2M",
+        "seed": 1517289903,
+        "process": "img2img",
+        "workflow": "img2img-hires",
+        "additionalResources": [
+          {
+            "name": "urn:air:sdxl:lora:civitai:122359@135867",
+            "type": "lora",
+            "strength": 1.2,
+            "strengthClip": 1
+          },
+          {
+            "name": "urn:air:sdxl:lora:civitai:1425333@1611053",
+            "type": "lora",
+            "strength": 0.75,
+            "strengthClip": 1
+          },
+          {
+            "name": "urn:air:sdxl:lora:civitai:1118770@1257343",
+            "type": "lora",
+            "strength": 1,
+            "strengthClip": 1
+          }
+        ],
+        "civitaiResources": [
+          {
+            "weight": 1,
+            "modelVersionId": 1888952
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "weight": 1.2,
+            "modelVersionId": 135867
+          },
+          {
+            "weight": 0.75,
+            "modelVersionId": 1611053
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 1257343
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 333245
+          },
+          {
+            "type": "checkpoint",
+            "modelVersionId": 1888952
+          },
+          {
+            "type": "upscaler",
+            "modelVersionId": 164821
+          },
+          {
+            "type": "vae",
+            "modelVersionId": 333245
+          },
+          {
+            "type": "lora",
+            "weight": 1.2,
+            "modelVersionId": 135867
+          },
+          {
+            "type": "lora",
+            "weight": 0.75,
+            "modelVersionId": 1611053
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 1257343
+          }
+        ],
+        "extra": {},
+        "vaes": [
+          "urn:air:sdxl:vae:civitai:296576@333245"
+        ],
+        "Model": "urn:air:sdxl:checkpoint:civitai:1110783@1888952",
+        "width": 832,
+        "height": 1216,
+        "models": [
+          "urn:air:sdxl:checkpoint:civitai:1110783@1888952"
+        ],
+        "priority": "low",
+        "quantity": 1,
+        "upscalers": [
+          "urn:air:other:upscaler:civitai:147759@164821"
+        ],
+        "disablePoi": true,
+        "aspectRatio": "13:19",
+        "sourceImage": {
+          "url": "https://orchestration.civitai.com/v2/consumer/blobs/PQ87SX9AZR0E3YRB9FJE3QV600.jpeg",
+          "width": 832,
+          "height": 1216
+        },
+        "experimental": false,
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 88474892,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 88474892,
+            "modelVersionId": 135867,
+            "strength": 1.2,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 88474892,
+            "modelVersionId": 164821,
+            "strength": null,
+            "modelId": 147759,
+            "modelName": "Remacri",
+            "modelType": "Upscaler",
+            "versionId": 164821,
+            "versionName": "Original",
+            "baseModel": "Other"
+          },
+          {
+            "imageId": 88474892,
+            "modelVersionId": 333245,
+            "strength": null,
+            "modelId": 296576,
+            "modelName": "SDXL VAE",
+            "modelType": "VAE",
+            "versionId": 333245,
+            "versionName": "SDXL-VAE",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 88474892,
+            "modelVersionId": 1257343,
+            "strength": 1,
+            "modelId": 1118770,
+            "modelName": "Aerith from Final Fantasy [IllustriousXL]",
+            "modelType": "LORA",
+            "versionId": 1257343,
+            "versionName": "v1.0",
+            "baseModel": "Illustrious"
+          },
+          {
+            "imageId": 88474892,
+            "modelVersionId": 1611053,
+            "strength": 0.75,
+            "modelId": 1425333,
+            "modelName": "Colored Fox Style",
+            "modelType": "LORA",
+            "versionId": 1611053,
+            "versionName": "V1",
+            "baseModel": "Illustrious"
+          },
+          {
+            "imageId": 88474892,
+            "modelVersionId": 1888952,
+            "strength": null,
+            "modelId": 1110783,
+            "modelName": "iLustMix",
+            "modelType": "Checkpoint",
+            "versionId": 1888952,
+            "versionName": "v7.0 Cinematic",
+            "baseModel": "Illustrious"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 77468734,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/5167c6de-dbb6-4611-96ad-3246b6a416f0/original=true/quality=90/T9JW7AVQFMEJDXWPFHHMV3GPD0.jpeg",
+      "author": "Unknown",
+      "tags": null,
+      "prompt": "1girl, solo, white background, score_9, source_anime, score_8_up, score_7_up, perfect hands, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, bar, holding tray of beers, crowd,",
+      "negative_prompt": "bad anatomy, bad, bad hands, sketch, low quality, lowres, aidxlv05_neg, negativeXL_D",
+      "model": "Prefect Pony XL",
+      "model_version": "v5.0",
+      "loras": [
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "DPM++ 2M Karras",
+      "steps": 24,
+      "cfg_scale": 4,
+      "seed": 264336392,
+      "raw_meta_json": {
+        "baseModel": "Pony",
+        "prompt": "1girl, solo, white background, score_9, source_anime, score_8_up, score_7_up, perfect hands, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, bar, holding tray of beers, crowd,",
+        "negativePrompt": "bad anatomy, bad, bad hands, sketch, low quality, lowres, aidxlv05_neg, negativeXL_D",
+        "cfgScale": 4,
+        "steps": 24,
+        "sampler": "DPM++ 2M Karras",
+        "seed": 264336392,
+        "workflow": "txt2img",
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 1199750
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 134583
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          }
+        ],
+        "extra": {
+          "remixOfId": 8080539
+        },
+        "Size": "832x1216",
+        "nsfw": false,
+        "draft": false,
+        "width": 832,
+        "height": 1216,
+        "quantity": 4,
+        "Created Date": "2025-05-20T1829:04.7769238Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 77468734,
+            "modelVersionId": 134583,
+            "strength": 1,
+            "modelId": 118418,
+            "modelName": "negativeXL",
+            "modelType": "TextualInversion",
+            "versionId": 134583,
+            "versionName": "D",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 77468734,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 77468734,
+            "modelVersionId": 1199750,
+            "strength": null,
+            "modelId": 439889,
+            "modelName": "Prefect Pony XL",
+            "modelType": "Checkpoint",
+            "versionId": 1199750,
+            "versionName": "v5.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 67733821,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/05da9618-f1ba-4985-9d61-f5d6f84919e1/original=true/quality=90/53278298.jpeg",
+      "author": "MAMELY32",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, source_cartoon, 1girl, 2boys, Beautiful Girl, ultra high quality, voluptuous body, toned, bubble butt, gigantic breasts, exposed breasts, shirt pulled up over tits, cute, skindentation, full lips, huge eyes, thin neck, huge penis, blush, horny, slutty face, surprised, crying, tears, scared, throbbing cock, Giving a deep throat blowjob, anal sex, huge cumshot, cum on boobs, cum on face, cum in the ass, ass exposed, facial, interracial, reception, bending over, side view, Expressiveh, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts",
+      "negative_prompt": "score_5_up, score_4_up, worst quality, low quality, simple background, bad artist, signature, watermark, blurry eyes, bad eyes, ugly, obese, distorted proportions, unusual anatomy, malformed, amputee, censorship, deformity, extra fingers, 3d, penis",
+      "model": "AniVerse - Pony XL",
+      "model_version": "v4.0",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 1.0
+        },
+        {
+          "name": "Deep Throat XL",
+          "weight": 1.0
+        },
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 1.0
+        },
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 1.0
+        },
+        {
+          "name": "Penis Size Slider - Pony/Illustrious",
+          "weight": 1.0
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 29,
+      "cfg_scale": 5,
+      "seed": "",
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, source_cartoon, 1girl, 2boys, Beautiful Girl, ultra high quality, voluptuous body, toned, bubble butt, gigantic breasts, exposed breasts, shirt pulled up over tits, cute, skindentation, full lips, huge eyes, thin neck, huge penis, blush, horny, slutty face, surprised, crying, tears, scared, throbbing cock, Giving a deep throat blowjob, anal sex, huge cumshot, cum on boobs, cum on face, cum in the ass, ass exposed, facial, interracial, reception, bending over, side view, Expressiveh, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts",
+        "negativePrompt": "score_5_up, score_4_up, worst quality, low quality, simple background, bad artist, signature, watermark, blurry eyes, bad eyes, ugly, obese, distorted proportions, unusual anatomy, malformed, amputee, censorship, deformity, extra fingers, 3d, penis",
+        "cfgScale": 5,
+        "steps": 29,
+        "sampler": "Euler a",
+        "resources": [
+          {
+            "imageId": 67733821,
+            "modelVersionId": 135867,
+            "strength": null,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 67733821,
+            "modelVersionId": 309802,
+            "strength": null,
+            "modelId": 274845,
+            "modelName": "Deep Throat XL",
+            "modelType": "LORA",
+            "versionId": 309802,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 67733821,
+            "modelVersionId": 382152,
+            "strength": null,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 67733821,
+            "modelVersionId": 396075,
+            "strength": null,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 67733821,
+            "modelVersionId": 517898,
+            "strength": null,
+            "modelId": 465379,
+            "modelName": "Penis Size Slider - Pony/Illustrious",
+            "modelType": "LORA",
+            "versionId": 517898,
+            "versionName": "Pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 67733821,
+            "modelVersionId": 982480,
+            "strength": null,
+            "modelId": 594253,
+            "modelName": "AniVerse - Pony XL",
+            "modelType": "Checkpoint",
+            "versionId": 982480,
+            "versionName": "v4.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 65288187,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/bad6083f-cdb3-4c52-8699-35fe52782f69/original=true/quality=90/XYT5HF5SHDRSC81TD1SMMWT3Y0.jpeg",
+      "author": "63787",
+      "tags": null,
+      "prompt": "(score_9, score_8_up, score_7_up, 8k, high res, high quality, intricate quality, highly detailed face), solo, dynamic light, dramatic lighting, simple background, solo,\nBREAK 1girl, KarrynCE, purple hair, short hair, blue eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap, boots, hairy armpit",
+      "negative_prompt": "score_6, score_5, score_4, duplicated, disfugured, deformed, poorly drawn, border, comics, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, worst quality, low quality, interlocked fingers, normal quality, signature, watermark, username, blurry, artist name, pixels, censored, excessive pecs, beard, easynegative, ng_deepnegative_v1_75t, verybadimagenegative_v1.3, bad anatomy, long torso, arms behind head, pleated skirt, leather skirt, slender, accessories, abs, fat, plump, unsymmetrical face, ((weird eyes, deformed eyes)), unsymmetrical eyes, (deformed face), skinny, ugly, monochrome, grayscale, makeup, negative_hand, unaestheticXL_cbp62, katana, close eyes, wide cheekbone, cute, high cheekbone, round face, young, youth, kid, child, water, yellow skin, excessive muscle, furry, sketch",
+      "model": "MeichiDarkMix_Reload",
+      "model_version": "MeichiDarkAnimV2_Lust",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 1
+        },
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        },
+        {
+          "name": "AI\u30a4\u30e9\u30b9\u30c8\u304a\u3058\u3055\u3093",
+          "weight": 0.05
+        },
+        {
+          "name": "Hands XL + SD 1.5 + F1D + Pony + Illustrious + zit",
+          "weight": 1
+        },
+        {
+          "name": "Vixon's Pony Styles - gothic neon",
+          "weight": 1.0
+        },
+        {
+          "name": "Sinfully Stylish (dramatic lighting)",
+          "weight": 0.05
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 57,
+      "cfg_scale": 10,
+      "seed": 347416969,
+      "raw_meta_json": {
+        "baseModel": "Pony",
+        "prompt": "(score_9, score_8_up, score_7_up, 8k, high res, high quality, intricate quality, highly detailed face), solo, dynamic light, dramatic lighting, simple background, solo,\nBREAK 1girl, KarrynCE, purple hair, short hair, blue eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap, boots, hairy armpit",
+        "negativePrompt": "score_6, score_5, score_4, duplicated, disfugured, deformed, poorly drawn, border, comics, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, worst quality, low quality, interlocked fingers, normal quality, signature, watermark, username, blurry, artist name, pixels, censored, excessive pecs, beard, easynegative, ng_deepnegative_v1_75t, verybadimagenegative_v1.3, bad anatomy, long torso, arms behind head, pleated skirt, leather skirt, slender, accessories, abs, fat, plump, unsymmetrical face, ((weird eyes, deformed eyes)), unsymmetrical eyes, (deformed face), skinny, ugly, monochrome, grayscale, makeup, negative_hand, unaestheticXL_cbp62, katana, close eyes, wide cheekbone, cute, high cheekbone, round face, young, youth, kid, child, water, yellow skin, excessive muscle, furry, sketch",
+        "cfgScale": 10,
+        "steps": 57,
+        "sampler": "Euler a",
+        "seed": 347416969,
+        "workflow": "txt2img",
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 770375
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 135867
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 5637
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 997426
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 25820
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 797474
+          },
+          {
+            "type": "lora",
+            "weight": 0,
+            "modelVersionId": 1029540
+          },
+          {
+            "type": "lora",
+            "weight": 0.05,
+            "modelVersionId": 537681
+          },
+          {
+            "type": "lora",
+            "weight": 0.05,
+            "modelVersionId": 1279063
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          }
+        ],
+        "Size": "832x1216",
+        "nsfw": false,
+        "draft": false,
+        "width": 832,
+        "height": 1216,
+        "quantity": 1,
+        "Created Date": "2025-03-23T0728:03.6265590Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 65288187,
+            "modelVersionId": 5637,
+            "strength": 1,
+            "modelId": 4629,
+            "modelName": "Deep Negative V1.x",
+            "modelType": "TextualInversion",
+            "versionId": 5637,
+            "versionName": "V1 75T",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 25820,
+            "strength": 1,
+            "modelId": 11772,
+            "modelName": "veryBadImageNegative",
+            "modelType": "TextualInversion",
+            "versionId": 25820,
+            "versionName": "veryBadImageNegative_v1.3",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 135867,
+            "strength": 1,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 537681,
+            "strength": 0.05,
+            "modelId": 481765,
+            "modelName": "AI\u30a4\u30e9\u30b9\u30c8\u304a\u3058\u3055\u3093",
+            "modelType": "LORA",
+            "versionId": 537681,
+            "versionName": "Pony V1.1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 770375,
+            "strength": null,
+            "modelId": 643227,
+            "modelName": "MeichiDarkMix_Reload",
+            "modelType": "Checkpoint",
+            "versionId": 770375,
+            "versionName": "MeichiDarkAnimV2_Lust",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 797474,
+            "strength": 1,
+            "modelId": 119032,
+            "modelName": "unaestheticXL | Negative TI",
+            "modelType": "TextualInversion",
+            "versionId": 797474,
+            "versionName": "_cbp62",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 997426,
+            "strength": 1,
+            "modelId": 200255,
+            "modelName": "Hands XL + SD 1.5 + F1D + Pony + Illustrious + zit",
+            "modelType": "LORA",
+            "versionId": 997426,
+            "versionName": "Hand XL v5.5",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 1029540,
+            "strength": null,
+            "modelId": 888231,
+            "modelName": "Vixon's Pony Styles - gothic neon",
+            "modelType": "LORA",
+            "versionId": 1029540,
+            "versionName": "Gothic Neon v2",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 65288187,
+            "modelVersionId": 1279063,
+            "strength": 0.05,
+            "modelId": 340248,
+            "modelName": "Sinfully Stylish (dramatic lighting)",
+            "modelType": "LORA",
+            "versionId": 1279063,
+            "versionName": "v1.0 for Pony",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 58031240,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/45b6043f-25ca-4aff-aec7-4781442773cb/original=true/quality=90/N3KJC17FYD383DHCHM6XT3K2W0.jpeg",
+      "author": "tessaiisan",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, 1girl, purple hair, short hair, perfect quality, high quality, mature female, plump, ambient occlusion, raytracing, source_anime, shining glossy skin, W4itr3ss, orange shorts, white tank top, midriff, cleavage, short shorts, sitting on chair,beer on table,looking at the viewer, pulling shirt to show nipples, drunk expression, a lot of beer around, shorts open, hairy pussy visible, soft lighting, realistic skin, blum effect, masterpiece, absolutely eye-catching, (massive breasts:1.5), sagging breasts, solo, upper body only, detailed hand, 5 fingers, hands on table, blue eyes",
+      "negative_prompt": "score_6, score_5, score_4, embedding:negativeXL_D, skinny, anorexic, furry, halo, (worst quality, low quality, sketch:1.1), error, bad anatomy, bad hands, watermark, ugly, distorted, censored, lowres, abstract, signature",
+      "model": "Hassaku XL (Illustrious)",
+      "model_version": "v1.3 - Style A",
+      "loras": [
+        {
+          "name": "Karryn (Karryn's Prison) - [Commission]",
+          "weight": 1
+        },
+        {
+          "name": "Realistic Anime Style (Illustrious/Pony/FLUX)",
+          "weight": 0.25
+        }
+      ],
+      "sampler": "DPM++ 2M Karras",
+      "steps": 30,
+      "cfg_scale": 4,
+      "seed": 225419403,
+      "raw_meta_json": {
+        "baseModel": "Illustrious",
+        "prompt": "score_9, score_8_up, score_7_up, 1girl, purple hair, short hair, perfect quality, high quality, mature female, plump, ambient occlusion, raytracing, source_anime, shining glossy skin, W4itr3ss, orange shorts, white tank top, midriff, cleavage, short shorts, sitting on chair,beer on table,looking at the viewer, pulling shirt to show nipples, drunk expression, a lot of beer around, shorts open, hairy pussy visible, soft lighting, realistic skin, blum effect, masterpiece, absolutely eye-catching, (massive breasts:1.5), sagging breasts, solo, upper body only, detailed hand, 5 fingers, hands on table, blue eyes",
+        "negativePrompt": "score_6, score_5, score_4, embedding:negativeXL_D, skinny, anorexic, furry, halo, (worst quality, low quality, sketch:1.1), error, bad anatomy, bad hands, watermark, ugly, distorted, censored, lowres, abstract, signature",
+        "cfgScale": 4,
+        "steps": 30,
+        "sampler": "DPM++ 2M Karras",
+        "seed": 225419403,
+        "workflow": "txt2img",
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 1240288
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 60938
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 91028
+          },
+          {
+            "type": "lora",
+            "weight": 0.25,
+            "modelVersionId": 1193082
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 1190900
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "nsfw": true,
+        "draft": false,
+        "width": 832,
+        "height": 1216,
+        "quantity": 1,
+        "Created Date": "2025-02-15T1955:21.5568002Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 58031240,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 58031240,
+            "modelVersionId": 60938,
+            "strength": 1,
+            "modelId": 56519,
+            "modelName": "negative_hand Negative Embedding ",
+            "modelType": "TextualInversion",
+            "versionId": 60938,
+            "versionName": "negative_hand",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 58031240,
+            "modelVersionId": 91028,
+            "strength": 1,
+            "modelId": 16807,
+            "modelName": "Useful Quality Embeddings",
+            "modelType": "TextualInversion",
+            "versionId": 91028,
+            "versionName": "aid291",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 58031240,
+            "modelVersionId": 1190900,
+            "strength": 1,
+            "modelId": 1061188,
+            "modelName": "Karryn (Karryn's Prison) - [Commission]",
+            "modelType": "LORA",
+            "versionId": 1190900,
+            "versionName": "v1.0",
+            "baseModel": "Illustrious"
+          },
+          {
+            "imageId": 58031240,
+            "modelVersionId": 1193082,
+            "strength": 0.25,
+            "modelId": 536084,
+            "modelName": "Realistic Anime Style (Illustrious/Pony/FLUX)",
+            "modelType": "LORA",
+            "versionId": 1193082,
+            "versionName": "Illustrious",
+            "baseModel": "Illustrious"
+          },
+          {
+            "imageId": 58031240,
+            "modelVersionId": 1240288,
+            "strength": null,
+            "modelId": 140272,
+            "modelName": "Hassaku XL (Illustrious)",
+            "modelType": "Checkpoint",
+            "versionId": 1240288,
+            "versionName": "v1.3 - Style A",
+            "baseModel": "Illustrious"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 55408868,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/28a6be90-80b3-4c66-8095-04860fa95470/original=true/quality=90/HPA4QVKSTVNAEYRDB6MJY8DDX0.jpeg",
+      "author": "WillAInukeusallalready",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, 1girl, solo, perfect face, perfect eyes, source_cartoon, source_comic,\nBREAK\n1girl, liarazure, nude, ,((blue skin)),asari,alien, no hair, gangbang, fucked from behind, doggystyle, ass, cute, sexy, vaginal penetration, anal penetration, double penetration, group sex, sex, forced sex, dynamic pose, dynamic shot, dominated, fucked into submission, humiliation, raw sex, running a train, forced submission, grimy dirty dark concrete room backround, dim afternoon lighting, human male, light skinned male, sketch,",
+      "negative_prompt": "score_6, score_5, score_4, , pony, censored, bad eyes, bad face, monochrome, 3d, realistic, (bad anatomy:1.3),(amputee:1.3),deformed,ugly,bad proportions,unicorn horn, (horns:1.3), extra legs,deformed anatomy, bad legs, tanlines, eyes without pupils",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 1
+        },
+        {
+          "name": "Gangbang/Group Sex Slider - Pony / Illustrious",
+          "weight": 1
+        },
+        {
+          "name": "Liara T'soni (Mass Effect)",
+          "weight": 1
+        },
+        {
+          "name": "Sabudenego styles (Sketch)",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 30,
+      "cfg_scale": 5.5,
+      "seed": 1732670781,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, 1girl, solo, perfect face, perfect eyes, source_cartoon, source_comic,\nBREAK\n1girl, liarazure, nude, ,((blue skin)),asari,alien, no hair, gangbang, fucked from behind, doggystyle, ass, cute, sexy, vaginal penetration, anal penetration, double penetration, group sex, sex, forced sex, dynamic pose, dynamic shot, dominated, fucked into submission, humiliation, raw sex, running a train, forced submission, grimy dirty dark concrete room backround, dim afternoon lighting, human male, light skinned male, sketch,",
+        "negativePrompt": "score_6, score_5, score_4, , pony, censored, bad eyes, bad face, monochrome, 3d, realistic, (bad anatomy:1.3),(amputee:1.3),deformed,ugly,bad proportions,unicorn horn, (horns:1.3), extra legs,deformed anatomy, bad legs, tanlines, eyes without pupils",
+        "cfgScale": 5.5,
+        "steps": 30,
+        "sampler": "Euler a",
+        "seed": 1732670781,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 536311
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 708278
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 768624
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 250712
+          }
+        ],
+        "extra": {
+          "remixOfId": 54931433
+        },
+        "Size": "832x1216",
+        "Created Date": "2025-02-02T1811:44.3060997Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 55408868,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 55408868,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408868,
+            "modelVersionId": 382152,
+            "strength": 1,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408868,
+            "modelVersionId": 536311,
+            "strength": 1,
+            "modelId": 482233,
+            "modelName": "Gangbang/Group Sex Slider - Pony / Illustrious",
+            "modelType": "LORA",
+            "versionId": 536311,
+            "versionName": "Pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408868,
+            "modelVersionId": 708278,
+            "strength": 1,
+            "modelId": 413975,
+            "modelName": "Liara T'soni (Mass Effect)",
+            "modelType": "LORA",
+            "versionId": 708278,
+            "versionName": "v2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408868,
+            "modelVersionId": 768624,
+            "strength": 0.8,
+            "modelId": 684156,
+            "modelName": "Sabudenego styles (Sketch)",
+            "modelType": "LORA",
+            "versionId": 768624,
+            "versionName": "Color 1",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 55408502,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/79dd01c5-04cb-4d0b-bb80-53a23a7ed842/original=true/quality=90/GVGQJD63D5S3794105N49G9QB0.jpeg",
+      "author": "WillAInukeusallalready",
+      "tags": null,
+      "prompt": "safe_pos, score_9, score_8_up, score_7_up, 1girl, solo, perfect face, perfect eyes, source_cartoon, source_comic,\nBREAK\n1girl, liarazure, nude, ,((blue skin)),asari,alien, no hair, gangbang, laying on her back, legs held up, cute, sexy, looking at viewer, vaginal penetration, group sex, sex, forced sex, dynamic pose, dynamic shot, dominated, fucked into submission, humiliation, raw sex, running a train, forced submission, grimy dirty dark concrete room backround, dim afternoon lighting, human male, light skinned male, sketch,",
+      "negative_prompt": "safe_neg, score_6, score_5, score_4, , pony, censored, bad eyes, bad face, monochrome, 3d, realistic, (bad anatomy:1.3),(amputee:1.3),deformed,ugly,bad proportions,unicorn horn, (horns:1.3), extra legs,deformed anatomy, bad legs, tanlines, eyes without pupils",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "Gangbang/Group Sex Slider - Pony / Illustrious",
+          "weight": 1
+        },
+        {
+          "name": "Liara T'soni (Mass Effect)",
+          "weight": 1
+        },
+        {
+          "name": "Sabudenego styles (Sketch)",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 30,
+      "cfg_scale": 5.5,
+      "seed": "",
+      "raw_meta_json": {
+        "prompt": "safe_pos, score_9, score_8_up, score_7_up, 1girl, solo, perfect face, perfect eyes, source_cartoon, source_comic,\nBREAK\n1girl, liarazure, nude, ,((blue skin)),asari,alien, no hair, gangbang, laying on her back, legs held up, cute, sexy, looking at viewer, vaginal penetration, group sex, sex, forced sex, dynamic pose, dynamic shot, dominated, fucked into submission, humiliation, raw sex, running a train, forced submission, grimy dirty dark concrete room backround, dim afternoon lighting, human male, light skinned male, sketch,",
+        "negativePrompt": "safe_neg, score_6, score_5, score_4, , pony, censored, bad eyes, bad face, monochrome, 3d, realistic, (bad anatomy:1.3),(amputee:1.3),deformed,ugly,bad proportions,unicorn horn, (horns:1.3), extra legs,deformed anatomy, bad legs, tanlines, eyes without pupils",
+        "cfgScale": 5.5,
+        "steps": 30,
+        "sampler": "Euler a",
+        "workflow": "img2img-facefix",
+        "additionalResources": [
+          {
+            "name": "urn:air:sdxl:lora:civitai:482233@536311",
+            "type": "lora",
+            "strength": 1,
+            "strengthClip": 1
+          },
+          {
+            "name": "urn:air:sdxl:lora:civitai:413975@708278",
+            "type": "lora",
+            "strength": 1,
+            "strengthClip": 1
+          },
+          {
+            "name": "urn:air:sdxl:lora:civitai:684156@768624",
+            "type": "lora",
+            "strength": 0.8,
+            "strengthClip": 1
+          }
+        ],
+        "civitaiResources": [
+          {
+            "weight": 1,
+            "modelVersionId": 324619
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 324619
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 536311
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 708278
+          },
+          {
+            "weight": 0.8,
+            "modelVersionId": 768624
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 250708
+          },
+          {
+            "weight": 1,
+            "modelVersionId": 250712
+          },
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 536311
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 708278
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 768624
+          }
+        ],
+        "extra": {
+          "remixOfId": 54931433
+        },
+        "Model": "urn:air:sdxl:checkpoint:civitai:288584@324619",
+        "models": [
+          "urn:air:sdxl:checkpoint:civitai:288584@324619"
+        ],
+        "resources": [
+          {
+            "imageId": 55408502,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 55408502,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408502,
+            "modelVersionId": 536311,
+            "strength": 1,
+            "modelId": 482233,
+            "modelName": "Gangbang/Group Sex Slider - Pony / Illustrious",
+            "modelType": "LORA",
+            "versionId": 536311,
+            "versionName": "Pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408502,
+            "modelVersionId": 708278,
+            "strength": 1,
+            "modelId": 413975,
+            "modelName": "Liara T'soni (Mass Effect)",
+            "modelType": "LORA",
+            "versionId": 708278,
+            "versionName": "v2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55408502,
+            "modelVersionId": 768624,
+            "strength": 0.8,
+            "modelId": 684156,
+            "modelName": "Sabudenego styles (Sketch)",
+            "modelType": "LORA",
+            "versionId": 768624,
+            "versionName": "Color 1",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 55145072,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/a3c991a4-2d04-4443-b536-9c2cf813d0c1/original=true/quality=90/6ZEGN54ZTH8MKRPTVHCRZB8550.jpeg",
+      "author": "ikarirh",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, score_6_up, 2d, digital art, masterpiece, PollyStyleMix, liarazure, cowboy shot, sunset, parted lips, profile",
+      "negative_prompt": "looking at the viewer, 3d",
+      "model": "Pony Diffusion V6 XL",
+      "model_version": "V6 (start with this one)",
+      "loras": [
+        {
+          "name": "Liara T'soni (Mass Effect)",
+          "weight": 0.8
+        },
+        {
+          "name": "The Polly mix Style - by IkariRH",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 29,
+      "cfg_scale": 7,
+      "seed": 1839087737,
+      "raw_meta_json": {
+        "baseModel": "Pony",
+        "prompt": "score_9, score_8_up, score_7_up, score_6_up, 2d, digital art, masterpiece, PollyStyleMix, liarazure, cowboy shot, sunset, parted lips, profile",
+        "negativePrompt": "looking at the viewer, 3d",
+        "cfgScale": 7,
+        "steps": 29,
+        "sampler": "Euler a",
+        "seed": 1839087737,
+        "workflow": "txt2img",
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 290640
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 708278
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 1274355
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 106916
+          }
+        ],
+        "Size": "832x1216",
+        "nsfw": false,
+        "draft": false,
+        "width": 832,
+        "height": 1216,
+        "quantity": 2,
+        "Created Date": "2025-02-01T1145:11.1465851Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 55145072,
+            "modelVersionId": 290640,
+            "strength": null,
+            "modelId": 257749,
+            "modelName": "Pony Diffusion V6 XL",
+            "modelType": "Checkpoint",
+            "versionId": 290640,
+            "versionName": "V6 (start with this one)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55145072,
+            "modelVersionId": 708278,
+            "strength": 0.8,
+            "modelId": 413975,
+            "modelName": "Liara T'soni (Mass Effect)",
+            "modelType": "LORA",
+            "versionId": 708278,
+            "versionName": "v2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 55145072,
+            "modelVersionId": 1274355,
+            "strength": 0.8,
+            "modelId": 1133520,
+            "modelName": "The Polly mix Style - by IkariRH",
+            "modelType": "LORA",
+            "versionId": 1274355,
+            "versionName": "Pony",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 52558113,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/56dddd6e-4da7-403f-88d7-47842fd236ed/original=true/quality=90/6QR1NP708ZJ8R2FCN3ASMQGVQ0.jpeg",
+      "author": "LGraph",
+      "tags": null,
+      "prompt": "1girl, cute beautiful female, beautiful face, big sagging tits, 18 years old, realistic, detailed, long eyelash, depth of field, big ass, athletic body, closed eyes, puffy lips, (photo), (blue skin), hand, cute panties, (1man, beautiful penis, side view handjob, cumming on face, wide open mouth), kneeling, on a spaceship, in space, big window with view on black hole background, liarazure, (grgnt)",
+      "negative_prompt": "score_6, score_5, score_4, pony, censored, chibi, 3d, monochrome, blur, low quality, anomaly, couple persons, bad anatomy, cartoon, anime, toon, extra hands, extra legs, extra fingers, multyply view, simple background",
+      "model": "MeichiDarkMix_Reload",
+      "model_version": "MeichiDarkAnimV2_Lust",
+      "loras": [
+        {
+          "name": "Hand Detail FLUX & XL",
+          "weight": 1
+        },
+        {
+          "name": "Vixon's Classic Art Styles - detailed painting",
+          "weight": 0.5
+        },
+        {
+          "name": "Pony Detail Tweaker",
+          "weight": 2
+        },
+        {
+          "name": "Liara T'soni (Mass Effect)",
+          "weight": 1
+        },
+        {
+          "name": "Gargantua Black Hole ( From Interstellar Movie )",
+          "weight": 1
+        }
+      ],
+      "sampler": "DPM++ 2M Karras",
+      "steps": 30,
+      "cfg_scale": 7,
+      "seed": 288131468,
+      "raw_meta_json": {
+        "baseModel": "Pony",
+        "prompt": "1girl, cute beautiful female, beautiful face, big sagging tits, 18 years old, realistic, detailed, long eyelash, depth of field, big ass, athletic body, closed eyes, puffy lips, (photo), (blue skin), hand, cute panties, (1man, beautiful penis, side view handjob, cumming on face, wide open mouth), kneeling, on a spaceship, in space, big window with view on black hole background, liarazure, (grgnt)",
+        "negativePrompt": "score_6, score_5, score_4, pony, censored, chibi, 3d, monochrome, blur, low quality, anomaly, couple persons, bad anatomy, cartoon, anime, toon, extra hands, extra legs, extra fingers, multyply view, simple background",
+        "cfgScale": 7,
+        "steps": 30,
+        "sampler": "DPM++ 2M Karras",
+        "seed": 288131468,
+        "workflow": "txt2img",
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 770375
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 294259
+          },
+          {
+            "type": "lora",
+            "weight": 0.5,
+            "modelVersionId": 399443
+          },
+          {
+            "type": "lora",
+            "weight": 2,
+            "modelVersionId": 427569
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 708278
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 768900
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "1216x832",
+        "nsfw": true,
+        "draft": false,
+        "width": 1216,
+        "height": 832,
+        "quantity": 4,
+        "Created Date": "2025-01-19T0831:23.8103408Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 52558113,
+            "modelVersionId": 294259,
+            "strength": 1,
+            "modelId": 260852,
+            "modelName": "Hand Detail FLUX & XL",
+            "modelType": "LORA",
+            "versionId": 294259,
+            "versionName": "v2.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 52558113,
+            "modelVersionId": 399443,
+            "strength": 0.5,
+            "modelId": 888250,
+            "modelName": "Vixon's Classic Art Styles - detailed painting",
+            "modelType": "LORA",
+            "versionId": 399443,
+            "versionName": "detailed painting v1.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 52558113,
+            "modelVersionId": 427569,
+            "strength": 2,
+            "modelId": 383086,
+            "modelName": "Pony Detail Tweaker",
+            "modelType": "LORA",
+            "versionId": 427569,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 52558113,
+            "modelVersionId": 708278,
+            "strength": 1,
+            "modelId": 413975,
+            "modelName": "Liara T'soni (Mass Effect)",
+            "modelType": "LORA",
+            "versionId": 708278,
+            "versionName": "v2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 52558113,
+            "modelVersionId": 768900,
+            "strength": 1,
+            "modelId": 687011,
+            "modelName": "Gargantua Black Hole ( From Interstellar Movie )",
+            "modelType": "LORA",
+            "versionId": 768900,
+            "versionName": "v0.9",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 52558113,
+            "modelVersionId": 770375,
+            "strength": null,
+            "modelId": 643227,
+            "modelName": "MeichiDarkMix_Reload",
+            "modelType": "Checkpoint",
+            "versionId": 770375,
+            "versionName": "MeichiDarkAnimV2_Lust",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 51128967,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/abce151f-4709-4dd1-bc35-f3c78048df17/original=true/quality=90/CQCJ45NK1J0P96Z4PASWEQV200.jpeg",
+      "author": "Haariger_Toepfer",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, score_6_up, score_5_up, score_4_up,1girl, solo, looking at viewer, (slingshot bikini), camel toe, Liara, blue skin, rear view, ass, (seductive), standing, Stripper Pole, stripper, pole dancing, strip club, on stage, looking down at viewer, blue eyes, (mature female), milf, (seductive), (shiny skin), breasts, neon lights, (nightclub background), zPDXL3, <lora:MELiara:.8>, MELiara,",
+      "negative_prompt": "source_furry, source_pony, monochrome, (censored), (mole:1.2), (logo), elf ears, (abs), (wrinkles), starfish, seashells, interior, half-closed eyes, equine, horse, my little pony, horse tail,",
+      "model": "Pony Diffusion V6 XL",
+      "model_version": "V6 (start with this one)",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 1.1
+        },
+        {
+          "name": "Not Artists Styles for Pony Diffusion V6 XL",
+          "weight": 0.8
+        },
+        {
+          "name": "ThePit Style [PonyXL]",
+          "weight": 0.3
+        },
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 0.75
+        },
+        {
+          "name": "Liara T'soni (Mass Effect)",
+          "weight": 0.4
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 40,
+      "cfg_scale": 4,
+      "seed": 1171592381,
+      "raw_meta_json": {
+        "baseModel": "Pony",
+        "prompt": "score_9, score_8_up, score_7_up, score_6_up, score_5_up, score_4_up,1girl, solo, looking at viewer, (slingshot bikini), camel toe, Liara, blue skin, rear view, ass, (seductive), standing, Stripper Pole, stripper, pole dancing, strip club, on stage, looking down at viewer, blue eyes, (mature female), milf, (seductive), (shiny skin), breasts, neon lights, (nightclub background), zPDXL3, <lora:MELiara:.8>, MELiara,",
+        "negativePrompt": "source_furry, source_pony, monochrome, (censored), (mole:1.2), (logo), elf ears, (abs), (wrinkles), starfish, seashells, interior, half-closed eyes, equine, horse, my little pony, horse tail,",
+        "cfgScale": 4,
+        "steps": 40,
+        "sampler": "Euler a",
+        "seed": 1171592381,
+        "workflow": "txt2img",
+        "resources": [
+          {
+            "imageId": 51128967,
+            "modelVersionId": 135867,
+            "strength": 1.1,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 51128967,
+            "modelVersionId": 290640,
+            "strength": null,
+            "modelId": 257749,
+            "modelName": "Pony Diffusion V6 XL",
+            "modelType": "Checkpoint",
+            "versionId": 290640,
+            "versionName": "V6 (start with this one)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 51128967,
+            "modelVersionId": 330475,
+            "strength": 0.8,
+            "modelId": 264290,
+            "modelName": "Not Artists Styles for Pony Diffusion V6 XL",
+            "modelType": "LORA",
+            "versionId": 330475,
+            "versionName": "Concept Art Twilight [M]",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 51128967,
+            "modelVersionId": 342682,
+            "strength": 0.3,
+            "modelId": 305206,
+            "modelName": "ThePit Style [PonyXL]",
+            "modelType": "LORA",
+            "versionId": 342682,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 51128967,
+            "modelVersionId": 382152,
+            "strength": 0.75,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 51128967,
+            "modelVersionId": 708278,
+            "strength": 0.4,
+            "modelId": 413975,
+            "modelName": "Liara T'soni (Mass Effect)",
+            "modelType": "LORA",
+            "versionId": 708278,
+            "versionName": "v2.0",
+            "baseModel": "Pony"
+          }
+        ],
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 290640
+          },
+          {
+            "type": "lora",
+            "weight": 1.1,
+            "modelVersionId": 135867
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 330475
+          },
+          {
+            "type": "lora",
+            "weight": 0.3,
+            "modelVersionId": 342682
+          },
+          {
+            "type": "lora",
+            "weight": 0.75,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "lora",
+            "weight": 0.4,
+            "modelVersionId": 708278
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "nsfw": true,
+        "draft": false,
+        "width": 832,
+        "height": 1216,
+        "quantity": 2,
+        "Created Date": "2025-01-12T1033:51.9941675Z",
+        "clipSkip": 2
+      }
+    },
+    {
+      "image_id": 31953252,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/fdd46d93-a968-417a-a5d2-234c404a1fe1/original=true/quality=90/XB6YYG2FD3765SJSC349J2TE10.jpeg",
+      "author": "PYBY_the_Fox",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, anthro realistic spike the dragon, My Little Pony, cute dragon, purple scales, (( furry Tails the foxy boy, Miles Prawer, completely nude,  flat chest,erect nipples, penis, balls, body fur)), Miles Prawer the fox hugs sonic the hedgehog, standing, cute, adorable, very aesthetic, furry, realistic fur, zzLFashion, G5, they meet downtown, anal sex, sex, neat little penis",
+      "negative_prompt": "score_6, score_5, score_4, ugly face, low res, blurry face, black and white, muscular female ,",
+      "model": "Pony Diffusion V6 XL",
+      "model_version": "V6 (start with this one)",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 0.45
+        },
+        {
+          "name": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+          "weight": -0.3
+        },
+        {
+          "name": "Not Artists Styles for Pony Diffusion V6 XL",
+          "weight": 0.3
+        },
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": -0.5
+        },
+        {
+          "name": "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+          "weight": -0.1
+        },
+        {
+          "name": "Mystical Furry (Style/Pony)",
+          "weight": -0.15
+        },
+        {
+          "name": "Finnick | |  zootopia for pony",
+          "weight": 0.9
+        },
+        {
+          "name": "Twilight Sparkle/ Original Version",
+          "weight": 0.7
+        },
+        {
+          "name": "[DAGASI (Sega Sonic)] Miles 'Tails' Prower Character PonyXL",
+          "weight": 0.9
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 19,
+      "cfg_scale": 7.5,
+      "seed": 3663527045,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, anthro realistic spike the dragon, My Little Pony, cute dragon, purple scales, (( furry Tails the foxy boy, Miles Prawer, completely nude,  flat chest,erect nipples, penis, balls, body fur)), Miles Prawer the fox hugs sonic the hedgehog, standing, cute, adorable, very aesthetic, furry, realistic fur, zzLFashion, G5, they meet downtown, anal sex, sex, neat little penis",
+        "negativePrompt": "score_6, score_5, score_4, ugly face, low res, blurry face, black and white, muscular female ,",
+        "cfgScale": 7.5,
+        "steps": 19,
+        "sampler": "Euler a",
+        "seed": 3663527045,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 290640
+          },
+          {
+            "type": "lora",
+            "weight": -0.15,
+            "modelVersionId": 571689
+          },
+          {
+            "type": "lora",
+            "weight": 0.45,
+            "modelVersionId": 135867
+          },
+          {
+            "type": "lora",
+            "weight": -0.3,
+            "modelVersionId": 244808
+          },
+          {
+            "type": "lora",
+            "weight": 0.3,
+            "modelVersionId": 330475
+          },
+          {
+            "type": "lora",
+            "weight": -0.5,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "lora",
+            "weight": -0.1,
+            "modelVersionId": 538118
+          },
+          {
+            "type": "lora",
+            "weight": 0.7,
+            "modelVersionId": 630781
+          },
+          {
+            "type": "lora",
+            "weight": 0.9,
+            "modelVersionId": 609318
+          },
+          {
+            "type": "lora",
+            "weight": 0.9,
+            "modelVersionId": 689523
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "Created Date": "2024-09-29T1028:06.6518478Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 31953252,
+            "modelVersionId": 135867,
+            "strength": 0.45,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 244808,
+            "strength": -0.3,
+            "modelId": 212532,
+            "modelName": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+            "modelType": "LORA",
+            "versionId": 244808,
+            "versionName": "v2.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 290640,
+            "strength": null,
+            "modelId": 257749,
+            "modelName": "Pony Diffusion V6 XL",
+            "modelType": "Checkpoint",
+            "versionId": 290640,
+            "versionName": "V6 (start with this one)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 330475,
+            "strength": 0.3,
+            "modelId": 264290,
+            "modelName": "Not Artists Styles for Pony Diffusion V6 XL",
+            "modelType": "LORA",
+            "versionId": 330475,
+            "versionName": "Concept Art Twilight [M]",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 382152,
+            "strength": -0.5,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 538118,
+            "strength": -0.1,
+            "modelId": 362766,
+            "modelName": "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+            "modelType": "LORA",
+            "versionId": 538118,
+            "versionName": "L Fashion",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 571689,
+            "strength": -0.15,
+            "modelId": 514423,
+            "modelName": "Mystical Furry (Style/Pony)",
+            "modelType": "LORA",
+            "versionId": 571689,
+            "versionName": "Furry v1(Pony)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 609318,
+            "strength": 0.9,
+            "modelId": 547799,
+            "modelName": "Finnick | |  zootopia for pony",
+            "modelType": "LORA",
+            "versionId": 609318,
+            "versionName": "V1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 630781,
+            "strength": 0.7,
+            "modelId": 565968,
+            "modelName": "Twilight Sparkle/ Original Version",
+            "modelType": "LORA",
+            "versionId": 630781,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953252,
+            "modelVersionId": 689523,
+            "strength": 0.9,
+            "modelId": 616800,
+            "modelName": "[DAGASI (Sega Sonic)] Miles 'Tails' Prower Character PonyXL",
+            "modelType": "LORA",
+            "versionId": 689523,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 31953251,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/3da13c59-ea76-426f-a491-d4f0349db14c/original=true/quality=90/VZ94V9190N9F21SY02T2NSZQ30.jpeg",
+      "author": "PYBY_the_Fox",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, anthro realistic spike the dragon, My Little Pony, cute dragon, purple scales, (( furry Tails the foxy boy, Miles Prawer, completely nude,  flat chest,erect nipples, penis, balls, body fur)), Miles Prawer the fox hugs sonic the hedgehog, standing, cute, adorable, very aesthetic, furry, realistic fur, zzLFashion, G5, they meet downtown, anal sex, sex, neat little penis",
+      "negative_prompt": "score_6, score_5, score_4, ugly face, low res, blurry face, black and white, muscular female ,",
+      "model": "Pony Realism \ud83d\udd2e",
+      "model_version": "\ud83d\udce6 v2.1",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 0.45
+        },
+        {
+          "name": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+          "weight": -0.3
+        },
+        {
+          "name": "Not Artists Styles for Pony Diffusion V6 XL",
+          "weight": 0.3
+        },
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": -0.5
+        },
+        {
+          "name": "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+          "weight": -0.1
+        },
+        {
+          "name": "Mystical Furry (Style/Pony)",
+          "weight": -0.15
+        },
+        {
+          "name": "Finnick | |  zootopia for pony",
+          "weight": 1
+        },
+        {
+          "name": "Twilight Sparkle/ Original Version",
+          "weight": 0.7
+        },
+        {
+          "name": "[DAGASI (Sega Sonic)] Miles 'Tails' Prower Character PonyXL",
+          "weight": 0.4
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 19,
+      "cfg_scale": 7.5,
+      "seed": 1770697261,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, anthro realistic spike the dragon, My Little Pony, cute dragon, purple scales, (( furry Tails the foxy boy, Miles Prawer, completely nude,  flat chest,erect nipples, penis, balls, body fur)), Miles Prawer the fox hugs sonic the hedgehog, standing, cute, adorable, very aesthetic, furry, realistic fur, zzLFashion, G5, they meet downtown, anal sex, sex, neat little penis",
+        "negativePrompt": "score_6, score_5, score_4, ugly face, low res, blurry face, black and white, muscular female ,",
+        "cfgScale": 7.5,
+        "steps": 19,
+        "sampler": "Euler a",
+        "seed": 1770697261,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 534642
+          },
+          {
+            "type": "lora",
+            "weight": -0.15,
+            "modelVersionId": 571689
+          },
+          {
+            "type": "lora",
+            "weight": 0.45,
+            "modelVersionId": 135867
+          },
+          {
+            "type": "lora",
+            "weight": -0.3,
+            "modelVersionId": 244808
+          },
+          {
+            "type": "lora",
+            "weight": 0.3,
+            "modelVersionId": 330475
+          },
+          {
+            "type": "lora",
+            "weight": -0.5,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "lora",
+            "weight": -0.1,
+            "modelVersionId": 538118
+          },
+          {
+            "type": "lora",
+            "weight": 0.7,
+            "modelVersionId": 630781
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 609318
+          },
+          {
+            "type": "lora",
+            "weight": 0.4,
+            "modelVersionId": 689523
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "Created Date": "2024-09-29T1020:24.2365173Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 31953251,
+            "modelVersionId": 135867,
+            "strength": 0.45,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 244808,
+            "strength": -0.3,
+            "modelId": 212532,
+            "modelName": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+            "modelType": "LORA",
+            "versionId": 244808,
+            "versionName": "v2.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 330475,
+            "strength": 0.3,
+            "modelId": 264290,
+            "modelName": "Not Artists Styles for Pony Diffusion V6 XL",
+            "modelType": "LORA",
+            "versionId": 330475,
+            "versionName": "Concept Art Twilight [M]",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 382152,
+            "strength": -0.5,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 534642,
+            "strength": null,
+            "modelId": 372465,
+            "modelName": "Pony Realism \ud83d\udd2e",
+            "modelType": "Checkpoint",
+            "versionId": 534642,
+            "versionName": "\ud83d\udce6 v2.1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 538118,
+            "strength": -0.1,
+            "modelId": 362766,
+            "modelName": "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+            "modelType": "LORA",
+            "versionId": 538118,
+            "versionName": "L Fashion",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 571689,
+            "strength": -0.15,
+            "modelId": 514423,
+            "modelName": "Mystical Furry (Style/Pony)",
+            "modelType": "LORA",
+            "versionId": 571689,
+            "versionName": "Furry v1(Pony)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 609318,
+            "strength": 1,
+            "modelId": 547799,
+            "modelName": "Finnick | |  zootopia for pony",
+            "modelType": "LORA",
+            "versionId": 609318,
+            "versionName": "V1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 630781,
+            "strength": 0.7,
+            "modelId": 565968,
+            "modelName": "Twilight Sparkle/ Original Version",
+            "modelType": "LORA",
+            "versionId": 630781,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31953251,
+            "modelVersionId": 689523,
+            "strength": 0.4,
+            "modelId": 616800,
+            "modelName": "[DAGASI (Sega Sonic)] Miles 'Tails' Prower Character PonyXL",
+            "modelType": "LORA",
+            "versionId": 689523,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 31950331,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/0613d227-ad3d-4878-9b81-93043dcffd15/original=true/quality=90/BNR5D2231AGWQVWXNDZ5Q0QM20.jpeg",
+      "author": "PYBY_the_Fox",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, anthro realistic spike the dragon, My Little Pony, cute dragon, purple scales, (( furry Tails the foxy boy, Miles Prawer, completely nude,  flat chest, body fur)), Miles Prawer the fox hugs sonic the hedgehog, standing, cute, adorable, very aesthetic, furry, realistic fur, zzLFashion, G5, they meet downtown",
+      "negative_prompt": "score_6, score_5, score_4, ugly face, low res, blurry face, black and white, muscular female ,",
+      "model": "PottingMix PDXL",
+      "model_version": "v1.0",
+      "loras": [
+        {
+          "name": "Detail Tweaker XL",
+          "weight": 0.45
+        },
+        {
+          "name": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+          "weight": -0.3
+        },
+        {
+          "name": "Miles 'Tails' Prower - SD 1.5 & SDXL",
+          "weight": 0.95
+        },
+        {
+          "name": "Not Artists Styles for Pony Diffusion V6 XL",
+          "weight": 0.3
+        },
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": -0.5
+        },
+        {
+          "name": "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+          "weight": -0.1
+        },
+        {
+          "name": "Mystical Furry (Style/Pony)",
+          "weight": -0.15
+        },
+        {
+          "name": "Finnick | |  zootopia for pony",
+          "weight": 1.05
+        },
+        {
+          "name": "Twilight Sparkle/ Original Version",
+          "weight": 0.7
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 19,
+      "cfg_scale": 7.5,
+      "seed": 2769756859,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, anthro realistic spike the dragon, My Little Pony, cute dragon, purple scales, (( furry Tails the foxy boy, Miles Prawer, completely nude,  flat chest, body fur)), Miles Prawer the fox hugs sonic the hedgehog, standing, cute, adorable, very aesthetic, furry, realistic fur, zzLFashion, G5, they meet downtown",
+        "negativePrompt": "score_6, score_5, score_4, ugly face, low res, blurry face, black and white, muscular female ,",
+        "cfgScale": 7.5,
+        "steps": 19,
+        "sampler": "Euler a",
+        "seed": 2769756859,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 595323
+          },
+          {
+            "type": "lora",
+            "weight": -0.15,
+            "modelVersionId": 571689
+          },
+          {
+            "type": "lora",
+            "weight": 0.45,
+            "modelVersionId": 135867
+          },
+          {
+            "type": "lora",
+            "weight": -0.3,
+            "modelVersionId": 244808
+          },
+          {
+            "type": "lora",
+            "weight": 0.3,
+            "modelVersionId": 330475
+          },
+          {
+            "type": "lora",
+            "weight": -0.5,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "lora",
+            "weight": -0.1,
+            "modelVersionId": 538118
+          },
+          {
+            "type": "lora",
+            "weight": 1.05,
+            "modelVersionId": 609318
+          },
+          {
+            "type": "lora",
+            "weight": 0.7,
+            "modelVersionId": 630781
+          },
+          {
+            "type": "lora",
+            "weight": 0.95,
+            "modelVersionId": 272222
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "extra": {
+          "remixOfId": 25760178
+        },
+        "Size": "832x1216",
+        "Created Date": "2024-09-29T1541:28.8658681Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 31950331,
+            "modelVersionId": 135867,
+            "strength": 0.45,
+            "modelId": 122359,
+            "modelName": "Detail Tweaker XL",
+            "modelType": "LORA",
+            "versionId": 135867,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 244808,
+            "strength": -0.3,
+            "modelId": 212532,
+            "modelName": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+            "modelType": "LORA",
+            "versionId": 244808,
+            "versionName": "v2.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 272222,
+            "strength": 0.95,
+            "modelId": 241277,
+            "modelName": "Miles 'Tails' Prower - SD 1.5 & SDXL",
+            "modelType": "LORA",
+            "versionId": 272222,
+            "versionName": "SDXL (v1.0)",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 330475,
+            "strength": 0.3,
+            "modelId": 264290,
+            "modelName": "Not Artists Styles for Pony Diffusion V6 XL",
+            "modelType": "LORA",
+            "versionId": 330475,
+            "versionName": "Concept Art Twilight [M]",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 382152,
+            "strength": -0.5,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 538118,
+            "strength": -0.1,
+            "modelId": 362766,
+            "modelName": "CAT SS - Citron Secret Styles [ZIT & IL & NoobAI & Flux & Pony]",
+            "modelType": "LORA",
+            "versionId": 538118,
+            "versionName": "L Fashion",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 571689,
+            "strength": -0.15,
+            "modelId": 514423,
+            "modelName": "Mystical Furry (Style/Pony)",
+            "modelType": "LORA",
+            "versionId": 571689,
+            "versionName": "Furry v1(Pony)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 595323,
+            "strength": null,
+            "modelId": 535545,
+            "modelName": "PottingMix PDXL",
+            "modelType": "Checkpoint",
+            "versionId": 595323,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 609318,
+            "strength": 1.05,
+            "modelId": 547799,
+            "modelName": "Finnick | |  zootopia for pony",
+            "modelType": "LORA",
+            "versionId": 609318,
+            "versionName": "V1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 31950331,
+            "modelVersionId": 630781,
+            "strength": 0.7,
+            "modelId": 565968,
+            "modelName": "Twilight Sparkle/ Original Version",
+            "modelType": "LORA",
+            "versionId": 630781,
+            "versionName": "v1.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 27538722,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/695bb0b1-95d5-49c4-b04e-58d4a1e086f1/original=true/quality=90/01686-628332573.png",
+      "author": "StevesAISlop",
+      "tags": null,
+      "prompt": "score_9,\n<lora:Expressive_H:1>, expressiveh, source_anime, 2d, \n<lora:KarrynCE_Ver2:0.5>, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, micro shorts, \nunderboob, \nsolo, \ncowboy shot, standing, fellatio gesture, open mouth, tongue out, hand on own hip, drooling, \ntavern,\nhigh resolution, Masterpiece, detailed,\nuncensored,",
+      "negative_prompt": "child, loli,\nsource_furry, source_pony, \ncensored, bar censor,\ngreyscale, \nnegativeXL_D",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_DPO",
+      "loras": [
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 1
+        },
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.5
+        }
+      ],
+      "sampler": "DPM++ 2M",
+      "steps": 30,
+      "cfg_scale": 4,
+      "seed": 628332573,
+      "raw_meta_json": {
+        "prompt": "score_9,\n<lora:Expressive_H:1>, expressiveh, source_anime, 2d, \n<lora:KarrynCE_Ver2:0.5>, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, micro shorts, \nunderboob, \nsolo, \ncowboy shot, standing, fellatio gesture, open mouth, tongue out, hand on own hip, drooling, \ntavern,\nhigh resolution, Masterpiece, detailed,\nuncensored,",
+        "negativePrompt": "child, loli,\nsource_furry, source_pony, \ncensored, bar censor,\ngreyscale, \nnegativeXL_D",
+        "cfgScale": 4,
+        "steps": 30,
+        "sampler": "DPM++ 2M",
+        "seed": 628332573,
+        "hashes": {
+          "model": "d3ee23d452",
+          "lora:Expressive_H": "5671f20a9a6b",
+          "embed:negativeXL_D": "fff5d51ab6",
+          "lora:KarrynCE_Ver2": "c5cf062e5927"
+        },
+        "resources": [
+          {
+            "imageId": 27538722,
+            "modelVersionId": 134583,
+            "strength": null,
+            "modelId": 118418,
+            "modelName": "negativeXL",
+            "modelType": "TextualInversion",
+            "versionId": 134583,
+            "versionName": "D",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 27538722,
+            "modelVersionId": 324692,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324692,
+            "versionName": "AutismMix_DPO",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 27538722,
+            "modelVersionId": 382152,
+            "strength": 1,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 27538722,
+            "modelVersionId": 396075,
+            "strength": 0.5,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          }
+        ],
+        "Size": "1500x2250",
+        "Model": "autismmixSDXL_autismmixDPO",
+        "Version": "v1.10.1",
+        "TI hashes": {
+          "negativeXL_D": "fff5d51ab655"
+        },
+        "Model hash": "d3ee23d452",
+        "Hypertile VAE": "True",
+        "Schedule type": "Karras",
+        "Denoising strength": "0.3",
+        "clipSkip": 2
+      }
+    },
+    {
+      "image_id": 24905619,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/e14b23cf-a051-44dc-8bb9-f11b37ae9cb3/original=true/quality=90/0NNKW9NGPEQQP38K0WSWCXFJ00.jpeg",
+      "author": "Poula",
+      "tags": null,
+      "prompt": "ultra detailed, best quality, photorealistic, high quality, cinematic, realistic, shadows, detailed body, source_3d, score_7_up, score_8_up, score_9, masterpiece,high detail, perfect face,  close-up, 1girl, 1girl, Liara T'soni,((asari)),(((blue skin))) small blue eyes,(blue full lips,) spaceship room, back lit, light beams coming in, steaming,large breasts, sweaty, looking at viewer, blue lipstick, sweaty, wet body, blue blush, clit, detailed areola, wide hips, , solo , perfect eyebrows, posing,(((wearing red Latex catsuit))),sci-fi, smiling, horny, (((is lying on large bed)))\nBREAK\nscore_9, score_8_up, score_7_up, score_6_up, rating_explicit,",
+      "negative_prompt": "easynegative,bad anatomy,(((white skin))), blurry, (worst quality:1.8), low quality, hands bad, face bad, (normal quality:1.3), eye misalignment, bad hands, mutated hands and fingers, extra legs, extra arms, extra fingers, duplicate, cropped, text, jpeg, artifacts, signature, watermark, username, blurry, blurry face, artist name, trademark, title, multiple view, Reference sheet, long body, multiple breasts, mutated, bad anatomy, poorly drawn hands, poorly drawn face, disfigured, bad proportions, duplicate, bad feet, artist name, ugly, text font ui, missing limb, monochrome, negative_hand, bad_pictures, ng_deepnegative_v1_75t,(((sexual intercourse))),sex,penis,(((human male))),(((human hair on head))),(((mutated anatomy))),(((black clothes))), multiple persons,pixel eyes,multiple human body,2 girls,2 man,red lips,naked breasts,easynegative",
+      "model": "Pony \ud83e\udd84FaeTality",
+      "model_version": "v1.1",
+      "loras": [
+        {
+          "name": "Neon Environments",
+          "weight": 1
+        },
+        {
+          "name": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+          "weight": 0.65
+        },
+        {
+          "name": "Detailed nipples XL",
+          "weight": 0.8
+        },
+        {
+          "name": "Flash Glowing Runes SDXL",
+          "weight": 0.75
+        },
+        {
+          "name": "Pony Realistic Tweaker",
+          "weight": 1
+        },
+        {
+          "name": "Liara T'soni (Mass Effect)",
+          "weight": 0.2
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 40,
+      "cfg_scale": 5,
+      "seed": 3546195829,
+      "raw_meta_json": {
+        "prompt": "ultra detailed, best quality, photorealistic, high quality, cinematic, realistic, shadows, detailed body, source_3d, score_7_up, score_8_up, score_9, masterpiece,high detail, perfect face,  close-up, 1girl, 1girl, Liara T'soni,((asari)),(((blue skin))) small blue eyes,(blue full lips,) spaceship room, back lit, light beams coming in, steaming,large breasts, sweaty, looking at viewer, blue lipstick, sweaty, wet body, blue blush, clit, detailed areola, wide hips, , solo , perfect eyebrows, posing,(((wearing red Latex catsuit))),sci-fi, smiling, horny, (((is lying on large bed)))\nBREAK\nscore_9, score_8_up, score_7_up, score_6_up, rating_explicit,",
+        "negativePrompt": "easynegative,bad anatomy,(((white skin))), blurry, (worst quality:1.8), low quality, hands bad, face bad, (normal quality:1.3), eye misalignment, bad hands, mutated hands and fingers, extra legs, extra arms, extra fingers, duplicate, cropped, text, jpeg, artifacts, signature, watermark, username, blurry, blurry face, artist name, trademark, title, multiple view, Reference sheet, long body, multiple breasts, mutated, bad anatomy, poorly drawn hands, poorly drawn face, disfigured, bad proportions, duplicate, bad feet, artist name, ugly, text font ui, missing limb, monochrome, negative_hand, bad_pictures, ng_deepnegative_v1_75t,(((sexual intercourse))),sex,penis,(((human male))),(((human hair on head))),(((mutated anatomy))),(((black clothes))), multiple persons,pixel eyes,multiple human body,2 girls,2 man,red lips,naked breasts,easynegative",
+        "cfgScale": 5,
+        "steps": 40,
+        "sampler": "Euler a",
+        "seed": 3546195829,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 464939
+          },
+          {
+            "type": "lora",
+            "weight": 0.65,
+            "modelVersionId": 244808
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 368603
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 150496
+          },
+          {
+            "type": "lora",
+            "weight": 0.75,
+            "modelVersionId": 564827
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 651293
+          },
+          {
+            "type": "lora",
+            "weight": 0.2,
+            "modelVersionId": 708278
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 106916
+          }
+        ],
+        "extra": {
+          "remixOfId": 24729483
+        },
+        "Size": "832x1216",
+        "Created Date": "2024-08-18T0953:25.2429412Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 24905619,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 150496,
+            "strength": 1,
+            "modelId": 109613,
+            "modelName": "Neon Environments",
+            "modelType": "LORA",
+            "versionId": 150496,
+            "versionName": "SDXL v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 244808,
+            "strength": 0.65,
+            "modelId": 212532,
+            "modelName": "All Disney Princess XL LoRA Model from Ralph Breaks the Internet",
+            "modelType": "LORA",
+            "versionId": 244808,
+            "versionName": "v2.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 368603,
+            "strength": 0.8,
+            "modelId": 328932,
+            "modelName": "Detailed nipples XL",
+            "modelType": "LORA",
+            "versionId": 368603,
+            "versionName": "v1.0",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 464939,
+            "strength": null,
+            "modelId": 331116,
+            "modelName": "Pony \ud83e\udd84FaeTality",
+            "modelType": "Checkpoint",
+            "versionId": 464939,
+            "versionName": "v1.1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 564827,
+            "strength": 0.75,
+            "modelId": 508186,
+            "modelName": "Flash Glowing Runes SDXL",
+            "modelType": "LORA",
+            "versionId": 564827,
+            "versionName": "Flash Glowing Runes SDXL",
+            "baseModel": "SDXL 1.0"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 651293,
+            "strength": 1,
+            "modelId": 433487,
+            "modelName": "Pony Realistic Tweaker",
+            "modelType": "LORA",
+            "versionId": 651293,
+            "versionName": "v2.0-rev1",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 24905619,
+            "modelVersionId": 708278,
+            "strength": 0.2,
+            "modelId": 413975,
+            "modelName": "Liara T'soni (Mass Effect)",
+            "modelType": "LORA",
+            "versionId": 708278,
+            "versionName": "v2.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 24536628,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/c9269c7e-a35c-4354-93ec-a7264628ebfb/original=true/quality=90/84855Q1XVDTCB7T3WR1NSNC4J0.jpeg",
+      "author": "tessaiisan",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, score_6_up, score_5_up, score_4_up, 1girl, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, shirt lift, lifted by self, undressing, underboob, areolaslip, round breasts, tavern bar, sweaty",
+      "negative_prompt": "worst quality, large head, low quality, extra digits, bad eye,  EasyNegativeV2,  ng_deepnegative_v1_75t , worst quality, low quality, watermark, signature, simple background, bad anatomy, bad hands, deformed limbs, blurry, cropped, cross-eyed, extra arms, speech bubble, extra legs, extra limbs, bad proportions, poorly drawn hands, text, flat background score_5, score_4, ugly, ugly face, poorly drawn face, blurry, blurry face, (3d),   realistic, muscular, blurry eyes, poorly drawn eyes, patreon, artist name, (sd, super deformed, chibi),",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 1
+        },
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        },
+        {
+          "name": "Round Breasts - Noob vPred, Pony, and 1.5",
+          "weight": 1
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 25,
+      "cfg_scale": 7,
+      "seed": 4164650443,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, score_6_up, score_5_up, score_4_up, 1girl, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, shirt lift, lifted by self, undressing, underboob, areolaslip, round breasts, tavern bar, sweaty",
+        "negativePrompt": "worst quality, large head, low quality, extra digits, bad eye,  EasyNegativeV2,  ng_deepnegative_v1_75t , worst quality, low quality, watermark, signature, simple background, bad anatomy, bad hands, deformed limbs, blurry, cropped, cross-eyed, extra arms, speech bubble, extra legs, extra limbs, bad proportions, poorly drawn hands, text, flat background score_5, score_4, ugly, ugly face, poorly drawn face, blurry, blurry face, (3d),   realistic, muscular, blurry eyes, poorly drawn eyes, patreon, artist name, (sd, super deformed, chibi),",
+        "cfgScale": 7,
+        "steps": 25,
+        "sampler": "Euler a",
+        "seed": 4164650443,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 407574
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 106916
+          }
+        ],
+        "extra": {
+          "remixOfId": 23034933
+        },
+        "Size": "832x1216",
+        "Created Date": "2024-08-16T0031:44.8627529Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 24536628,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 24536628,
+            "modelVersionId": 382152,
+            "strength": 1,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 24536628,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 24536628,
+            "modelVersionId": 407574,
+            "strength": 1,
+            "modelId": 161161,
+            "modelName": "Round Breasts - Noob vPred, Pony, and 1.5",
+            "modelType": "LORA",
+            "versionId": 407574,
+            "versionName": "Pony",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 23833473,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/05a81c5d-1844-4bd2-81cd-550a28457e93/original=true/quality=90/YT19VB5GVNHG0Q19NF9TKS5D80.jpeg",
+      "author": "Ashong",
+      "tags": null,
+      "prompt": "score_9, score_8_up, dynamic lighting, beautiful composition, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, ashamed expression, embarrassed expression, bent over table, cumchug, mug",
+      "negative_prompt": "translucent clothes, transparent clothes, 3d, signature, watermark, score_5_up, score_4_up, source_pony, source_furry",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        },
+        {
+          "name": "(Pony XL) Cum Chugging (Gokkun)",
+          "weight": 1
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 19,
+      "cfg_scale": 7,
+      "seed": 3132268613,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, dynamic lighting, beautiful composition, KarrynBarCE, purple hair, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, ashamed expression, embarrassed expression, bent over table, cumchug, mug",
+        "negativePrompt": "translucent clothes, transparent clothes, 3d, signature, watermark, score_5_up, score_4_up, source_pony, source_furry",
+        "cfgScale": 7,
+        "steps": 19,
+        "sampler": "Euler a",
+        "seed": 3132268613,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 552297
+          },
+          {
+            "type": "lora",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "Created Date": "2024-08-11T1747:46.6211904Z",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 23833473,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 23833473,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 23833473,
+            "modelVersionId": 552297,
+            "strength": 1,
+            "modelId": 399995,
+            "modelName": "(Pony XL) Cum Chugging (Gokkun)",
+            "modelType": "LORA",
+            "versionId": 552297,
+            "versionName": "v3.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 23268339,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/216b266c-d79d-4c17-bf28-12fcb390a85c/original=true/quality=90/X0EJ61ZAKKVG43RC2ME43KZXJ0.jpeg",
+      "author": "Ashong",
+      "tags": null,
+      "prompt": "safe_pos, score_9, score_8_up, score_7_up, KarrynBarCE, purple hair,, embarrassed expression, detailed eyes, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, bent over table, spanking, red ass, cumchug, mug, 1 female, surrounded by penises",
+      "negative_prompt": "safe_neg, bad quality, (3d, photo, hyperrealistic,) worst quality, normal quality (e621_p_low), deformed, ugly, blurry, watermark, signature, disfigured, ((bad anatomy)), glitch, messy colors, bad artwork, inaccurate shadows, 3D, poorly drawn, brush strokes, glitchy, low quality, jpeg artifacts, signature, bad proportions, pony,",
+      "model": "Pony Diffusion V6 XL",
+      "model_version": "V6 (start with this one)",
+      "loras": [
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 1
+        },
+        {
+          "name": "(Pony XL) Cum Chugging (Gokkun)",
+          "weight": 1
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 40,
+      "cfg_scale": 8,
+      "seed": 806710010,
+      "raw_meta_json": {
+        "prompt": "safe_pos, score_9, score_8_up, score_7_up, KarrynBarCE, purple hair,, embarrassed expression, detailed eyes, short hair, blue eyes, huge breasts, cleavage, white tank top, midriff, orange shorts, bent over table, spanking, red ass, cumchug, mug, 1 female, surrounded by penises",
+        "negativePrompt": "safe_neg, bad quality, (3d, photo, hyperrealistic,) worst quality, normal quality (e621_p_low), deformed, ugly, blurry, watermark, signature, disfigured, ((bad anatomy)), glitch, messy colors, bad artwork, inaccurate shadows, 3D, poorly drawn, brush strokes, glitchy, low quality, jpeg artifacts, signature, bad proportions, pony,",
+        "cfgScale": 8,
+        "steps": 40,
+        "sampler": "Euler a",
+        "seed": 806710010,
+        "workflow": "img2img-facefix",
+        "additionalResources": [
+          {
+            "name": "urn:air:sdxl:lora:civitai:316773@396075",
+            "type": "lora",
+            "strength": 1,
+            "strengthClip": 1
+          },
+          {
+            "name": "urn:air:sdxl:lora:civitai:399995@552297",
+            "type": "lora",
+            "strength": 1,
+            "strengthClip": 1
+          }
+        ],
+        "civitaiResources": [
+          {
+            "modelVersionId": 290640
+          },
+          {
+            "modelVersionId": 396075
+          },
+          {
+            "modelVersionId": 552297
+          },
+          {
+            "modelVersionId": 250708
+          },
+          {
+            "modelVersionId": 250712
+          },
+          {
+            "type": "checkpoint",
+            "modelVersionId": 290640
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 396075
+          },
+          {
+            "type": "lora",
+            "weight": 1,
+            "modelVersionId": 552297
+          }
+        ],
+        "extra": {},
+        "Model": "urn:air:sdxl:checkpoint:civitai:257749@290640",
+        "models": [
+          "urn:air:sdxl:checkpoint:civitai:257749@290640"
+        ],
+        "resources": [
+          {
+            "imageId": 23268339,
+            "modelVersionId": 290640,
+            "strength": null,
+            "modelId": 257749,
+            "modelName": "Pony Diffusion V6 XL",
+            "modelType": "Checkpoint",
+            "versionId": 290640,
+            "versionName": "V6 (start with this one)",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 23268339,
+            "modelVersionId": 396075,
+            "strength": 1,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 23268339,
+            "modelVersionId": 552297,
+            "strength": 1,
+            "modelId": 399995,
+            "modelName": "(Pony XL) Cum Chugging (Gokkun)",
+            "modelType": "LORA",
+            "versionId": 552297,
+            "versionName": "v3.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 11208702,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/cf202e09-5d7b-4d73-98ea-1dd701f8e739/original=true/quality=90/37FE7DE5F2386AE72BBD44A23F5200E35F9BFA4FC26FBF565097C6275A902622.jpeg",
+      "author": "SFC",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, source_anime, BREAK 1girl, KarrynCE, purple hair, short hair, pink eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap, salute, hypnosis, squatting, tongue, ?, prison, pussy juices, spread legs, floating hearts,",
+      "negative_prompt": "worst quality, (low quality:1.4), easynegative, badhandv4, ((((clones)))), ((same face)), (((watermark))), bad hands, bad anatomy, extra fingers, extra limbs, 3d, monochrome, censored,",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 29,
+      "cfg_scale": 6,
+      "seed": 1286145768,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, source_anime, BREAK 1girl, KarrynCE, purple hair, short hair, pink eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap, salute, hypnosis, squatting, tongue, ?, prison, pussy juices, spread legs, floating hearts,",
+        "negativePrompt": "worst quality, (low quality:1.4), easynegative, badhandv4, ((((clones)))), ((same face)), (((watermark))), bad hands, bad anatomy, extra fingers, extra limbs, 3d, monochrome, censored,",
+        "cfgScale": 6,
+        "steps": 29,
+        "sampler": "Euler a",
+        "seed": 1286145768,
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "embed",
+            "weight": 1,
+            "modelVersionId": 9208
+          },
+          {
+            "type": "ImageJobNetworkParams { Strength = 0.8, TriggerWord = , Type = lora }",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "clipSkip": 2,
+        "resources": [
+          {
+            "imageId": 11208702,
+            "modelVersionId": 9208,
+            "strength": 1,
+            "modelId": 7808,
+            "modelName": "EasyNegative",
+            "modelType": "TextualInversion",
+            "versionId": 9208,
+            "versionName": "EasyNegative",
+            "baseModel": "SD 1.5"
+          },
+          {
+            "imageId": 11208702,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 11208702,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          }
+        ]
+      }
+    },
+    {
+      "image_id": 11150911,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/d3e84126-184d-4931-929b-f666d0919bb8/original=true/quality=90/E2EC00ACE93158E41FD325082CF1C082D9864C6888259EC286EF767C55B6E7F3.jpeg",
+      "author": "Yashug01",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, score_6_score_5_up, score_4_up, uncensored, BREAK,<lora:KarrynCE_Ver2:.8> , 1girl, solo, sexy pose, ((view from above, close)), focus girl, KarrynCE, purple hair, short hair, blue eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap , curvy, large breasts, cleavage, thighs, areola slip, indoors, prison , night, standing in front of viewer, floating black hearts, wide hips, happy smile, teeth, meduim lips, cute, cute smile, half-closed eyes, blush, press her breasts, sexy wink <lora:Expressive_H:1>,Expressiveh",
+      "negative_prompt": "standing, oral, 3D, tree, censored, watermark, patreon username, jpeg artifacts, muscular female, artist name.",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 1
+        },
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 32,
+      "cfg_scale": 7,
+      "seed": 1029142046,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, score_6_score_5_up, score_4_up, uncensored, BREAK,<lora:KarrynCE_Ver2:.8> , 1girl, solo, sexy pose, ((view from above, close)), focus girl, KarrynCE, purple hair, short hair, blue eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap , curvy, large breasts, cleavage, thighs, areola slip, indoors, prison , night, standing in front of viewer, floating black hearts, wide hips, happy smile, teeth, meduim lips, cute, cute smile, half-closed eyes, blush, press her breasts, sexy wink <lora:Expressive_H:1>,Expressiveh",
+        "negativePrompt": "standing, oral, 3D, tree, censored, watermark, patreon username, jpeg artifacts, muscular female, artist name.",
+        "cfgScale": 7,
+        "steps": 32,
+        "sampler": "Euler a",
+        "seed": 1029142046,
+        "resources": [
+          {
+            "imageId": 11150911,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 11150911,
+            "modelVersionId": 382152,
+            "strength": 1,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 11150911,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          }
+        ],
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "ImageJobNetworkParams { Strength = 1, TriggerWord = , Type = lora }",
+            "weight": 1,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "ImageJobNetworkParams { Strength = 0.8, TriggerWord = , Type = lora }",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "clipSkip": 2
+      }
+    },
+    {
+      "image_id": 11150910,
+      "image_url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/ad1bca99-ef4d-4b57-bd75-edf7c5c502e6/original=true/quality=90/8E1978C45B71E754CD68AA2E898477039CEC26645F565A90300E6A1CFB57A255.jpeg",
+      "author": "Yashug01",
+      "tags": null,
+      "prompt": "score_9, score_8_up, score_7_up, score_6_score_5_up, score_4_up, uncensored, BREAK,<lora:KarrynCE_Ver2:.8> , 1girl, solo, sexy pose, ((view from below, close)), focus girl, KarrynCE, purple hair, short hair, blue eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap , curvy, large breasts, cleavage, thighs, areola slip, indoors, prison ,standing in front of viewer, floating  hearts, wide hips, seductive smile, teeth, meduim lips, cute, half-closed eyes, blush, grabbing ger boobs, sexy wink <lora:Expressive_H:1>,Expressiveh",
+      "negative_prompt": "standing, oral, 3D, tree, censored, watermark, patreon username, jpeg artifacts, muscular female, artist name.",
+      "model": "AutismMix SDXL",
+      "model_version": "AutismMix_pony",
+      "loras": [
+        {
+          "name": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+          "weight": 1
+        },
+        {
+          "name": "Karryn SDXL (Pony XL)",
+          "weight": 0.8
+        }
+      ],
+      "sampler": "Euler a",
+      "steps": 32,
+      "cfg_scale": 7,
+      "seed": 769108878,
+      "raw_meta_json": {
+        "prompt": "score_9, score_8_up, score_7_up, score_6_score_5_up, score_4_up, uncensored, BREAK,<lora:KarrynCE_Ver2:.8> , 1girl, solo, sexy pose, ((view from below, close)), focus girl, KarrynCE, purple hair, short hair, blue eyes, huge breasts, cleavage, bare shoulders, minidress, elbow gloves, red necktie, peaked cap, black side-tie panties, thigh strap , curvy, large breasts, cleavage, thighs, areola slip, indoors, prison ,standing in front of viewer, floating  hearts, wide hips, seductive smile, teeth, meduim lips, cute, half-closed eyes, blush, grabbing ger boobs, sexy wink <lora:Expressive_H:1>,Expressiveh",
+        "negativePrompt": "standing, oral, 3D, tree, censored, watermark, patreon username, jpeg artifacts, muscular female, artist name.",
+        "cfgScale": 7,
+        "steps": 32,
+        "sampler": "Euler a",
+        "seed": 769108878,
+        "resources": [
+          {
+            "imageId": 11150910,
+            "modelVersionId": 324619,
+            "strength": null,
+            "modelId": 288584,
+            "modelName": "AutismMix SDXL",
+            "modelType": "Checkpoint",
+            "versionId": 324619,
+            "versionName": "AutismMix_pony",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 11150910,
+            "modelVersionId": 382152,
+            "strength": 1,
+            "modelId": 341353,
+            "modelName": "ExpressiveH (Hentai LoRa Style) \u30a8\u30ed\u30a2\u30cb\u30e1",
+            "modelType": "LORA",
+            "versionId": 382152,
+            "versionName": "ExpressiveH",
+            "baseModel": "Pony"
+          },
+          {
+            "imageId": 11150910,
+            "modelVersionId": 396075,
+            "strength": 0.8,
+            "modelId": 316773,
+            "modelName": "Karryn SDXL (Pony XL)",
+            "modelType": "LORA",
+            "versionId": 396075,
+            "versionName": "Pony_2.0",
+            "baseModel": "Pony"
+          }
+        ],
+        "civitaiResources": [
+          {
+            "type": "checkpoint",
+            "modelVersionId": 324619
+          },
+          {
+            "type": "ImageJobNetworkParams { Strength = 1, TriggerWord = , Type = lora }",
+            "weight": 1,
+            "modelVersionId": 382152
+          },
+          {
+            "type": "ImageJobNetworkParams { Strength = 0.8, TriggerWord = , Type = lora }",
+            "weight": 0.8,
+            "modelVersionId": 396075
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250708
+          },
+          {
+            "type": "embed",
+            "modelVersionId": 250712
+          }
+        ],
+        "Size": "832x1216",
+        "clipSkip": 2
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "result": {
+    "data": {
+      "json": {
+        "collection": {
+          "id": 14949699,
+          "name": "Concept - Chastity Belt",
+          "description": "Concept - Chastity Belt with Anal Cutout",
+          "read": "Private",
+          "write": "Private",
+          "type": "Image",
+          "nsfw": true,
+          "nsfwLevel": 60,
+          "image": null,
+          "mode": null,
+          "metadata": {},
+          "availability": "Public",
+          "userId": 8726941,
+          "tags": [],
+          "user": {
+            "id": 8726941,
+            "username": "winguru",
+            "deletedAt": null,
+            "image": "https://lh3.googleusercontent.com/a/ACg8ocKcRO7tXnxxzOb5R76B5XshGgRceom5_ME9K0CrNRXdjhAPNTd5=s96-c",
+            "profilePicture": null,
+            "cosmetics": []
+          }
+        },
+        "permissions": {
+          "collectionId": 14949699,
+          "read": true,
+          "write": true,
+          "writeReview": false,
+          "manage": true,
+          "follow": false,
+          "isContributor": false,
+          "isOwner": true,
+          "publicCollection": false,
+          "followPermissions": [],
+          "collectionType": "Image",
+          "collectionMode": null
+        }
+      }
+    }
+  }
+}

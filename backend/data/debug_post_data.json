@@ -1,0 +1,52 @@
+{
+  "id": 25815673,
+  "nsfwLevel": 16,
+  "title": null,
+  "detail": null,
+  "modelVersionId": null,
+  "modelVersion": null,
+  "user": {
+    "id": 3319660,
+    "username": "Buzzington",
+    "deletedAt": null,
+    "image": "https://lh3.googleusercontent.com/a/ACg8ocLF78XW6D5j9qzQwF1jIlzZzR8PzaCw47jJNrIjAes=s96-c",
+    "profilePicture": {
+      "id": 26409279,
+      "name": "SM6B7QCYTF7Q0E2J3ZKY6S02V0.jpg",
+      "url": "95734447-905a-44d1-81c6-17754be8f1c9",
+      "nsfwLevel": 4,
+      "hash": "UMHL#t~9NH-;T#ITWCX9ItRPnNRkNgnit6o#",
+      "userId": 3319660,
+      "ingestion": "Scanned",
+      "type": "image",
+      "width": 832,
+      "height": 1216,
+      "metadata": {
+        "hash": "UMHL#t~9NH-;T#ITWCX9ItRPnNRkNgnit6o#",
+        "size": 240676,
+        "width": 832,
+        "height": 1216,
+        "userId": 3319660,
+        "profilePicture": true
+      }
+    },
+    "cosmetics": [
+      {
+        "data": null,
+        "cosmetic": {
+          "id": 937,
+          "data": {
+            "url": "4cfed04b-5e65-4e7a-8f97-b8cac40dac0d"
+          },
+          "type": "Badge",
+          "source": "Claim",
+          "name": "Black Friday Sale"
+        }
+      }
+    ]
+  },
+  "publishedAt": "2026-01-11T23:50:24.059Z",
+  "availability": "Public",
+  "tags": [],
+  "collectionId": null
+}

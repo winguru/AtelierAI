@@ -1,0 +1,154 @@
+{
+  "type": "image",
+  "onSite": true,
+  "process": "txt2img",
+  "meta": {
+    "baseModel": "Illustrious",
+    "prompt": "dutch angle, back view, perfect round ass, portrait, very close up, face focus, masterpiece,best quality,amazing quality,, quality,,anime coloring, dutch angle, shiny skin, 1girl,Ahyoon, Black Hair, Blue Eyes, Long Hair, Loose High bun, Large Breasts,  head tilted up,  ,very skinny waist, narrow waist, wide grimace, shocked, scared, sweat, deep blush eyes looking at viewer,, toned stomach, \nnude, naked, chastity belt, anus cutout, anus\nDynamic pose, kneeling, on hands and knees, prostitution, chain leash, slave auction, arms behind back, small bald fat merchant man, holding bag of money, slave auction, smaller domination, size difference, faceless, faceless male, interspecies, loincloth, rags, erection, pelvic curtain, curtains\n\n\n",
+    "negativePrompt": "worst quality, bad quality, simple background, 3d, anime, child, loli, closed eyes, tan lines, shiny skin, fat, obese, patreon, watermark, bad hands, text, pubes, pubic hair, censhorship",
+    "cfgScale": 3,
+    "steps": 34,
+    "sampler": "Euler a",
+    "seed": 1339988861,
+    "engine": "comfyui",
+    "process": "txt2img",
+    "workflow": "img2img-hires",
+    "civitaiResources": [
+      {
+        "type": "checkpoint",
+        "modelVersionId": 2568276
+      },
+      {
+        "weight": 1,
+        "modelVersionId": 1833157
+      },
+      {
+        "type": "lora",
+        "weight": 0.7,
+        "modelVersionId": 2579501
+      },
+      {
+        "type": "lora",
+        "weight": 0.7,
+        "modelVersionId": 1725302
+      },
+      {
+        "type": "lora",
+        "weight": 1,
+        "modelVersionId": 1932075
+      },
+      {
+        "type": "upscaler",
+        "modelVersionId": 164821
+      }
+    ],
+    "extra": {},
+    "Model": "urn:air:sdxl:checkpoint:civitai:1342490@2568276",
+    "width": 1024,
+    "height": 1024,
+    "images": [
+      {
+        "url": "https://orchestration-new.civitai.com/v2/consumer/blobs/96APGTRFQM0EWJX1VNAQGDFVA0.jpeg?sig=CfDJ8N_qP_UguotCoWxV0GDJyroKuEljEh8gwjumt4C5A4zkEWQ7rlLGUIA2nlAZhDwT7MWxF16jdj4xHLFJ460RNH2nqCWMhkbkl8R4awa3ml_Idv_3S4C231gjD-zSDwGBcwxB6AePPIWdM5q2wiMOFujf3sTC6_FfsoW_U1W3gSjpHvtAT6Ad0tZDrOFnXVy_5G_lLj998DiQOVDSikbVHU1o6vt1ERvWlJzi-I0_JOVthZuJDAT3mhWQtfJCJCPSQRe-XdtxWbpHU1sjgpolGzyfSrJac6O2kZYqgW2fcnZG&exp=2027-01-11T23:40:06.8203272Z",
+        "width": 1024,
+        "height": 1024
+      }
+    ],
+    "models": [
+      "urn:air:sdxl:checkpoint:civitai:1342490@2568276"
+    ],
+    "denoise": 0.4,
+    "priority": "normal",
+    "quantity": 2,
+    "upscalers": [
+      "urn:air:other:upscaler:civitai:147759@164821"
+    ],
+    "disablePoi": true,
+    "aspectRatio": "1:1",
+    "sourceImage": {
+      "url": "https://orchestration-new.civitai.com/v2/consumer/blobs/96APGTRFQM0EWJX1VNAQGDFVA0.jpeg?sig=CfDJ8N_qP_UguotCoWxV0GDJyroKuEljEh8gwjumt4C5A4zkEWQ7rlLGUIA2nlAZhDwT7MWxF16jdj4xHLFJ460RNH2nqCWMhkbkl8R4awa3ml_Idv_3S4C231gjD-zSDwGBcwxB6AePPIWdM5q2wiMOFujf3sTC6_FfsoW_U1W3gSjpHvtAT6Ad0tZDrOFnXVy_5G_lLj998DiQOVDSikbVHU1o6vt1ERvWlJzi-I0_JOVthZuJDAT3mhWQtfJCJCPSQRe-XdtxWbpHU1sjgpolGzyfSrJac6O2kZYqgW2fcnZG&exp=2027-01-11T23:40:06.8203272Z",
+      "width": 1024,
+      "height": 1024
+    },
+    "enhancedCompatibility": true,
+    "clipSkip": 2
+  },
+  "resources": [
+    {
+      "imageId": 117165031,
+      "modelVersionId": 164821,
+      "strength": null,
+      "modelId": 147759,
+      "modelName": "Remacri",
+      "modelType": "Upscaler",
+      "versionId": 164821,
+      "versionName": "Original",
+      "baseModel": "Other"
+    },
+    {
+      "imageId": 117165031,
+      "modelVersionId": 1725302,
+      "strength": 0.7,
+      "modelId": 1524863,
+      "modelName": "Slave auction | Sex slave  | Concept version | Illustrious/NoobAI/Pony",
+      "modelType": "LORA",
+      "versionId": 1725302,
+      "versionName": "Illustrious/NoobAI/Pony",
+      "baseModel": "Illustrious"
+    },
+    {
+      "imageId": 117165031,
+      "modelVersionId": 1833157,
+      "strength": 1,
+      "modelId": 1302719,
+      "modelName": "\u2728 Lazy Embeddings for ALL illustrious NoobAI Pony SDXL models LazyPositive LazyNegative (Positive and Negative plus more!)",
+      "modelType": "TextualInversion",
+      "versionId": 1833157,
+      "versionName": "lazypos",
+      "baseModel": "Illustrious"
+    },
+    {
+      "imageId": 117165031,
+      "modelVersionId": 1932075,
+      "strength": 1,
+      "modelId": 1001446,
+      "modelName": "chastity belt thin/ cable style / anus cutout",
+      "modelType": "LORA",
+      "versionId": 1932075,
+      "versionName": "v1.1 Illustrious",
+      "baseModel": "Illustrious"
+    },
+    {
+      "imageId": 117165031,
+      "modelVersionId": 2568276,
+      "strength": null,
+      "modelId": 1342490,
+      "modelName": "DarkMix Mimosa Illustrious - 2.5D Anime",
+      "modelType": "Checkpoint",
+      "versionId": 2568276,
+      "versionName": "v3.0.0",
+      "baseModel": "Illustrious"
+    },
+    {
+      "imageId": 117165031,
+      "modelVersionId": 2579501,
+      "strength": 0.7,
+      "modelId": 2292280,
+      "modelName": "Ah-Yoon - Not to be Missed [Muldeok]",
+      "modelType": "LORA",
+      "versionId": 2579501,
+      "versionName": "V1",
+      "baseModel": "Illustrious"
+    }
+  ],
+  "tools": [],
+  "techniques": [
+    {
+      "id": 1,
+      "name": "txt2img",
+      "notes": null
+    }
+  ],
+  "external": null,
+  "canRemix": true,
+  "remixOfId": null
+}

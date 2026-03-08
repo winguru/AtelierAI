@@ -1,2 +1,4 @@
 mcp
 lancedb
+openai
+voyageai

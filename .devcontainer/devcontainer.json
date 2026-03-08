@@ -3,7 +3,7 @@
   "dockerComposeFile": "../docker-compose.yml",
   "service": "backend",
   "workspaceFolder": "/app",
-
+  
   // Configure VS Code to install these extensions inside the container
   "customizations": {
     "vscode": {
@@ -19,7 +19,8 @@
         "python.defaultInterpreterPath": "/usr/local/bin/python",
         "python.linting.enabled": true,
         "python.linting.flake8Enabled": true,
-        "python.formatting.provider": "black"
+        "python.formatting.provider": "black",
+        "python.envFile": "${workspaceFolder}/.env"
       }
     }
   },

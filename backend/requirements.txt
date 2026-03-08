@@ -6,6 +6,7 @@ python-multipart
 exifread
 python-dotenv
 requests
+wcwidth
 
 # Civitai automatic authentication
 

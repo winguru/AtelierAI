@@ -3,5 +3,6 @@
         "gosu",
         "libpq",
         "PYTHONPATH"
-    ]
+    ],
+    "python.analysis.typeCheckingMode": "standard"
 }

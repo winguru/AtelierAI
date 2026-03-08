@@ -1,0 +1,12 @@
+# MCP indexing allowlist.
+#
+# Empty file means: include all files except those ignored by .gitignore.
+#
+# Add glob patterns to restrict which files are indexed, for example:
+# **/*.py
+# **/*.md
+# **/*.json
+#
+# Prefix with ! to exclude matches even if included:
+# !data/**
+# !archive/**

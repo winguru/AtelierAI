@@ -139,8 +139,21 @@ document.addEventListener('DOMContentLoaded', () => {
             // Parse the JSON data from the response
             const images = await response.json();
 
-            // Display the raw JSON data in the <pre> tag for now
-            apiOutput.textContent = JSON.stringify(images, null, 2);
+            // Render escaped characters as readable text.
+            const formattedImages = JSON.stringify(images, null, 2)
+                // Handle strings that contain literal "\\n" sequences.
+                .replace(/\\\\n/g, '\n')
+                // Handle normal escaped newlines from JSON serialization.
+                .replace(/\\n/g, '\n')
+                // Handle malformed "/n" tokens seen in some metadata exports.
+                .replace(/\/n/g, '\n')
+                // Unescape common JSON escape sequences.
+                .replace(/\\"/g, '"')           // \" → "
+                .replace(/\\\//g, '/')          // \/ → /
+                .replace(/\\t/g, '\t')          // \t → tab character
+                .replace(/\\r/g, '')            // \r → (remove carriage returns)
+                .replace(/\\\\/g, '\\');        // \\ → \ (do this last to avoid conflicts)
+            apiOutput.textContent = formattedImages;
 
         } catch (error) {
             // If an error occurs, display it in the output area

@@ -6,6 +6,9 @@ set -e
 # Print a message to indicate the server is starting
 echo "Starting Uvicorn server for AtelierAI..."
 
+PYTHONPATH=$PYTHONPATH:/app/src:/app/dev
+export PYTHONPATH
+
 # Run the uvicorn command
 # We use --host 0.0.0.0 to make it accessible from outside the container
 # We use --port 8000 as our standard port

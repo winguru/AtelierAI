@@ -1,10 +1,7 @@
 # main.py
 import os
-import hashlib
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
 from typing import List, Optional
-from PIL import Image
-from PIL.ExifTags import TAGS
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session, joinedload
 from fastapi.staticfiles import StaticFiles
@@ -25,42 +22,16 @@ from models import (
     Tool,
     License,
     Artist,
-    SchemaVersion
-)   # Import the specific classes we need
+    SchemaVersion,
+)  # Import the specific classes we need
 
 from image_processor import ImageProcessor
 from image_collection import ImageCollection
+from image_data import ImageData
 
 
 class ScanRequest(BaseModel):
     folder_path: str
-
-
-def get_file_hash(filepath: str) -> str:
-    """Returns the SHA256 hash of a file."""
-    h = hashlib.sha256()
-    with open(filepath, "rb") as file:
-        while chunk := file.read(8192):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def get_exif_data(image_path: str) -> dict:
-    """Extracts EXIF data from an image and returns it as a JSON-serializable dict."""
-    try:
-        image = Image.open(image_path)
-        exif_data_raw = image.getexif()
-        if exif_data_raw:
-            # Filter out non-serializable data and convert tag IDs to names
-            return {
-                TAGS.get(tag, tag): value
-                for tag, value in exif_data_raw.items()
-                if isinstance(value, (str, int, float, list, tuple, dict))
-            }
-    except Exception:
-        # If any error occurs during EXIF extraction, return an empty dict
-        pass
-    return {}
 
 
 def create_initial_data():
@@ -159,16 +130,22 @@ async def lifespan(app: FastAPI):
 
     # --- NEW SCHEMA VERSIONING LOGIC ---
     # Check if the database file exists at all
-    db_file_path = os.getenv("DATABASE_URL", "sqlite:///./data/image_db.sqlite").replace("sqlite:///", "")
+    db_file_path = os.getenv(
+        "DATABASE_URL", "sqlite:///./data/image_db.sqlite"
+    ).replace("sqlite:///", "")
     db_exists = os.path.exists(db_file_path)
 
     if db_exists:
         # Check the version
         try:
             with engine.connect() as connection:
-                version_result = connection.execute(SchemaVersion.__table__.select()).scalar_one_or_none()
+                version_result = connection.execute(
+                    SchemaVersion.__table__.select()
+                ).scalar_one_or_none()
                 if version_result != CURRENT_SCHEMA_VERSION:
-                    print(f"⚠️ Schema version mismatch. Found {version_result}, expected {CURRENT_SCHEMA_VERSION}.")
+                    print(
+                        f"⚠️ Schema version mismatch. Found {version_result}, expected {CURRENT_SCHEMA_VERSION}."
+                    )
                     print("   Recreating database...")
                     os.remove(db_file_path)
                     db_exists = False
@@ -221,16 +198,20 @@ async def read_index():
 def read_images(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     """
     Returns a list of images with their associated artist and license info.
+    Uses ImageData class to encapsulate and display image metadata.
     """
     # Use joinedload to efficiently fetch the related objects
     images_query = db.query(ImageModel).options(
-        joinedload(ImageModel.artist),
-        joinedload(ImageModel.license)
+        joinedload(ImageModel.artist), joinedload(ImageModel.license)
     )
     images = images_query.offset(skip).limit(limit).all()
 
-    # The logic is now just a simple list comprehension
-    return [image.to_dict() for image in images]
+    # Convert database records to ImageData instances for structured data handling
+    images_data = [ImageData.from_db_record(image) for image in images]
+
+    # Return list of dictionaries using ImageData's to_dict() method
+    # This provides a clean, consistent interface for data serialization
+    return [image_data.to_dict() for image_data in images_data]
 
 
 # Also, update the /artists/ endpoint to return the new artist objects
@@ -243,6 +224,7 @@ def get_artists(db: Session = Depends(get_db)):
         for artist in artists
     ]
 
+
 @app.get("/licenses/", response_model=List[dict])
 def get_licenses(db: Session = Depends(get_db)):
     """Returns a list of all available licenses."""
@@ -251,6 +233,7 @@ def get_licenses(db: Session = Depends(get_db)):
         {"id": license.id, "name": license.name, "short_name": license.short_name}
         for license in licenses
     ]
+
 
 @app.post("/scan_library/")
 def scan_library(db: Session = Depends(get_db)):
@@ -264,20 +247,20 @@ def scan_library(db: Session = Depends(get_db)):
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"An unexpected error occurred: {e}"
+        )
 
 
 @app.post("/upload_images/")
 async def upload_images(
     # This will be a list of uploaded files
-
     files: List[UploadFile] = File(...),
     # These are the optional batch metadata fields
-
     artist_name: Optional[str] = Form(None),
     source_url: Optional[str] = Form(None),
     license_id: Optional[int] = Form(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Uploads one or more images, saves them to the library, and adds them to the database.
@@ -335,5 +318,5 @@ async def upload_images(
         "message": "Upload complete.",
         "images_added": images_added,
         "images_skipped": images_skipped,
-        "errors": errors
+        "errors": errors,
     }

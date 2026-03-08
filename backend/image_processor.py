@@ -1,93 +1,300 @@
 import os
 import shutil
 import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from PIL import Image
 from PIL.ExifTags import TAGS
 from sqlalchemy.orm import Session
 
 from models import ImageModel, Artist
+from image_data import ImageData
 
 # A set of allowed image extensions for easy lookup
-ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.jfif'}
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".jfif"}
+MIME_MAPPING = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".jfif": "image/jpeg",
+}
+
 
 class ImageProcessor:
     """A class to handle all operations for a single image file."""
 
     def __init__(self, file_path: str, db: Session, library_path: str):
         self.db = db
-        self.library_path = library_path  # <-- Store the injected dependency
-        self.original_path = Path(file_path)
-        self.original_filename = self.original_path.name
+        self.library_path = library_path
+        # self.original_path = Path(file_path)
+        # self.original_filename = self.original_path.name
 
-        # --- Initialize state ---
-        self.file_hash: Optional[str] = None
-        self.width: int = 0
-        self.height: int = 0
-        self.date_created = datetime.now()
-        self.date_modified = datetime.now()
-        self.exif_data: dict = {}
-        self.file_size: int = 0
+        # --- Initialize state using ImageData ---
+        self.metadata: ImageData = ImageData()
         self.db_record: Optional[ImageModel] = None
 
         # --- Perform initial processing ---
-        if not self.original_path.is_file() or not self._is_valid_image():
-            print(f"File is not a valid image: {self.original_filename}")
-            raise ValueError(f"File is not a valid image: {self.original_filename}")
+        self.metadata.file_path = str(Path(file_path))
+        self.metadata.file_name = Path(file_path).name
+        if not Path(file_path).is_file() or not self._is_valid_image():
+            print(f"File is not a valid image: {self.metadata.file_name}")
+            raise ValueError(f"File is not a valid image: {self.metadata.file_name}")
 
         self._process_file()
 
+        # Add file-derived data to ImageData after processing
+        self.metadata.file_hash = self.file_hash
+        self.metadata.width = self.width
+        self.metadata.height = self.height
+        self.metadata.mimetype = self.mimetype
+        self.metadata.file_size = self.file_size
+        self.metadata.exif_data = self.exif_data
+        self.metadata.date_created = self.date_created.isoformat()
+        self.metadata.date_modified = self.date_modified.isoformat()
+
+    # --- Properties for backward compatibility ---
+    @property
+    def file_hash(self) -> str:
+        return self.metadata.file_hash or ""
+
+    @property
+    def width(self) -> int:
+        return self.metadata.width or 0
+
+    @property
+    def height(self) -> int:
+        return self.metadata.height or 0
+
+    @property
+    def mimetype(self) -> Optional[str]:
+        return self.metadata.mimetype
+
+    @property
+    def exif_data(self) -> dict:
+        return self.metadata.exif_data or {}
+
+    @property
+    def file_size(self) -> int:
+        return self.metadata.file_size or 0
+
+    @property
+    def date_created(self) -> datetime:
+        """Returns date_created as datetime object."""
+        if self.metadata.date_created:
+            return datetime.fromisoformat(self.metadata.date_created)
+        return datetime.now()
+
+    @property
+    def extension(self) -> Optional[str]:
+        """Returns the file extension based on MIME type or filename."""
+        if self.mimetype:
+            ext = self.mime_to_extension(self.mimetype)
+            if ext:
+                return ext
+        if self.metadata.file_name:
+            return Path(self.metadata.file_name).suffix.lower()
+        return None
+
+    @property
+    def date_modified(self) -> datetime:
+        """Returns date_modified as datetime object."""
+        if self.metadata.date_modified:
+            return datetime.fromisoformat(self.metadata.date_modified)
+        return datetime.now()
+
     def _is_valid_image(self) -> bool:
         """Checks if the file has a valid image extension."""
-        return self.original_path.suffix.lower() in ALLOWED_EXTENSIONS
+        if self.metadata.file_path is None:
+            return False
+        return self.extension in ALLOWED_EXTENSIONS
 
     def _process_file(self):
         """Calculates hash, gets metadata, and size."""
-        self.file_hash = self._calculate_hash()
-        self.width, self.height, self.exif_data = self._get_metadata()
-        self.file_size = self.original_path.stat().st_size
+        self.metadata.file_hash = self._calculate_hash()
+        (
+            self.metadata.width,
+            self.metadata.height,
+            self.metadata.mimetype,
+            self.metadata.exif_data,
+        ) = self._get_metadata()
+        if self.metadata.file_path:
+            self.metadata.file_size = Path(self.metadata.file_path).stat().st_size
 
     def _calculate_hash(self) -> str:
         """Calculates the SHA256 hash of the image file."""
+        if self.metadata.file_path is None:
+            raise ValueError("File path is None")
         h = hashlib.sha256()
-        with open(self.original_path, "rb") as f:
+        with open(self.metadata.file_path, "rb") as f:
             while chunk := f.read(8192):
                 h.update(chunk)
         return h.hexdigest()
 
-    def _get_metadata(self) -> tuple[int, int, dict]:
+    @staticmethod
+    def mime_to_extension(mime_type: str | None) -> Optional[str]:
+        """Converts a MIME type to a file extension."""
+        if mime_type is None:
+            return None
+        for ext, mime in MIME_MAPPING.items():
+            if mime == mime_type:
+                return ext
+        return None
+
+    def _extract_mimetype(self, img: Image.Image) -> Optional[str]:
+        """Extracts the MIME type from a PIL Image object."""
+        mimetype = Image.MIME.get(img.format) if img.format else None
+        if not mimetype and img.format:
+            ext = self.mime_to_extension(img.format)
+            mimetype = MIME_MAPPING.get(ext) if ext else None
+        if not mimetype and self.metadata.file_path:
+            ext = self.extension
+            mimetype = MIME_MAPPING.get(ext) if ext else None
+        return mimetype
+
+    @staticmethod
+    def decode_exif_value(value):
+        """Decodes an EXIF value."""
+        if not isinstance(value, bytes):
+            return value
+
+        # EXIF UserComment often has "UNICODE\x00\x00" as first 8 bytes
+        # Then the actual UTF-16BE data starts at byte 8
+        if len(value) > 8 and value[:7] == b"UNICODE":
+            # Skip to byte 8, then decode as UTF-16BE
+            try:
+                decoded = value[8:].decode("utf-16be")
+                decoded = decoded.rstrip("\x00")
+                if decoded:
+                    return decoded
+            except (UnicodeDecodeError, AttributeError):
+                pass
+
+        # Try standard decodings (UTF-16BE first, then UTF-8, then ASCII)
+        for encoding in ["utf-16be", "utf-8", "ascii", "latin-1"]:
+            try:
+                decoded = value.decode(encoding)
+                decoded = decoded.rstrip("\x00")
+                if decoded:
+                    return decoded
+            except (UnicodeDecodeError, AttributeError):
+                continue
+
+        # If all decodings fail, return the raw bytes as-is
+        return value
+
+    def _extract_standard_exif_tags(self, exif_data_raw) -> dict:
+        """Extracts standard EXIF tags from raw EXIF data."""
+        exif_data = {}
+        for tag, value in exif_data_raw.items():
+            tag_name = TAGS.get(tag, tag)
+            if isinstance(value, (str, int, float, list, tuple, dict)):
+                exif_data[tag_name] = value
+            elif isinstance(value, bytes):
+                decoded_value = self.decode_exif_value(value)
+                exif_data[tag_name] = decoded_value
+        return exif_data
+
+    def _extract_ifd_exif_tags(self, exif_data_raw, exif_data: dict) -> None:
+        """Extracts IFD (Image File Directory) data from raw EXIF data."""
+        try:
+            for ifd_id in [
+                0x8825,  # GPSInfo IFD
+                0x8827,  # Interop IFD
+                0x927C,  # MakerNote IFD
+                0x8769,  # ExifOffset IFD
+            ]:
+                try:
+                    ifd_data = exif_data_raw.get_ifd(ifd_id)
+                    for tag, value in ifd_data.items() if ifd_data else []:
+                        # Decode the value before storing
+                        decoded_value = self.decode_exif_value(value)
+                        tag_name = TAGS.get(tag, tag)
+                        if isinstance(
+                            decoded_value,
+                            (str, int, float, list, tuple, dict),
+                        ):
+                            exif_data[f"{tag_name}"] = decoded_value
+                except KeyError:
+                    pass
+        except Exception:
+            pass
+
+    def _print_exif_data(self, exif_data: dict) -> None:
+        """Prints all decoded EXIF data."""
+        print(f"Second pass: Extracted EXIF data from {self.metadata.file_name}:")
+        for key, value in exif_data.items():
+            print(f"  {key}: {value}")
+
+    def _get_metadata(self) -> tuple[int, int, Optional[str], dict]:
         """Extracts metadata from the image file."""
         try:
-            with Image.open(self.original_path) as img:
+            if self.metadata.file_path is None:
+                return 0, 0, None, {}
+            with Image.open(self.metadata.file_path) as img:
                 width, height = img.size
+                mimetype = self._extract_mimetype(img)
                 exif_data_raw = img.getexif()
+
+                exif_data = {}
                 if exif_data_raw:
-                    exif_data = {TAGS.get(tag, tag): value for tag, value in exif_data_raw.items() if isinstance(value, (str, int, float, list, tuple, dict))}
-                else:
-                    exif_data = {}
-            return width, height, exif_data
+                    exif_data = self._extract_standard_exif_tags(exif_data_raw)
+                    self._extract_ifd_exif_tags(exif_data_raw, exif_data)
+                    self._print_exif_data(exif_data)
+
+            return width, height, mimetype, exif_data
         except Exception:
-            return 0, 0, {}
+            return 0, 0, None, {}
 
     def find_in_database(self) -> Optional[ImageModel]:
         """Finds the image in the database using its hash."""
-        self.db_record = self.db.query(ImageModel).filter(ImageModel.file_hash == self.file_hash).first()
+        self.db_record = (
+            self.db.query(ImageModel)
+            .filter(ImageModel.file_hash == self.file_hash)
+            .first()
+        )
         return self.db_record
 
     def save_to_library(self) -> str:
         """Renames/moves the image to the library using its hash as the filename."""
-        final_filename = f"{self.file_hash}{self.original_path.suffix.lower()}"
+        final_filename = f"{self.file_hash}{self.extension or ''}"
         final_absolute_path = Path(self.library_path) / final_filename
+        print(f"Saving image to library: {final_absolute_path}")
 
         # If the file is already in the right place with the right name, do nothing
-        if self.original_path.resolve() == final_absolute_path.resolve():
+        if (
+            self.metadata.file_path
+            and Path(self.metadata.file_path).resolve() == final_absolute_path.resolve()
+        ):
             return final_filename
 
-        # Move the file to its final destination
-        shutil.move(self.original_path, final_absolute_path)
+        # Move any existing JSON metadata file along with the image
+        original_json_path = (
+            self._get_json_path(Path(self.metadata.file_path))
+            if self.metadata.file_path
+            else None
+        )
+        final_json_path = self._get_json_path(final_absolute_path)
+
+        # Move the image file to its final destination
+        if self.metadata.file_path is None:
+            raise ValueError("File path is None, cannot save to library")
+        shutil.move(self.metadata.file_path, final_absolute_path)
+
+        # Move the JSON file if it exists
+        if original_json_path and original_json_path.exists():
+            try:
+                shutil.move(original_json_path, final_json_path)
+                print(f"Moved JSON metadata to: {final_json_path}")
+            except Exception as e:
+                print(f"Warning: Could not move JSON metadata file: {e}")
+
+        # Update the original_path to point to the new location
+        self.original_path = final_absolute_path
+
         return final_filename
 
     def delete_from_filesystem(self):
@@ -107,7 +314,7 @@ class ImageProcessor:
         absolute_path = Path(self.library_path) / relative_filepath
         stat = os.stat(absolute_path)
 
-        display_name = original_filename or self.original_filename
+        display_name = original_filename or self.metadata.file_name or relative_filepath
 
         self.db_record = ImageModel(
             file_path=relative_filepath,
@@ -116,12 +323,13 @@ class ImageProcessor:
             file_size=stat.st_size,
             width=self.width,
             height=self.height,
+            mimetype=self.mimetype,
             date_created=datetime.fromtimestamp(stat.st_ctime),
             date_modified=datetime.fromtimestamp(stat.st_mtime),
             artist_id=artist_obj.id if artist_obj else None,
             source_url=source_url,
             license_id=license_id if license_id else None,
-            exif_data=self.exif_data
+            exif_data=self.exif_data,
         )
         return self.db_record
 
@@ -135,3 +343,164 @@ class ImageProcessor:
             db.commit()
             db.refresh(artist_obj)
         return artist_obj
+
+    def _get_json_path(self, image_path: Path) -> Path:
+        """Returns the path to the JSON metadata file for a given image path."""
+        return image_path.with_suffix(".json")
+
+    def _save_json(
+        self,
+        image_path: Path,
+        db_record: Optional[ImageModel] = None,
+        additional_data: Optional[dict] = None,
+    ) -> None:
+        """
+        Saves metadata to a JSON file alongside the image file.
+
+        The JSON file serves as the source of authority for metadata, except for
+        fields derived directly from the file content (hash, size, date_modified).
+
+        Args:
+            image_path: Path to the image file
+            db_record: Optional ImageModel record to include data from
+            additional_data: Optional additional metadata not in the database model
+        """
+        json_path = self._get_json_path(image_path)
+        stat = image_path.stat()
+
+        # Build the data structure from all available sources
+        data: dict[str, Any] = {
+            # Core file metadata (from actual file)
+            "file_hash": self.file_hash,
+            "file_size": stat.st_size,
+            "date_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            # Image metadata
+            "width": self.width,
+            "height": self.height,
+            "mimetype": self.mimetype,
+            "exif_data": self.exif_data,
+        }
+
+        # Load existing JSON data to preserve fields not in current state
+        existing_data = {}
+        if json_path.exists():
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                pass
+
+        # Preserve date_created from JSON if it exists (file creation time)
+        # The JSON file is the authority for this
+        if "date_created" in existing_data:
+            data["date_created"] = existing_data["date_created"]
+        else:
+            # No existing JSON, use file's creation time
+            data["date_created"] = datetime.fromtimestamp(stat.st_ctime).isoformat()
+
+        # Merge additional fields from existing JSON (fields not in database)
+        json_only_fields = {
+            k: v
+            for k, v in existing_data.items()
+            if k
+            not in {
+                "file_hash",
+                "file_size",
+                "date_modified",
+                "date_created",
+                "width",
+                "height",
+                "mimetype",
+                "exif_data",
+                "file_path",
+                "file_name",
+                "artist_id",
+                "artist_name",
+                "source_url",
+                "license_id",
+            }
+        }
+        data.update(json_only_fields)
+
+        # Add database fields if a record is provided
+        if db_record:
+            data.update(
+                {
+                    "file_path": db_record.file_path,
+                    "file_name": db_record.file_name,
+                    "artist_id": db_record.artist_id,
+                    "source_url": db_record.source_url,
+                    "license_id": db_record.license_id,
+                }
+            )
+            # Include artist name if available
+            if db_record.artist_id is not None:
+                artist = (
+                    self.db.query(Artist)
+                    .filter(Artist.id == db_record.artist_id)
+                    .first()
+                )
+                if artist:
+                    data["artist_name"] = artist.name
+
+        # Add any additional custom data provided
+        if additional_data:
+            data.update(additional_data)
+
+        # Write the JSON file
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+    def _load_json(self, image_path: Path) -> dict[str, Any]:
+        """
+        Loads metadata from a JSON file alongside the image file.
+
+        Returns a dictionary containing metadata that can be used to populate
+        the database. File-derived fields (hash, size, date_modified, dimensions)
+        from the actual file take precedence over JSON values.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            Dictionary containing metadata from the JSON file, with file-derived
+            fields overridden by actual file data
+        """
+        json_path = self._get_json_path(image_path)
+
+        # Default empty structure
+        metadata: dict[str, Any] = {}
+
+        if not json_path.exists():
+            return metadata
+
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                loaded_data = json.load(f)
+
+            # Get actual file stats
+            stat = image_path.stat()
+
+            # Start with loaded JSON data
+            metadata = loaded_data.copy()
+
+            # Override with actual file data (file is authority for these)
+            metadata["file_hash"] = self.file_hash
+            metadata["file_size"] = stat.st_size
+            metadata["date_modified"] = datetime.fromtimestamp(
+                stat.st_mtime
+            ).isoformat()
+            metadata["width"] = self.width
+            metadata["height"] = self.height
+
+            # Keep date_created from JSON (it's the authority for file creation time)
+            # unless it doesn't exist, then use file creation time
+            if "date_created" not in metadata:
+                metadata["date_created"] = datetime.fromtimestamp(
+                    stat.st_ctime
+                ).isoformat()
+
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Failed to load JSON metadata for {image_path}: {e}")
+
+        return metadata

@@ -1,13 +1,23 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text, DateTime, JSON, Enum
+from sqlalchemy import (
+    Boolean,
+    Column,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    DateTime,
+    JSON,
+    Enum,
+)
 from sqlalchemy.orm import relationship
 from database import Base
 
 # 1. Define the values in a single, constant tuple. This is the source of truth.
-COLLECTION_TYPE_VALUES = ('public', 'paid', 'private', 'user_created')
+COLLECTION_TYPE_VALUES = ("public", "paid", "private", "user_created")
 
 # 2. Dynamically create the Enum class from the tuple.
 #    This is the clean and correct way.
-CollectionType = Enum('CollectionType', ' '.join(COLLECTION_TYPE_VALUES), type=str)
+CollectionType = Enum("CollectionType", " ".join(COLLECTION_TYPE_VALUES), type=str)
 
 
 class ImageModel(Base):
@@ -20,6 +30,7 @@ class ImageModel(Base):
     file_size = Column(Integer)
     width = Column(Integer)
     height = Column(Integer)
+    mimetype = Column(String, nullable=True)
     date_created = Column(DateTime)
     date_modified = Column(DateTime)
 
@@ -40,7 +51,9 @@ class ImageModel(Base):
     license = relationship("License", back_populates="images")
     analysis_data = relationship("AnalysisData", back_populates="images")
     tags = relationship("Tag", secondary="image_tags", back_populates="images")
-    datasets = relationship("Dataset", secondary="dataset_images", back_populates="images")
+    datasets = relationship(
+        "Dataset", secondary="dataset_images", back_populates="images"
+    )
     artist = relationship("Artist", back_populates="images")
 
     def to_dict(self) -> dict:
@@ -53,7 +66,7 @@ class ImageModel(Base):
             artist_info = {
                 "id": self.artist.id,
                 "name": self.artist.name,
-                "nickname": self.artist.nickname
+                "nickname": self.artist.nickname,
             }
 
         # Safely access the license information
@@ -62,16 +75,42 @@ class ImageModel(Base):
             license_info = {
                 "id": self.license.id,
                 "short_name": self.license.short_name,
-                "name": self.license.name
+                "name": self.license.name,
             }
+
+        exif_data = None
+        if self.exif_data is not None:
+            exif_data = self.exif_data
+
+        json_metadata = None
+        if self.json_metadata is not None:
+            json_metadata = self.json_metadata
 
         return {
             "id": self.id,
             "file_name": self.file_name,
             "file_hash": self.file_hash,
+            "file_size": self.file_size,
+            "width": self.width,
+            "height": self.height,
+            "mimetype": self.mimetype,
+            "date_created": (
+                self.date_created.isoformat() if self.date_created is not None else None
+            ),
+            "date_modified": (
+                self.date_modified.isoformat()
+                if self.date_modified is not None
+                else None
+            ),
+            "source_url": self.source_url,
+            "source_site": self.source_site,
+            "collection_type": self.collection_type,
             "artist": artist_info,
-            "license": license_info
+            "license": license_info,
+            "exif_data": exif_data,
+            "json_metadata": json_metadata,
         }
+
 
 class Tag(Base):
     __tablename__ = "tags"
@@ -108,7 +147,9 @@ class AnalysisData(Base):
     id = Column(Integer, primary_key=True, index=True)
     image_id = Column(Integer, ForeignKey("images.id"), nullable=False)
     tool_id = Column(Integer, ForeignKey("tools.id"), nullable=False)
-    dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=True)  # Nullable if user-generated
+    dataset_id = Column(
+        Integer, ForeignKey("datasets.id"), nullable=True
+    )  # Nullable if user-generated
     data = Column(Text, nullable=False)
     is_curated = Column(Boolean, default=False)
     created_at = Column(DateTime, nullable=False)
@@ -139,13 +180,17 @@ class Dataset(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     description = Column(Text)
-    creator_user_id = Column(String)  # Could be a simple string or a foreign key to a users table later
+    creator_user_id = Column(
+        String
+    )  # Could be a simple string or a foreign key to a users table later
     version = Column(String)
     export_date = Column(DateTime)
 
     # Relationships
     analysis_data = relationship("AnalysisData", back_populates="dataset")
-    images = relationship("ImageModel", secondary="dataset_images", back_populates="datasets")
+    images = relationship(
+        "ImageModel", secondary="dataset_images", back_populates="datasets"
+    )
 
 
 class DatasetImage(Base):

@@ -53,7 +53,7 @@ class CivitaiAPI:
                 from config import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportMissingImports]
             except (ModuleNotFoundError, ImportError):
                 try:
-                    from config_example import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportAttributeAccessIssue]
+                    from backend.examples.config_example import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportAttributeAccessIssue]
                 except (ModuleNotFoundError, ImportError):
                     CIVITAI_SESSION_COOKIE = None
 
@@ -112,7 +112,7 @@ class CivitaiAPI:
         try:
             from config import CIVITAI_SESSION_CACHE  # pyright: ignore[reportMissingImports]
         except ModuleNotFoundError:
-            from config_example import CIVITAI_SESSION_CACHE  # pyright: ignore[reportAttributeAccessIssue]
+            from backend.examples.config_example import CIVITAI_SESSION_CACHE  # pyright: ignore[reportAttributeAccessIssue]
 
         if os.path.exists(CIVITAI_SESSION_CACHE):
             try:
@@ -140,7 +140,7 @@ class CivitaiAPI:
         try:
             from config import CIVITAI_SESSION_CACHE  # pyright: ignore[reportMissingImports]
         except ModuleNotFoundError:
-            from config_example import CIVITAI_SESSION_CACHE  # pyright: ignore[reportAttributeAccessIssue]
+            from backend.examples.config_example import CIVITAI_SESSION_CACHE  # pyright: ignore[reportAttributeAccessIssue]
 
         print("ℹ️  No valid session token found in cache or environment")
         print("   Attempting automatic authentication...")
@@ -160,7 +160,7 @@ class CivitaiAPI:
         try:
             from config import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportMissingImports]
         except ModuleNotFoundError:
-            from config_example import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportAttributeAccessIssue]
+            from backend.examples.config_example import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportAttributeAccessIssue]
 
         if CIVITAI_SESSION_COOKIE and len(CIVITAI_SESSION_COOKIE) > 100:
             print("Using session token from config.py")

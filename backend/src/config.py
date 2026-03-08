@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////var/lib/atelierai/image_db.
 IMAGE_LIBRARY_PATH = os.getenv("IMAGE_LIBRARY_PATH", "/var/lib/atelierai/image_library")
 
 # --- Schema Versioning ---
-CURRENT_SCHEMA_VERSION = "1.2"  # Increment this when you make schema changes
+CURRENT_SCHEMA_VERSION = "1.3"  # Increment this when you make schema changes
 
 # --- CivitAI Configuration ---
 CIVITAI_API_KEY = os.getenv("CIVITAI_API_KEY", "")

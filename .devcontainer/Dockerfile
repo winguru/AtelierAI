@@ -12,18 +12,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the backend requirements file and install Python dependencies
-COPY /backend/requirements.txt /app/requirements.txt
-COPY /backend/dev-requirements.txt /app/dev-requirements.txt
+COPY ./backend/requirements.txt ./backend/dev-requirements.txt /app/
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir -r dev-requirements.txt
-
-RUN pip install --no-cache-dir playwright && \
-    playwright install chromium
-
-
-# Copy the rest of the backend application code and scripts
-COPY /backend/ /app/
 
 # Make the shell scripts executable
 RUN chmod +x /app/start.sh /app/entrypoint.sh

@@ -16,6 +16,7 @@
 **/.DS_Store
 app/.civitai_chrome_profile/
 app/src/*.egg-info/
+.devcontainer/Dockerfile.new
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

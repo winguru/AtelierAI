@@ -1,6 +1,6 @@
-# Civitai Private Scraper & Analyzer
+# CivitAIPrivate Scraper & Analyzer
 
-A comprehensive Python toolkit for Civitai that automatically authenticates with Google OAuth and extracts full generation metadata including models, versions, prompts, LoRAs, tags, and image URLs.
+A comprehensive Python toolkit for CivitAI that automatically authenticates with Google OAuth and extracts full generation metadata including models, versions, prompts, LoRAs, tags, and image URLs.
 
 ## ⚠️ IMPORTANT: Correct Cookie Name
 
@@ -12,7 +12,7 @@ If you're manually extracting the token from your browser's DevTools, make sure 
 
 The project has been refactored with a modern, maintainable architecture:
 
-- **`CivitaiAPI` (Singleton)** - Centralized API client for all Civitai API calls
+- **`CivitaiAPI` (Singleton)** - Centralized API client for all CivitAI API calls
 - **`CivitaiImage` (Class)** - Image data model with consistent URL construction and display
 - **`analyze_image.py`** - Single image analysis with full metadata and tags
 - **`analyze_collection.py`** - Collection-wide analysis with statistics and common patterns
@@ -32,7 +32,7 @@ The legacy `CivitaiPrivateScraper` class is still available but deprecated.
   - LoRAs with weights
   - Full prompts and negative prompts
   - Author information with profile URLs
-  - **Tags** (votable tags from Civitai API)
+  - **Tags** (votable tags from CivitAI API)
 - ✅ **Single Image Analysis** - Detailed breakdown of individual images
 - ✅ **Collection Analysis** - Find common patterns across collections
   - Top models, LoRAs, samplers, tags
@@ -40,7 +40,7 @@ The legacy `CivitaiPrivateScraper` class is still available but deprecated.
   - Statistical analysis
 - ✅ **Model Availability Detection** - Automatically detect deleted/removed LoRAs
   - Identifies models that have been deleted from Civitai
-  - Provides links to Civitai Archive (civitaiarchive.com) for deleted models
+  - Provides links to CivitAI Archive (civitaiarchive.com) for deleted models
   - Shows model status and usage count
   - **Model availability detection** - Identifies deleted/removed models with archive links
 
@@ -148,7 +148,7 @@ Output includes:
 - Top models and versions
 - Sampler, steps, and CFG distributions
 - Top LoRAs with average weights
-- **Deleted/Unavailable Models** - Models removed from Civitai with archive links
+- **Deleted/Unavailable Models** - Models removed from CivitAI with archive links
 - **Top Tags** (most common across collection)
 - Common prompt concepts and phrases
 - Sample prompts
@@ -229,7 +229,7 @@ The `CivitaiImage` class provides consistent access to image data:
 
 ### Tag Structure
 
-Tags are simple strings, sorted by relevance score from Civitai API:
+Tags are simple strings, sorted by relevance score from CivitAI API:
 
 ```python
 [
@@ -317,7 +317,7 @@ python setup_session_token.py --force
 
 ### "No tags found for this image"
 
-**Cause:** Image has no tags assigned on Civitai (common for newer images)
+**Cause:** Image has no tags assigned on CivitAI (common for newer images)
 
 **Solution:** This is expected behavior. The API returns empty tags for images without tags.
 
@@ -335,7 +335,7 @@ python setup_session_token.py --headless=false
 ### v2.1.0 (Latest)
 - ✅ Added model availability detection for LoRAs
 - ✅ Automatically checks if models have been deleted from Civitai
-- ✅ Provides links to Civitai Archive (civitaiarchive.com) for deleted models
+- ✅ Provides links to CivitAI Archive (civitaiarchive.com) for deleted models
 - ✅ Shows model status and usage count for deleted models
 - ✅ Added `check_model_availability()` method to CivitaiAPI
 

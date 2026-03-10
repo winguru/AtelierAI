@@ -2,6 +2,7 @@ import os
 import shutil
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -23,6 +24,13 @@ MIME_MAPPING = {
     ".jfif": "image/jpeg",
 }
 
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
+UUID_ANYWHERE_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+)
+
 
 class ImageProcessor:
     """A class to handle all operations for a single image file."""
@@ -36,6 +44,7 @@ class ImageProcessor:
         # --- Initialize state using ImageData ---
         self.metadata: ImageData = ImageData()
         self.db_record: Optional[ImageModel] = None
+        self.exif_tags: dict[str, Any] = {}
 
         # --- Perform initial processing ---
         self.metadata.file_path = str(Path(file_path))
@@ -120,6 +129,7 @@ class ImageProcessor:
             self.metadata.height,
             self.metadata.mimetype,
             self.metadata.exif_data,
+            self.exif_tags,
         ) = self._get_metadata()
         if self.metadata.file_path:
             self.metadata.file_size = Path(self.metadata.file_path).stat().st_size
@@ -186,6 +196,26 @@ class ImageProcessor:
         # If all decodings fail, return the raw bytes as-is
         return value
 
+    @classmethod
+    def _to_json_safe(cls, value: Any) -> Any:
+        """Recursively convert EXIF values into JSON-safe primitives."""
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, bytes):
+            decoded = cls.decode_exif_value(value)
+            if isinstance(decoded, bytes):
+                return decoded.hex()
+            return cls._to_json_safe(decoded)
+        if isinstance(value, tuple):
+            return [cls._to_json_safe(v) for v in value]
+        if isinstance(value, list):
+            return [cls._to_json_safe(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): cls._to_json_safe(v) for k, v in value.items()}
+
+        # Fallback for Rational/IFDRational and other Pillow-specific types.
+        return str(value)
+
     def _extract_standard_exif_tags(self, exif_data_raw) -> dict:
         """Extracts standard EXIF tags from raw EXIF data."""
         exif_data = {}
@@ -198,7 +228,12 @@ class ImageProcessor:
                 exif_data[tag_name] = decoded_value
         return exif_data
 
-    def _extract_ifd_exif_tags(self, exif_data_raw, exif_data: dict) -> None:
+    def _extract_ifd_exif_tags(
+        self,
+        exif_data_raw,
+        exif_data: dict,
+        exif_tags: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Extracts IFD (Image File Directory) data from raw EXIF data."""
         try:
             for ifd_id in [
@@ -218,6 +253,10 @@ class ImageProcessor:
                             (str, int, float, list, tuple, dict),
                         ):
                             exif_data[f"{tag_name}"] = decoded_value
+
+                        if exif_tags is not None:
+                            ifd_key = f"ifd:{ifd_id}:{tag_name}"
+                            exif_tags[ifd_key] = self._to_json_safe(decoded_value)
                 except KeyError:
                     pass
         except Exception:
@@ -227,27 +266,257 @@ class ImageProcessor:
         """Prints all decoded EXIF data."""
         print(f"Second pass: Extracted EXIF data from {self.metadata.file_name}:")
         for key, value in exif_data.items():
-            print(f"  {key}: {value}")
+            # print(f"  {key}: {value[:100] if isinstance(value, str) else value}")
+            pass
 
-    def _get_metadata(self) -> tuple[int, int, Optional[str], dict]:
+    def _extract_generation_text_fields(
+        self,
+        img: Image.Image,
+        exif_data: dict,
+        exif_tags: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Extract generation text fields often stored outside classic EXIF.
+
+        Many AI-generated images (especially PNG/WebP) store prompt metadata in
+        image info text chunks under keys like `parameters`, `comment`, or
+        `comments`. These values may not appear in `img.getexif()`.
+        """
+        info = getattr(img, "info", {}) or {}
+        if not isinstance(info, dict):
+            return
+
+        # Build case-insensitive lookup of textual keys in image info.
+        info_lookup: dict[str, Any] = {
+            str(k).strip().lower(): self.decode_exif_value(v)
+            for k, v in info.items()
+            if isinstance(k, str)
+        }
+
+        if exif_tags is not None:
+            for key, value in info_lookup.items():
+                exif_tags[f"info:{key}"] = self._to_json_safe(value)
+
+        # Preserve common generation fields and textual metadata from PNG chunks.
+        for source_key, target_key in (
+            ("parameters", "parameters"),
+            ("prompt", "Prompt"),
+            ("workflow", "Workflow"),
+            ("title", "Title"),
+            ("description", "Description"),
+            ("software", "Software"),
+            ("source", "Source"),
+            ("generation time", "Generation Time"),
+        ):
+            value = info_lookup.get(source_key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    exif_data[target_key] = cleaned
+
+        # Canonicalize free-form generation payload under UserComment only.
+        # Some images expose this under comment/comments text chunks.
+        user_comment = exif_data.get("UserComment")
+        if not isinstance(user_comment, str) or not user_comment.strip():
+            for key in ("comment", "comments"):
+                value = info_lookup.get(key)
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    if cleaned:
+                        exif_data["UserComment"] = cleaned
+                        break
+
+        # Avoid duplicate payload copies once UserComment is present.
+        exif_data.pop("comment", None)
+        exif_data.pop("comments", None)
+
+    @staticmethod
+    def _looks_like_comfyui_workflow_tag(workflow_value: str) -> bool:
+        """Return True when workflow text looks like ComfyUI workflow metadata.
+
+        Common pattern: starts with an `id` field and includes a UUID-like value,
+        e.g. JSON-ish strings like {"id":"<uuid>", ...} or id:<uuid>.
+        """
+        text = workflow_value.strip()
+        if not text:
+            return False
+
+        lowered = text.lower().lstrip("{\n\r\t ")
+        starts_with_id = lowered.startswith('"id"') or lowered.startswith("id")
+        has_uuid = bool(UUID_ANYWHERE_RE.search(text))
+        return starts_with_id and has_uuid
+
+    @staticmethod
+    def _prune_ifd_pointer_tags(exif_data: dict) -> None:
+        """Remove low-value IFD pointer tags once nested data has been extracted."""
+        pointer_keys = {
+            "ExifOffset",
+            "GPSInfo",
+            "InteroperabilityOffset",
+            "InteropOffset",
+        }
+        for key in pointer_keys:
+            exif_data.pop(key, None)
+
+        # Keep UserComment as the canonical free-form generation payload key.
+        if "UserComment" in exif_data:
+            exif_data.pop("comment", None)
+            exif_data.pop("comments", None)
+
+    def infer_generation_software(
+        self,
+        source_url: Optional[str] = None,
+        existing_sidecar: Optional[dict[str, Any]] = None,
+        db_json_metadata: Optional[dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Infer generator software while preserving original EXIF fields.
+
+        This returns a normalized tool/source name suitable for a dedicated
+        sidecar field (e.g. `generation_software`).
+        """
+        sidecar = existing_sidecar if isinstance(existing_sidecar, dict) else {}
+        json_meta = db_json_metadata if isinstance(db_json_metadata, dict) else {}
+
+        # Note: Hosting platform is not the same as generation tool.
+        # We intentionally do NOT infer generation software from source_url.
+
+        software_raw = self.exif_data.get("Software") if isinstance(self.exif_data, dict) else None
+        software_value = software_raw.strip() if isinstance(software_raw, str) else ""
+        software_lower = software_value.lower()
+
+        if "adobe" in software_lower or "photoshop" in software_lower:
+            return "Photoshop"
+        if "comfyui" in software_lower or "comfy" in software_lower:
+            return "ComfyUI"
+        if "automatic1111" in software_lower or "stable diffusion webui" in software_lower:
+            return "AUTOMATIC1111"
+        if "invoke" in software_lower:
+            return "InvokeAI"
+        if "fooocus" in software_lower:
+            return "Fooocus"
+        if "swarm" in software_lower:
+            return "SwarmUI"
+        if "civitai" in software_lower:
+            return "CivitAI"
+        if "novelai" in software_lower:
+            return "NovelAI"
+
+        # Inspect generation text fields for tool fingerprints.
+        generation_text_sources: list[str] = []
+        if isinstance(self.exif_data, dict):
+            for key in (
+                "parameters",
+                "prompt",
+                "Prompt",
+                "workflow",
+                "Workflow",
+                "comment",
+                "comments",
+                "UserComment",
+            ):
+                value = self.exif_data.get(key)
+                if isinstance(value, str) and value.strip():
+                    generation_text_sources.append(value)
+
+            workflow_candidate = self.exif_data.get("Workflow") or self.exif_data.get(
+                "workflow"
+            )
+            if isinstance(workflow_candidate, str) and self._looks_like_comfyui_workflow_tag(
+                workflow_candidate
+            ):
+                return "ComfyUI"
+
+        sidecar_exif = sidecar.get("exif_data")
+        if isinstance(sidecar_exif, dict):
+            for key in (
+                "parameters",
+                "prompt",
+                "Prompt",
+                "workflow",
+                "Workflow",
+                "comment",
+                "comments",
+                "UserComment",
+            ):
+                value = sidecar_exif.get(key)
+                if isinstance(value, str) and value.strip():
+                    generation_text_sources.append(value)
+
+            workflow_candidate = sidecar_exif.get("Workflow") or sidecar_exif.get(
+                "workflow"
+            )
+            if isinstance(workflow_candidate, str) and self._looks_like_comfyui_workflow_tag(
+                workflow_candidate
+            ):
+                return "ComfyUI"
+
+        generation_text = "\n".join(generation_text_sources).lower()
+
+        if "comfyui" in generation_text:
+            return "ComfyUI"
+        if "automatic1111" in generation_text or "a1111" in generation_text or "stable diffusion webui" in generation_text:
+            return "AUTOMATIC1111"
+        if "invokeai" in generation_text:
+            return "InvokeAI"
+        if "fooocus" in generation_text:
+            return "Fooocus"
+        if "swarmui" in generation_text or "swarm ui" in generation_text:
+            return "SwarmUI"
+
+        # CivitAI-specific marker often appears in generation metadata export.
+        if "civitai resources:" in generation_text:
+            return "CivitAI"
+
+        # If CivitAI metadata exists and tool still unknown, use process/engine hints.
+        civitai_payload = None
+        if isinstance(sidecar.get("civitai"), dict):
+            civitai_payload = sidecar.get("civitai")
+        elif isinstance(json_meta.get("civitai"), dict):
+            civitai_payload = json_meta.get("civitai")
+
+        if isinstance(civitai_payload, dict):
+            process = str(civitai_payload.get("process", "")).lower()
+            engine = str(civitai_payload.get("engine", "")).lower()
+            merged_hint = f"{process} {engine}"
+            if "comfy" in merged_hint:
+                return "ComfyUI"
+            if "a1111" in merged_hint or "automatic" in merged_hint or "webui" in merged_hint:
+                return "AUTOMATIC1111"
+
+        # CivitAI often writes opaque UUID-like software values.
+        if software_value and UUID_RE.match(software_value):
+            if "civitai resources:" in generation_text:
+                return "CivitAI"
+
+        return None
+
+    def _get_metadata(self) -> tuple[int, int, Optional[str], dict, dict[str, Any]]:
         """Extracts metadata from the image file."""
         try:
             if self.metadata.file_path is None:
-                return 0, 0, None, {}
+                return 0, 0, None, {}, {}
             with Image.open(self.metadata.file_path) as img:
                 width, height = img.size
                 mimetype = self._extract_mimetype(img)
                 exif_data_raw = img.getexif()
 
                 exif_data = {}
+                exif_tags: dict[str, Any] = {}
                 if exif_data_raw:
-                    exif_data = self._extract_standard_exif_tags(exif_data_raw)
-                    self._extract_ifd_exif_tags(exif_data_raw, exif_data)
-                    self._print_exif_data(exif_data)
+                    for tag, value in exif_data_raw.items():
+                        tag_name = TAGS.get(tag, f"tag_{tag}")
+                        exif_tags[f"exif:{tag_name}"] = self._to_json_safe(value)
 
-            return width, height, mimetype, exif_data
+                    exif_data = self._extract_standard_exif_tags(exif_data_raw)
+                    self._extract_ifd_exif_tags(exif_data_raw, exif_data, exif_tags)
+
+                # Also inspect text chunks (PNG/WebP/etc.) for generation metadata.
+                self._extract_generation_text_fields(img, exif_data, exif_tags)
+                self._prune_ifd_pointer_tags(exif_data)
+                self._print_exif_data(exif_data)
+
+            return width, height, mimetype, exif_data, exif_tags
         except Exception:
-            return 0, 0, None, {}
+            return 0, 0, None, {}, {}
 
     def find_in_database(self) -> Optional[ImageModel]:
         """Finds the image in the database using its hash."""
@@ -308,7 +577,9 @@ class ImageProcessor:
         original_filename: Optional[str] = None,
         artist_obj: Optional[Artist] = None,
         source_url: Optional[str] = None,
+        source_site: Optional[str] = None,
         license_id: Optional[int] = None,
+        json_metadata: Optional[dict[str, Any]] = None,
     ) -> ImageModel:
         """Creates a new ImageModel record."""
         absolute_path = Path(self.library_path) / relative_filepath
@@ -328,8 +599,10 @@ class ImageProcessor:
             date_modified=datetime.fromtimestamp(stat.st_mtime),
             artist_id=artist_obj.id if artist_obj else None,
             source_url=source_url,
+            source_site=source_site,
             license_id=license_id if license_id else None,
             exif_data=self.exif_data,
+            json_metadata=json_metadata,
         )
         return self.db_record
 
@@ -348,14 +621,32 @@ class ImageProcessor:
         """Returns the path to the JSON metadata file for a given image path."""
         return image_path.with_suffix(".json")
 
-    def _save_json(
+    def save_json_metadata(
         self,
         image_path: Path,
         db_record: Optional[ImageModel] = None,
         additional_data: Optional[dict] = None,
     ) -> None:
         """
-        Saves metadata to a JSON file alongside the image file.
+        Public API to save/update sidecar JSON metadata for an image.
+
+        This method is the stable entry point used by other modules.
+        It intentionally delegates to the internal writer so callers do not
+        depend on implementation details and future refactors stay localized.
+        """
+        self._write_json_sidecar(image_path, db_record, additional_data)
+
+    def _write_json_sidecar(
+        self,
+        image_path: Path,
+        db_record: Optional[ImageModel] = None,
+        additional_data: Optional[dict] = None,
+    ) -> None:
+        """
+        Private/internal implementation that writes metadata to a JSON sidecar file.
+
+        This method is subject to change without notice.
+        External callers should use ``save_json_metadata`` instead.
 
         The JSON file serves as the source of authority for metadata, except for
         fields derived directly from the file content (hash, size, date_modified).
@@ -379,6 +670,7 @@ class ImageProcessor:
             "height": self.height,
             "mimetype": self.mimetype,
             "exif_data": self.exif_data,
+            "exif_tags": self.exif_tags,
         }
 
         # Load existing JSON data to preserve fields not in current state
@@ -412,12 +704,16 @@ class ImageProcessor:
                 "height",
                 "mimetype",
                 "exif_data",
+                "exif_tags",
                 "file_path",
                 "file_name",
                 "artist_id",
                 "artist_name",
                 "source_url",
                 "license_id",
+                "source_site",
+                "json_metadata",
+                "json_data",
             }
         }
         data.update(json_only_fields)
@@ -430,6 +726,7 @@ class ImageProcessor:
                     "file_name": db_record.file_name,
                     "artist_id": db_record.artist_id,
                     "source_url": db_record.source_url,
+                    "source_site": db_record.source_site,
                     "license_id": db_record.license_id,
                 }
             )
@@ -446,6 +743,32 @@ class ImageProcessor:
         # Add any additional custom data provided
         if additional_data:
             data.update(additional_data)
+
+        # Keep original Software EXIF raw value, but provide normalized generator field.
+        source_url_value = (
+            db_record.source_url
+            if db_record is not None and isinstance(db_record.source_url, str)
+            else data.get("source_url")
+        )
+        db_json_metadata_value = (
+            db_record.json_metadata
+            if db_record is not None and isinstance(db_record.json_metadata, dict)
+            else data.get("json_metadata")
+        )
+
+        inferred_software = self.infer_generation_software(
+            source_url=source_url_value,
+            existing_sidecar=existing_data,
+            db_json_metadata=(
+                db_json_metadata_value
+                if isinstance(db_json_metadata_value, dict)
+                else None
+            ),
+        )
+        if inferred_software:
+            data["generation_software"] = inferred_software
+        elif "generation_software" in existing_data:
+            data["generation_software"] = existing_data["generation_software"]
 
         # Write the JSON file
         with open(json_path, "w", encoding="utf-8") as f:

@@ -1,4 +1,4 @@
-# Refactoring Summary: Civitai Collection Analysis Tools
+# Refactoring Summary: CivitAI Collection Analysis Tools
 
 ## Overview
 This refactoring consolidates duplicate code across `civitai.py` and `analyze_collection.py` to reduce redundancy and improve maintainability.
@@ -83,14 +83,14 @@ data = scraper.scrape(collection_id, limit=50)  # limit parameter now built-in
 ## Class Responsibilities
 
 ### CivitaiAPI (Singleton)
-- All low-level Civitai API calls
+- All low-level CivitAI API calls
 - Session management and authentication
 - Request building and execution
 - Data fetching (images, tags, generation data)
 
 ### CivitaiPrivateScraper
 - Collection pagination with proper cursor handling
-- Duplicate detection (Civitai pagination bug workaround)
+- Duplicate detection (CivitAI pagination bug workaround)
 - Data merging (basic info + generation data + tags)
 - Resource processing (models, LoRAs)
 - Filename sanitization and URL construction

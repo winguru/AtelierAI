@@ -55,7 +55,7 @@ python analyze_collection.py 14949699 --limit -1
 $ python analyze_collection.py 14949699 --limit 3 --debug
 
 ======================================================================
-Civitai Collection Analyzer
+CivitAI Collection Analyzer
 ======================================================================
   Scraping collection 14949699...
 ✅ Using cached session token from .civitai_session

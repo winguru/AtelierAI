@@ -1,12 +1,12 @@
-# Civitai Private Scraper & Analyzer
+# CivitAI Private Scraper & Analyzer
 
-A comprehensive Python toolkit for Civitai that automatically authenticates with Google OAuth and extracts full generation metadata including models, versions, prompts, LoRAs, tags, and image URLs.
+A comprehensive Python toolkit for CivitAI that automatically authenticates with Google OAuth and extracts full generation metadata including models, versions, prompts, LoRAs, tags, and image URLs.
 
 ## ✨ New Architecture (v2.0)
 
 The project has been refactored with a modern, maintainable architecture:
 
-- **`CivitaiAPI` (Singleton)** - Centralized API client for all Civitai API calls
+- **`CivitaiAPI` (Singleton)** - Centralized API client for all CivitAI API calls
 - **`CivitaiImage` (Class)** - Image data model with consistent URL construction and display
 - **`analyze_image.py`** - Single image analysis with full metadata and tags
 - **`analyze_collection.py`** - Collection-wide analysis with statistics and common patterns
@@ -32,7 +32,7 @@ If you're manually extracting the token from your browser's DevTools, make sure 
   - LoRAs with weights
   - Full prompts and negative prompts
   - Author information with profile URLs
-  - **Tags** (votable tags from Civitai API)
+  - **Tags** (votable tags from CivitAI API)
 - ✅ **Single Image Analysis** - Detailed breakdown of individual images
 - ✅ **Collection Analysis** - Find common patterns across collections
   - Top models, LoRAs, samplers, tags
@@ -296,7 +296,7 @@ Each item in the returned list contains the following fields:
 
 ### Raw Metadata
 
-The `raw_meta_json` field contains all metadata returned by the Civitai API, including fields not extracted into the main structure. This includes:
+The `raw_meta_json` field contains all metadata returned by the CivitAI API, including fields not extracted into the main structure. This includes:
 
 - `baseModel` - Base model type (Pony, SDXL 1.0, etc.)
 - `Size` - Image dimensions (e.g., "832x1216")
@@ -321,7 +321,7 @@ https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/{image_hash}/original=true/qual
 
 ## Session Token Refresh
 
-Session tokens from Civitai typically expire after ~30 days. When you encounter authentication errors:
+Session tokens from CivitAI typically expire after ~30 days. When you encounter authentication errors:
 
 ### Automatic Refresh
 
@@ -521,10 +521,10 @@ The scraper works without it, just with slightly higher chance of detection duri
 
 ## Token Expiration
 
-Civitai session tokens typically expire after:
+CivitAI session tokens typically expire after:
 - **~30 days** of inactivity
 - When the user logs out from Civitai
-- When Civitai rotates their session keys
+- When CivitAI rotates their session keys
 
 The scraper automatically detects expired tokens and prompts for re-authentication.
 

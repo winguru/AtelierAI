@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Demo script showcasing ConsoleFormatter features."""
 
-from src.console_utils import ConsoleFormatter
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 # Create a formatter with default line length (70)
 fmt = ConsoleFormatter()

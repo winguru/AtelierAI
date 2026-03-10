@@ -7,7 +7,7 @@ from .console_utils import ConsoleFormatter
 
 
 class CivitaiImage:
-    """Represents a Civitai image with consistent data access and URL construction."""
+    """Represents a CivitAI image with consistent data access and URL construction."""
 
     def __init__(
         self,
@@ -19,7 +19,7 @@ class CivitaiImage:
         """Initialize a CivitaiImage.
 
         Args:
-            image_id: Civitai image ID
+            image_id: CivitAI image ID
             url_hash: Image URL hash (GUID)
             image_name: Image filename
             mime_type: Image MIME type for extension detection
@@ -107,7 +107,7 @@ class CivitaiImage:
         return f"{base_name}{target_ext}"
 
     def _get_extension_from_mime(self, mime_type: Optional[str]) -> str:
-        """Map Civitai MIME types to file extensions."""
+        """Map CivitAI MIME types to file extensions."""
         if not mime_type:
             return ".jpeg"  # Default fallback
 
@@ -118,7 +118,7 @@ class CivitaiImage:
         elif "webp" in mime_lower:
             return ".webp"
         elif "tiff" in mime_lower or "tif" in mime_lower:
-            return ".tif"  # Civitai sometimes uses .jtif, .tif is standard
+            return ".tif"  # CivitAI sometimes uses .jtif, .tif is standard
         elif "mp4" in mime_lower:
             return ".mp4"
         elif "jpeg" in mime_lower or "jpg" in mime_lower:
@@ -186,8 +186,13 @@ class CivitaiImage:
         if not generation_data:
             return
 
-        meta = generation_data.get("meta", {})
-        resources = generation_data.get("resources", [])
+        meta = generation_data.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+
+        resources = generation_data.get("resources")
+        if not isinstance(resources, list):
+            resources = []
 
         # Extract generation parameters from meta
         self.base_model = meta.get("baseModel", "Unknown")
@@ -219,6 +224,8 @@ class CivitaiImage:
         self.embeddings = []
 
         for resource in resources:
+            if not isinstance(resource, dict):
+                continue
             resource_type = resource.get("modelType", "").lower()
             if not resource_type:
                 resource_type = resource.get("type", "").lower()
@@ -271,6 +278,8 @@ class CivitaiImage:
         if not self.models and self.model == "Unknown":
             # Look for main model in resources list
             for res in resources:
+                if not isinstance(res, dict):
+                    continue
                 if res.get("type") == "checkpoint":
                     self.model = res.get("modelName", "Unknown")
                     break
@@ -514,7 +523,7 @@ class CivitaiImage:
             fmt.print_error("No image data available!")
             return
 
-        fmt.print_header("Civitai Image Analysis")
+        fmt.print_header("CivitAI Image Analysis")
         fmt.print_blank()
 
         CivitaiImage._print_basic_info(image, fmt)
@@ -548,6 +557,11 @@ class CivitaiImage:
         Returns:
             CivitaiImage instance
         """
+        item_user = item.get("user") if isinstance(item.get("user"), dict) else {}
+        item_account = (
+            item.get("account") if isinstance(item.get("account"), dict) else {}
+        )
+
         image = cls(
             image_id=item.get("id", 0),
             url_hash=item.get("url"),
@@ -558,8 +572,8 @@ class CivitaiImage:
         # Merge basic info from collection item
         image.author = (
             item.get("username")
-            or item.get("user", {}).get("username")
-            or item.get("account", {}).get("username")
+            or item_user.get("username")
+            or item_account.get("username")
             or "Unknown"
         )
         image.created_at = item.get("createdAt")
@@ -584,6 +598,9 @@ class CivitaiImage:
         Returns:
             CivitaiImage instance
         """
+        basic_info = basic_info if isinstance(basic_info, dict) else {}
+        generation_data = generation_data if isinstance(generation_data, dict) else {}
+
         image_id = (basic_info.get("id") if basic_info else None) or (generation_data.get("id") if generation_data else None) or 0
 
         image = cls(

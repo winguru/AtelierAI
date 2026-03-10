@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Detailed test of Civitai scraper showing all extracted data"""
+"""Detailed test of CivitAI scraper showing all extracted data"""
 
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 import json
 
 table_header_length = 10+18+27+32
 
 print("=" * table_header_length)
-print("Civitai Scraper - Detailed Output Test")
+print("CivitAI Scraper - Detailed Output Test")
 print("=" * table_header_length)
 print()
 

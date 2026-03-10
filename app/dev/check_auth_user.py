@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check which user we're currently authenticated as"""
 
-from config import CIVITAI_SESSION_CACHE
+from atelierai.config import CIVITAI_SESSION_CACHE
 
 # Default browser state path
 CIVITAI_BROWSER_STATE = ".civitai_browser_state"
@@ -35,7 +35,7 @@ else:
 
 print()
 print("=" * 70)
-print("Fetching Current User from Civitai")
+print("Fetching Current User from CivitAI API")
 print("=" * 70)
 print()
 
@@ -50,7 +50,7 @@ try:
             token = f.read().strip()
     else:
         # Fall back to config
-        from config import MY_SESSION_COOKIE
+        from atelierai.config import MY_SESSION_COOKIE
         token = MY_SESSION_COOKIE
 
     # Try to fetch user info
@@ -97,13 +97,13 @@ print("=" * 70)
 print("Recommendation")
 print("=" * 70)
 print()
-print("If the username shown above is NOT your Civitai username that owns")
+print("If the username shown above is NOT your CivitAI username that owns")
 print("the collection, you need to re-authenticate with the correct account.")
 print()
 print("To re-authenticate:")
 print("  1. Delete browser state and session cache")
 print("  2. Run the authentication script")
-print("  3. Sign in with the Google account linked to your Civitai account")
+print("  3. Sign in with the Google account linked to your CivitAI account")
 print()
 print("Commands:")
 print("  rm -f .civitai_browser_state .civitai_session")

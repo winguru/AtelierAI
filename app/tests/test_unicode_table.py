@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test script to verify Unicode table formatting."""
 
-from src.console_utils import ConsoleFormatter, get_display_width
+from atelierai.civitai.console_utils import ConsoleFormatter, get_display_width
 
 # Test display width calculations
 print("=== Display Width Tests ===")
@@ -27,7 +27,7 @@ print()
 
 # Test truncation
 print("=== Truncation Test ===")
-from src.console_utils import truncate_to_width
+from atelierai.civitai.console_utils import truncate_to_width
 long_text = "Safety Mittens & Restraining Booties / 医療用安全ミトン - 院拘束ブーツ (ABDL/BDSM) [Illustrious]"
 truncated = truncate_to_width(long_text, 40)
 print(f"Original: {long_text}")

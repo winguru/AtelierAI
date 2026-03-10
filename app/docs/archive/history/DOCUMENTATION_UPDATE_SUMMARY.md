@@ -9,7 +9,7 @@ Updated all relevant project documentation to reflect the new model availability
 - ✅ Added "Model Availability Detection" to Features section
 - ✅ Added details about:
   - Automatically detecting deleted/removed LoRAs
-  - Providing links to Civitai Archive (civitaiarchive.com)
+  - Providing links to CivitAI Archive (civitaiarchive.com)
   - Showing model status and usage count
 - ✅ Updated "Collection Analysis" usage output description
 - ✅ Added `check_model_availability()` to CivitaiAPI methods table
@@ -61,8 +61,8 @@ Updated all relevant project documentation to reflect the new model availability
 ### Feature Description
 ```
 - Model Availability Detection - Automatically detect deleted/removed LoRAs
-  - Identifies models that have been deleted from Civitai
-  - Provides links to Civitai Archive (civitaiarchive.com) for deleted models
+  - Identifies models that have been deleted from CivitAI
+  - Provides links to CivitAI Archive (civitaiarchive.com) for deleted models
   - Shows model status and usage count
 ```
 
@@ -76,14 +76,14 @@ Updated all relevant project documentation to reflect the new model availability
 ```
 Deleted/Unavailable Models
 --------------------------------------------------------------------------------
-⚠️  Found 1 model(s) that have been removed from Civitai:
+⚠️  Found 1 model(s) that have been removed from CivitAI:
 
   🗑️  Deepthroat slider Pony/IllustriousXL
     Status: Deleted
     Model ID: 871004
     Version ID: 1498821
     Usage Count: 3
-    Civitai URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 
 💡 Tip: The archive site (civitaiarchive.com) may have backups of deleted models.

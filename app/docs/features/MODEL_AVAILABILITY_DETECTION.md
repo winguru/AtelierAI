@@ -1,7 +1,7 @@
 # Model Availability Detection Feature
 
 ## Overview
-Added functionality to detect if LoRA models have been deleted or removed from Civitai, and automatically provide links to the Civitai Archive site (civitaiarchive.com) for those models.
+Added functionality to detect if LoRA models have been deleted or removed from Civitai, and automatically provide links to the CivitAI Archive site (civitaiarchive.com) for those models.
 
 ## Changes Made
 
@@ -10,7 +10,7 @@ Added new method `check_model_availability()`:
 - Uses the `modelVersion.getById` API endpoint to check model status
 - Returns availability information including:
   - `available`: boolean indicating if model is still available
-  - `model_status`: the actual status from Civitai (e.g., "Published", "Deleted")
+  - `model_status`: the actual status from CivitAI (e.g., "Published", "Deleted")
   - `civitai_url`: link to the model on Civitai
   - `archive_url`: link to the model on civitaiarchive.com
   - `error`: any error message if the check failed
@@ -28,7 +28,7 @@ Added new method `check_model_availability()`:
 #### New `_print_deleted_models_section()` function:
 - Displays deleted models with clear formatting
 - Shows model name, status, IDs, and usage count
-- Provides both Civitai URL and Archive URL
+- Provides both CivitAI URL and Archive URL
 - Includes helpful tip about the archive site
 
 #### Updated `print_analysis_report()`:
@@ -71,7 +71,7 @@ Deleted/Unavailable Models
     Model ID: 871004
     Version ID: 1498821
     Usage Count: 3
-    Civitai URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 
 💡 Tip: The archive site (civitaiarchive.com) may have backups of deleted models.

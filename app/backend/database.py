@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError
-from config import DATABASE_URL
+from atelierai.config import DATABASE_URL
 
 # Create the SQLAlchemy engine
 # The `check_same_thread=False` is necessary for SQLite to work with FastAPI

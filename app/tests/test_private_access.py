@@ -3,9 +3,9 @@
 
 import requests
 import json
-from config import CIVITAI_SESSION_CACHE
+from atelierai.config import CIVITAI_SESSION_CACHE
 import os
-from console_utils import ConsoleFormatter
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 # Initialize formatter with default line length of 70
 fmt = ConsoleFormatter()
@@ -15,7 +15,7 @@ if os.path.exists(CIVITAI_SESSION_CACHE):
     with open(CIVITAI_SESSION_CACHE, "r") as f:
         token = f.read().strip()
 else:
-    from config import CIVITAI_SESSION_COOKIE
+    from atelierai.config import CIVITAI_SESSION_COOKIE
     token = CIVITAI_SESSION_COOKIE
 
 headers = {
@@ -256,5 +256,5 @@ fmt.print_info("2. Re-authenticate with correct account:")
 fmt.print_info("   python civitai_auth.py --headless=false")
 fmt.print_blank()
 fmt.print_info("3. IMPORTANT: Sign in with the Google account that owns")
-fmt.print_info("   the Civitai account that created the collection!")
+fmt.print_info("   the CivitAI account that created the collection!")
 fmt.print_blank()

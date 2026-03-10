@@ -4,9 +4,9 @@
 import requests
 import json
 import os
-from config import CIVITAI_SESSION_CACHE
-from src.civitai import CivitaiPrivateScraper
-from src.console_utils import ConsoleFormatter
+from atelierai.config import CIVITAI_SESSION_CACHE
+from atelierai.civitai import CivitaiPrivateScraper
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 # Initialize formatter
 fmt = ConsoleFormatter()
@@ -16,7 +16,7 @@ if os.path.exists(CIVITAI_SESSION_CACHE):
     with open(CIVITAI_SESSION_CACHE, "r") as f:
         token = f.read().strip()
 else:
-    from config import MY_SESSION_COOKIE
+    from atelierai.config import MY_SESSION_COOKIE
 
     token = MY_SESSION_COOKIE
 

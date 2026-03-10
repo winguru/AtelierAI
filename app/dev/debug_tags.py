@@ -2,7 +2,7 @@
 """Debug tags issue - check what data is available."""
 
 import json
-from src.civitai_api import CivitaiAPI
+from atelierai.civitai.civitai_api import CivitaiAPI
 
 def main():
     image_id = 117165031

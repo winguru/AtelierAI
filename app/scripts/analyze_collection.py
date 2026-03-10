@@ -8,9 +8,9 @@ import argparse
 from collections import Counter, defaultdict
 from typing import Dict, List, Tuple
 
-from civitai import CivitaiPrivateScraper
-from civitai_api import CivitaiAPI
-from console_utils import ConsoleFormatter
+from atelierai.civitai import CivitaiPrivateScraper
+from atelierai.civitai.civitai_api import CivitaiAPI
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 
 # ==========================================
@@ -469,7 +469,7 @@ class CollectionAnalyzer:
         return avg_weights
 
     def check_lora_availability(self, api: CivitaiAPI) -> List[Dict]:
-        """Check if LoRA models are available on Civitai or have been deleted.
+        """Check if LoRA models are available on CivitAI or have been deleted.
 
         Args:
             api: CivitaiAPI instance for checking model availability
@@ -652,7 +652,7 @@ def _print_deleted_models_section(
         fmt.print_key_value("Usage Count", model['usage_count'], indent=4)
         if model.get('error'):
             fmt.print_key_value("Error", model['error'], indent=4)
-        fmt.print_info(f"Civitai URL: {model['civitai_url']}", indent=4)
+        fmt.print_info(f"CivitAI URL: {model['civitai_url']}", indent=4)
         fmt.print_info(f"📦 Archive URL: {model['archive_url']}", indent=4)
         fmt.print_blank()
 
@@ -823,10 +823,10 @@ def print_analysis_report(
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Analyze a Civitai collection to find common tags and patterns"
+        description="Analyze a CivitAI collection to find common tags and patterns"
     )
     parser.add_argument(
-        "collection_id", type=int, help="Civitai collection ID to analyze"
+        "collection_id", type=int, help="CivitAI collection ID to analyze"
     )
     parser.add_argument(
         "--limit",
@@ -861,7 +861,7 @@ def main():
     # Initialize formatter
     fmt = ConsoleFormatter(line_length=args.line_length)
 
-    fmt.print_header("Civitai Collection Analyzer")
+    fmt.print_header("CivitAI Collection Analyzer")
     fmt.print_blank()
 
     # Scrape the collection - Now uses CivitaiPrivateScraper.scrape() directly

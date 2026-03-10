@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 class CivitaiPrivateScraper:
     """
-    High-level scraper for Civitai collections.
+    High-level scraper for CivitAI collections.
 
     Uses CivitaiAPI for all API communication and focuses on:
     - Collection pagination
@@ -27,7 +27,7 @@ class CivitaiPrivateScraper:
                           will try to retrieve automatically.
             auto_authenticate: If True, attempts to get session token automatically.
         """
-        from src.civitai_api import CivitaiAPI
+        from atelierai.civitai.civitai_api import CivitaiAPI
 
         # Use CivitaiAPI for all API communication
         self.api = CivitaiAPI(
@@ -115,7 +115,7 @@ class CivitaiPrivateScraper:
         """Fetch collection items with full pagination support.
 
         Args:
-            collection_id: The Civitai collection ID
+            collection_id: The CivitAI collection ID
             limit: Maximum number of items to fetch (None = all)
 
         Returns:
@@ -189,7 +189,7 @@ class CivitaiPrivateScraper:
         """Scrape collection items with full details.
 
         Args:
-            collection_id: The Civitai collection ID
+            collection_id: The CivitAI collection ID
             limit: Maximum number of items to fetch (None = all)
 
         Returns:

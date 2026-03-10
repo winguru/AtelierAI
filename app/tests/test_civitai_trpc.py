@@ -27,8 +27,8 @@ if __name__ == "__main__":
     # The __main__ block in civitai_trpc.py won't run since we imported it as a module
     # So we'll create a client and test it manually
 
-    from civitai_trpc import CivitaiTrpcClient, CivitaiTrpcError
-    from config import CIVITAI_SESSION_COOKIE
+    from atelierai.civitai.civitai_trpc import CivitaiTrpcClient, CivitaiTrpcError
+    from atelierai.config import CIVITAI_SESSION_COOKIE
 
     print("🚀 TEST: CivitAI tRPC Client (fresh import)")
     print("=" * 70)

@@ -1,4 +1,4 @@
-# Quick Reference - Civitai Cookie Name
+# Quick Reference - CivitAI Cookie Name
 
 ## ✅ Correct Cookie Name
 
@@ -52,7 +52,7 @@ Output includes:
     Model ID: 871004
     Version ID: 1498821
     Usage Count: 3
-    Civitai URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 ```
 
@@ -139,7 +139,7 @@ headers = {
 
 1. Check cookie name is `__Secure-civitai-token`
 2. Verify token was copied completely (no truncation)
-3. Ensure token is from the correct Civitai account
+3. Ensure token is from the correct CivitAI account
 4. Token might be expired (get a fresh one)
 
 ---

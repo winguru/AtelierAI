@@ -1,4 +1,4 @@
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 scraper = CivitaiPrivateScraper(auto_authenticate=True)
 data = scraper.scrape(12176069)

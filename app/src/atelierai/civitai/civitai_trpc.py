@@ -3,7 +3,7 @@ import json
 import time
 from typing import Any, Optional, List, Dict
 import httpx
-from config import CIVITAI_SESSION_COOKIE
+from atelierai.config import CIVITAI_SESSION_COOKIE
 
 # Force reload by setting this environment variable
 # This ensures any cached bytecode is ignored

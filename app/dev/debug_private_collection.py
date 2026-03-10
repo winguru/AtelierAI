@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Debug script to test fetching private collections"""
 
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 import json
 
 print("=" * 70)

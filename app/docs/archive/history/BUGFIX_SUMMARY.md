@@ -1,7 +1,7 @@
 # Bug Fix Summary: Cookie Name Issue
 
 ## Problem
-The scraper was failing to fetch images from Civitai collections, returning:
+The scraper was failing to fetch images from CivitAI collections, returning:
 - `read: false`
 - `isOwner: false`
 - 0 items in responses
@@ -59,7 +59,7 @@ Updated to use correct cookie name for testing.
 
 ## Why Both Cookies Exist
 
-Civitai likely uses multiple cookies:
+CivitAI likely uses multiple cookies:
 - `__Secure-next-auth.session-token` - Next.js session management
 - `__Secure-civitai-token` - API-specific authentication token
 

@@ -58,7 +58,7 @@ The analyzer now provides feedback about collection size:
 ### When Limit is Reached
 ```
 ======================================================================
-Civitai Collection Analyzer
+CivitAI Collection Analyzer
 ======================================================================
 
 Scraping collection 12345...
@@ -117,7 +117,7 @@ The `CivitaiPrivateScraper` class is patched with:
 #### `fetch_collection_items(self, collection_id, limit=None)`
 - Fetches collection items with pagination support
 - Respects the `limit` parameter
-- Uses cursor-based pagination from Civitai API
+- Uses cursor-based pagination from CivitAI API
 - Returns when limit is reached or no more items
 
 #### `scrape(self, collection_id, limit=None)`
@@ -237,7 +237,7 @@ python analyze_collection.py 12345 --limit -1
 
 ### Issue: Pagination stops early
 
-**Cause:** Civitai API may not return `nextCursor` or collection has ended.
+**Cause:** CivitAI API may not return `nextCursor` or collection has ended.
 
 **Check:** Look for "No more pages" message or "Found X total items" message.
 

@@ -2,8 +2,8 @@
 """Test script to debug image API response structure."""
 
 import json
-from src.civitai import CivitaiPrivateScraper
-from src.console_utils import ConsoleFormatter
+from atelierai.civitai import CivitaiPrivateScraper
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 def main():
     image_id = 117165031

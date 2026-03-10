@@ -4,5 +4,14 @@
         "libpq",
         "PYTHONPATH"
     ],
-    "python.analysis.typeCheckingMode": "standard"
+    "python.envFile": "${workspaceFolder}/.vscode/.env",
+    "python.analysis.typeCheckingMode": "standard",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/app/src",
+        "${workspaceFolder}/app/backend",
+        "${workspaceFolder}/app/dev"
+    ],
+    "terminal.integrated.env.osx": {
+        "PYTHONPATH": "${workspaceFolder}/app/src:${workspaceFolder}/app/backend:${workspaceFolder}/app/dev:${env:PYTHONPATH}"
+    }
 }

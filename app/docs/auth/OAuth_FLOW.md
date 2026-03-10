@@ -231,7 +231,7 @@
     └────────────────────────────────────────────────────────────────┘
 
     ┌────────────────────────────────────────────────────────────────┐
-    │ To Switch to Different Civitai Account                         │
+    │ To Switch to Different CivitAI Account                         │
     │                                                               │
     │ rm .civitai_browser_state                                     │
     │ python civitai_auth.py                                        │

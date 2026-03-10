@@ -2,7 +2,7 @@
 """Final verification test for all changes."""
 
 import sys
-from src.console_utils import ConsoleFormatter, get_display_width
+from atelierai.civitai.console_utils import ConsoleFormatter, get_display_width
 
 print("=== Final Verification Test ===\n")
 
@@ -15,7 +15,7 @@ test_strings = [
 ]
 
 # Use pad_to_width for proper display-based alignment
-from src.console_utils import pad_to_width
+from atelierai.civitai.console_utils import pad_to_width
 
 print(f"{'String':<40} {'len()':<8} {'display_width':<14}")
 print("-" * 62)

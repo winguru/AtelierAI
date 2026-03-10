@@ -29,7 +29,7 @@ A centralized, configurable console formatting utility for consistent output acr
 
 ### 2. Collection Analyzer (`analyze_collection.py`)
 
-A tool that scrapes Civitai collections and analyzes common patterns across all images.
+A tool that scrapes CivitAI collections and analyzes common patterns across all images.
 
 **Analysis Capabilities:**
 

@@ -2,7 +2,7 @@
 """Debug script to see what image.getById API returns."""
 
 import json
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 def main():
     image_id = 117165031

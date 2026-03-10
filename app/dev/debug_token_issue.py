@@ -4,14 +4,14 @@
 import requests
 import json
 import os
-from config import CIVITAI_SESSION_CACHE
+from atelierai.config import CIVITAI_SESSION_CACHE
 
 # Get session token
 if os.path.exists(CIVITAI_SESSION_CACHE):
     with open(CIVITAI_SESSION_CACHE, 'r') as f:
         token = f.read().strip()
 else:
-    from config import MY_SESSION_COOKIE
+    from atelierai.config import MY_SESSION_COOKIE
     token = MY_SESSION_COOKIE
 
 collection_id = 12176069
@@ -168,10 +168,10 @@ if response_no_auth.status_code == 200:
         print("Possible causes:")
         print("  1. Token expired (session tokens last ~30 days)")
         print("  2. Token copied from wrong browser tab/session")
-        print("  3. You have multiple Civitai accounts")
+        print("  3. You have multiple CivitAI accounts")
         print()
         print("To fix:")
-        print("  1. Open Civitai.com in a fresh tab")
+        print("  1. Open CivitAI.com in a fresh tab")
         print("  2. Sign in (make sure you're on the right account)")
         print("  3. Get a fresh token from that tab")
         print("  4. Run: python setup_session_token.py")

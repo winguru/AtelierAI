@@ -1,8 +1,8 @@
-# Civitai Collection Analyzer
+# CivitAI Collection Analyzer
 
 ## Overview
 
-The Collection Analyzer is a tool that scrapes a Civitai collection and analyzes the common patterns, tags, models, and prompt elements across all images in the collection.
+The Collection Analyzer is a tool that scrapes a CivitAI collection and analyzes the common patterns, tags, models, and prompt elements across all images in the collection.
 
 ## Features
 

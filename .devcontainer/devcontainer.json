@@ -3,6 +3,9 @@
   "dockerComposeFile": "../docker-compose.yml",
   "service": "backend",
   "workspaceFolder": "/app",
+  "remoteEnv": {
+    "PYTHONPATH": "${containerWorkspaceFolder}/src:${containerWorkspaceFolder}/backend:${containerWorkspaceFolder}/dev:${PYTHONPATH}"
+  },
   
   // Configure VS Code to install these extensions inside the container
   "customizations": {
@@ -12,15 +15,14 @@
         "ms-python.pylance",
         "ms-python.black-formatter",
         "ms-python.flake8",
-        "ms-azuretools.vscode-docker",
-        "Continue.continue"
+        "ms-azuretools.vscode-docker"
       ],
       "settings": {
         "python.defaultInterpreterPath": "/usr/local/bin/python",
         "python.linting.enabled": true,
         "python.linting.flake8Enabled": true,
         "python.formatting.provider": "black",
-        "python.envFile": "${workspaceFolder}/.env"
+        "python.envFile": "${workspaceFolder}/.vscode/.env"
       }
     }
   },

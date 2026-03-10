@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Debug script to see raw API response for model version"""
 
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 import json
 
 print("=" * 70)

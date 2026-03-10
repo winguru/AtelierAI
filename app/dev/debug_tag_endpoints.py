@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Debug script to find how to access tags from Civitai API."""
+"""Debug script to find how to access tags from CivitAI API."""
 
 import json
-from src.civitai_api import CivitaiAPI
+from atelierai.civitai.civitai_api import CivitaiAPI
 
 def main():
     api = CivitaiAPI.get_instance()

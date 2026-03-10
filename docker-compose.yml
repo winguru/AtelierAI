@@ -12,7 +12,8 @@ services:
       - db-data:/var/lib/atelierai   # Persistent storage for the database
 
     environment:
-      # Tell FastAPI where to find the DB
+      # Tell FastAPI where to find the DB and the image library
+      - IMAGE_LIBRARY_PATH=/var/lib/atelierai/image_library
       - DATABASE_URL=sqlite:////var/lib/atelierai/image_db.sqlite
 
     # This overrides the CMD in the Dockerfile, preventing the app from starting automatically.

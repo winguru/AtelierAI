@@ -3,7 +3,7 @@
 
 import json
 import requests
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 def main() -> None:
     scraper = CivitaiPrivateScraper(auto_authenticate=True)

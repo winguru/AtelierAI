@@ -2,7 +2,7 @@
 """Debug script to check if tags are in the post data."""
 
 import json
-from src.civitai_api import CivitaiAPI
+from atelierai.civitai.civitai_api import CivitaiAPI
 
 def main():
     api = CivitaiAPI.get_instance()

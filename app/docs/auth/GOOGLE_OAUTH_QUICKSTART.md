@@ -1,6 +1,6 @@
-# Google OAuth Quick Start for Civitai Authentication
+# Google OAuth Quick Start for CivitAI Authentication
 
-This guide is specifically for users who sign in to Civitai using Google OAuth.
+This guide is specifically for users who sign in to CivitAI using Google OAuth.
 
 ---
 
@@ -293,7 +293,7 @@ For production use, set up a cron job to refresh weekly:
 
 A: **No!** The authentication uses your browser session. You never need to enter your password in code or environment variables.
 
-**Q: Can I use this with multiple Civitai accounts?**
+**Q: Can I use this with multiple CivitAI accounts?**
 
 A: Yes, but you'll need separate browser state files. Modify the `persist_state_file` parameter:
 
@@ -301,14 +301,14 @@ A: Yes, but you'll need separate browser state files. Modify the `persist_state_
 authenticator = CivitaiAuthenticator(persist_state_file=".civitai_browser_state_account1")
 ```
 
-**Q: Will this work if Civitai changes their login?**
+**Q: Will this work if CivitAI changes their login?**
 
 A: The script is designed to be flexible. It:
 - Detects OAuth pages automatically
 - Waits for redirect back to civitai.com
 - Only looks for the session token
 
-If Civitai significantly changes their auth flow, you may need to update the script.
+If CivitAI significantly changes their auth flow, you may need to update the script.
 
 **Q: Can I run this in a Docker container?**
 
@@ -347,6 +347,6 @@ Next run will start fresh.
 
 ## 🎉 You're Done!
 
-After the first-time setup, your Civitai authentication will be completely automatic. No more manually extracting cookies!
+After the first-time setup, your CivitAI authentication will be completely automatic. No more manually extracting cookies!
 
 For more details, see `CIVITAI_AUTH_README.md`.

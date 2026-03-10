@@ -1,8 +1,8 @@
-# Civitai Authentication Methods
+# CivitAI Authentication Methods
 
 ## Overview
 
-Civitai does not provide an official API key for their private tRPC API. The authentication system uses Next.js session cookies (`__Secure-next-auth.session-token`). This document explains your options for handling authentication.
+CivitAI does not provide an official API key for their private tRPC API. The authentication system uses Next.js session cookies (`__Secure-next-auth.session-token`). This document explains your options for handling authentication.
 
 ---
 
@@ -60,10 +60,10 @@ playwright==1.40.0
 
 #### 2. Configure Credentials
 
-Add your Civitai credentials to your `.env` file:
+Add your CivitAI credentials to your `.env` file:
 
 ```env
-# Civitai credentials for automatic authentication
+# CivitAI credentials for automatic authentication
 CIVITAI_USERNAME=your_email@example.com
 CIVITAI_PASSWORD=your_password
 
@@ -122,7 +122,7 @@ python civitai_auth.py --headless
 - Requires Playwright installation (~300MB)
 - Requires storing credentials in `.env`
 - First authentication run is slower (needs to open browser)
-- May break if Civitai changes their login flow
+- May break if CivitAI changes their login flow
 
 ### OAuth Support
 
@@ -236,7 +236,7 @@ playwright install-deps chromium
 
 ### Headless Browser Shows Captcha
 
-**Problem:** Civitai shows captcha during auto-login
+**Problem:** CivitAI shows captcha during auto-login
 
 **Solutions:**
 1. Run with `headless=False` first and solve captcha manually
@@ -284,7 +284,7 @@ playwright install-deps chromium
 
 ## Future Possibilities
 
-Civitai may eventually release an official API with proper authentication. Monitor:
+CivitAI may eventually release an official API with proper authentication. Monitor:
 - https://developer.civitai.com
 - https://github.com/civitai/civitai
 

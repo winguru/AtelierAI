@@ -1,19 +1,44 @@
 #!/usr/bin/env python3
 """
-Civitai API singleton for managing all Civitai API calls.
+CivitAI API singleton for managing all CivitAI API calls.
 Refer to CIVITAI_API_REFERENCE.md for details on endpoints and usage.
 """
 
 import os
 import requests
 import json
+from importlib import import_module
 from typing import Dict, List, Optional, Any
 
 
-class CivitaiAPI:
-    """Singleton class for managing Civitai API calls.
+def _get_config_value(name: str) -> Optional[str]:
+    """Load a config value from either local runtime or packaged app layout."""
+    module_names = [
+        "atelierai.config",
+        "config",
+        "backend.config",
+        "app.backend.config",
+        "examples.config_example",
+        "app.examples.config_example",
+    ]
 
-    Handles all API communication with Civitai, including authentication,
+    for module_name in module_names:
+        try:
+            mod = import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+
+        value = getattr(mod, name, None)
+        if value is not None:
+            return value
+
+    return None
+
+
+class CivitaiAPI:
+    """Singleton class for managing CivitAI API calls.
+
+    Handles all API communication with CivitAI, including authentication,
     request management, and data fetching.
 
     Usage:
@@ -49,20 +74,12 @@ class CivitaiAPI:
             self.session_cookie = self._get_auto_session_token()
         else:
             # Fallback to environment variable or config
-            try:
-                from config import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportMissingImports]
-            except (ModuleNotFoundError, ImportError):
-                try:
-                    from backend.examples.config_example import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportAttributeAccessIssue]
-                except (ModuleNotFoundError, ImportError):
-                    CIVITAI_SESSION_COOKIE = None
-
-            self.session_cookie = CIVITAI_SESSION_COOKIE
+            self.session_cookie = _get_config_value("CIVITAI_SESSION_COOKIE")
 
         self.base_url = "https://civitai.com/api/trpc"
         self.session = requests.Session()  # Reuse connection
 
-        # Default parameters based on Civitai API
+        # Default parameters based on CivitAI API
         self.default_params = {
             "collectionId": 10842247,
             "period": "AllTime",
@@ -109,10 +126,9 @@ class CivitaiAPI:
 
     def _get_session_token_from_cache(self) -> Optional[str]:
         """Try to get session token from cache file."""
-        try:
-            from config import CIVITAI_SESSION_CACHE  # pyright: ignore[reportMissingImports]
-        except ModuleNotFoundError:
-            from backend.examples.config_example import CIVITAI_SESSION_CACHE  # pyright: ignore[reportAttributeAccessIssue]
+        CIVITAI_SESSION_CACHE = _get_config_value("CIVITAI_SESSION_CACHE")
+        if not CIVITAI_SESSION_CACHE:
+            return None
 
         if os.path.exists(CIVITAI_SESSION_CACHE):
             try:
@@ -137,15 +153,21 @@ class CivitaiAPI:
 
     def _get_session_token_from_auth(self) -> Optional[str]:
         """Try to get session token using Playwright authentication."""
-        try:
-            from config import CIVITAI_SESSION_CACHE  # pyright: ignore[reportMissingImports]
-        except ModuleNotFoundError:
-            from backend.examples.config_example import CIVITAI_SESSION_CACHE  # pyright: ignore[reportAttributeAccessIssue]
+        CIVITAI_SESSION_CACHE = _get_config_value("CIVITAI_SESSION_CACHE")
+        if not CIVITAI_SESSION_CACHE:
+            return None
 
         print("ℹ️  No valid session token found in cache or environment")
         print("   Attempting automatic authentication...")
         try:
-            from civitai_auth import get_cached_or_refresh_session_token
+            try:
+                auth_mod = import_module("atelierai.civitai.civitai_auth")
+            except ModuleNotFoundError:
+                auth_mod = import_module("app.src.atelierai.civitai.civitai_auth")
+
+            get_cached_or_refresh_session_token = getattr(
+                auth_mod, "get_cached_or_refresh_session_token"
+            )
             return get_cached_or_refresh_session_token(
                 cache_file=CIVITAI_SESSION_CACHE, headless=True
             )
@@ -157,10 +179,7 @@ class CivitaiAPI:
 
     def _get_session_token_from_config(self) -> Optional[str]:
         """Try to get session token from config file."""
-        try:
-            from config import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportMissingImports]
-        except ModuleNotFoundError:
-            from backend.examples.config_example import CIVITAI_SESSION_COOKIE  # pyright: ignore[reportAttributeAccessIssue]
+        CIVITAI_SESSION_COOKIE = _get_config_value("CIVITAI_SESSION_COOKIE")
 
         if CIVITAI_SESSION_COOKIE and len(CIVITAI_SESSION_COOKIE) > 100:
             print("Using session token from config.py")
@@ -210,7 +229,7 @@ class CivitaiAPI:
         return json.dumps({"json": input_json, **input_meta}, separators=(",", ":"))
 
     def _make_request(self, endpoint: str, payload_data: Dict) -> Optional[Dict]:
-        """Make a request to Civitai API.
+        """Make a request to CivitAI API.
 
         Args:
             endpoint: API endpoint (e.g., "image.get", "image.getGenerationData")
@@ -252,7 +271,7 @@ class CivitaiAPI:
         Uses tag.getVotableTags endpoint which returns tags with scores.
 
         Args:
-            image_id: Civitai image ID
+            image_id: CivitAI image ID
 
         Returns:
             List of tag strings sorted by relevance score (highest first),
@@ -279,7 +298,7 @@ class CivitaiAPI:
         Uses image.get endpoint.
 
         Args:
-            image_id: Civitai image ID
+            image_id: CivitAI image ID
 
         Returns:
             Dictionary with basic image info, or None if not found
@@ -294,7 +313,7 @@ class CivitaiAPI:
         Uses image.getGenerationData endpoint.
 
         Args:
-            image_id: Civitai image ID
+            image_id: CivitAI image ID
 
         Returns:
             Dictionary with generation data (prompts, models, parameters), or None
@@ -310,7 +329,7 @@ class CivitaiAPI:
         Combines fetch_basic_info() and fetch_generation_data().
 
         Args:
-            image_id: Civitai image ID
+            image_id: CivitAI image ID
 
         Returns:
             Dictionary with both sources:
@@ -327,12 +346,12 @@ class CivitaiAPI:
     def check_model_availability(
         self, model_id: int, model_version_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Check if a model/version is available on Civitai or has been deleted.
+        """Check if a model/version is available on CivitAI or has been deleted.
 
         Uses modelVersion.getById API endpoint to check model status.
 
         Args:
-            model_id: The Civitai model ID
+            model_id: The CivitAI model ID
             model_version_id: Optional model version ID (required for accurate check)
 
         Returns:
@@ -411,7 +430,7 @@ class CivitaiAPI:
         Uses image.getInfinite endpoint.
 
         Args:
-            collection_id: Civitai collection ID
+            collection_id: CivitAI collection ID
 
         Returns:
             List of collection items (dictionaries), or empty list
@@ -424,6 +443,7 @@ class CivitaiAPI:
             endpoint="image.getInfinite", payload_data=payload_data
         )
 
+        result = None
         if response:
             result = self._find_deep_image_list(response)
         return result if result is not None else []
@@ -434,7 +454,7 @@ class CivitaiAPI:
         """Fetch collection items with full generation details.
 
         Args:
-            collection_id: Civitai collection ID
+            collection_id: CivitAI collection ID
             limit: Maximum number of items to fetch (default: 50)
                    Use -1 for all items (with pagination)
 

@@ -1,8 +1,8 @@
-# Civitai API Reference
+# CivitAI API Reference
 
 ## Overview
 
-This document documents all known Civitai API endpoints, request formats, and response structures based on reverse-engineering and testing with the Civitai Private Scraper project.
+This document documents all known CivitAI API endpoints, request formats, and response structures based on reverse-engineering and testing with the CivitAI Private Scraper project.
 
 ---
 
@@ -37,7 +37,7 @@ headers = {
 
 ## 📨 Request Format (tRPC)
 
-Civitai uses **tRPC** protocol which requires a specific JSON structure.
+CivitAI uses **tRPC** protocol which requires a specific JSON structure.
 
 ### URL Structure
 
@@ -301,7 +301,7 @@ Fetch detailed generation parameters.
 | `height` | int | Image height |
 | `workflow` | str | Workflow type |
 | `Model` | str | Model name (from civitaiResources) |
-| `civitaiResources` | list | Civitai resource references |
+| `civitaiResources` | list | CivitAI resource references |
 
 **Resources Array:**
 | Field | Type | Description |
@@ -309,7 +309,7 @@ Fetch detailed generation parameters.
 | `modelType` | str | Type: "lora", "checkpoint", "textualinversion" |
 | `modelName` | str | Display name |
 | `strength` | float | Weight for LoRAs/textualinversions |
-| `modelVersionId` | int | Civitai model version ID |
+| `modelVersionId` | int | CivitAI model version ID |
 | `versionName` | str | Version name |
 | `baseModel` | str | Base model type |
 
@@ -596,7 +596,7 @@ Fetch details for a specific model version, including availability status.
 
 **Status Values:**
 - **"Published"** - Model/version is available
-- **"Deleted"** - Model/version has been removed from Civitai
+- **"Deleted"** - Model/version has been removed from CivitAI
 - Other statuses may include "Processing", "Unpublished", etc.
 
 **Use Case - Model Availability Checking:**
@@ -820,7 +820,7 @@ class CivitaiAPI:
         })
 
     def _make_request(self, endpoint, payload_data):
-        """Make a request to Civitai API."""
+        """Make a request to CivitAI API."""
         url = f"{self.base_url}/{endpoint}"
         params = {"input": quote(self._build_trpc_payload(payload_data))}
 
@@ -854,7 +854,7 @@ class CivitaiAPI:
 
 ## ⚠️ Disclaimer
 
-This API reference is based on reverse-engineering and testing. Civitai may change endpoints or parameters without notice. Use responsibly and respect their Terms of Service.
+This API reference is based on reverse-engineering and testing. CivitAI may change endpoints or parameters without notice. Use responsibly and respect their Terms of Service.
 
 ---
 

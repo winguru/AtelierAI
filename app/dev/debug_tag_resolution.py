@@ -2,7 +2,7 @@
 """Debug script to find tag name resolution API."""
 
 import json
-from src.civitai_api import CivitaiAPI
+from atelierai.civitai.civitai_api import CivitaiAPI
 
 def main():
     api = CivitaiAPI.get_instance()

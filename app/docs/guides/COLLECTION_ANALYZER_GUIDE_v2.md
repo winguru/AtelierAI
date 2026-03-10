@@ -1,8 +1,8 @@
-# Civitai Collection Analyzer
+# CivitAI Collection Analyzer
 
 ## Overview
 
-The Collection Analyzer is a tool that scrapes a Civitai collection and analyzes common patterns, **tags**, models, and prompt elements across all images in the collection.
+The Collection Analyzer is a tool that scrapes a CivitAI collection and analyzes common patterns, **tags**, models, and prompt elements across all images in the collection.
 
 **New Features (v2.1):**
 - Model availability detection - Identifies deleted/removed models
@@ -79,7 +79,7 @@ A beautiful woman with long blonde hair standing in a forest, dramatic lighting
 #### **Deleted/Unavailable Models** (NEW v2.1)
 - Automatically detects LoRAs that have been deleted from Civitai
 - Shows model status (e.g., "Deleted")
-- Provides links to Civitai Archive for deleted models
+- Provides links to CivitAI Archive for deleted models
 - Displays usage count for each deleted model
 - Helps identify missing resources in your collection
 
@@ -198,7 +198,7 @@ Deleted/Unavailable Models
     Model ID: 871004
     Version ID: 1498821
     Usage Count: 3
-    Civitai URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 
 💡 Tip: The archive site (civitaiarchive.com) may have backups of deleted models.

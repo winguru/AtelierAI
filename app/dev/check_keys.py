@@ -1,4 +1,4 @@
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 import json
 
 scraper = CivitaiPrivateScraper(auto_authenticate=True)

@@ -57,7 +57,7 @@ loras.append({
 
 **Problem:** No way to see which LoRA version was used or link to the model page.
 
-**Solution:** Track and display LoRA model IDs and Civitai URLs.
+**Solution:** Track and display LoRA model IDs and CivitAI URLs.
 
 **New Attribute:**
 ```python
@@ -212,7 +212,7 @@ chastity belt thin/ cable style / anus cutout                                   
 2. **LoRA ID Priority:**
    - Model ID: Base model identifier (same across all versions)
    - Version ID: Specific version identifier
-   - Civitai URL needs both for version-specific links
+   - CivitAI URL needs both for version-specific links
 
 3. **Backward Compatibility:**
    - Existing code continues to work

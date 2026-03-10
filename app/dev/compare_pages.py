@@ -2,7 +2,7 @@
 """Compare items across pages to see if they're the same"""
 
 import requests
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 scraper = CivitaiPrivateScraper(auto_authenticate=True)
 

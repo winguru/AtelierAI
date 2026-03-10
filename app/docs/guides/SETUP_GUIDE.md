@@ -1,8 +1,8 @@
-# Civitai Private Collection Scraper - Setup Guide
+# CivitAI Private Collection Scraper - Setup Guide
 
 ## 🎯 Overview
 
-This scraper allows you to fetch images from your Civitai collections, including private collections.
+This scraper allows you to fetch images from your CivitAI collections, including private collections.
 
 **New Architecture (v2.0):** The project now uses `CivitaiAPI` singleton and `CivitaiImage` class for improved maintainability.
 
@@ -15,7 +15,7 @@ The scraper uses the cookie `__Secure-civitai-token`, NOT `__Secure-next-auth.se
 ### Step 1: Get Your Session Token
 
 1. **Open Civitai.com** in your browser (Chrome, Firefox, Edge)
-2. **Sign in** with your Civitai account
+2. **Sign in** with your CivitAI account
 3. **Open Developer Tools** (F12)
 4. **Go to Application tab** > **Cookies** > **https://civitai.com`
 5. **Find the cookie** named `__Secure-civitai-token`
@@ -81,7 +81,7 @@ Deleted/Unavailable Models
 
   🗑️  Deepthroat slider Pony/IllustriousXL
     Status: Deleted
-    Civitai URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 ```
 
@@ -152,8 +152,8 @@ Each scraped image includes:
 **Problem:** Your token doesn't have access to this collection.
 
 **Solution:**
-1. Make sure you got the token from the **correct Civitai account**
-2. Sign in with the Google account linked to that Civitai account
+1. Make sure you got the token from the **correct CivitAI account**
+2. Sign in with the Google account linked to that CivitAI account
 3. Get a fresh token from that session
 4. Run `python setup_session_token.py` again
 
@@ -192,7 +192,7 @@ python setup_session_token.py
 
 ## 🔐 Security Notes
 
-- **Keep your token secure** - it gives full access to your Civitai account
+- **Keep your token secure** - it gives full access to your CivitAI account
 - **Don't commit tokens** to version control
 - Add `.civitai_session` to your `.gitignore`
 - Tokens expire after ~30 days for security

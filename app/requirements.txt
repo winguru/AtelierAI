@@ -8,7 +8,7 @@ python-dotenv
 requests
 wcwidth
 
-# Civitai automatic authentication
+# CivitAI automatic authentication
 
-playwright==1.40.0
+playwright==1.52.0
 playwright-stealth

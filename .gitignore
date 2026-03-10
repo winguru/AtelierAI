@@ -11,6 +11,12 @@
 *.sln.docstates
 *.env
 
+# macOS and local tooling artifacts
+.DS_Store
+**/.DS_Store
+app/.civitai_chrome_profile/
+app/src/*.egg-info/
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
@@ -417,5 +423,12 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
+# Python virtual environment files
+.venv*/
+venv*/
+
 # Application specific files
+.civitai_session
+image_db.sqlite
+image_library/
 image_library/*

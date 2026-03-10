@@ -4,8 +4,9 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from models import ImageModel
 from image_processor import ImageProcessor
-from config import IMAGE_LIBRARY_PATH
+from atelierai.config import IMAGE_LIBRARY_PATH
 from image_data import ImageData
+from civitai_enrichment import is_civitai_image_url, fetch_civitai_image_data
 
 
 class ImageCollection:
@@ -29,10 +30,282 @@ class ImageCollection:
             "json_files_created": 0,
             "json_db_differences": 0,  # Track JSON values differing from DB
             "json_db_records_updated": 0,  # Track DB records updated from JSON
+            # CivitAI enrichment tracking
+            "civitai_lookup_attempts": 0,
+            "civitai_lookup_successes": 0,
+            "civitai_lookup_failures": 0,
+            # EXIF backfill tracking
+            "exif_backfill_attempts": 0,
+            "exif_backfill_successes": 0,
+            "exif_backfill_failures": 0,
+            # Generation software backfill tracking
+            "generation_software_backfill_attempts": 0,
+            "generation_software_backfill_successes": 0,
+            "generation_software_backfill_failures": 0,
             # Error count (actual error messages in self.error_messages)
             "errors": 0,
         }
         self.error_messages: List[str] = []
+
+    @staticmethod
+    def _load_sidecar_json(sidecar_path: Path) -> dict[str, Any]:
+        """Load sidecar JSON data, returning an empty dict on read/parse issues."""
+        if not sidecar_path.exists():
+            return {}
+
+        try:
+            import json
+
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
+    def _hydrate_missing_exif_if_needed(
+        self,
+        db_record: ImageModel,
+        image_path: Path,
+        processor: ImageProcessor,
+    ) -> None:
+        """Backfill EXIF when sidecar is missing exif_data or generation text fields."""
+        sidecar_data = self._load_sidecar_json(image_path.with_suffix(".json"))
+        sidecar_exif = sidecar_data.get("exif_data")
+
+        existing_exif = sidecar_exif if isinstance(sidecar_exif, dict) else {}
+
+        def has_generation_fields(exif_dict: dict[str, Any]) -> bool:
+            lower_keys = {str(k).strip().lower() for k in exif_dict.keys()}
+            return any(k in lower_keys for k in {"parameters", "comment", "comments", "usercomment"})
+
+        # Treat absent/empty exif as missing so the file is normalized once.
+        exif_present = sidecar_exif not in (None, {}, [])
+        if exif_present and has_generation_fields(existing_exif):
+            return
+
+        self.results["exif_backfill_attempts"] += 1
+
+        try:
+            exif_data = processor.exif_data if isinstance(processor.exif_data, dict) else {}
+
+            self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
+                {ImageModel.exif_data: exif_data},
+                synchronize_session=False,
+            )
+            self.db.flush()
+            self.db.refresh(db_record)
+
+            processor.save_json_metadata(image_path, db_record)
+            self.db.commit()
+            self.results["exif_backfill_successes"] += 1
+        except Exception as e:
+            self.results["exif_backfill_failures"] += 1
+            self.error_messages.append(
+                f"Could not backfill EXIF for {image_path.name}: {e}"
+            )
+
+    def _hydrate_missing_metadata_fields(
+        self,
+        db_record: ImageModel,
+        image_path: Path,
+        processor: ImageProcessor,
+    ) -> None:
+        """Check for missing metadata fields and run field-specific collectors.
+
+        This is intentionally the single extensible place to add new metadata
+        backfill handlers (e.g. AI analysis outputs) in the future.
+        """
+        self._hydrate_missing_exif_if_needed(db_record, image_path, processor)
+        self._hydrate_missing_generation_software_if_needed(
+            db_record, image_path, processor
+        )
+        self._enrich_from_civitai_if_needed(db_record, image_path, processor)
+
+    def _hydrate_missing_generation_software_if_needed(
+        self,
+        db_record: ImageModel,
+        image_path: Path,
+        processor: ImageProcessor,
+    ) -> None:
+        """Backfill generation_software when missing from sidecar metadata."""
+        sidecar_data = self._load_sidecar_json(image_path.with_suffix(".json"))
+        if sidecar_data.get("generation_software"):
+            return
+
+        self.results["generation_software_backfill_attempts"] += 1
+
+        try:
+            inferred = processor.infer_generation_software(
+                source_url=getattr(db_record, "source_url", None),
+                existing_sidecar=sidecar_data,
+                db_json_metadata=(
+                    db_record.json_metadata
+                    if isinstance(db_record.json_metadata, dict)
+                    else None
+                ),
+            )
+            if not inferred:
+                self.results["generation_software_backfill_failures"] += 1
+                return
+
+            processor.save_json_metadata(
+                image_path,
+                db_record,
+                additional_data={"generation_software": inferred},
+            )
+            self.db.commit()
+            self.results["generation_software_backfill_successes"] += 1
+        except Exception as e:
+            self.results["generation_software_backfill_failures"] += 1
+            self.error_messages.append(
+                f"Could not backfill generation_software for {image_path.name}: {e}"
+            )
+
+    def _import_new_image_with_processor(
+        self,
+        processor: ImageProcessor,
+        image_file: Path,
+        original_filename: str,
+        artist_name: Optional[str] = None,
+        source_url: Optional[str] = None,
+        license_id: Optional[int] = None,
+    ) -> tuple[ImageModel, Path]:
+        """Import a newly discovered image using the same pipeline used during scan."""
+        file_hash = processor.file_hash
+        file_extension = (
+            processor.mime_to_extension(processor.mimetype)
+            if processor.mimetype
+            else image_file.suffix.lower()
+        )
+        expected_filename = f"{file_hash}{file_extension}"
+
+        if image_file.name != expected_filename:
+            print(f"Renaming to '{expected_filename}'")
+            processor.save_to_library()
+            self.results["files_renamed"] += 1
+            relative_path = expected_filename
+            final_file_path = processor.original_path
+        else:
+            relative_path = image_file.name
+            final_file_path = image_file
+
+        artist_obj = None
+        if artist_name:
+            artist_obj = ImageProcessor.find_or_create_artist(self.db, artist_name)
+
+        new_image = processor.create_database_record(
+            relative_filepath=relative_path,
+            original_filename=original_filename,
+            artist_obj=artist_obj,
+            source_url=source_url,
+            license_id=license_id,
+        )
+        self.db.add(new_image)
+        self.db.flush()  # Flush to get the ID
+
+        processor.save_json_metadata(processor.original_path, new_image)
+        self.results["json_files_created"] += 1
+        print(f"Created JSON file for: {final_file_path.name}")
+
+        self._hydrate_missing_metadata_fields(
+            db_record=new_image,
+            image_path=processor.original_path,
+            processor=processor,
+        )
+
+        self.results["images_added"] += 1
+        return new_image, final_file_path
+
+    def ingest_uploaded_file(
+        self,
+        uploaded_file_path: Path,
+        original_filename: str,
+        artist_name: Optional[str] = None,
+        source_url: Optional[str] = None,
+        license_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Ingest one uploaded file through the same import steps used by scan."""
+        processor = ImageProcessor(str(uploaded_file_path), self.db, str(self.library_path))
+        existing_image = processor.find_in_database()
+
+        if existing_image is not None:
+            existing_image_path = self.library_path / str(existing_image.file_path)
+            self._ensure_json_file_exists(existing_image_path, existing_image)
+            self._hydrate_missing_metadata_fields(
+                db_record=existing_image,
+                image_path=existing_image_path,
+                processor=processor,
+            )
+            return {"images_added": 0, "images_skipped": 1, "json_files_created": 0}
+
+        # For uploads, trust explicit form metadata over absent JSON metadata.
+        self._import_new_image_with_processor(
+            processor=processor,
+            image_file=uploaded_file_path,
+            original_filename=original_filename,
+            artist_name=artist_name,
+            source_url=source_url,
+            license_id=license_id,
+        )
+        return {"images_added": 1, "images_skipped": 0, "json_files_created": 1}
+
+    def _enrich_from_civitai_if_needed(
+        self,
+        db_record: ImageModel,
+        image_path: Path,
+        processor: ImageProcessor,
+    ) -> None:
+        """Attempt CivitAI enrichment during scan when sidecar CivitAI section is missing."""
+        source_url_value = getattr(db_record, "source_url", None)
+        if not isinstance(source_url_value, str) or not source_url_value:
+            return
+
+        if not is_civitai_image_url(source_url_value):
+            return
+
+        # Sidecar JSON is the source of authority for deciding refresh behavior.
+        # If the whole `civitai` section is missing, fetch again. This lets users
+        # manually remove that section to force a refresh on the next scan.
+        sidecar_data = self._load_sidecar_json(image_path.with_suffix(".json"))
+        sidecar_has_civitai = "civitai" in sidecar_data
+
+        if sidecar_has_civitai:
+            return
+
+        existing_json_metadata_value = getattr(db_record, "json_metadata", None)
+        existing_json_metadata = (
+            existing_json_metadata_value
+            if isinstance(existing_json_metadata_value, dict)
+            else {}
+        )
+
+        self.results["civitai_lookup_attempts"] += 1
+
+        civitai_data = fetch_civitai_image_data(source_url_value)
+        if not civitai_data:
+            self.results["civitai_lookup_failures"] += 1
+            return
+
+        merged_json_metadata = dict(existing_json_metadata)
+        merged_json_metadata["civitai"] = civitai_data
+
+        self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
+            {
+                ImageModel.json_metadata: merged_json_metadata,
+                ImageModel.source_site: "civitai",
+            },
+            synchronize_session=False,
+        )
+        self.db.flush()
+        self.db.refresh(db_record)
+
+        processor.save_json_metadata(
+            image_path,
+            db_record,
+            additional_data={"civitai": civitai_data},
+        )
+        self.db.commit()
+        self.results["civitai_lookup_successes"] += 1
 
     def _cleanup_orphaned_records(self):
         """Finds and removes database records for files that no longer exist on the filesystem."""
@@ -203,8 +476,15 @@ class ImageCollection:
             date_modified=image_data.date_modified,
             artist_id=image_data.artist_id,
             source_url=image_data.source_url,
+            source_site=(
+                image_data.source_site
+                or ("civitai" if image_data.civitai_data else None)
+            ),
             license_id=image_data.license_id,
             exif_data=image_data.exif_data,
+            json_metadata={"civitai": image_data.civitai_data}
+            if image_data.civitai_data
+            else None,
         )
         self.db.add(new_image)
         self.db.flush()
@@ -421,12 +701,12 @@ class ImageCollection:
             # Create JSON file if it doesn't exist
             print(f"Creating JSON file for: {image_file.name}")
             if processor:
-                processor._save_json(image_file, db_record)
+                processor.save_json_metadata(image_file, db_record)
             else:
                 new_processor = ImageProcessor(
                     str(image_file), self.db, str(self.library_path)
                 )
-                new_processor._save_json(image_file, db_record)
+                new_processor.save_json_metadata(image_file, db_record)
             self.results["json_files_created"] += 1
             print(f"Created JSON file: {json_path.name}")
 
@@ -504,7 +784,7 @@ class ImageCollection:
                         )
 
                         # Save updated JSON with new file path and actual file data
-                        processor._save_json(processor.original_path, db_record)
+                        processor.save_json_metadata(processor.original_path, db_record)
                         self.db.commit()
                     else:
                         # File has correct name, just update with actual file data if needed
@@ -539,11 +819,17 @@ class ImageCollection:
                                 synchronize_session=False,
                             )
                             # Update JSON with current file data
-                            processor._save_json(image_file, db_record)
+                            processor.save_json_metadata(image_file, db_record)
                             self.db.commit()
 
                         # Check if JSON file exists, create if missing
                         self._ensure_json_file_exists(final_file_path, db_record, processor)
+
+                    self._hydrate_missing_metadata_fields(
+                        db_record=db_record,
+                        image_path=final_file_path,
+                        processor=processor,
+                    )
                 else:
                     # This shouldn't happen if JSON was processed, but handle it
                     # File is new and needs to be imported
@@ -551,30 +837,11 @@ class ImageCollection:
                         f"New image file detected (no JSON record): {image_file.name}"
                     )
 
-                    if image_file.name != expected_filename:
-                        print(f"Renaming to '{expected_filename}'")
-                        processor.save_to_library()
-                        self.results["files_renamed"] += 1
-                        relative_path = expected_filename
-                        final_file_path = processor.original_path
-                    else:
-                        relative_path = image_file.name
-                        final_file_path = image_file
-
-                    # Create database record with preserved original filename
-                    new_image = processor.create_database_record(
-                        relative_filepath=relative_path,
+                    self._import_new_image_with_processor(
+                        processor=processor,
+                        image_file=image_file,
                         original_filename=original_filename,
                     )
-                    self.db.add(new_image)
-                    self.db.flush()  # Flush to get the ID
-
-                    # Save JSON metadata using existing processor
-                    processor._save_json(processor.original_path, new_image)
-                    self.results["json_files_created"] += 1
-                    print(f"Created JSON file for: {final_file_path.name}")
-
-                    self.results["images_added"] += 1
 
             except Exception as e:
                 self.error_messages.append(f"Could not process {image_file.name}: {e}")

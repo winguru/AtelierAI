@@ -11,7 +11,7 @@ def fetch_collection_items_paginated(self, collection_id, limit=None, debug=Fals
     """Paginated version of fetch_collection_items.
 
     Args:
-        collection_id: The Civitai collection ID
+        collection_id: The CivitAI collection ID
         limit: Maximum number of items to fetch (None = all)
         debug: Enable debug output
 
@@ -89,7 +89,7 @@ def scrape_with_limit(self, collection_id, limit=None, debug=False):
     """Scrape with limit support.
 
     Args:
-        collection_id: The Civitai collection ID
+        collection_id: The CivitAI collection ID
         limit: Maximum number of items to fetch (None = all)
         debug: Enable debug output
 
@@ -121,9 +121,18 @@ def scrape_with_limit(self, collection_id, limit=None, debug=False):
 # Patch the scraper class when this file is imported
 def patch_scraper():
     """Patch CivitaiPrivateScraper with pagination support."""
-    from src.civitai import CivitaiPrivateScraper
+    try:
+        from atelierai.civitai import CivitaiPrivateScraper
+    except ModuleNotFoundError:
+        from app.src.atelierai.civitai import CivitaiPrivateScraper  # type: ignore
+
     CivitaiPrivateScraper.fetch_collection_items = fetch_collection_items_paginated
     CivitaiPrivateScraper.scrape = scrape_with_limit
+    return CivitaiPrivateScraper
+
+
+if __name__ != "__main__":
+    patch_scraper()
 
 
 if __name__ == "__main__":

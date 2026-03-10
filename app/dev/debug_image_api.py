@@ -2,7 +2,7 @@
 """Debug script to see actual API response structure for an image."""
 
 import json
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 def main():
     image_id = 117165031

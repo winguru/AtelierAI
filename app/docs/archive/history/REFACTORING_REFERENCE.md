@@ -1,4 +1,4 @@
-# Quick Reference: Refactored Civitai Classes
+# Quick Reference: Refactored CivitAI Classes
 
 ## Class Hierarchy
 

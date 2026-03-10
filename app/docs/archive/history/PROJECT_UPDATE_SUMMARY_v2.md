@@ -2,14 +2,14 @@
 
 ## Overview
 
-The Civitai scraper has been significantly refactored from v1.0 to v2.0 with a modern, maintainable architecture and new features.
+The CivitAI scraper has been significantly refactored from v1.0 to v2.0 with a modern, maintainable architecture and new features.
 
 ## Major Changes
 
 ### 1. New Architecture
 
 #### Files Created (NEW):
-- **`civitai_api.py`** - Singleton API client for all Civitai API operations
+- **`civitai_api.py`** - Singleton API client for all CivitAI API operations
 - **`civitai_image.py`** - Image data model class
 - **`analyze_image.py`** - Single image analyzer script
 - **`analyze_collection.py`** - Collection-wide analyzer script (updated with tag support)
@@ -65,7 +65,7 @@ Shows:
 ## 3. CivitaiAPI Singleton
 
 ### Purpose
-Centralized API client for all Civitai operations using singleton pattern.
+Centralized API client for all CivitAI operations using singleton pattern.
 
 ### Methods
 
@@ -320,7 +320,7 @@ Added sections:
 - **Separation of concerns** - API, data model, analysis, display
 
 ### Functionality
-- **Tag support** - Fetch and display tags from Civitai API
+- **Tag support** - Fetch and display tags from CivitAI API
 - **Better URLs** - Automatic extension detection and construction
 - **Enhanced display** - Full URLs, author URLs, simplified LoRA tables
 - **Consistent formatting** - ConsoleFormatter for all output
@@ -350,7 +350,7 @@ Potential additions for v2.1:
 ### Tag Issues
 - **"No tags found for this image"** - Normal for images without tags assigned
 - **"404 API request failed"** - Check image ID and authentication
-- **Empty tags list** - Image may not have tags assigned on Civitai
+- **Empty tags list** - Image may not have tags assigned on CivitAI
 
 ### Migration Issues
 - **Import errors** - Ensure `from civitai_api import CivitaiAPI` is used

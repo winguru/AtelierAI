@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atelierai"
+version = "0.1.0"
+description = "AtelierAI shared application modules"
+license = "GPL-3.0-or-later"
+readme = "atelierai/civitai/README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Geoff Thornton (winguru)", email = "github@geoffthornton.me" },
+]
+dependencies = [
+  "requests>=2.31",
+  "pydantic>=2.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/winguru/atelierai"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["atelierai*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

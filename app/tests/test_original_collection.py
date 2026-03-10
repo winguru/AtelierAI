@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test the scraper on the original collection 11035255"""
 
-from src.civitai import CivitaiPrivateScraper
-from src.console_utils import ConsoleFormatter
+from atelierai.civitai import CivitaiPrivateScraper
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 # Initialize formatter
 fmt = ConsoleFormatter()

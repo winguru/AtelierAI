@@ -1,6 +1,6 @@
-# Civitai Metadata Field Reference
+# CivitAI Metadata Field Reference
 
-This document provides a comprehensive reference for all metadata fields available through the Civitai scraper.
+This document provides a comprehensive reference for all metadata fields available through the CivitAI scraper.
 
 ---
 
@@ -395,9 +395,9 @@ landscape = [
 
 ## Additional Resources
 
-For the latest Civitai API changes, check:
-- Civitai website developer tools (Network tab)
-- Community discussions on Civitai Discord
+For the latest CivitAI API changes, check:
+- CivitAI website developer tools (Network tab)
+- Community discussions on CivitAI Discord
 - tRPC API documentation (if available)
 
 ---

@@ -4,7 +4,7 @@
 import requests
 import json
 import os
-from config import CIVITAI_SESSION_CACHE
+from atelierai.config import CIVITAI_SESSION_CACHE
 from urllib.parse import unquote
 
 # Get session token
@@ -12,7 +12,7 @@ if os.path.exists(CIVITAI_SESSION_CACHE):
     with open(CIVITAI_SESSION_CACHE, 'r') as f:
         token = f.read().strip()
 else:
-    from config import MY_SESSION_COOKIE
+    from atelierai.config import MY_SESSION_COOKIE
     token = MY_SESSION_COOKIE
 
 collection_id = 12176069

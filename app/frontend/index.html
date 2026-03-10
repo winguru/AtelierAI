@@ -1,66 +1,121 @@
 <!DOCTYPE html>
 <html lang="en">
-
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AtelierAI Gallery</title>
+    <link rel="stylesheet" href="/frontend/css/style.css">
+</head>
 <body>
-    <h1>AtelierAI</h1>
-
-    <!-- UPDATED SECTION FOR SCANNING -->
-    <div class="card">
-        <h2>1. Manage Image Library</h2>
-        <p>
-            Add images to the <code>./image_library</code> folder, then click the button below.
-            This will clean up orphaned records, import new files, rename them to their hash, and remove any files
-            already in the database.
-        </p>
-        <button id="scan-btn">Scan & Sync Library</button>
-        <pre id="scan-output"></pre>
-    </div>
-    <hr>
-    <!-- NEW SECTION FOR UPLOADING -->
-    <div class="card">
-        <h2>3. Upload New Images</h2>
-        <p>Select one or more images to upload to your library. You can also assign batch metadata.</p>
-
-        <form id="upload-form" enctype="multipart/form-data">
-            <div class="form-group">
-                <label for="image-files">Select Images:</label>
-                <input type="file" id="image-files" name="files" multiple accept="image/png, image/jpeg, image/webp">
+    <div class="app-shell">
+        <header class="app-header">
+            <div>
+                <p class="eyebrow">AtelierAI</p>
+                <h1>Image Gallery</h1>
             </div>
-
-            <div class="form-group">
-                <label for="artist-name">Artist Name (Optional):</label>
-                <input list="artist-suggestions" type="text" id="artist-name" name="artist_name"
-                    placeholder="Start typing to see suggestions...">
-                <datalist id="artist-suggestions"></datalist>
+            <div class="header-actions">
+                <button id="refresh-btn" class="btn ghost" type="button">Refresh</button>
+                <button id="scan-btn" class="btn solid" type="button">Rescan Library</button>
             </div>
+        </header>
 
-            <div class="form-group">
-                <label for="source-url">Source URL (Optional):</label>
-                <input type="url" id="source-url" name="source_url" placeholder="https://...">
-            </div>
+        <main class="layout">
+            <section class="gallery-pane">
+                <div class="gallery-toolbar">
+                    <div class="toolbar-row toolbar-row-primary">
+                        <input id="search-input" type="search" placeholder="Search by filename, source, software...">
+                        <label class="toggle-wrap" for="infinite-scroll-toggle">
+                            <input id="infinite-scroll-toggle" type="checkbox" checked>
+                            <span>Infinite scroll</span>
+                        </label>
+                        <label class="toggle-wrap" for="debug-toggle">
+                            <input id="debug-toggle" type="checkbox" checked>
+                            <span>Debug</span>
+                        </label>
+                        <span id="image-count" class="count-pill">0 images</span>
+                    </div>
 
-            <div class="form-group">
-                <label for="license-select">License (Optional):</label>
-                <select id="license-select" name="license_id">
-                    <option value="">-- Select a License --</option>
-                </select>
-            </div>
+                    <div class="toolbar-row toolbar-row-secondary">
+                        <label class="slider-wrap" for="thumb-size-slider">
+                            <span>Thumb Size</span>
+                            <input id="thumb-size-slider" type="range" min="120" max="260" step="5" value="165">
+                            <output id="thumb-size-value" for="thumb-size-slider">165px</output>
+                        </label>
+                        <div class="preset-wrap" role="group" aria-label="Thumbnail size presets">
+                            <button type="button" class="btn ghost btn-sm thumb-preset" data-size="130">Compact</button>
+                            <button type="button" class="btn ghost btn-sm thumb-preset" data-size="165">Balanced</button>
+                            <button type="button" class="btn ghost btn-sm thumb-preset" data-size="220">Large</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
+                <div class="gallery-footer">
+                    <button id="load-more-btn" class="btn ghost hidden" type="button">Load More</button>
+                    <p id="gallery-status" class="gallery-status"></p>
+                </div>
+                <div id="gallery-sentinel" class="gallery-sentinel" aria-hidden="true"></div>
+            </section>
 
-            <button type="submit">Upload Images</button>
-        </form>
-        <pre id="upload-output"></pre>
-    </div>
+            <aside class="details-pane">
+                <div id="details-empty" class="details-empty">
+                    <h2>Select an image</h2>
+                    <p>Choose a thumbnail from the gallery to inspect metadata, generation details, and source links.</p>
+                </div>
 
-    <hr>
+                <div id="details-content" class="details-content hidden">
+                    <img id="detail-image" class="detail-image" alt="Selected image preview">
+                    <section id="debug-badge" class="debug-badge" aria-live="polite">
+                        <p class="debug-title">Debug</p>
+                        <dl id="debug-fields" class="debug-fields"></dl>
+                    </section>
+                    <div class="detail-header">
+                        <h2 id="detail-title">Untitled</h2>
+                        <p id="detail-subtitle"></p>
+                    </div>
+                    <div id="detail-meta" class="meta-grid"></div>
+                    <section class="detail-block">
+                        <h3>EXIF / Generation Data</h3>
+                        <pre id="detail-exif" class="json-block"></pre>
+                    </section>
+                    <section class="detail-block">
+                        <h3>CivitAI Data</h3>
+                        <pre id="detail-civitai" class="json-block"></pre>
+                    </section>
+                </div>
+            </aside>
+        </main>
 
-    <!-- EXISTING SECTION FOR LOADING -->
-    <div class="card">
-        <h2>2. View Image Data</h2>
-        <button id="load-images-btn">Load Images from API</button>
-        <pre id="api-output"></pre>
+        <section class="control-drawer">
+            <details>
+                <summary>Upload Images</summary>
+                <form id="upload-form" enctype="multipart/form-data" class="upload-form">
+                    <label>
+                        Image files
+                        <input type="file" id="image-files" name="files" multiple accept="image/png, image/jpeg, image/webp">
+                    </label>
+                    <label>
+                        Artist
+                        <input list="artist-suggestions" type="text" id="artist-name" name="artist_name" placeholder="Optional artist name">
+                        <datalist id="artist-suggestions"></datalist>
+                    </label>
+                    <label>
+                        Source URL
+                        <input type="url" id="source-url" name="source_url" placeholder="https://...">
+                    </label>
+                    <label>
+                        License
+                        <select id="license-select" name="license_id">
+                            <option value="">-- Select a License --</option>
+                        </select>
+                    </label>
+                    <button class="btn solid" type="submit">Upload</button>
+                </form>
+                <pre id="upload-output" class="status-output"></pre>
+                <pre id="scan-output" class="status-output"></pre>
+            </details>
+        </section>
     </div>
 
     <script src="/frontend/js/main.js"></script>
 </body>
-
 </html>

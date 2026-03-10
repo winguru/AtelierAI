@@ -25,7 +25,7 @@ test_resources = [
 ]
 
 print("=== Test 1: _process_resources() ===")
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 scraper = CivitaiPrivateScraper(auto_authenticate=True)
 model_name, model_version, loras = scraper._process_resources(test_resources)
@@ -74,7 +74,7 @@ print("✅ CollectionAnalyzer tracking works correctly!")
 print()
 
 print("=== Test 3: Table Display ===")
-from src.console_utils import ConsoleFormatter
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 fmt = ConsoleFormatter(line_length=120)
 
@@ -105,7 +105,7 @@ print("✅ Table formatting works with Unicode!")
 print()
 
 print("=== Test 4: Display Width Calculations ===")
-from src.console_utils import get_display_width
+from atelierai.civitai.console_utils import get_display_width
 
 test_strings = [
     "abc",

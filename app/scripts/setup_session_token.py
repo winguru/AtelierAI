@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple script to manually set your Civitai session token.
+Simple script to manually set your CivitAI session token.
 Use this if you're in a Docker container and can't run the browser authentication.
 """
 
@@ -67,7 +67,7 @@ def update_env_file(env_file: str, token: str) -> None:
 
 
 print("=" * 70)
-print("Civitai Session Token Setup")
+print("CivitAI Session Token Setup")
 print("=" * 70)
 print()
 

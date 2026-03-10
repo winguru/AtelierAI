@@ -1,8 +1,8 @@
-# How to Get Your Civitai Session Token from Browser
+# How to Get Your CivitAI Session Token from Browser
 
 Since you're in a Docker container and need to authenticate with a specific Google account, the easiest method is to manually copy the session token from your browser.
 
-## Step 1: Sign In to Civitai in Your Regular Browser
+## Step 1: Sign In to CivitAI in Your Regular Browser
 
 1. Open your regular browser (Chrome, Firefox, Edge, etc.)
 2. Go to https://civitai.com/
@@ -66,7 +66,7 @@ You should now see:
 
 - Session tokens expire after ~30 days
 - If you change your password, the token will become invalid
-- Keep the token secure - it gives full access to your Civitai account
+- Keep the token secure - it gives full access to your CivitAI account
 - Don't commit `.env` file to version control
 - Use the `__Secure-civitai-token` cookie, NOT `__Secure-next-auth.session-token`
 

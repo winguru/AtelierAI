@@ -3,7 +3,7 @@
 
 import requests
 import json
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 print("=" * 70)
 print("Testing Different Collection Endpoints")

@@ -56,15 +56,19 @@ class ImageData:
     date_modified: Optional[str] = None  # ISO format string
     artist_id: Optional[str] = None
     source_url: Optional[str] = None
+    source_site: Optional[str] = None
     license_id: Optional[str] = None
 
     # Extended metadata
     exif_data: Dict[str, Any] = field(default_factory=dict)
+    civitai_data: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Initialize fields after dataclass creation."""
         if self.exif_data is None:
             self.exif_data = {}
+        if self.civitai_data is None:
+            self.civitai_data = {}
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ImageData":
@@ -93,8 +97,14 @@ class ImageData:
             date_modified=data.get("date_modified"),
             artist_id=data.get("artist_id"),
             source_url=data.get("source_url"),
+            source_site=data.get("source_site"),
             license_id=data.get("license_id"),
             exif_data=data.get("exif_data", {}),
+            civitai_data=(
+                data.get("civitai_data")
+                or data.get("civitai")
+                or (data.get("json_metadata") or {}).get("civitai", {})
+            ),
         )
 
     @classmethod
@@ -160,8 +170,10 @@ class ImageData:
             ),
             artist_id=db_record.artist_id,
             source_url=db_record.source_url,
+            source_site=getattr(db_record, "source_site", None),
             license_id=db_record.license_id,
             exif_data=db_record.exif_data,
+            civitai_data=((db_record.json_metadata or {}).get("civitai", {})),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -183,8 +195,10 @@ class ImageData:
             "date_modified": self.date_modified,
             "artist_id": self.artist_id,
             "source_url": self.source_url,
+            "source_site": self.source_site,
             "license_id": self.license_id,
             "exif_data": self.exif_data,
+            "civitai_data": self.civitai_data,
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -224,10 +238,10 @@ class ImageData:
         for key, value in other_dict.items():
             if value is not None:
                 # Special handling for exif_data: merge dicts
-                if key == "exif_data" and isinstance(value, dict):
-                    if merged_dict.get("exif_data") is None:
-                        merged_dict["exif_data"] = {}
-                    merged_dict["exif_data"].update(value)
+                if key in {"exif_data", "civitai_data"} and isinstance(value, dict):
+                    if merged_dict.get(key) is None:
+                        merged_dict[key] = {}
+                    merged_dict[key].update(value)
                 else:
                     merged_dict[key] = value
 
@@ -337,6 +351,7 @@ class ImageData:
                     ("Modified", self.date_modified),
                     ("Artist ID", self.artist_id),
                     ("Source URL", self.source_url),
+                    ("Source Site", self.source_site),
                     ("License ID", self.license_id),
                 ],
             ),
@@ -346,6 +361,13 @@ class ImageData:
         if self.exif_data:
             exif_fields = [(key, value) for key, value in sorted(self.exif_data.items())]
             sections.append(("EXIF Data", exif_fields))
+
+        # Add CivitAI data section if it exists
+        if self.civitai_data:
+            civitai_fields = [
+                (key, value) for key, value in sorted(self.civitai_data.items())
+            ]
+            sections.append(("CivitAI Data", civitai_fields))
 
         return self._format_sections(sections)
 

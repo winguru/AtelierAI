@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quick test script to verify Civitai authentication works.
+Quick test script to verify CivitAI authentication works.
 Run this after setting up authentication for the first time.
 """
 
@@ -10,13 +10,13 @@ import sys
 def test_auto_auth():
     """Test automatic authentication"""
     print("=" * 70)
-    print("Testing Civitai Automatic Authentication")
+    print("Testing CivitAI Automatic Authentication")
     print("=" * 70)
     print()
 
     # Import the authentication function
     try:
-        from civitai_auth import get_cached_or_refresh_session_token
+        from atelierai.civitai.civitai_auth import get_cached_or_refresh_session_token
 
         print("✅ civitai_auth module imported successfully")
     except ImportError as e:
@@ -77,12 +77,12 @@ def test_scraper_with_auth():
     """Test the scraper with automatic authentication"""
     print()
     print("=" * 70)
-    print("Testing Civitai Scraper with Auto-Auth")
+    print("Testing CivitAI Scraper with Auto-Auth")
     print("=" * 70)
     print()
 
     try:
-        from src.civitai import CivitaiPrivateScraper
+        from atelierai.civitai import CivitaiPrivateScraper
 
         print("Initializing scraper with auto_authenticate=True...")
         scraper = CivitaiPrivateScraper(auto_authenticate=True)
@@ -139,7 +139,7 @@ def main():
     print()
     print("╔" + "=" * 68 + "╗")
     print("║" + " " * 68 + "║")
-    print("║" + "  Civitai Authentication Test Suite".center(68) + "║")
+    print("║" + "  CivitAI Authentication Test Suite".center(68) + "║")
     print("║" + " " * 68 + "║")
     print("╚" + "=" * 68 + "╝")
     print()

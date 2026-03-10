@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""Analyze a single Civitai image using CivitaiAPI singleton."""
+"""Analyze a single CivitAI image using CivitaiAPI singleton."""
 
 import argparse
 import json
-import os
-import sys
 
-# Ensure /app is on sys.path for "src" imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from src.civitai_api import CivitaiAPI
-from src.civitai_image import CivitaiImage
-from src.console_utils import ConsoleFormatter
+from atelierai.civitai.civitai_api import CivitaiAPI
+from atelierai.civitai.civitai_image import CivitaiImage
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Analyze a single Civitai image to see full generation details and prompts"
+        description="Analyze a single CivitAI image to see full generation details and prompts"
     )
-    parser.add_argument("image_id", type=int, help="Civitai image ID to analyze")
+    parser.add_argument("image_id", type=int, help="CivitAI image ID to analyze")
     parser.add_argument(
         "--save", action="store_true", help="Save analysis results to JSON file"
     )
@@ -32,7 +27,7 @@ def main():
     # Initialize formatter
     fmt = ConsoleFormatter(line_length=args.line_length)
 
-    fmt.print_header("Civitai Image Analyzer")
+    fmt.print_header("CivitAI Image Analyzer")
     fmt.print_blank()
 
     # Get API singleton instance

@@ -11,7 +11,7 @@ def fetch_collection_items_paginated(self, collection_id, limit=None):
     Handles pagination automatically.
 
     Args:
-        collection_id: The Civitai collection ID
+        collection_id: The CivitAI collection ID
         limit: Maximum number of items to fetch (None = all items)
 
     Returns:
@@ -93,7 +93,7 @@ def scrape_with_limit(self, collection_id, limit=None):
     Main entry point: Orchestrates fetching collection and merging details.
 
     Args:
-        collection_id: The Civitai collection ID
+        collection_id: The CivitAI collection ID
         limit: Maximum number of items to process (None = all)
 
     Returns:

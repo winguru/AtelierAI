@@ -6,8 +6,8 @@ import json
 import argparse
 from collections import Counter, defaultdict
 from typing import Dict, List, Tuple
-from src.civitai import CivitaiPrivateScraper
-from src.console_utils import ConsoleFormatter
+from atelierai.civitai import CivitaiPrivateScraper
+from atelierai.civitai.console_utils import ConsoleFormatter
 
 
 # ==========================================
@@ -514,12 +514,12 @@ def print_analysis_report(analyzer: CollectionAnalyzer, fmt: ConsoleFormatter, c
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Analyze a Civitai collection to find common tags and patterns"
+        description="Analyze a CivitAI collection to find common tags and patterns"
     )
     parser.add_argument(
         "collection_id",
         type=int,
-        help="Civitai collection ID to analyze"
+        help="CivitAI collection ID to analyze"
     )
     parser.add_argument(
         "--limit",
@@ -553,7 +553,7 @@ def main():
     # Initialize formatter
     fmt = ConsoleFormatter(line_length=args.line_length)
 
-    fmt.print_header("Civitai Collection Analyzer")
+    fmt.print_header("CivitAI Collection Analyzer")
     fmt.print_blank()
 
     # Scrape the collection - Now uses CivitaiPrivateScraper.scrape() directly

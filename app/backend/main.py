@@ -1,5 +1,7 @@
 # main.py
 import os
+import json
+from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
 from typing import List, Optional
 from contextlib import asynccontextmanager
@@ -8,7 +10,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from config import IMAGE_LIBRARY_PATH, CURRENT_SCHEMA_VERSION
+from atelierai.config import (
+    IMAGE_LIBRARY_PATH,
+    CURRENT_SCHEMA_VERSION,
+    DATABASE_URL,
+    ALLOW_SCHEMA_RESET,
+)
 
 # Use absolute imports for consistency with our project structure
 from database import (
@@ -25,13 +32,20 @@ from models import (
     SchemaVersion,
 )  # Import the specific classes we need
 
-from image_processor import ImageProcessor
 from image_collection import ImageCollection
 from image_data import ImageData
+from image_processor import ImageProcessor
+from civitai_enrichment import is_civitai_image_url
 
 
 class ScanRequest(BaseModel):
     folder_path: str
+
+
+class ImageUpdateRequest(BaseModel):
+    source_url: Optional[str] = None
+    artist_name: Optional[str] = None
+    artist_profile: Optional[str] = None
 
 
 def create_initial_data():
@@ -129,11 +143,14 @@ async def lifespan(app: FastAPI):
     print("Starting AtelierAI API...")
 
     # --- NEW SCHEMA VERSIONING LOGIC ---
-    # Check if the database file exists at all
-    db_file_path = os.getenv(
-        "DATABASE_URL", "sqlite:///./data/image_db.sqlite"
-    ).replace("sqlite:///", "")
-    db_exists = os.path.exists(db_file_path)
+    # Check if the database file exists at all (for sqlite only).
+    db_file_path = None
+    db_exists = True
+    if DATABASE_URL.startswith("sqlite:///"):
+        db_file_path = os.path.abspath(
+            os.path.expanduser(DATABASE_URL.replace("sqlite:///", "", 1))
+        )
+        db_exists = os.path.exists(db_file_path)
 
     if db_exists:
         # Check the version
@@ -146,26 +163,58 @@ async def lifespan(app: FastAPI):
                     print(
                         f"⚠️ Schema version mismatch. Found {version_result}, expected {CURRENT_SCHEMA_VERSION}."
                     )
-                    print("   Recreating database...")
-                    os.remove(db_file_path)
-                    db_exists = False
+                    if db_file_path and os.path.exists(db_file_path):
+                        if ALLOW_SCHEMA_RESET:
+                            print("   Recreating database (ALLOW_SCHEMA_RESET=true)...")
+                            os.remove(db_file_path)
+                            db_exists = False
+                        else:
+                            raise RuntimeError(
+                                "Schema mismatch detected and automatic reset is disabled. "
+                                "Set ALLOW_SCHEMA_RESET=true in .env for development-only "
+                                "auto-rebuild, or migrate/update the database manually."
+                            )
+                    else:
+                        raise RuntimeError(
+                            "Schema mismatch detected, but automatic reset is only supported "
+                            "for sqlite file databases. Please migrate/update the database manually."
+                        )
                 else:
                     print("✅ Database schema is up to date.")
         except Exception as e:
             print(f"⚠️ Could not check schema version (table might not exist): {e}")
-            print("   Recreating database to be safe...")
-            os.remove(db_file_path)
-            db_exists = False
+            if db_file_path and os.path.exists(db_file_path):
+                if ALLOW_SCHEMA_RESET:
+                    print("   Recreating database to be safe (ALLOW_SCHEMA_RESET=true)...")
+                    os.remove(db_file_path)
+                    db_exists = False
+                else:
+                    raise RuntimeError(
+                        "Could not verify schema version and automatic reset is disabled. "
+                        "Set ALLOW_SCHEMA_RESET=true in .env for development-only auto-rebuild, "
+                        "or inspect/fix the database manually."
+                    ) from e
+            else:
+                raise RuntimeError(
+                    "Could not verify schema version for a non-sqlite database. "
+                    "Automatic reset is unavailable; inspect/fix the database manually."
+                ) from e
 
     # Create tables and initial data if the DB doesn't exist
     if not db_exists:
         print("Creating new database and initial data...")
         Base.metadata.create_all(bind=engine, checkfirst=True)
 
-        # Create a record for the new schema version
+        # Create schema version record once.
         with SessionLocal() as db:
-            db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
-            db.commit()
+            existing_version = (
+                db.query(SchemaVersion)
+                .filter(SchemaVersion.version_num == CURRENT_SCHEMA_VERSION)
+                .first()
+            )
+            if not existing_version:
+                db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+                db.commit()
 
         create_initial_data()
         print("Database setup complete.")
@@ -186,6 +235,8 @@ app = FastAPI(title="AtelierAI API", version="0.1.0", lifespan=lifespan)
 # Mount the static files directory
 # This will serve files from the 'frontend' directory under the '/frontend/' URL path
 app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
+# Expose processed images so the gallery can render thumbnails/full previews.
+app.mount("/image_library", StaticFiles(directory=IMAGE_LIBRARY_PATH), name="image_library")
 
 
 # Define a root endpoint to serve the main index.html file
@@ -206,12 +257,122 @@ def read_images(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
     )
     images = images_query.offset(skip).limit(limit).all()
 
-    # Convert database records to ImageData instances for structured data handling
-    images_data = [ImageData.from_db_record(image) for image in images]
+    # Build DB payload and merge raw sidecar JSON (source of authority) when present.
+    response_payload: list[dict] = []
+    for image in images:
+        db_dict = ImageData.from_db_record(image).to_dict()
 
-    # Return list of dictionaries using ImageData's to_dict() method
-    # This provides a clean, consistent interface for data serialization
-    return [image_data.to_dict() for image_data in images_data]
+        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(
+            ".json"
+        )
+
+        sidecar_dict: dict = {}
+        if sidecar_path.exists():
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    sidecar_dict = loaded
+            except (OSError, json.JSONDecodeError):
+                sidecar_dict = {}
+
+        # Sidecar values override DB where present.
+        response_payload.append({**db_dict, **sidecar_dict})
+
+    return response_payload
+
+
+@app.patch("/images/{file_hash}", response_model=dict)
+def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depends(get_db)):
+    """Update editable image metadata fields and persist to sidecar JSON."""
+    image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    update_values: dict = {}
+    sidecar_additional_data: dict = {}
+
+    # Expandable field-update pattern for future editable metadata cards.
+    if payload.source_url is not None:
+        normalized_source = payload.source_url.strip() or None
+        update_values[ImageModel.source_url] = normalized_source
+        if normalized_source and is_civitai_image_url(normalized_source):
+            update_values[ImageModel.source_site] = "civitai"
+        elif normalized_source is None:
+            update_values[ImageModel.source_site] = None
+
+    if payload.artist_name is not None:
+        normalized_artist = payload.artist_name.strip()
+        if normalized_artist:
+            artist_obj = db.query(Artist).filter(Artist.name == normalized_artist).first()
+            if artist_obj is None:
+                artist_obj = Artist(name=normalized_artist)
+                db.add(artist_obj)
+                db.flush()
+            update_values[ImageModel.artist_id] = artist_obj.id
+        else:
+            update_values[ImageModel.artist_id] = None
+
+    if payload.artist_profile is not None:
+        normalized_artist_profile = payload.artist_profile.strip() or None
+        sidecar_additional_data["artist_profile"] = normalized_artist_profile
+
+    if update_values:
+        (
+            db.query(ImageModel)
+            .filter(ImageModel.id == image.id)
+            .update(update_values, synchronize_session=False)
+        )
+
+    image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+    if not image_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Image file does not exist on disk: {image.file_path}",
+        )
+
+    try:
+        db.flush()
+        db.refresh(image)
+        processor = ImageProcessor(str(image_path), db, IMAGE_LIBRARY_PATH)
+        processor.save_json_metadata(
+            image_path,
+            image,
+            additional_data=sidecar_additional_data if sidecar_additional_data else None,
+        )
+        db.commit()
+        image = (
+            db.query(ImageModel)
+            .options(joinedload(ImageModel.artist))
+            .filter(ImageModel.file_hash == file_hash)
+            .first()
+        )
+        if image is None:
+            raise HTTPException(status_code=404, detail="Image not found after update")
+
+        sidecar_artist_profile = None
+        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
+        if sidecar_path.exists():
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as f:
+                    sidecar_data = json.load(f)
+                if isinstance(sidecar_data, dict):
+                    sidecar_artist_profile = sidecar_data.get("artist_profile")
+            except (OSError, json.JSONDecodeError):
+                sidecar_artist_profile = None
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update image metadata: {e}")
+
+    return {
+        "message": "Image metadata updated",
+        "file_hash": image.file_hash,
+        "source_url": image.source_url,
+        "source_site": image.source_site,
+        "artist_id": image.artist_id,
+        "artist_name": image.artist.name if image.artist is not None else None,
+        "artist_profile": sidecar_artist_profile,
+    }
 
 
 # Also, update the /artists/ endpoint to return the new artist objects
@@ -269,10 +430,8 @@ async def upload_images(
 
     images_added = 0
     images_skipped = 0
+    json_files_created = 0
     errors = []
-
-    # Ensure the library directory exists
-    os.makedirs(IMAGE_LIBRARY_PATH, exist_ok=True)
 
     for file in files:
         temp_path = None
@@ -283,26 +442,19 @@ async def upload_images(
             with open(temp_path, "wb") as f:
                 f.write(contents)
 
-            # 2. Create a processor for the image
-            processor = ImageProcessor(temp_path, db, IMAGE_LIBRARY_PATH)
-
-            # 3. Check for duplicates
-            if processor.find_in_database():
-                images_skipped += 1
-                continue
-
-            # 4. Handle the artist
-            artist_obj = None
-            if artist_name:
-                artist_obj = ImageProcessor.find_or_create_artist(db, artist_name)
-
-            # 5. Save to library and create DB record
-            final_path = processor.save_to_library()
-            new_image = processor.create_database_record(
-                str(final_path), file.filename, artist_obj, source_url, license_id
+            # 2. Ingest via ImageCollection to share the same processing steps as scan.
+            collection = ImageCollection(db)
+            ingest_result = collection.ingest_uploaded_file(
+                uploaded_file_path=Path(temp_path),
+                original_filename=file.filename or Path(temp_path).name,
+                artist_name=artist_name,
+                source_url=source_url,
+                license_id=license_id,
             )
-            db.add(new_image)
-            images_added += 1
+
+            images_added += int(ingest_result.get("images_added", 0))
+            images_skipped += int(ingest_result.get("images_skipped", 0))
+            json_files_created += int(ingest_result.get("json_files_created", 0))
 
         except ValueError as e:
             errors.append(str(e))
@@ -318,5 +470,6 @@ async def upload_images(
         "message": "Upload complete.",
         "images_added": images_added,
         "images_skipped": images_skipped,
+        "json_files_created": json_files_created,
         "errors": errors,
     }

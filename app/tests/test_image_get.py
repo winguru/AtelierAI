@@ -3,7 +3,7 @@
 
 import requests
 import json
-from src.civitai import CivitaiPrivateScraper
+from atelierai.civitai import CivitaiPrivateScraper
 
 def test_endpoint(endpoint_name: str, image_id: int, scraper: CivitaiPrivateScraper):
     """Test a specific API endpoint."""

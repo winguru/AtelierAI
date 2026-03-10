@@ -1,4 +1,4 @@
-# Refactoring Complete: Civitai Collection Analysis Tools
+# Refactoring Complete: CivitAI Collection Analysis Tools
 
 ## ✅ What Was Refactored
 

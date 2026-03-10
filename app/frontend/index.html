@@ -46,6 +46,13 @@
                             <button type="button" class="btn ghost btn-sm thumb-preset" data-size="165">Balanced</button>
                             <button type="button" class="btn ghost btn-sm thumb-preset" data-size="220">Large</button>
                         </div>
+                        <label class="sort-wrap" for="sort-order-select">
+                            <span>Sort</span>
+                            <select id="sort-order-select">
+                                <option value="first_added">First Added</option>
+                                <option value="last_added">Last Added</option>
+                            </select>
+                        </label>
                     </div>
                 </div>
                 <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
@@ -63,7 +70,10 @@
                 </div>
 
                 <div id="details-content" class="details-content hidden">
-                    <img id="detail-image" class="detail-image" alt="Selected image preview">
+                    <div id="detail-media-frame" class="detail-media-frame">
+                        <img id="detail-image" class="detail-image" alt="Selected image preview">
+                        <video id="detail-video" class="detail-image hidden" controls playsinline preload="metadata"></video>
+                    </div>
                     <section id="debug-badge" class="debug-badge" aria-live="polite">
                         <p class="debug-title">Debug</p>
                         <dl id="debug-fields" class="debug-fields"></dl>
@@ -73,6 +83,28 @@
                         <p id="detail-subtitle"></p>
                     </div>
                     <div id="detail-meta" class="meta-grid"></div>
+                    <section class="detail-block collections-block">
+                        <h3>Collections</h3>
+                        <div id="image-collections-list" class="collections-list"></div>
+                        <div class="collections-actions">
+                            <label>
+                                Select Collection
+                                <select id="collection-select"></select>
+                            </label>
+                            <button id="add-to-collection-btn" class="btn ghost btn-sm" type="button">Add Image to Collection</button>
+                            <label>
+                                New Collection
+                                <input id="new-collection-name" type="text" placeholder="Collection name">
+                            </label>
+                            <button id="create-collection-btn" class="btn ghost btn-sm" type="button">Create Collection</button>
+                            <label>
+                                Rename Selected
+                                <input id="rename-collection-name" type="text" placeholder="New name">
+                            </label>
+                            <button id="rename-collection-btn" class="btn ghost btn-sm" type="button">Rename Collection</button>
+                            <button id="delete-collection-btn" class="btn ghost btn-sm" type="button">Delete Selected Collection</button>
+                        </div>
+                    </section>
                     <section class="detail-block">
                         <h3>EXIF / Generation Data</h3>
                         <pre id="detail-exif" class="json-block"></pre>
@@ -91,7 +123,7 @@
                 <form id="upload-form" enctype="multipart/form-data" class="upload-form">
                     <label>
                         Image files
-                        <input type="file" id="image-files" name="files" multiple accept="image/png, image/jpeg, image/webp">
+                        <input type="file" id="image-files" name="files" multiple accept="image/png, image/jpeg, image/webp, video/mp4">
                     </label>
                     <label>
                         Artist
@@ -110,7 +142,32 @@
                     </label>
                     <button class="btn solid" type="submit">Upload</button>
                 </form>
+                <form id="import-form" class="import-form">
+                    <label>
+                        Import Images
+                        <select id="import-type" name="import_type">
+                            <option value="collection">Import CivitAI Collection</option>
+                            <option value="image">Import CivitAI Image</option>
+                        </select>
+                    </label>
+                    <label>
+                        CivitAI URL or ID
+                        <input
+                            type="text"
+                            id="import-value"
+                            name="value"
+                            placeholder="https://civitai.com/collections/... or 123456"
+                            required
+                        >
+                    </label>
+                    <label>
+                        Limit (optional, collection only)
+                        <input type="number" id="import-limit" name="limit" min="1" step="1" placeholder="All images">
+                    </label>
+                    <button id="import-submit" class="btn solid" type="submit">Import</button>
+                </form>
                 <pre id="upload-output" class="status-output"></pre>
+                <pre id="import-output" class="status-output"></pre>
                 <pre id="scan-output" class="status-output"></pre>
             </details>
         </section>

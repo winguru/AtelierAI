@@ -3,6 +3,7 @@ import shutil
 import hashlib
 import json
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -14,14 +15,15 @@ from sqlalchemy.orm import Session
 from models import ImageModel, Artist
 from image_data import ImageData
 
-# A set of allowed image extensions for easy lookup
-ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".jfif"}
+# A set of supported media extensions for easy lookup.
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".jfif", ".mp4"}
 MIME_MAPPING = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
     ".jfif": "image/jpeg",
+    ".mp4": "video/mp4",
 }
 
 UUID_RE = re.compile(
@@ -30,6 +32,31 @@ UUID_RE = re.compile(
 UUID_ANYWHERE_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
 )
+
+_EXIFTOOL_CHECKED = False
+_EXIFTOOL_AVAILABLE = False
+_EXIFTOOL_WARNED = False
+
+
+def is_exiftool_available() -> bool:
+    """Return True when exiftool is available in PATH."""
+    global _EXIFTOOL_CHECKED, _EXIFTOOL_AVAILABLE
+    if not _EXIFTOOL_CHECKED:
+        _EXIFTOOL_AVAILABLE = shutil.which("exiftool") is not None
+        _EXIFTOOL_CHECKED = True
+    return _EXIFTOOL_AVAILABLE
+
+
+def _warn_exiftool_missing_once() -> None:
+    """Log a one-time warning when exiftool is missing."""
+    global _EXIFTOOL_WARNED
+    if _EXIFTOOL_WARNED:
+        return
+    _EXIFTOOL_WARNED = True
+    print(
+        "Warning: exiftool is not installed or not on PATH. "
+        "Video metadata extraction is limited; ingestion will continue."
+    )
 
 
 class ImageProcessor:
@@ -49,9 +76,9 @@ class ImageProcessor:
         # --- Perform initial processing ---
         self.metadata.file_path = str(Path(file_path))
         self.metadata.file_name = Path(file_path).name
-        if not Path(file_path).is_file() or not self._is_valid_image():
-            print(f"File is not a valid image: {self.metadata.file_name}")
-            raise ValueError(f"File is not a valid image: {self.metadata.file_name}")
+        if not Path(file_path).is_file() or not self._is_valid_media():
+            print(f"File is not a supported media type: {self.metadata.file_name}")
+            raise ValueError(f"File is not a supported media type: {self.metadata.file_name}")
 
         self._process_file()
 
@@ -115,11 +142,52 @@ class ImageProcessor:
             return datetime.fromisoformat(self.metadata.date_modified)
         return datetime.now()
 
-    def _is_valid_image(self) -> bool:
-        """Checks if the file has a valid image extension."""
+    def _is_valid_media(self) -> bool:
+        """Checks if the file has a supported extension."""
         if self.metadata.file_path is None:
             return False
         return self.extension in ALLOWED_EXTENSIONS
+
+    def _extract_metadata_with_exiftool(self) -> tuple[int, int, Optional[str], dict, dict[str, Any]]:
+        """Extract metadata using exiftool, used as fallback and for non-image files."""
+        if self.metadata.file_path is None:
+            return 0, 0, None, {}, {}
+
+        if not is_exiftool_available():
+            _warn_exiftool_missing_once()
+            fallback_mimetype = MIME_MAPPING.get(self.extension or "")
+            return 0, 0, fallback_mimetype, {}, {}
+
+        try:
+            result = subprocess.run(
+                ["exiftool", "-j", self.metadata.file_path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(result.stdout)
+            if not isinstance(payload, list) or not payload:
+                return 0, 0, None, {}, {}
+
+            exif_data = payload[0] if isinstance(payload[0], dict) else {}
+            width = int(exif_data.get("ImageWidth") or exif_data.get("SourceImageWidth") or 0)
+            height = int(exif_data.get("ImageHeight") or exif_data.get("SourceImageHeight") or 0)
+            mimetype = exif_data.get("MIMEType")
+            if not mimetype and self.extension:
+                mimetype = MIME_MAPPING.get(self.extension)
+
+            exif_tags = {
+                f"exiftool:{k}": self._to_json_safe(v)
+                for k, v in exif_data.items()
+            }
+            return width, height, mimetype, exif_data, exif_tags
+        except FileNotFoundError:
+            _warn_exiftool_missing_once()
+            fallback_mimetype = MIME_MAPPING.get(self.extension or "")
+            return 0, 0, fallback_mimetype, {}, {}
+        except Exception:
+            fallback_mimetype = MIME_MAPPING.get(self.extension or "")
+            return 0, 0, fallback_mimetype, {}, {}
 
     def _process_file(self):
         """Calculates hash, gets metadata, and size."""
@@ -490,7 +558,11 @@ class ImageProcessor:
         return None
 
     def _get_metadata(self) -> tuple[int, int, Optional[str], dict, dict[str, Any]]:
-        """Extracts metadata from the image file."""
+        """Extracts metadata from image/video files."""
+        # Non-image formats (e.g. mp4) are handled via exiftool.
+        if self.extension == ".mp4":
+            return self._extract_metadata_with_exiftool()
+
         try:
             if self.metadata.file_path is None:
                 return 0, 0, None, {}, {}
@@ -516,7 +588,7 @@ class ImageProcessor:
 
             return width, height, mimetype, exif_data, exif_tags
         except Exception:
-            return 0, 0, None, {}, {}
+            return self._extract_metadata_with_exiftool()
 
     def find_in_database(self) -> Optional[ImageModel]:
         """Finds the image in the database using its hash."""

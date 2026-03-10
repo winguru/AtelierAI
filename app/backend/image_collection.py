@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 from models import ImageModel
@@ -42,10 +43,95 @@ class ImageCollection:
             "generation_software_backfill_attempts": 0,
             "generation_software_backfill_successes": 0,
             "generation_software_backfill_failures": 0,
+            # Legacy temp-name cleanup tracking
+            "filename_backfill_attempts": 0,
+            "filename_backfill_successes": 0,
+            "filename_backfill_failures": 0,
             # Error count (actual error messages in self.error_messages)
             "errors": 0,
         }
         self.error_messages: List[str] = []
+
+    @staticmethod
+    def _coerce_datetime(value: Any) -> Optional[datetime]:
+        """Convert common date/datetime JSON values into Python datetime."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            try:
+                return datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _normalize_expected_filename(candidate_name: Optional[str], fallback_ext: str) -> Optional[str]:
+        """Build a safe filename preserving extension when missing."""
+        if not isinstance(candidate_name, str):
+            return None
+
+        safe_name = Path(candidate_name.strip()).name
+        if not safe_name:
+            return None
+
+        if not Path(safe_name).suffix and fallback_ext:
+            safe_name = f"{safe_name}{fallback_ext}"
+
+        return safe_name
+
+    def _backfill_temp_filename_if_needed(
+        self,
+        db_record: ImageModel,
+        image_path: Path,
+        processor: ImageProcessor,
+    ) -> None:
+        """Replace legacy temp_* display names with expected source filenames."""
+        current_name = getattr(db_record, "file_name", None)
+        if not isinstance(current_name, str) or not current_name.lower().startswith("temp_"):
+            return
+
+        source_url_value = getattr(db_record, "source_url", None)
+        if not isinstance(source_url_value, str) or not source_url_value:
+            return
+
+        if not is_civitai_image_url(source_url_value):
+            return
+
+        self.results["filename_backfill_attempts"] += 1
+
+        try:
+            civitai_data = fetch_civitai_image_data(source_url_value) or {}
+            expected = self._normalize_expected_filename(
+                civitai_data.get("image_name"),
+                image_path.suffix or (processor.extension or ""),
+            )
+
+            if not expected or expected == current_name:
+                self.results["filename_backfill_failures"] += 1
+                return
+
+            self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
+                {ImageModel.file_name: expected},
+                synchronize_session=False,
+            )
+            self.db.flush()
+            self.db.refresh(db_record)
+
+            processor.save_json_metadata(image_path, db_record)
+            self.db.commit()
+            self.results["filename_backfill_successes"] += 1
+        except Exception as e:
+            self.results["filename_backfill_failures"] += 1
+            self.error_messages.append(
+                f"Could not backfill filename for {image_path.name}: {e}"
+            )
 
     @staticmethod
     def _load_sidecar_json(sidecar_path: Path) -> dict[str, Any]:
@@ -120,6 +206,7 @@ class ImageCollection:
             db_record, image_path, processor
         )
         self._enrich_from_civitai_if_needed(db_record, image_path, processor)
+        self._backfill_temp_filename_if_needed(db_record, image_path, processor)
 
     def _hydrate_missing_generation_software_if_needed(
         self,
@@ -236,10 +323,20 @@ class ImageCollection:
                 image_path=existing_image_path,
                 processor=processor,
             )
-            return {"images_added": 0, "images_skipped": 1, "json_files_created": 0}
+            return {
+                "images_added": 0,
+                "images_skipped": 1,
+                "json_files_created": 0,
+                "image_id": existing_image.id,
+                "skip_reason": "existing_file_hash",
+                "existing_image_id": existing_image.id,
+                "existing_file_hash": existing_image.file_hash,
+                "existing_file_path": existing_image.file_path,
+                "existing_source_url": existing_image.source_url,
+            }
 
         # For uploads, trust explicit form metadata over absent JSON metadata.
-        self._import_new_image_with_processor(
+        new_image, _ = self._import_new_image_with_processor(
             processor=processor,
             image_file=uploaded_file_path,
             original_filename=original_filename,
@@ -247,7 +344,13 @@ class ImageCollection:
             source_url=source_url,
             license_id=license_id,
         )
-        return {"images_added": 1, "images_skipped": 0, "json_files_created": 1}
+        return {
+            "images_added": 1,
+            "images_skipped": 0,
+            "json_files_created": 1,
+            "image_id": new_image.id if new_image is not None else None,
+            "skip_reason": None,
+        }
 
     def _enrich_from_civitai_if_needed(
         self,
@@ -464,6 +567,9 @@ class ImageCollection:
 
         relative_filepath = f"{file_hash}{ext}"
 
+        date_created = self._coerce_datetime(image_data.date_created)
+        date_modified = self._coerce_datetime(image_data.date_modified)
+
         new_image = ImageModel(
             file_path=relative_filepath,
             file_name=image_data.file_name or json_file.stem,
@@ -472,8 +578,8 @@ class ImageCollection:
             width=image_data.width or 0,
             height=image_data.height or 0,
             mimetype=image_data.mimetype,
-            date_created=image_data.date_created,
-            date_modified=image_data.date_modified,
+            date_created=date_created,
+            date_modified=date_modified,
             artist_id=image_data.artist_id,
             source_url=image_data.source_url,
             source_site=(
@@ -486,9 +592,13 @@ class ImageCollection:
             if image_data.civitai_data
             else None,
         )
-        self.db.add(new_image)
-        self.db.flush()
-        self.db.commit()
+        try:
+            self.db.add(new_image)
+            self.db.flush()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         self.results["images_added"] += 1
         self.results["json_db_entries_added"] += 1
 
@@ -579,6 +689,7 @@ class ImageCollection:
                     json_data_by_hash[file_hash] = final_image_data
 
             except Exception as e:
+                self.db.rollback()
                 self.error_messages.append(
                     f"Could not process JSON file {json_file.name}: {e}"
                 )
@@ -844,6 +955,7 @@ class ImageCollection:
                     )
 
             except Exception as e:
+                self.db.rollback()
                 self.error_messages.append(f"Could not process {image_file.name}: {e}")
                 self.results["errors"] += 1
 

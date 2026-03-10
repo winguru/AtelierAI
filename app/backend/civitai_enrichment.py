@@ -96,6 +96,10 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
 
         data["source_url"] = source_url
         data["image_id"] = image_id
+        if isinstance(basic_info, dict):
+            image_name = basic_info.get("name")
+            if isinstance(image_name, str) and image_name.strip():
+                data["image_name"] = image_name.strip()
         return data
     except Exception as e:
         # Enrichment should not block uploads, so fail open.

@@ -54,6 +54,9 @@ class ImageModel(Base):
     datasets = relationship(
         "Dataset", secondary="dataset_images", back_populates="images"
     )
+    collections = relationship(
+        "CollectionModel", secondary="image_collections", back_populates="images"
+    )
     artist = relationship("Artist", back_populates="images")
 
     def to_dict(self) -> dict:
@@ -198,6 +201,26 @@ class DatasetImage(Base):
 
     dataset_id = Column(Integer, ForeignKey("datasets.id"), primary_key=True)
     image_id = Column(Integer, ForeignKey("images.id"), primary_key=True)
+
+
+class CollectionModel(Base):
+    __tablename__ = "collections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    source = Column(String, nullable=False, default="user")
+    civitai_collection_id = Column(Integer, nullable=True)
+
+    images = relationship(
+        "ImageModel", secondary="image_collections", back_populates="collections"
+    )
+
+
+class ImageCollectionMembership(Base):
+    __tablename__ = "image_collections"
+
+    image_id = Column(Integer, ForeignKey("images.id"), primary_key=True)
+    collection_id = Column(Integer, ForeignKey("collections.id"), primary_key=True)
 
 
 class Artist(Base):

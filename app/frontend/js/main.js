@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
         infinite: 'atelier.gallery.infiniteScroll',
         debug: 'atelier.gallery.debugVisible',
         thumbSize: 'atelier.gallery.thumbSize',
+        sortOrder: 'atelier.gallery.sortOrder',
     };
     const TEST_PAGE_SIZE = 120;
     const BASE_SYNC_MARGIN_PX = 4;
@@ -54,10 +55,32 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function readStoredString(key, fallback, allowedValues) {
+        try {
+            const raw = window.localStorage.getItem(key);
+            if (raw === null) {
+                return fallback;
+            }
+            return allowedValues.includes(raw) ? raw : fallback;
+        } catch {
+            return fallback;
+        }
+    }
+
+    function writeStoredString(key, value) {
+        try {
+            window.localStorage.setItem(key, String(value));
+        } catch {
+            // Ignore storage errors (private mode, blocked storage, etc.)
+        }
+    }
+
     const state = {
         allImages: [],
         filteredImages: [],
         artistNames: [],
+        collections: [],
+        imagesStateSignature: null,
         selectedKey: null,
         // Lower page size is intentional for testing end-of-library UI transitions.
         pageSize: TEST_PAGE_SIZE,
@@ -67,6 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
         infiniteEnabled: readStoredBool(STORAGE_KEYS.infinite, true),
         debugVisible: readStoredBool(STORAGE_KEYS.debug, true),
         thumbSize: readStoredNumber(STORAGE_KEYS.thumbSize, 165, 120, 260),
+        sortOrder: readStoredString(STORAGE_KEYS.sortOrder, 'first_added', ['first_added', 'last_added']),
     };
 
     const artistDatalist = document.getElementById('artist-suggestions');
@@ -83,6 +107,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const thumbSizeSlider = document.getElementById('thumb-size-slider');
     const thumbSizeValue = document.getElementById('thumb-size-value');
     const thumbPresetButtons = Array.from(document.querySelectorAll('.thumb-preset'));
+    const sortOrderSelect = document.getElementById('sort-order-select');
     const imageCount = document.getElementById('image-count');
     const searchInput = document.getElementById('search-input');
     const refreshBtn = document.getElementById('refresh-btn');
@@ -90,15 +115,30 @@ document.addEventListener('DOMContentLoaded', () => {
     const scanOutput = document.getElementById('scan-output');
     const uploadForm = document.getElementById('upload-form');
     const uploadOutput = document.getElementById('upload-output');
+    const importForm = document.getElementById('import-form');
+    const importTypeSelect = document.getElementById('import-type');
+    const importValueInput = document.getElementById('import-value');
+    const importLimitInput = document.getElementById('import-limit');
+    const importOutput = document.getElementById('import-output');
 
     const detailsEmpty = document.getElementById('details-empty');
     const detailsContent = document.getElementById('details-content');
+    const detailMediaFrame = document.getElementById('detail-media-frame');
     const detailImage = document.getElementById('detail-image');
+    const detailVideo = document.getElementById('detail-video');
     const detailTitle = document.getElementById('detail-title');
     const detailSubtitle = document.getElementById('detail-subtitle');
     const detailMeta = document.getElementById('detail-meta');
     const detailExif = document.getElementById('detail-exif');
     const detailCivitai = document.getElementById('detail-civitai');
+    const imageCollectionsList = document.getElementById('image-collections-list');
+    const collectionSelect = document.getElementById('collection-select');
+    const addToCollectionBtn = document.getElementById('add-to-collection-btn');
+    const newCollectionNameInput = document.getElementById('new-collection-name');
+    const createCollectionBtn = document.getElementById('create-collection-btn');
+    const renameCollectionNameInput = document.getElementById('rename-collection-name');
+    const renameCollectionBtn = document.getElementById('rename-collection-btn');
+    const deleteCollectionBtn = document.getElementById('delete-collection-btn');
     const detailsPane = document.querySelector('.details-pane');
     const debugFields = document.getElementById('debug-fields');
     const debugBadge = document.getElementById('debug-badge');
@@ -206,12 +246,24 @@ document.addEventListener('DOMContentLoaded', () => {
         return `/image_library/${encodedPath}`;
     }
 
+    function isVideoAsset(image) {
+        const mimetype = typeof image?.mimetype === 'string' ? image.mimetype : '';
+        return mimetype.toLowerCase().startsWith('video/');
+    }
+
     function toClientImage(image, indexOffset) {
         const stablePart = image.file_hash || image.file_path || image.file_name || `row-${indexOffset}`;
         return {
             ...image,
             __key: `${stablePart}::${indexOffset}`,
         };
+    }
+
+    function pickCaption(image) {
+        if (isVideoAsset(image) && typeof image.file_path === 'string' && image.file_path.trim()) {
+            return image.file_path.split('/').pop() || image.file_path;
+        }
+        return image.file_name || image.file_path || image.file_hash || 'Untitled';
     }
 
     function renderMetaItem(label, value) {
@@ -409,6 +461,113 @@ document.addEventListener('DOMContentLoaded', () => {
         return result;
     }
 
+    async function fetchCollections() {
+        const response = await fetch('/collections/');
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.detail || `HTTP ${response.status}`);
+        }
+        return Array.isArray(result) ? result : [];
+    }
+
+    async function fetchImagesStateSignature() {
+        const response = await fetch('/images/state');
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.detail || `HTTP ${response.status}`);
+        }
+        const count = Number(result.count) || 0;
+        const latestId = Number(result.latest_id) || 0;
+        return `${count}:${latestId}`;
+    }
+
+    function syncCollectionSelect() {
+        const previous = collectionSelect.value;
+        collectionSelect.innerHTML = '';
+
+        if (!state.collections.length) {
+            const emptyOption = document.createElement('option');
+            emptyOption.value = '';
+            emptyOption.textContent = '-- No collections --';
+            collectionSelect.appendChild(emptyOption);
+            return;
+        }
+
+        state.collections.forEach((collection) => {
+            const option = document.createElement('option');
+            option.value = String(collection.id);
+            option.textContent = collection.name;
+            collectionSelect.appendChild(option);
+        });
+
+        if (state.collections.some((c) => String(c.id) === previous)) {
+            collectionSelect.value = previous;
+        }
+    }
+
+    function getSelectedImage() {
+        if (!state.selectedKey) {
+            return null;
+        }
+        return state.filteredImages.find((image) => image.__key === state.selectedKey) || null;
+    }
+
+    async function refreshCollectionsState() {
+        state.collections = await fetchCollections();
+        syncCollectionSelect();
+    }
+
+    function renderImageCollections(image) {
+        imageCollectionsList.innerHTML = '';
+        const names = Array.isArray(image?.collection_names) ? image.collection_names : [];
+        const ids = Array.isArray(image?.collection_ids) ? image.collection_ids : [];
+
+        if (!names.length) {
+            imageCollectionsList.textContent = 'Not in any collections yet.';
+            return;
+        }
+
+        names.forEach((name, idx) => {
+            const pill = document.createElement('span');
+            pill.className = 'collection-pill';
+
+            const text = document.createElement('span');
+            text.textContent = String(name);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'collection-pill-remove';
+            removeBtn.textContent = 'x';
+            removeBtn.title = `Remove from ${name}`;
+
+            const collectionId = ids[idx];
+            removeBtn.addEventListener('click', async () => {
+                if (!image?.file_hash || !collectionId) {
+                    return;
+                }
+                try {
+                    const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/collections/${collectionId}`, {
+                        method: 'DELETE',
+                    });
+                    const result = await response.json();
+                    if (!response.ok) {
+                        throw new Error(result.detail || `HTTP ${response.status}`);
+                    }
+                    image.collection_names = names.filter((_, i) => i !== idx);
+                    image.collection_ids = ids.filter((_, i) => i !== idx);
+                    renderImageCollections(image);
+                    applyFilter();
+                } catch (error) {
+                    alert(`Could not remove collection: ${error.message}`);
+                }
+            });
+
+            pill.appendChild(text);
+            pill.appendChild(removeBtn);
+            imageCollectionsList.appendChild(pill);
+        });
+    }
+
     function setDebugBadge(fields) {
         const pairs = Object.entries(fields || {});
         debugFields.innerHTML = '';
@@ -422,21 +581,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function getImageLayoutDebug() {
-        const computed = window.getComputedStyle(detailImage);
-        const pane = detailImage.closest('.details-pane');
+    function getImageLayoutDebug(activeMedia = detailImage) {
+        const computed = window.getComputedStyle(activeMedia);
+        const pane = activeMedia.closest('.details-pane');
         return {
-            class: detailImage.className,
+            media_tag: activeMedia.tagName.toLowerCase(),
+            class: activeMedia.className,
             display: computed.display,
             visibility: computed.visibility,
             opacity: computed.opacity,
-            client_size: `${detailImage.clientWidth}x${detailImage.clientHeight}`,
+            client_size: `${activeMedia.clientWidth}x${activeMedia.clientHeight}`,
+            frame_client: detailMediaFrame ? `${detailMediaFrame.clientWidth}x${detailMediaFrame.clientHeight}` : 'N/A',
             pane_client: pane ? `${pane.clientWidth}x${pane.clientHeight}` : 'N/A',
         };
     }
 
     function showDetails(image) {
         if (!image) {
+            detailImage.classList.add('hidden');
+            detailImage.style.display = 'none';
+            detailImage.removeAttribute('src');
+            detailVideo.pause();
+            detailVideo.classList.add('hidden');
+            detailVideo.style.display = 'none';
+            detailVideo.removeAttribute('src');
             detailsContent.classList.add('hidden');
             detailsEmpty.classList.remove('hidden');
             currentDebugImage = null;
@@ -449,18 +617,54 @@ document.addEventListener('DOMContentLoaded', () => {
         debugBadge.classList.toggle('hidden', !state.debugVisible);
 
         const imageUrl = getImageUrl(image);
+        const videoMode = isVideoAsset(image);
         currentDebugImage = image;
 
-        // Force visible state to avoid stale hidden-class/layout edge cases.
-        detailImage.classList.remove('hidden');
-        detailImage.style.display = 'block';
-        detailImage.style.visibility = 'visible';
-        detailImage.style.opacity = '1';
+        // Guard against layout expansion glitches in some browser/video combinations.
+        detailMediaFrame.style.width = '100%';
+        detailMediaFrame.style.maxWidth = '100%';
+        detailMediaFrame.style.minWidth = '0';
+        detailVideo.style.width = '100%';
+        detailVideo.style.maxWidth = '100%';
+        detailVideo.style.minWidth = '0';
+        detailVideo.style.height = '100%';
+        detailVideo.style.maxHeight = '100%';
 
-        if (imageUrl) {
-            detailImage.src = imageUrl;
-        } else {
+        // Force visible state to avoid stale hidden-class/layout edge cases.
+        if (videoMode) {
+            detailImage.classList.add('hidden');
+            detailImage.style.display = 'none';
             detailImage.removeAttribute('src');
+            detailVideo.classList.remove('hidden');
+            detailVideo.style.display = 'block';
+            detailVideo.style.visibility = 'visible';
+            detailVideo.style.opacity = '1';
+            detailVideo.muted = true;
+            detailVideo.loop = true;
+            detailVideo.autoplay = true;
+            detailVideo.playsInline = true;
+            if (imageUrl) {
+                detailVideo.src = imageUrl;
+                // Autoplay can be blocked by browser policy; ignore rejection.
+                detailVideo.play().catch(() => {});
+            } else {
+                detailVideo.removeAttribute('src');
+            }
+        } else {
+            detailVideo.classList.add('hidden');
+            detailVideo.style.display = 'none';
+            detailVideo.pause();
+            detailVideo.removeAttribute('src');
+            detailImage.classList.remove('hidden');
+            detailImage.style.display = 'block';
+            detailImage.style.visibility = 'visible';
+            detailImage.style.opacity = '1';
+
+            if (imageUrl) {
+                detailImage.src = imageUrl;
+            } else {
+                detailImage.removeAttribute('src');
+            }
         }
         detailImage.alt = safeText(image.file_name, 'Selected image');
         detailTitle.textContent = safeText(image.file_name, image.file_hash || 'Untitled');
@@ -534,6 +738,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         detailExif.textContent = JSON.stringify(image.exif_data || {}, null, 2);
         detailCivitai.textContent = JSON.stringify(image.civitai_data || image.civitai || {}, null, 2);
+        renderImageCollections(image);
 
         setDebugBadge({
             key: image.__key,
@@ -541,7 +746,7 @@ document.addEventListener('DOMContentLoaded', () => {
             file_path: image.file_path,
             url: imageUrl,
             status: imageUrl ? 'loading' : 'missing-url',
-            ...getImageLayoutDebug(),
+            ...getImageLayoutDebug(videoMode ? detailVideo : detailImage),
         });
 
         scheduleGalleryGridHeightSync();
@@ -560,22 +765,58 @@ document.addEventListener('DOMContentLoaded', () => {
         const fragment = document.createDocumentFragment();
 
         state.filteredImages.forEach((image) => {
-            const caption = image.file_name || image.file_path || image.file_hash || 'Untitled';
+            const caption = pickCaption(image);
             const tile = document.createElement('button');
             tile.className = `tile ${state.selectedKey === image.__key ? 'active' : ''}`;
             tile.type = 'button';
             tile.dataset.key = image.__key;
 
-            const img = document.createElement('img');
-            img.loading = 'lazy';
-            img.alt = safeText(caption);
-            img.src = getImageUrl(image);
+            const mediaUrl = getImageUrl(image);
+            const videoMode = isVideoAsset(image);
+
+            let mediaNode;
+            if (videoMode) {
+                const video = document.createElement('video');
+                video.muted = true;
+                video.autoplay = true;
+                video.loop = true;
+                video.playsInline = true;
+                video.preload = 'metadata';
+                video.src = mediaUrl;
+                video.play().catch(() => {});
+                mediaNode = video;
+            } else {
+                const img = document.createElement('img');
+                img.loading = 'lazy';
+                img.alt = safeText(caption);
+                img.src = mediaUrl;
+                mediaNode = img;
+            }
 
             const captionSpan = document.createElement('span');
             captionSpan.className = 'tile-caption';
-            captionSpan.textContent = safeText(caption);
 
-            tile.appendChild(img);
+            const primaryCaption = document.createElement('span');
+            primaryCaption.className = 'tile-caption-primary';
+            primaryCaption.textContent = safeText(caption);
+            captionSpan.appendChild(primaryCaption);
+
+            const collectionNames = Array.isArray(image.collection_names)
+                ? image.collection_names.filter((name) => typeof name === 'string' && name.trim())
+                : [];
+            if (collectionNames.length) {
+                const collectionsOverlay = document.createElement('div');
+                collectionsOverlay.className = 'tile-collections';
+                collectionNames.slice(0, 5).forEach((name) => {
+                    const item = document.createElement('span');
+                    item.className = 'tile-collection-item';
+                    item.textContent = name;
+                    collectionsOverlay.appendChild(item);
+                });
+                tile.appendChild(collectionsOverlay);
+            }
+
+            tile.appendChild(mediaNode);
             tile.appendChild(captionSpan);
             fragment.appendChild(tile);
         });
@@ -597,6 +838,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     image.source_site,
                     image.generation_software,
                     image.mimetype,
+                    ...(Array.isArray(image.collection_names) ? image.collection_names : []),
                 ].filter(Boolean).join(' ').toLowerCase();
                 return haystack.includes(query);
             });
@@ -632,7 +874,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updatePagingUi();
 
         try {
-            const response = await fetch(`/images/?skip=${state.offset}&limit=${state.pageSize}`);
+            const response = await fetch(`/images/?skip=${state.offset}&limit=${state.pageSize}&sort_by=${encodeURIComponent(state.sortOrder)}`);
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
@@ -662,9 +904,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadReferenceData() {
-        const [artistsRes, licensesRes] = await Promise.all([
+        const [artistsRes, licensesRes, collections] = await Promise.all([
             fetch('/artists/'),
             fetch('/licenses/'),
+            fetchCollections(),
         ]);
 
         const artists = await artistsRes.json();
@@ -687,14 +930,24 @@ document.addEventListener('DOMContentLoaded', () => {
             option.textContent = `${license.short_name} - ${license.name}`;
             licenseSelect.appendChild(option);
         });
+
+        state.collections = collections;
+        syncCollectionSelect();
     }
 
-    async function resetAndLoadImages() {
-        refreshBtn.disabled = true;
-        refreshBtn.textContent = 'Refreshing...';
+    async function resetAndLoadImages(options = {}) {
+        const preserveSelection = options.preserveSelection === true;
+        const showRefreshUi = options.showRefreshUi !== false;
+        const previousSelectedKey = preserveSelection ? state.selectedKey : null;
+
+        if (showRefreshUi) {
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = 'Refreshing...';
+        }
+
         state.allImages = [];
         state.filteredImages = [];
-        state.selectedKey = null;
+        state.selectedKey = preserveSelection ? previousSelectedKey : null;
         state.offset = 0;
         state.hasMore = true;
         state.loadingPage = false;
@@ -708,8 +961,16 @@ document.addEventListener('DOMContentLoaded', () => {
             imageCount.textContent = '0 images';
             showDetails(null);
         } finally {
-            refreshBtn.disabled = false;
-            refreshBtn.textContent = 'Refresh';
+            try {
+                state.imagesStateSignature = await fetchImagesStateSignature();
+            } catch {
+                // Ignore state-signature errors and keep gallery usable.
+            }
+
+            if (showRefreshUi) {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = 'Refresh';
+            }
         }
     }
 
@@ -750,6 +1011,45 @@ document.addEventListener('DOMContentLoaded', () => {
             url: detailImage.currentSrc || getImageUrl(currentDebugImage),
             status: 'error-loading-image',
             ...getImageLayoutDebug(),
+        });
+    });
+    detailVideo.addEventListener('loadedmetadata', () => {
+        if (!currentDebugImage) {
+            return;
+        }
+
+        // Re-apply constraints after metadata load, as some browsers adjust replaced-element sizing.
+        detailMediaFrame.style.width = '100%';
+        detailMediaFrame.style.maxWidth = '100%';
+        detailMediaFrame.style.minWidth = '0';
+        detailVideo.style.width = '100%';
+        detailVideo.style.maxWidth = '100%';
+        detailVideo.style.minWidth = '0';
+        detailVideo.style.height = '100%';
+        detailVideo.style.maxHeight = '100%';
+
+        setDebugBadge({
+            key: currentDebugImage.__key,
+            file_hash: currentDebugImage.file_hash,
+            file_path: currentDebugImage.file_path,
+            url: detailVideo.currentSrc || getImageUrl(currentDebugImage),
+            status: 'video-loadedmetadata',
+            video_natural: `${detailVideo.videoWidth}x${detailVideo.videoHeight}`,
+            ...getImageLayoutDebug(detailVideo),
+        });
+        scheduleGalleryGridHeightSync();
+    });
+    detailVideo.addEventListener('error', () => {
+        if (!currentDebugImage) {
+            return;
+        }
+        setDebugBadge({
+            key: currentDebugImage.__key,
+            file_hash: currentDebugImage.file_hash,
+            file_path: currentDebugImage.file_path,
+            url: detailVideo.currentSrc || getImageUrl(currentDebugImage),
+            status: 'video-error',
+            ...getImageLayoutDebug(detailVideo),
         });
     });
     galleryGrid.addEventListener('scroll', () => {
@@ -794,6 +1094,153 @@ document.addEventListener('DOMContentLoaded', () => {
             writeStoredNumber(STORAGE_KEYS.thumbSize, state.thumbSize);
             scheduleGalleryGridHeightSync();
         });
+    });
+    sortOrderSelect.addEventListener('change', async () => {
+        state.sortOrder = sortOrderSelect.value === 'last_added' ? 'last_added' : 'first_added';
+        writeStoredString(STORAGE_KEYS.sortOrder, state.sortOrder);
+        await resetAndLoadImages();
+    });
+    addToCollectionBtn.addEventListener('click', async () => {
+        const image = getSelectedImage();
+        if (!image?.file_hash) {
+            return;
+        }
+
+        const collectionId = Number(collectionSelect.value);
+        if (!Number.isInteger(collectionId) || collectionId <= 0) {
+            alert('Select a collection first.');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/collections/${collectionId}`, {
+                method: 'POST',
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || `HTTP ${response.status}`);
+            }
+
+            const selectedCollection = state.collections.find((c) => c.id === collectionId);
+            if (!selectedCollection) {
+                return;
+            }
+
+            const names = Array.isArray(image.collection_names) ? image.collection_names : [];
+            const ids = Array.isArray(image.collection_ids) ? image.collection_ids : [];
+            if (!ids.includes(collectionId)) {
+                image.collection_ids = ids.concat(collectionId);
+                image.collection_names = names.concat(selectedCollection.name);
+            }
+            renderImageCollections(image);
+            applyFilter();
+        } catch (error) {
+            alert(`Could not add image to collection: ${error.message}`);
+        }
+    });
+    createCollectionBtn.addEventListener('click', async () => {
+        const name = newCollectionNameInput.value.trim();
+        if (!name) {
+            alert('Enter a collection name first.');
+            return;
+        }
+
+        try {
+            const response = await fetch('/collections/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ name }),
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || `HTTP ${response.status}`);
+            }
+            newCollectionNameInput.value = '';
+            await refreshCollectionsState();
+            collectionSelect.value = String(result.id);
+        } catch (error) {
+            alert(`Could not create collection: ${error.message}`);
+        }
+    });
+    renameCollectionBtn.addEventListener('click', async () => {
+        const collectionId = Number(collectionSelect.value);
+        const name = renameCollectionNameInput.value.trim();
+        if (!Number.isInteger(collectionId) || collectionId <= 0) {
+            alert('Select a collection to rename.');
+            return;
+        }
+        if (!name) {
+            alert('Enter a new collection name first.');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/collections/${collectionId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ name }),
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || `HTTP ${response.status}`);
+            }
+            renameCollectionNameInput.value = '';
+            await refreshCollectionsState();
+            collectionSelect.value = String(collectionId);
+
+            state.allImages.forEach((img) => {
+                if (!Array.isArray(img.collection_ids) || !Array.isArray(img.collection_names)) {
+                    return;
+                }
+                const idx = img.collection_ids.indexOf(collectionId);
+                if (idx >= 0) {
+                    img.collection_names[idx] = result.name;
+                }
+            });
+            applyFilter();
+        } catch (error) {
+            alert(`Could not rename collection: ${error.message}`);
+        }
+    });
+    deleteCollectionBtn.addEventListener('click', async () => {
+        const collectionId = Number(collectionSelect.value);
+        if (!Number.isInteger(collectionId) || collectionId <= 0) {
+            alert('Select a collection to delete.');
+            return;
+        }
+
+        if (!window.confirm('Delete this collection? This removes membership links but keeps images.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/collections/${collectionId}`, {
+                method: 'DELETE',
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || `HTTP ${response.status}`);
+            }
+
+            await refreshCollectionsState();
+            state.allImages.forEach((img) => {
+                if (!Array.isArray(img.collection_ids) || !Array.isArray(img.collection_names)) {
+                    return;
+                }
+                const idx = img.collection_ids.indexOf(collectionId);
+                if (idx >= 0) {
+                    img.collection_ids.splice(idx, 1);
+                    img.collection_names.splice(idx, 1);
+                }
+            });
+            applyFilter();
+        } catch (error) {
+            alert(`Could not delete collection: ${error.message}`);
+        }
     });
 
     scanBtn.addEventListener('click', async () => {
@@ -860,11 +1307,115 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    function updateImportInputPlaceholder() {
+        if (importTypeSelect.value === 'image') {
+            importValueInput.placeholder = 'https://civitai.com/images/... or 123456';
+        } else {
+            importValueInput.placeholder = 'https://civitai.com/collections/... or 123456';
+        }
+    }
+
+    importTypeSelect.addEventListener('change', updateImportInputPlaceholder);
+
+    function formatImportCounters(result) {
+        const added = Number(result?.images_added || 0);
+        const skipped = Number(result?.images_skipped || 0);
+        const recovered = Number(result?.images_recovered || 0);
+        const requested = Number(result?.requested || 0);
+        return `Added ${added} | Skipped ${skipped} | Recovered ${recovered} | Requested ${requested}`;
+    }
+
+    importForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        const importType = importTypeSelect.value;
+        const rawValue = importValueInput.value.trim();
+        const rawLimit = importLimitInput.value.trim();
+        const submitButton = document.getElementById('import-submit');
+
+        if (!rawValue) {
+            importOutput.textContent = 'Please provide a CivitAI URL or numeric ID.';
+            return;
+        }
+
+        const payload = {
+            import_type: importType,
+            value: rawValue,
+        };
+
+        if (importType === 'collection' && rawLimit) {
+            const parsedLimit = Number(rawLimit);
+            if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+                importOutput.textContent = 'Limit must be a positive whole number.';
+                return;
+            }
+            payload.limit = parsedLimit;
+        }
+
+        importOutput.textContent = 'Importing from CivitAI...';
+        submitButton.disabled = true;
+        let liveRefreshTimer = null;
+        let liveRefreshInFlight = false;
+
+        // While import is running, poll backend state and only refresh gallery when data changed.
+        liveRefreshTimer = window.setInterval(async () => {
+            if (liveRefreshInFlight) {
+                return;
+            }
+            liveRefreshInFlight = true;
+            try {
+                const latestSignature = await fetchImagesStateSignature();
+                if (latestSignature !== state.imagesStateSignature) {
+                    await resetAndLoadImages({ preserveSelection: true, showRefreshUi: false });
+                }
+            } catch {
+                // Ignore transient polling/refresh errors during long-running imports.
+            } finally {
+                liveRefreshInFlight = false;
+            }
+        }, 2500);
+
+        try {
+            const response = await fetch('/import_civitai/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.detail || `HTTP ${response.status}`);
+            }
+
+            const summaryLine = formatImportCounters(result);
+            importOutput.textContent = `${summaryLine}\n\n${JSON.stringify(result, null, 2)}`;
+            importForm.reset();
+            importTypeSelect.value = importType;
+            updateImportInputPlaceholder();
+            await refreshCollectionsState();
+            if (result && result.local_collection && result.local_collection.id) {
+                collectionSelect.value = String(result.local_collection.id);
+            }
+            await resetAndLoadImages({ preserveSelection: true, showRefreshUi: false });
+        } catch (error) {
+            importOutput.textContent = `Error: ${error.message}`;
+        } finally {
+            if (liveRefreshTimer !== null) {
+                window.clearInterval(liveRefreshTimer);
+            }
+            submitButton.disabled = false;
+        }
+    });
+
     infiniteScrollToggle.checked = state.infiniteEnabled;
     debugToggle.checked = state.debugVisible;
+    sortOrderSelect.value = state.sortOrder;
     syncLayoutMode();
     syncThumbSize();
     updatePagingUi();
+    updateImportInputPlaceholder();
 
     resizeObserver = new ResizeObserver(() => {
         scheduleGalleryGridHeightSync();

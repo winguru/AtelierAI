@@ -91,7 +91,7 @@
       .filter(Boolean);
   }
 
-  function renderChipEditor({ host, labelText, values, onChange, placeholder, helpText }) {
+  function renderChipEditor({ host, labelText, values, onChange, placeholder, helpTextRight, helpTextBelow }) {
     const field = document.createElement('div');
     field.className = 'tag-field';
 
@@ -100,13 +100,20 @@
     const label = document.createElement('label');
     label.textContent = labelText;
     head.appendChild(label);
-    if (helpText) {
+    if (helpTextRight) {
       const help = document.createElement('span');
       help.className = 'tag-field-help-inline';
-      help.textContent = helpText;
+      help.textContent = helpTextRight;
       head.appendChild(help);
     }
     field.appendChild(head);
+
+    if (helpTextBelow) {
+      const below = document.createElement('div');
+      below.className = 'tag-field-help-below';
+      below.textContent = helpTextBelow;
+      field.appendChild(below);
+    }
 
     const chipList = document.createElement('div');
     chipList.className = 'tag-chip-list';
@@ -197,9 +204,6 @@
       return;
     }
 
-    const title = document.createElement('h3');
-    title.textContent = `${sourceLabel(selected.source)} Tag Details: ${selected.name}`;
-
     const grid = document.createElement('div');
     grid.className = 'tag-details-grid';
 
@@ -214,6 +218,10 @@
     descriptionHelp.textContent = `${(selected.description || '').length}/60`;
     descriptionHead.append(descriptionLabel, descriptionHelp);
     descriptionField.appendChild(descriptionHead);
+    const descriptionSubHelp = document.createElement('div');
+    descriptionSubHelp.className = 'tag-field-help-below';
+    descriptionSubHelp.textContent = 'Short description of characteristics.';
+    descriptionField.appendChild(descriptionSubHelp);
 
     const descriptionInput = document.createElement('input');
     descriptionInput.type = 'text';
@@ -236,7 +244,7 @@
         selected.aliases = next;
       },
       placeholder: 'Add alias and press Enter',
-      helpText: 'Synonymous tags from the same source.',
+      helpTextBelow: 'Synonymous tags from the same source.',
     });
 
     renderChipEditor({
@@ -247,7 +255,7 @@
         selected.implies = next;
       },
       placeholder: 'Add implied tag and press Enter',
-      helpText: 'Always includes underlying tags.',
+      helpTextBelow: 'Always includes underlying tags.',
     });
 
     const examplesField = document.createElement('div');
@@ -271,7 +279,7 @@
     examplesField.appendChild(examplesInput);
     grid.appendChild(examplesField);
 
-    tagDetailsPanel.append(title, grid);
+    tagDetailsPanel.append(grid);
   }
 
   function getParentKey(level) {

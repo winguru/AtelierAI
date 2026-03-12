@@ -23,8 +23,8 @@ body {
   min-height: 100vh;
   padding: 1rem;
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
-  gap: 0.8rem;
+  grid-template-rows: auto auto auto auto auto;
+  gap: 0.55rem;
 }
 
 .concept-header h1 {
@@ -40,7 +40,7 @@ body {
 
 .scope-controls-wrap {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.2rem;
 }
 
 .tag-board,
@@ -49,7 +49,7 @@ body {
   grid-template-columns: repeat(4, minmax(240px, 1fr));
   gap: 0.7rem;
   overflow-x: auto;
-  padding-bottom: 0.4rem;
+  padding-bottom: 0.15rem;
 }
 
 .tag-board {
@@ -96,7 +96,7 @@ body {
   flex-wrap: wrap;
   align-content: flex-start;
   gap: 0.35rem;
-  min-height: 140px;
+  min-height: 128px;
   max-height: 220px;
   overflow: auto;
 }
@@ -130,9 +130,16 @@ body {
   background: var(--panel);
   border: 1px solid var(--stroke);
   border-radius: 14px;
-  padding: 0.55rem;
+  padding: 0.48rem;
   display: grid;
-  gap: 0.4rem;
+  gap: 0.3rem;
+  min-height: 96px;
+}
+
+.tag-details .tag-empty {
+  display: flex;
+  align-items: center;
+  min-height: 100%;
 }
 
 .tag-details h3 {
@@ -143,13 +150,13 @@ body {
 .tag-details-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(170px, 1fr));
-  gap: 0.4rem;
+  gap: 0.3rem;
   align-items: start;
 }
 
 .tag-field {
   display: grid;
-  gap: 0.24rem;
+  gap: 0.16rem;
 }
 
 .tag-details-grid > .tag-field {
@@ -177,18 +184,24 @@ body {
 
 .tag-field-help-inline {
   margin-left: auto;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   color: var(--ink-soft);
   white-space: nowrap;
   text-align: right;
+}
+
+.tag-field-help-below {
+  font-size: 0.7rem;
+  line-height: 1.1;
+  color: var(--ink-soft);
 }
 
 .tag-field input,
 .tag-field textarea {
   border: 1px solid var(--stroke);
   border-radius: 8px;
-  padding: 0.34rem 0.45rem;
-  font-size: 0.8rem;
+  padding: 0.3rem 0.42rem;
+  font-size: 0.78rem;
   color: var(--ink);
   background: #fff;
   width: 100%;
@@ -239,9 +252,9 @@ body {
   color: var(--ink);
 }
 
-.tag-examples-input {
-  min-height: 84px;
-  max-height: 84px;
+.tag-field textarea.tag-examples-input {
+  min-height: 56px;
+  max-height: 56px;
   overflow: auto;
   resize: none;
 }
@@ -258,12 +271,12 @@ body {
   padding: 0.65rem;
   display: grid;
   grid-template-rows: auto 1fr;
-  min-height: 420px;
+  min-height: 380px;
   min-width: 240px;
 }
 
 .tag-pane {
-  min-height: 260px;
+  min-height: 230px;
 }
 
 .pane h2 {
@@ -404,5 +417,12 @@ body {
 
   .tag-details-grid {
     grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
+}
+
+@media (min-width: 901px) {
+  .tag-details {
+    height: 96px;
+    overflow: hidden;
   }
 }

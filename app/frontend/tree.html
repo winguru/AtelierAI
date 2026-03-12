@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Concept Prototype</title>
+  <link rel="stylesheet" href="/frontend/css/tree.css">
+</head>
+<body>
+  <main class="concept-page">
+    <header class="concept-header">
+      <h1>Concept Hierarchy Prototype</h1>
+      <p>Prototype mode: shared scope controls, 4 tag source panes, and 4 concept panes.</p>
+    </header>
+
+    <section class="scope-controls-wrap" aria-label="Tag scope controls">
+      <div class="tag-filter-title">Scope</div>
+      <div id="scope-controls" class="tag-filter-row"></div>
+    </section>
+
+    <section id="tag-board" class="tag-board" aria-label="Tag source panes"></section>
+
+    <section id="tag-details" class="tag-details" aria-label="Selected tag details"></section>
+
+    <section id="concept-board" class="concept-board" aria-label="Concept panes"></section>
+
+    <section class="trash-zone-wrap" aria-label="Concept deletion">
+      <div id="concept-trash" class="concept-trash" title="Drop concept here to delete it and all descendants">
+        <span class="trash-icon" aria-hidden="true">🗑</span>
+        <span>Drop Here To Delete Concept Branch</span>
+      </div>
+    </section>
+
+    <footer class="concept-footer">
+      <span>Prototype mode: in-memory only (no database writes).</span>
+    </footer>
+  </main>
+
+  <script src="/frontend/js/tree.js" defer></script>
+</body>
+</html>

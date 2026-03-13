@@ -515,12 +515,15 @@ class CivitaiAPI:
     # ===== Helper Methods =====
 
     def _is_image_list(self, obj: List) -> bool:
-        """Check if a list contains image objects."""
+        """Check if a list contains gallery media objects from image.getInfinite."""
         return (
             len(obj) > 0
             and isinstance(obj[0], dict)
             and "id" in obj[0]
-            and obj[0].get("type") == "image"
+            and (
+                obj[0].get("type") in {"image", "video"}
+                or bool(obj[0].get("url"))
+            )
         )
 
     def _search_list(self, obj: List, depth: int) -> Optional[List]:

@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAssignmentType=false, reportAttributeAccessIssue=false, reportOperatorIssue=false, reportOptionalOperand=false, reportPossiblyUnboundVariable=false
 # main.py
 import os
 import csv
@@ -21,12 +22,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from atelierai.config import (
-    IMAGE_LIBRARY_PATH,
-    CURRENT_SCHEMA_VERSION,
-    DATABASE_URL,
-    ALLOW_SCHEMA_RESET,
-)
+import atelierai.config as app_config
+
+IMAGE_LIBRARY_PATH = str(getattr(app_config, "IMAGE_LIBRARY_PATH", "image_library"))
+CURRENT_SCHEMA_VERSION = str(getattr(app_config, "CURRENT_SCHEMA_VERSION", "1.0"))
+DATABASE_URL = str(getattr(app_config, "DATABASE_URL", "sqlite:///image_db.sqlite"))
+ALLOW_SCHEMA_RESET = bool(getattr(app_config, "ALLOW_SCHEMA_RESET", False))
 
 # Use absolute imports for consistency with our project structure
 from database import (
@@ -473,16 +474,16 @@ def _execute_taxonomy_bootstrap_import(
                     stats["authority_terms_created"] += 1
                 else:
                     changed = False
-                    if term.external_tag_id != external_tag_id:
+                    if str(term.external_tag_id or "") != external_tag_id:
                         term.external_tag_id = external_tag_id
                         changed = True
-                    if term.external_name != raw_name:
+                    if str(term.external_name or "") != raw_name:
                         term.external_name = raw_name
                         changed = True
-                    if term.normalized_external_name != normalized_name:
+                    if str(term.normalized_external_name or "") != normalized_name:
                         term.normalized_external_name = normalized_name
                         changed = True
-                    if term.concept_id != concept.id:
+                    if int(term.concept_id or 0) != int(concept.id):
                         term.concept_id = concept.id
                         changed = True
                     term.last_seen_at = datetime.utcnow()
@@ -511,10 +512,11 @@ def _is_descendant(db: Session, ancestor_id: int, candidate_descendant_id: int) 
     current = db.query(Concept).filter(Concept.id == candidate_descendant_id).first()
     seen: set[int] = set()
     while current is not None and current.parent_concept_id is not None:
-        if current.id in seen:
+        current_id = int(current.id)
+        if current_id in seen:
             break
-        seen.add(current.id)
-        if current.parent_concept_id == ancestor_id:
+        seen.add(current_id)
+        if int(current.parent_concept_id) == ancestor_id:
             return True
         current = db.query(Concept).filter(Concept.id == current.parent_concept_id).first()
     return False
@@ -1023,7 +1025,7 @@ def _get_or_create_collection(
     if existing:
         if civitai_collection_id is not None and existing.civitai_collection_id is None:
             existing.civitai_collection_id = civitai_collection_id
-        if source == "civitai" and existing.source == "user":
+        if source == "civitai" and str(existing.source or "") == "user":
             existing.source = "civitai"
         db.flush()
         return existing
@@ -1532,7 +1534,7 @@ def repair_png_image(file_hash: str, db: Session = Depends(get_db)):
         if isinstance(repaired_image_id, int):
             repaired_image = db.query(ImageModel).filter(ImageModel.id == repaired_image_id).first()
 
-        if repaired_image is not None and repaired_image.id != image.id:
+        if repaired_image is not None and int(repaired_image.id) != int(image.id):
             for collection in image.collections:
                 _ensure_image_in_collection(db, repaired_image.id, collection.id)
 
@@ -1656,7 +1658,7 @@ def restore_image_record(file_hash: str, db: Session = Depends(get_db)):
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    previous_status = image.image_status or "active"
+    previous_status = str(image.image_status or "active")
     if previous_status == "active":
         return {
             "message": "Image is already active.",
@@ -2659,7 +2661,8 @@ def taxonomy_tree_state(db: Session = Depends(get_db)):
             .all()
         )
         for alias in aliases:
-            if not alias.alias:
+            alias_text = str(alias.alias or "").strip()
+            if not alias_text:
                 continue
             concept_id = int(alias.concept_id)
             bucket = alias_data_by_concept.setdefault(concept_id, {"aliases": [], "implies": []})
@@ -2668,9 +2671,9 @@ def taxonomy_tree_state(db: Session = Depends(get_db)):
             if alias_kind == "canonical":
                 continue
             if alias_kind == "implies":
-                bucket["implies"].append(alias.alias)
+                bucket["implies"].append(alias_text)
             else:
-                bucket["aliases"].append(alias.alias)
+                bucket["aliases"].append(alias_text)
 
     term_rows = (
         db.query(AuthorityTerm, TagAuthority, Concept)

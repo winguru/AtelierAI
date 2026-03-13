@@ -12,6 +12,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Fine-tuning offset for near-equal pane heights in this environment.
     // If this causes overfitting across devices/zoom/font settings, set to 0.
     const PANE_HEIGHT_CALIBRATION_PX = 2;
+    const VIDEO_POSTER_CAPTURE_CONCURRENCY = 1;
+    const VIDEO_POSTER_CAPTURE_TIMEOUT_MS = 8000;
 
     function readStoredBool(key, fallback) {
         try {
@@ -99,6 +101,12 @@ document.addEventListener('DOMContentLoaded', () => {
         thumbSize: readStoredNumber(STORAGE_KEYS.thumbSize, 165, 120, 260),
         sortOrder: readStoredString(STORAGE_KEYS.sortOrder, 'first_added', ['first_added', 'last_added']),
         treeTagFilter: null,
+        runtimeWarnings: [],
+        mediaCapabilities: null,
+        videoPosterCache: new Map(),
+        videoPosterInflight: new Map(),
+        videoPosterQueue: [],
+        videoPosterActiveCaptures: 0,
     };
 
     const artistDatalist = document.getElementById('artist-suggestions');
@@ -106,6 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const appShell = document.querySelector('.app-shell');
     const galleryPane = document.querySelector('.gallery-pane');
     const galleryToolbar = document.querySelector('.gallery-toolbar');
+    const runtimeWarningBanner = document.getElementById('runtime-warning-banner');
     const galleryFooter = document.querySelector('.gallery-footer');
     const galleryGrid = document.getElementById('gallery-grid');
     const galleryStatus = document.getElementById('gallery-status');
@@ -247,6 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let heightSyncRaf = 0;
     let lastSyncedGalleryHeight = -1;
     let searchDebounceTimer = null;
+    let posterCaptureObserver = null;
 
     function syncLayoutMode() {
         appShell.classList.toggle('debug-on', state.debugVisible);
@@ -320,6 +330,38 @@ document.addEventListener('DOMContentLoaded', () => {
             return fallback;
         }
         return String(value);
+    }
+
+    function renderRuntimeWarnings() {
+        if (!runtimeWarningBanner) {
+            return;
+        }
+
+        const warnings = Array.isArray(state.runtimeWarnings)
+            ? state.runtimeWarnings.filter((message) => typeof message === 'string' && message.trim())
+            : [];
+
+        runtimeWarningBanner.innerHTML = '';
+        if (!warnings.length) {
+            runtimeWarningBanner.classList.add('hidden');
+            return;
+        }
+
+        const title = document.createElement('p');
+        title.className = 'runtime-warning-title';
+        title.textContent = 'Runtime Warnings';
+
+        const list = document.createElement('ul');
+        list.className = 'runtime-warning-list';
+        warnings.forEach((message) => {
+            const item = document.createElement('li');
+            item.textContent = message;
+            list.appendChild(item);
+        });
+
+        runtimeWarningBanner.appendChild(title);
+        runtimeWarningBanner.appendChild(list);
+        runtimeWarningBanner.classList.remove('hidden');
     }
 
     function normalizeTagName(value) {
@@ -550,6 +592,228 @@ document.addEventListener('DOMContentLoaded', () => {
             video.dataset.previewSrc = src;
         }
         return true;
+    }
+
+    function getVideoPosterCacheKey(image, mediaUrl) {
+        if (image && typeof image.file_hash === 'string' && image.file_hash.trim()) {
+            return `hash:${image.file_hash}`;
+        }
+        return mediaUrl ? `url:${mediaUrl}` : '';
+    }
+
+    function getVideoPosterUrl(image) {
+        const candidates = [
+            image?.video_poster_url,
+            image?.poster_url,
+            image?.preview_image_url,
+            image?.json_metadata?.video_poster_url,
+            image?.json_metadata?.poster_url,
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.trim()) {
+                return candidate;
+            }
+        }
+        return '';
+    }
+
+    function applyTileVideoPoster(tile, video, posterUrl) {
+        if (!(video instanceof HTMLVideoElement)) {
+            return;
+        }
+        if (posterUrl) {
+            video.poster = posterUrl;
+            tile.classList.add('has-poster');
+        } else {
+            video.removeAttribute('poster');
+            tile.classList.remove('has-poster');
+        }
+    }
+
+    function cleanupPosterCaptureVideo(video) {
+        if (!(video instanceof HTMLVideoElement)) {
+            return;
+        }
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+    }
+
+    function captureVideoPosterFromSource(src) {
+        return new Promise((resolve) => {
+            const loader = document.createElement('video');
+            let finished = false;
+            let timeoutId = 0;
+
+            const finalize = (posterUrl) => {
+                if (finished) {
+                    return;
+                }
+                finished = true;
+                if (timeoutId) {
+                    window.clearTimeout(timeoutId);
+                }
+                cleanupPosterCaptureVideo(loader);
+                resolve(posterUrl || null);
+            };
+
+            const captureFrame = () => {
+                const width = loader.videoWidth || 0;
+                const height = loader.videoHeight || 0;
+                if (!width || !height) {
+                    finalize(null);
+                    return;
+                }
+
+                const scale = Math.min(1, 320 / Math.max(width, height));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(width * scale));
+                canvas.height = Math.max(1, Math.round(height * scale));
+                const context = canvas.getContext('2d');
+                if (!context) {
+                    finalize(null);
+                    return;
+                }
+
+                try {
+                    context.drawImage(loader, 0, 0, canvas.width, canvas.height);
+                    finalize(canvas.toDataURL('image/jpeg', 0.82));
+                } catch {
+                    finalize(null);
+                }
+            };
+
+            const onLoadedMetadata = () => {
+                const duration = Number.isFinite(loader.duration) ? loader.duration : 0;
+                const targetTime = duration > 0.18 ? Math.min(0.15, duration / 3) : 0;
+                if (targetTime > 0) {
+                    loader.addEventListener('seeked', captureFrame, { once: true });
+                    try {
+                        loader.currentTime = targetTime;
+                        return;
+                    } catch {
+                        // Fall through to loadeddata capture.
+                    }
+                }
+
+                if (loader.readyState >= 2) {
+                    captureFrame();
+                } else {
+                    loader.addEventListener('loadeddata', captureFrame, { once: true });
+                }
+            };
+
+            loader.muted = true;
+            loader.preload = 'metadata';
+            loader.playsInline = true;
+            loader.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+            loader.addEventListener('error', () => finalize(null), { once: true });
+            timeoutId = window.setTimeout(() => finalize(null), VIDEO_POSTER_CAPTURE_TIMEOUT_MS);
+            loader.src = src;
+            loader.load();
+        });
+    }
+
+    function pumpVideoPosterQueue() {
+        while (
+            state.videoPosterActiveCaptures < VIDEO_POSTER_CAPTURE_CONCURRENCY
+            && state.videoPosterQueue.length
+        ) {
+            const job = state.videoPosterQueue.shift();
+            if (!job) {
+                return;
+            }
+
+            state.videoPosterActiveCaptures += 1;
+            captureVideoPosterFromSource(job.mediaUrl)
+                .then((posterUrl) => {
+                    state.videoPosterCache.set(job.cacheKey, posterUrl || null);
+                    const callbacks = state.videoPosterInflight.get(job.cacheKey) || [];
+                    state.videoPosterInflight.delete(job.cacheKey);
+                    callbacks.forEach((callback) => callback(posterUrl || ''));
+                })
+                .finally(() => {
+                    state.videoPosterActiveCaptures = Math.max(0, state.videoPosterActiveCaptures - 1);
+                    pumpVideoPosterQueue();
+                });
+        }
+    }
+
+    function requestVideoPoster(image, mediaUrl, onReady) {
+        const cacheKey = getVideoPosterCacheKey(image, mediaUrl);
+        if (!cacheKey || !mediaUrl) {
+            onReady('');
+            return;
+        }
+
+        const directPosterUrl = getVideoPosterUrl(image);
+        if (directPosterUrl) {
+            state.videoPosterCache.set(cacheKey, directPosterUrl);
+            onReady(directPosterUrl);
+            return;
+        }
+
+        if (state.videoPosterCache.has(cacheKey)) {
+            onReady(state.videoPosterCache.get(cacheKey) || '');
+            return;
+        }
+
+        const inflight = state.videoPosterInflight.get(cacheKey);
+        if (inflight) {
+            inflight.push(onReady);
+            return;
+        }
+
+        state.videoPosterInflight.set(cacheKey, [onReady]);
+        state.videoPosterQueue.push({ cacheKey, mediaUrl });
+        pumpVideoPosterQueue();
+    }
+
+    function ensurePosterCaptureObserver() {
+        if (posterCaptureObserver || !(galleryGrid instanceof HTMLElement)) {
+            return;
+        }
+
+        posterCaptureObserver = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (!entry.isIntersecting) {
+                    return;
+                }
+
+                posterCaptureObserver.unobserve(entry.target);
+                const tile = entry.target;
+                const image = tile.__posterImage;
+                const video = tile.__posterVideo;
+                const mediaUrl = tile.__posterMediaUrl;
+
+                if (!(video instanceof HTMLVideoElement) || !image || !mediaUrl) {
+                    return;
+                }
+
+                requestVideoPoster(image, mediaUrl, (posterUrl) => {
+                    if (!tile.isConnected || tile.__posterVideo !== video) {
+                        return;
+                    }
+                    applyTileVideoPoster(tile, video, posterUrl);
+                });
+            });
+        }, {
+            root: galleryGrid,
+            rootMargin: '220px 0px',
+            threshold: 0.01,
+        });
+    }
+
+    function observeTileForPosterCapture(tile, image, video, mediaUrl) {
+        ensurePosterCaptureObserver();
+        if (!posterCaptureObserver) {
+            return;
+        }
+
+        tile.__posterImage = image;
+        tile.__posterVideo = video;
+        tile.__posterMediaUrl = mediaUrl;
+        posterCaptureObserver.observe(tile);
     }
 
     function startTileVideoPreview(tile, video, src) {
@@ -1011,6 +1275,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const count = Number(result.count) || 0;
         const latestId = Number(result.latest_id) || 0;
         state.totalImageCount = count;
+        state.runtimeWarnings = Array.isArray(result.warnings) ? result.warnings : [];
+        state.mediaCapabilities = result.capabilities && typeof result.capabilities === 'object'
+            ? result.capabilities
+            : null;
+        renderRuntimeWarnings();
         return `${count}:${latestId}`;
     }
 
@@ -1862,6 +2131,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 tile.addEventListener('pointerleave', endPreview);
                 tile.addEventListener('focus', beginPreview);
                 tile.addEventListener('blur', endPreview);
+
+                const directPosterUrl = getVideoPosterUrl(image);
+                if (directPosterUrl) {
+                    applyTileVideoPoster(tile, video, directPosterUrl);
+                } else {
+                    applyTileVideoPoster(tile, video, '');
+                    observeTileForPosterCapture(tile, image, video, mediaUrl);
+                }
 
                 mediaNode = video;
                 tile.appendChild(placeholder);

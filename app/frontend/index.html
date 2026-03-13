@@ -15,7 +15,12 @@
             </div>
             <div class="header-actions">
                 <button id="refresh-btn" class="btn ghost" type="button">Refresh</button>
+                <label class="toggle-wrap header-toggle-wrap" for="auto-refresh-toggle">
+                    <input id="auto-refresh-toggle" type="checkbox" checked>
+                    <span>Auto-refresh</span>
+                </label>
                 <button id="scan-btn" class="btn solid" type="button">Rescan Library</button>
+                <button id="purge-deleted-btn" class="btn ghost" type="button" title="Purge deleted files from disk">&#128465;</button>
             </div>
         </header>
 
@@ -33,6 +38,14 @@
                             <span>Debug</span>
                         </label>
                         <span id="image-count" class="count-pill">0 images</span>
+                    </div>
+
+                    <div id="tree-tag-filter-indicator" class="toolbar-row tree-tag-filter-row hidden" aria-live="polite">
+                        <span class="tree-tag-filter-label">Tag Filter:</span>
+                        <span id="tree-tag-filter-chip" class="tree-tag-filter-chip">
+                            <span id="tree-tag-filter-text"></span>
+                            <button id="tree-tag-filter-clear" class="tree-tag-filter-remove" type="button" aria-label="Clear tree tag filter">x</button>
+                        </span>
                     </div>
 
                     <div class="toolbar-row toolbar-row-secondary">
@@ -55,6 +68,7 @@
                         </label>
                     </div>
                 </div>
+                <div id="runtime-warning-banner" class="runtime-warning-banner hidden" aria-live="polite"></div>
                 <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
                 <div class="gallery-footer">
                     <button id="load-more-btn" class="btn ghost hidden" type="button">Load More</button>
@@ -79,8 +93,14 @@
                         <dl id="debug-fields" class="debug-fields"></dl>
                     </section>
                     <div class="detail-header">
-                        <h2 id="detail-title">Untitled</h2>
-                        <p id="detail-subtitle"></p>
+                        <div class="detail-header-main">
+                            <h2 id="detail-title">Untitled</h2>
+                            <p id="detail-subtitle"></p>
+                        </div>
+                        <div class="detail-header-actions">
+                            <button id="repair-image-btn" class="btn ghost btn-sm" type="button" title="Repair PNG">&#128295;</button>
+                            <button id="delete-image-file-btn" class="btn ghost btn-sm" type="button" title="Delete image file and sidecar">Delete File</button>
+                        </div>
                     </div>
                     <div id="detail-meta" class="meta-grid"></div>
                     <section class="detail-block collections-block">
@@ -161,16 +181,210 @@
                         >
                     </label>
                     <label>
-                        Limit (optional, collection only)
+                        Limit (optional, collection or sync only)
                         <input type="number" id="import-limit" name="limit" min="1" step="1" placeholder="All images">
                     </label>
-                    <button id="import-submit" class="btn solid" type="submit">Import</button>
+                    <div class="preset-wrap">
+                        <button id="import-submit" class="btn solid" type="submit">Import</button>
+                        <button id="sync-civitai-collections-btn" class="btn ghost" type="button">Sync My CivitAI Collections</button>
+                    </div>
                 </form>
-                <pre id="upload-output" class="status-output"></pre>
                 <pre id="import-output" class="status-output"></pre>
+            </details>
+        </section>
+
+        <section class="control-drawer">
+            <details>
+                <summary>Utilities</summary>
+                <p id="utilities-status-badge" class="count-pill">Deleted: 0 | Tombstoned: 0</p>
+                <form id="utilities-form" class="import-form">
+                    <label>
+                        Inactive Status Filter
+                        <select id="inactive-status-filter">
+                            <option value="all">Deleted + Tombstoned</option>
+                            <option value="deleted">Deleted Only</option>
+                            <option value="tombstoned">Tombstoned Only</option>
+                        </select>
+                    </label>
+                    <button id="refresh-inactive-list-btn" class="btn ghost" type="button">Refresh Inactive List</button>
+                </form>
+                <div id="inactive-images-list" class="inactive-images-list"></div>
+                <pre id="upload-output" class="status-output"></pre>
+                <pre id="utilities-output" class="status-output"></pre>
                 <pre id="scan-output" class="status-output"></pre>
             </details>
         </section>
+
+        <section class="control-drawer">
+            <details>
+                <summary>Taxonomy Admin</summary>
+                <p id="taxonomy-summary-badge" class="count-pill">Concepts: 0 | Terms: 0 | Unresolved: 0</p>
+                <div class="taxonomy-admin-grid">
+                    <button id="taxonomy-refresh-btn" class="btn ghost" type="button">Refresh Taxonomy</button>
+                    <label class="toggle-wrap" for="taxonomy-merge-dry-run">
+                        <input id="taxonomy-merge-dry-run" type="checkbox" checked>
+                        <span>Merge Dry Run</span>
+                    </label>
+                    <label class="toggle-wrap" for="taxonomy-parent-dry-run">
+                        <input id="taxonomy-parent-dry-run" type="checkbox" checked>
+                        <span>Parent Move Dry Run</span>
+                    </label>
+                </div>
+
+                <form id="taxonomy-bootstrap-form" class="import-form">
+                    <label>
+                        Bootstrap Authority
+                        <select id="taxonomy-bootstrap-authority">
+                            <option value="user">user</option>
+                            <option value="civitai">civitai</option>
+                            <option value="danbooru">danbooru</option>
+                        </select>
+                    </label>
+                    <label>
+                        Bootstrap Format
+                        <select id="taxonomy-bootstrap-format">
+                            <option value="json">json</option>
+                            <option value="csv">csv</option>
+                        </select>
+                    </label>
+                    <label class="toggle-wrap" for="taxonomy-bootstrap-dry-run">
+                        <input id="taxonomy-bootstrap-dry-run" type="checkbox" checked>
+                        <span>Bootstrap Dry Run</span>
+                    </label>
+                    <label style="grid-column: 1 / -1;">
+                        Bootstrap Data (JSON list/object with terms, or CSV with `name,external_tag_id,concept_name`)
+                        <textarea id="taxonomy-bootstrap-raw" rows="7" placeholder='[{"name":"beach"},{"name":"two-piece","concept_name":"bikini"}]'></textarea>
+                    </label>
+                    <label style="grid-column: 1 / -1;">
+                        Bootstrap File (recommended for large imports)
+                        <input id="taxonomy-bootstrap-file" type="file" accept=".json,.csv,text/csv,application/json,text/plain">
+                    </label>
+                    <div id="taxonomy-bootstrap-dropzone" class="taxonomy-bootstrap-dropzone" style="grid-column: 1 / -1;">
+                        Drag and drop a `.json` or `.csv` bootstrap file here, or use the file picker above.
+                    </div>
+                    <button id="taxonomy-bootstrap-submit" class="btn ghost" type="submit">Import Bootstrap Terms</button>
+                </form>
+
+                <form id="taxonomy-concept-search-form" class="import-form">
+                    <label>
+                        Concept Search
+                        <input id="taxonomy-concept-query" type="text" placeholder="Search canonical concept names">
+                    </label>
+                    <button id="taxonomy-concept-search-btn" class="btn ghost" type="submit">Search Concepts</button>
+                </form>
+
+                <div id="taxonomy-concepts-list" class="inactive-images-list"></div>
+
+                <form id="taxonomy-alias-form" class="import-form">
+                    <label>
+                        Concept ID
+                        <input id="taxonomy-alias-concept-id" type="number" min="1" step="1" placeholder="e.g. 1482" required>
+                    </label>
+                    <label>
+                        Alias
+                        <input id="taxonomy-alias-value" type="text" placeholder="e.g. two-piece" required>
+                    </label>
+                    <label>
+                        Alias Type
+                        <input id="taxonomy-alias-type" type="text" value="synonym">
+                    </label>
+                    <label>
+                        Authority (optional)
+                        <input id="taxonomy-alias-authority" type="text" placeholder="user / civitai / danbooru">
+                    </label>
+                    <button id="taxonomy-alias-submit" class="btn ghost" type="submit">Add Alias</button>
+                </form>
+
+                <form id="taxonomy-create-concept-form" class="import-form">
+                    <label>
+                        New Concept
+                        <input id="taxonomy-new-concept-name" type="text" placeholder="e.g. location" required>
+                    </label>
+                    <label>
+                        Parent Concept ID (optional)
+                        <input id="taxonomy-new-concept-parent-id" type="number" min="1" step="1" placeholder="e.g. 14">
+                    </label>
+                    <button id="taxonomy-create-concept-submit" class="btn ghost" type="submit">Create Concept</button>
+                </form>
+
+                <form id="taxonomy-merge-form" class="import-form">
+                    <label>
+                        Source Concept ID
+                        <input id="taxonomy-merge-source-id" type="number" min="1" step="1" required>
+                    </label>
+                    <label>
+                        Target Concept ID
+                        <input id="taxonomy-merge-target-id" type="number" min="1" step="1" required>
+                    </label>
+                    <button id="taxonomy-merge-submit" class="btn solid" type="submit">Run Merge</button>
+                </form>
+
+                <h4>Potential Duplicates</h4>
+                <div id="taxonomy-duplicates-list" class="inactive-images-list"></div>
+
+                <h4>Taxonomy Tree</h4>
+                <p class="taxonomy-shortcuts-help">
+                    Shortcuts:
+                    <span class="kbd">Alt</span> while dropping a node commits the move immediately (overrides dry-run).
+                    Without <span class="kbd">Alt</span>, drop follows the "Parent Move Dry Run" toggle.
+                </p>
+                <div class="taxonomy-admin-grid">
+                    <button id="taxonomy-tree-expand-all" class="btn ghost btn-sm" type="button">Expand All</button>
+                    <button id="taxonomy-tree-collapse-all" class="btn ghost btn-sm" type="button">Collapse All</button>
+                </div>
+                <form id="taxonomy-parent-form" class="import-form">
+                    <label>
+                        Concept ID
+                        <input id="taxonomy-parent-concept-id" type="number" min="1" step="1" required>
+                    </label>
+                    <label>
+                        New Parent ID (blank for root)
+                        <input id="taxonomy-parent-new-parent-id" type="number" min="1" step="1" placeholder="root if blank">
+                    </label>
+                    <button id="taxonomy-parent-submit" class="btn ghost" type="submit">Update Parent</button>
+                </form>
+                <form id="taxonomy-concept-update-form" class="import-form">
+                    <label>
+                        Concept ID
+                        <input id="taxonomy-update-concept-id" type="number" min="1" step="1" required>
+                    </label>
+                    <label>
+                        Canonical Name (optional)
+                        <input id="taxonomy-update-canonical-name" type="text" placeholder="leave unchanged if empty">
+                    </label>
+                    <label style="grid-column: 1 / -1;">
+                        Concept Description
+                        <textarea id="taxonomy-update-description" rows="4" placeholder="Brief concept description for curation context"></textarea>
+                    </label>
+                    <button id="taxonomy-update-concept-submit" class="btn ghost" type="submit">Update Concept</button>
+                </form>
+                <p class="inactive-image-sub">Drag a concept node onto another node to set parent. Drag onto "Drop Here For Root" to move to top-level.</p>
+                <div id="taxonomy-tree-root-drop" class="taxonomy-root-drop" draggable="false">Drop Here For Root</div>
+                <div id="taxonomy-tree" class="taxonomy-tree"></div>
+                <pre id="taxonomy-output" class="status-output"></pre>
+            </details>
+        </section>
+
+        <section class="control-drawer">
+            <details>
+                <summary>Tree Tag Concepts</summary>
+                <p class="inactive-image-sub">When scope is set to <strong>Image</strong>, tags are filtered to the currently selected gallery image.</p>
+                <iframe
+                    id="tree-embed-frame"
+                    class="tree-embed-frame"
+                    src="/tree"
+                    title="Tree Tag Concept Manager"
+                    loading="lazy"
+                ></iframe>
+            </details>
+        </section>
+    </div>
+
+    <div id="fullscreen-preview" class="fullscreen-preview hidden" aria-hidden="true">
+        <button id="fullscreen-loop-btn" class="fullscreen-loop-btn" type="button" aria-pressed="true">Loop: On</button>
+        <button id="fullscreen-close-btn" class="fullscreen-close-btn" type="button" aria-label="Close fullscreen preview">X</button>
+        <img id="fullscreen-image" class="fullscreen-media hidden" alt="Fullscreen preview">
+        <video id="fullscreen-video" class="fullscreen-media hidden" controls playsinline preload="metadata"></video>
     </div>
 
     <script src="/frontend/js/main.js"></script>

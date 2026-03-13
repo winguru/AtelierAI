@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
-from typing import List, Optional, Literal
+from typing import Any, List, Optional, Literal
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
@@ -56,7 +56,7 @@ from models import (
 
 from image_collection import ImageCollection
 from image_data import ImageData
-from image_processor import ImageProcessor, is_exiftool_available
+from image_processor import ImageProcessor, is_exiftool_available, is_ffmpeg_available
 from civitai_enrichment import (
     is_civitai_image_url,
     extract_civitai_image_id,
@@ -81,6 +81,10 @@ class ImageUpdateRequest(BaseModel):
 class CivitaiImportRequest(BaseModel):
     import_type: Literal["collection", "image"]
     value: str
+    limit: Optional[int] = None
+
+
+class CivitaiCollectionSyncRequest(BaseModel):
     limit: Optional[int] = None
 
 
@@ -117,6 +121,10 @@ class TaxonomyConceptCreateRequest(BaseModel):
     canonical_name: str
     parent_concept_id: Optional[int] = None
     description: Optional[str] = None
+
+
+class TaxonomyPurgeRootsRequest(BaseModel):
+    dry_run: bool = True
 
 
 class TaxonomyConceptUpdateRequest(BaseModel):
@@ -239,6 +247,123 @@ def _normalize_taxonomy_text(value: str) -> str:
     normalized = (value or "").strip().replace("_", " ").lower()
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
+
+
+def _normalize_gallery_tag_text(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _add_gallery_tag_name(bucket: set[str], value: Any) -> None:
+    normalized = _normalize_gallery_tag_text(str(value or ""))
+    if normalized:
+        bucket.add(normalized)
+
+
+def _add_gallery_tag_collection(bucket: set[str], value: Any) -> None:
+    if value is None:
+        return
+
+    if isinstance(value, str):
+        _add_gallery_tag_name(bucket, value)
+        return
+
+    if isinstance(value, dict):
+        if isinstance(value.get("name"), str):
+            _add_gallery_tag_name(bucket, value.get("name"))
+        if isinstance(value.get("tag"), str):
+            _add_gallery_tag_name(bucket, value.get("tag"))
+        if isinstance(value.get("label"), str):
+            _add_gallery_tag_name(bucket, value.get("label"))
+        return
+
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _add_gallery_tag_collection(bucket, item)
+
+
+def _extract_image_scope_tag_names(payload: dict[str, Any]) -> dict[str, set[str]]:
+    by_source: dict[str, set[str]] = {
+        "civitai": set(),
+        "danbooru": set(),
+        "prompt": set(),
+        "user": set(),
+    }
+
+    civitai = payload.get("civitai_data") or payload.get("civitai") or {}
+    if not isinstance(civitai, dict):
+        civitai = {}
+    _add_gallery_tag_collection(by_source["civitai"], civitai.get("tags"))
+    meta = civitai.get("meta") if isinstance(civitai.get("meta"), dict) else {}
+    image = civitai.get("image") if isinstance(civitai.get("image"), dict) else {}
+    _add_gallery_tag_collection(by_source["civitai"], meta.get("tags"))
+    _add_gallery_tag_collection(by_source["civitai"], image.get("tags"))
+
+    exif = payload.get("exif_data") if isinstance(payload.get("exif_data"), dict) else {}
+    _add_gallery_tag_collection(by_source["prompt"], payload.get("prompt_tags"))
+    _add_gallery_tag_collection(by_source["prompt"], exif.get("prompt_tags"))
+    _add_gallery_tag_collection(by_source["prompt"], exif.get("prompt"))
+    _add_gallery_tag_collection(by_source["danbooru"], payload.get("danbooru_tags"))
+    _add_gallery_tag_collection(by_source["danbooru"], exif.get("danbooru_tags"))
+    _add_gallery_tag_collection(by_source["danbooru"], exif.get("danbooru"))
+    _add_gallery_tag_collection(by_source["user"], payload.get("user_tags"))
+    _add_gallery_tag_collection(by_source["user"], exif.get("user_tags"))
+
+    raw_tags = payload.get("tags")
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            if isinstance(tag, str):
+                _add_gallery_tag_name(by_source["user"], tag)
+                continue
+            if not isinstance(tag, dict):
+                continue
+
+            name = tag.get("name") or tag.get("tag") or tag.get("label")
+            if not isinstance(name, str):
+                continue
+
+            source = _normalize_taxonomy_text(str(tag.get("source") or "user")) or "user"
+            if source not in by_source:
+                source = "user"
+            _add_gallery_tag_name(by_source[source], name)
+
+    return by_source
+
+
+def _load_image_sidecar_payload(image: ImageModel) -> dict[str, Any]:
+    sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
+    if not sidecar_path.exists():
+        return {}
+
+    try:
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _gallery_tag_names_by_source(db: Session) -> dict[str, list[str]]:
+    by_source: dict[str, set[str]] = {
+        "civitai": set(),
+        "danbooru": set(),
+        "prompt": set(),
+        "user": set(),
+    }
+
+    images = db.query(ImageModel).filter(_active_image_filter()).all()
+    for image in images:
+        merged_payload = {
+            **ImageData.from_db_record(image).to_dict(),
+            **_load_image_sidecar_payload(image),
+        }
+        extracted = _extract_image_scope_tag_names(merged_payload)
+        for source, names in extracted.items():
+            by_source[source].update(names)
+
+    return {
+        source: sorted(names)
+        for source, names in by_source.items()
+    }
 
 
 def _duplicate_key(value: str) -> str:
@@ -818,7 +943,20 @@ def _get_runtime_warnings() -> list[str]:
         warnings.append(
             "exiftool is not installed or not on PATH. Video metadata extraction is limited; imports still continue."
         )
+    if not is_ffmpeg_available():
+        warnings.append(
+            "ffmpeg is not installed or not on PATH. Server-generated video posters are unavailable, so the gallery falls back to browser-generated static posters plus hover preview. Install ffmpeg to improve video thumbnail support; on macOS with Homebrew, run 'brew install ffmpeg'."
+        )
     return warnings
+
+
+def _get_media_capabilities() -> dict[str, Any]:
+    ffmpeg_available = is_ffmpeg_available()
+    return {
+        "exiftool_available": is_exiftool_available(),
+        "ffmpeg_available": ffmpeg_available,
+        "video_poster_mode": "server" if ffmpeg_available else "browser-fallback",
+    }
 
 
 def _find_existing_image_by_source_url(db: Session, source_url: str) -> Optional[ImageModel]:
@@ -982,6 +1120,15 @@ def _normalize_collection_name(name: str) -> str:
     return normalized
 
 
+def _collection_name_exists(
+    db: Session, name: str, exclude_collection_id: Optional[int] = None
+) -> bool:
+    query = db.query(CollectionModel).filter(CollectionModel.name == name)
+    if exclude_collection_id is not None:
+        query = query.filter(CollectionModel.id != exclude_collection_id)
+    return query.first() is not None
+
+
 def _serialize_collection(collection: CollectionModel) -> dict:
     return {
         "id": collection.id,
@@ -1014,6 +1161,60 @@ def _fetch_civitai_collection_name(api: CivitaiAPI, civitai_collection_id: int) 
         return fallback
 
 
+def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
+    try:
+        response = api._make_request(
+            endpoint="collection.getAllUser",
+            payload_data={"authed": True},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch CivitAI user collections: {e}",
+        )
+
+    if not isinstance(response, list):
+        raise HTTPException(
+            status_code=502,
+            detail="CivitAI collection listing returned an unexpected response.",
+        )
+
+    collections: list[dict] = []
+    seen_ids: set[int] = set()
+    for row in response:
+        if not isinstance(row, dict):
+            continue
+
+        collection_type = str(row.get("type") or "").strip().lower()
+        if collection_type != "image":
+            continue
+
+        try:
+            collection_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            continue
+
+        if collection_id in seen_ids:
+            continue
+
+        seen_ids.add(collection_id)
+        name = str(row.get("name") or "").strip() or f"CivitAI Collection {collection_id}"
+        collections.append(
+            {
+                "id": collection_id,
+                "name": name,
+                "type": collection_type,
+            }
+        )
+
+    collections.sort(key=lambda item: str(item.get("name") or "").lower())
+    return collections
+
+
+def _build_civitai_image_source_url(image_id: int) -> str:
+    return f"https://civitai.com/images/{image_id}"
+
+
 def _get_or_create_collection(
     db: Session,
     name: str,
@@ -1021,14 +1222,41 @@ def _get_or_create_collection(
     civitai_collection_id: Optional[int] = None,
 ) -> CollectionModel:
     normalized_name = _normalize_collection_name(name)
+
+    if civitai_collection_id is not None:
+        existing_by_remote_id = (
+            db.query(CollectionModel)
+            .filter(CollectionModel.civitai_collection_id == civitai_collection_id)
+            .first()
+        )
+        if existing_by_remote_id is not None:
+            if not _collection_name_exists(
+                db,
+                normalized_name,
+                exclude_collection_id=existing_by_remote_id.id,
+            ):
+                existing_by_remote_id.name = normalized_name
+            if source == "civitai" and str(existing_by_remote_id.source or "") != "civitai":
+                existing_by_remote_id.source = "civitai"
+            db.flush()
+            return existing_by_remote_id
+
     existing = db.query(CollectionModel).filter(CollectionModel.name == normalized_name).first()
     if existing:
         if civitai_collection_id is not None and existing.civitai_collection_id is None:
             existing.civitai_collection_id = civitai_collection_id
+        elif (
+            civitai_collection_id is not None
+            and existing.civitai_collection_id is not None
+            and int(existing.civitai_collection_id) != int(civitai_collection_id)
+        ):
+            normalized_name = f"{normalized_name} (CivitAI {civitai_collection_id})"
+            existing = None
         if source == "civitai" and str(existing.source or "") == "user":
             existing.source = "civitai"
-        db.flush()
-        return existing
+        if existing is not None:
+            db.flush()
+            return existing
 
     created = CollectionModel(
         name=normalized_name,
@@ -1054,6 +1282,118 @@ def _ensure_image_in_collection(db: Session, image_id: int, collection_id: int) 
 
     db.add(ImageCollectionMembership(image_id=image_id, collection_id=collection_id))
     db.flush()
+
+
+def _remove_images_not_in_collection_set(
+    db: Session, collection_id: int, keep_image_ids: set[int]
+) -> int:
+    memberships = (
+        db.query(ImageCollectionMembership)
+        .filter(ImageCollectionMembership.collection_id == collection_id)
+        .all()
+    )
+    removed = 0
+    for membership in memberships:
+        if int(membership.image_id) in keep_image_ids:
+            continue
+        db.delete(membership)
+        removed += 1
+    if removed:
+        db.flush()
+    return removed
+
+
+def _sync_single_civitai_collection(
+    api: CivitaiAPI,
+    scraper: CivitaiPrivateScraper,
+    db: Session,
+    civitai_collection_id: int,
+    civitai_collection_name: str,
+    limit: Optional[int] = None,
+) -> dict:
+    local_collection = _get_or_create_collection(
+        db,
+        name=civitai_collection_name,
+        source="civitai",
+        civitai_collection_id=civitai_collection_id,
+    )
+    _commit_with_lock_retry(
+        db, context=f"Collection sync setup commit for {civitai_collection_id}"
+    )
+
+    collection_items = scraper.fetch_collection_items(
+        collection_id=civitai_collection_id,
+        limit=limit,
+    )
+
+    seen_ids: set[int] = set()
+    image_ids: list[int] = []
+    for item in collection_items:
+        raw_id = item.get("id") if isinstance(item, dict) else None
+        try:
+            image_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+
+        if image_id in seen_ids:
+            continue
+
+        seen_ids.add(image_id)
+        image_ids.append(image_id)
+
+    results: list[dict] = []
+    desired_image_db_ids: set[int] = set()
+    for image_id in image_ids:
+        existing_image = _find_existing_image_by_source_url(
+            db, _build_civitai_image_source_url(image_id)
+        )
+        if existing_image is not None:
+            desired_image_db_ids.add(int(existing_image.id))
+
+        result = _import_single_civitai_image(api, db, image_id)
+        if not result.get("error"):
+            image_db_id = result.get("image_db_id")
+            if isinstance(image_db_id, int):
+                desired_image_db_ids.add(image_db_id)
+                _ensure_image_in_collection(db, image_db_id, local_collection.id)
+            try:
+                _commit_with_lock_retry(db, context=f"Import commit for image {image_id}")
+            except HTTPException as e:
+                result["images_added"] = 0
+                result["images_skipped"] = 0
+                result["images_recovered"] = 0
+                result["json_files_created"] = 0
+                result["image_db_id"] = None
+                result["error"] = str(e.detail)
+        results.append(result)
+
+    memberships_removed = _remove_images_not_in_collection_set(
+        db,
+        local_collection.id,
+        desired_image_db_ids,
+    )
+    _commit_with_lock_retry(
+        db,
+        context=f"Collection membership sync commit for {civitai_collection_id}",
+    )
+
+    return {
+        "civitai_collection_id": civitai_collection_id,
+        "civitai_collection_name": civitai_collection_name,
+        "local_collection": _serialize_collection(local_collection),
+        "requested": len(image_ids),
+        "images_added": sum(int(r.get("images_added", 0)) for r in results),
+        "images_skipped": sum(int(r.get("images_skipped", 0)) for r in results),
+        "images_recovered": sum(int(r.get("images_recovered", 0)) for r in results),
+        "json_files_created": sum(int(r.get("json_files_created", 0)) for r in results),
+        "memberships_removed": memberships_removed,
+        "errors": [
+            f"Image {r.get('image_id')}: {r['error']}"
+            for r in results
+            if r.get("error")
+        ],
+        "results": results,
+    }
 
 
 def create_initial_data():
@@ -1366,6 +1706,8 @@ def read_images_state(db: Session = Depends(get_db)):
     return {
         "count": total_count,
         "latest_id": latest_id,
+        "warnings": _get_runtime_warnings(),
+        "capabilities": _get_media_capabilities(),
     }
 
 
@@ -2048,6 +2390,83 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
     }
 
 
+@app.post("/collections/sync/civitai", response_model=dict)
+def sync_civitai_collections(
+    payload: CivitaiCollectionSyncRequest, db: Session = Depends(get_db)
+):
+    if payload.limit is not None and payload.limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be greater than 0.")
+
+    try:
+        api = CivitaiAPI.get_instance()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"CivitAI API initialization failed: {e}",
+        )
+
+    remote_collections = _fetch_civitai_user_image_collections(api)
+    if not remote_collections:
+        return {
+            "message": "No CivitAI image collections found.",
+            "collections_requested": 0,
+            "collections_synced": 0,
+            "images_added": 0,
+            "images_skipped": 0,
+            "images_recovered": 0,
+            "json_files_created": 0,
+            "memberships_removed": 0,
+            "errors": [],
+            "warnings": _get_runtime_warnings(),
+            "collections": [],
+            "orphaned_local_collections": [],
+        }
+
+    scraper = CivitaiPrivateScraper(auto_authenticate=True)
+    collection_summaries: list[dict] = []
+    for remote in remote_collections:
+        collection_summaries.append(
+            _sync_single_civitai_collection(
+                api=api,
+                scraper=scraper,
+                db=db,
+                civitai_collection_id=int(remote["id"]),
+                civitai_collection_name=str(remote["name"]),
+                limit=payload.limit,
+            )
+        )
+
+    remote_collection_ids = {int(item["id"]) for item in remote_collections}
+    orphaned_local_collections = [
+        _serialize_collection(collection)
+        for collection in db.query(CollectionModel)
+        .filter(CollectionModel.source == "civitai")
+        .order_by(CollectionModel.name.asc())
+        .all()
+        if collection.civitai_collection_id is not None
+        and int(collection.civitai_collection_id) not in remote_collection_ids
+    ]
+
+    return {
+        "message": "CivitAI collection sync complete.",
+        "collections_requested": len(remote_collections),
+        "collections_synced": len(collection_summaries),
+        "images_added": sum(int(item.get("images_added", 0)) for item in collection_summaries),
+        "images_skipped": sum(int(item.get("images_skipped", 0)) for item in collection_summaries),
+        "images_recovered": sum(int(item.get("images_recovered", 0)) for item in collection_summaries),
+        "json_files_created": sum(int(item.get("json_files_created", 0)) for item in collection_summaries),
+        "memberships_removed": sum(int(item.get("memberships_removed", 0)) for item in collection_summaries),
+        "errors": [
+            f"Collection {item.get('civitai_collection_id')}: {error}"
+            for item in collection_summaries
+            for error in item.get("errors", [])
+        ],
+        "warnings": _get_runtime_warnings(),
+        "collections": collection_summaries,
+        "orphaned_local_collections": orphaned_local_collections,
+    }
+
+
 @app.get("/taxonomy/review/summary", response_model=dict)
 def taxonomy_review_summary(db: Session = Depends(get_db)):
     concepts_total = db.query(Concept).count()
@@ -2606,6 +3025,92 @@ def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db
     }
 
 
+@app.post("/taxonomy/utils/purge_root_concepts", response_model=dict)
+def taxonomy_purge_root_concepts(payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)):
+    roots = (
+        db.query(Concept.id, Concept.canonical_name)
+        .filter(Concept.parent_concept_id.is_(None))
+        .order_by(Concept.id.asc())
+        .all()
+    )
+    root_ids = [int(row.id) for row in roots]
+    if not root_ids:
+        return {
+            "message": "No root concepts found.",
+            "dry_run": payload.dry_run,
+            "root_concept_count": 0,
+            "affected_concept_count": 0,
+            "affected_authority_term_count": 0,
+            "affected_alias_count": 0,
+            "affected_observation_count": 0,
+            "deleted_concept_ids": [],
+        }
+
+    to_visit = list(root_ids)
+    branch_ids: set[int] = set()
+    while to_visit:
+        current = to_visit.pop()
+        if current in branch_ids:
+            continue
+        branch_ids.add(current)
+        children = db.query(Concept.id).filter(Concept.parent_concept_id == current).all()
+        to_visit.extend(int(row.id) for row in children)
+
+    branch_id_list = sorted(branch_ids)
+
+    authority_term_count = (
+        db.query(func.count(AuthorityTerm.id))
+        .filter(AuthorityTerm.concept_id.in_(branch_id_list))
+        .scalar()
+        or 0
+    )
+    alias_count = (
+        db.query(func.count(ConceptAlias.id))
+        .filter(ConceptAlias.concept_id.in_(branch_id_list))
+        .scalar()
+        or 0
+    )
+    observation_count = (
+        db.query(func.count(ImageConceptObservation.id))
+        .filter(ImageConceptObservation.concept_id.in_(branch_id_list))
+        .scalar()
+        or 0
+    )
+
+    response = {
+        "message": "Dry-run purge preview." if payload.dry_run else "Root concept branches purged.",
+        "dry_run": payload.dry_run,
+        "root_concept_count": len(root_ids),
+        "affected_concept_count": len(branch_id_list),
+        "affected_authority_term_count": int(authority_term_count),
+        "affected_alias_count": int(alias_count),
+        "affected_observation_count": int(observation_count),
+        "root_concepts": [
+            {"id": int(row.id), "canonical_name": row.canonical_name}
+            for row in roots[:200]
+        ],
+        "deleted_concept_ids": branch_id_list,
+    }
+
+    if payload.dry_run:
+        return response
+
+    db.query(AuthorityTerm).filter(AuthorityTerm.concept_id.in_(branch_id_list)).update(
+        {AuthorityTerm.concept_id: None, AuthorityTerm.updated_at: datetime.utcnow()},
+        synchronize_session=False,
+    )
+    db.query(ImageConceptObservation).filter(
+        ImageConceptObservation.concept_id.in_(branch_id_list)
+    ).delete(synchronize_session=False)
+    db.query(ConceptAlias).filter(ConceptAlias.concept_id.in_(branch_id_list)).delete(
+        synchronize_session=False
+    )
+    db.query(Concept).filter(Concept.id.in_(branch_id_list)).delete(synchronize_session=False)
+    db.commit()
+
+    return response
+
+
 @app.get("/taxonomy/tree", response_model=list[dict])
 def taxonomy_tree(status: str = "active", db: Session = Depends(get_db)):
     query = db.query(Concept)
@@ -2641,6 +3146,11 @@ def taxonomy_tree(status: str = "active", db: Session = Depends(get_db)):
 
 @app.get("/taxonomy/tree/state", response_model=dict)
 def taxonomy_tree_state(db: Session = Depends(get_db)):
+    gallery_tag_names_by_source = _gallery_tag_names_by_source(db)
+    gallery_tag_name_sets_by_source = {
+        source: set(names)
+        for source, names in gallery_tag_names_by_source.items()
+    }
     concepts = (
         db.query(Concept)
         .filter(Concept.status == "active")
@@ -2687,13 +3197,15 @@ def taxonomy_tree_state(db: Session = Depends(get_db)):
     normalized_term_names: set[str] = set()
     referenced_concept_ids: set[int] = set()
     for term, authority, concept in term_rows:
-        normalized_term_name = _normalize_taxonomy_text(term.external_name or "")
-        if normalized_term_name:
-            normalized_term_names.add(normalized_term_name)
+        taxonomy_normalized_term_name = _normalize_taxonomy_text(term.external_name or "")
+        if taxonomy_normalized_term_name:
+            normalized_term_names.add(taxonomy_normalized_term_name)
+        gallery_normalized_term_name = _normalize_gallery_tag_text(term.external_name or "")
 
         source_name = str(authority.name or "user").strip().lower()
         if source_name not in {"civitai", "danbooru", "prompt", "user"}:
             source_name = "user"
+        gallery_scope_names = gallery_tag_name_sets_by_source.get(source_name, set())
 
         if concept is not None:
             referenced_concept_ids.add(int(concept.id))
@@ -2709,7 +3221,11 @@ def taxonomy_tree_state(db: Session = Depends(get_db)):
                 "authority_term_id": int(term.id),
                 "name": term.external_name,
                 "source": source_name,
-                "scope": "image",
+                "scope": (
+                    "gallery"
+                    if gallery_normalized_term_name and gallery_normalized_term_name in gallery_scope_names
+                    else "image"
+                ),
                 "description": concept.description if concept else "",
                 "aliases": concept_alias_data.get("aliases", []),
                 "implies": concept_alias_data.get("implies", []),
@@ -2752,6 +3268,7 @@ def taxonomy_tree_state(db: Session = Depends(get_db)):
             for c in filtered_concepts
         ],
         "tags": tags,
+        "gallery_tag_names_by_source": gallery_tag_names_by_source,
     }
 
 

@@ -36,6 +36,8 @@ UUID_ANYWHERE_RE = re.compile(
 _EXIFTOOL_CHECKED = False
 _EXIFTOOL_AVAILABLE = False
 _EXIFTOOL_WARNED = False
+_FFMPEG_CHECKED = False
+_FFMPEG_AVAILABLE = False
 
 
 def is_exiftool_available() -> bool:
@@ -45,6 +47,15 @@ def is_exiftool_available() -> bool:
         _EXIFTOOL_AVAILABLE = shutil.which("exiftool") is not None
         _EXIFTOOL_CHECKED = True
     return _EXIFTOOL_AVAILABLE
+
+
+def is_ffmpeg_available() -> bool:
+    """Return True when ffmpeg is available in PATH."""
+    global _FFMPEG_CHECKED, _FFMPEG_AVAILABLE
+    if not _FFMPEG_CHECKED:
+        _FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+        _FFMPEG_CHECKED = True
+    return _FFMPEG_AVAILABLE
 
 
 def _warn_exiftool_missing_once() -> None:

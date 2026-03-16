@@ -1170,11 +1170,14 @@ h1 {
 .detail-folder-tabs {
     display: grid;
     grid-template-columns: repeat(13, minmax(0, 1fr));
+    --detail-tab-height: 3.15rem;
     --folder-edge: #d4c1a8;
     --folder-back-top: #d7cbc0;
     --folder-back-bottom: #cab9a9;
+    --folder-back-body: #ac9c88;
     --folder-front-top: #dfd4c8;
     --folder-front-bottom: #d5cab8;
+    --folder-front-body: #eadcc3;
     --folder-front-active-top: #f7efdf;
     --folder-front-active-bottom: #eee1c9;
     gap: 0.3rem;
@@ -1182,6 +1185,28 @@ h1 {
     position: relative;
     isolation: isolate;
     z-index: 2;
+    overflow: visible;
+}
+
+.detail-folder-tabs::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: -1px;
+    /* Start at the back-tab baseline so it reads as body beneath tabs, not between them. */
+    top: calc(var(--detail-tab-height) - 1px);
+    height: 3rem;
+    border: 1px solid var(--folder-edge);
+    border-bottom: none;
+    border-top: none;
+    border-radius: 0;
+    background: linear-gradient(
+        180deg,
+        var(--folder-back-body) 0%,
+        color-mix(in oklab, var(--folder-back-body) 88%, #9a8874) 100%
+    );
+    pointer-events: none;
+    z-index: 1;
 }
 
 .detail-folder-tab {
@@ -1236,8 +1261,15 @@ h1 {
 
 .detail-folder-tab.is-back-row {
     z-index: 2;
-    background: linear-gradient(180deg, var(--folder-back-top) 0%, var(--folder-back-bottom) 100%);
+    transform: translateX(1px);
+    background: linear-gradient(
+        180deg,
+        var(--folder-back-top) 0%,
+        color-mix(in oklab, var(--folder-back-bottom) 82%, #d2c0aa) 46%,
+        var(--folder-back-body) 100%
+    );
     color: color-mix(in oklab, var(--ink-soft) 90%, #5e452f);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
 }
 
 .detail-folder-tab.is-back-row::after {
@@ -1255,16 +1287,34 @@ h1 {
 
 .detail-folder-tab.is-front-row {
     margin-top: -0.82rem;
-    z-index: 5;
+    z-index: 4;
+    background: linear-gradient(
+        180deg,
+        var(--folder-front-top) 0%,
+        color-mix(in oklab, var(--folder-front-bottom) 82%, #d8c7af) 56%,
+        var(--folder-back-body) 100%
+    );
+    box-shadow:
+        0 1px 2px rgba(88, 63, 42, 0.1),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -3px 5px rgba(88, 63, 42, 0.09);
+}
+
+.detail-folder-tab.is-back-row::after {
+    display: none !important;
 }
 
 .detail-folder-tab.is-front-row::after {
     bottom: -1.02rem;
     height: 1.08rem;
+    background: linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--folder-front-bottom) 78%, #d9c7ae) 0%,
+        var(--folder-front-body) 100%
+    );
 }
 
 .detail-folder-tab.is-active {
-    /* background: linear-gradient(180deg, #f4ecdd 0%, #efe3cd 100%); */
     background: linear-gradient(180deg, #f4ecdd 0%, #eadcc3 100%);
     color: var(--ink);
     border-color: #cdb79b;
@@ -1279,14 +1329,13 @@ h1 {
     background: linear-gradient(180deg, #efe3cd 0%, #ebdcc4 100%);
     border-left: none;
     border-right: none;
-    /* widen past tab side borders to plug corner notches */
     left: -2px;
     right: -2px;
 }
 
 .detail-folder-tab.is-back-row.is-active {
     z-index: 4;
-    transform: translateY(-1px);
+    transform: translate(1px, -1px);
 }
 
 .detail-folder-tab.is-front-row.is-active {
@@ -1295,13 +1344,11 @@ h1 {
 }
 
 .detail-folder-tab.is-front-row.is-active::after {
-    /* front row: body margin-top=-1.34rem, translateY=-2px ≈ 1.32rem gap; add small overrun */
     bottom: -1.38rem;
     height: 1.42rem;
 }
 
 .detail-folder-tab.is-back-row.is-active::after {
-    /* back row: front-row margin-top=-0.82rem adds to gap; approx 2.16rem + overrun */
     bottom: -2.22rem;
     height: 2.26rem;
 }
@@ -1316,11 +1363,7 @@ h1 {
     border: 1px solid #d4c1a8;
     border-top: none;
     border-radius: 0 12px 12px 12px;
-    /* background: #eadcc3; */
     background: #eadcc3;
-    /* box-shadow:
-        inset 0 1px 0 #fff6e6,
-        0 1px 0 #c9b08f; */
     margin-top: -1.34rem;
 }
 
@@ -1353,14 +1396,15 @@ h1 {
     top: 0;
     height: 2px;
     pointer-events: none;
+    z-index: 3;
     background: linear-gradient(
         90deg,
-        #d4c1a8 0,
-        #d4c1a8 var(--active-tab-left),
+        var(--folder-front-body) 0,
+        var(--folder-front-body) var(--active-tab-left),
         transparent var(--active-tab-left),
         transparent calc(var(--active-tab-left) + var(--active-tab-width)),
-        #d4c1a8 calc(var(--active-tab-left) + var(--active-tab-width)),
-        #d4c1a8 100%
+        var(--folder-front-body) calc(var(--active-tab-left) + var(--active-tab-width)),
+        var(--folder-front-body) 100%
     );
 }
 

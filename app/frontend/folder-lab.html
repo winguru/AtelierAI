@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Folder Tab Lab</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/folder-tabs.css">
+  <link rel="stylesheet" href="/frontend/css/folder-lab.css">
+</head>
+<body>
+  <main class="lab-page">
+
+    <header class="lab-header">
+      <div>
+        <p class="lab-kicker">Prototype</p>
+        <h1>Folder Tab Lab</h1>
+        <p class="lab-subtitle">Explore the stacked manila-folder tab component across color themes, tab counts, and row configurations. Use the interactive builder to try your own combinations.</p>
+      </div>
+      <div class="global-pref-row" aria-label="Page preferences">
+        <label class="toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="lab-link" href="/">Back to gallery</a>
+      </div>
+    </header>
+
+    <!-- ── Preset Gallery ──────────────────────────────────── -->
+    <p class="section-title">Preset variants</p>
+    <p class="section-desc">Each card uses the same component with different color tokens and tab counts.</p>
+
+    <section id="preset-gallery" class="preset-gallery" aria-label="Preset folder tab variants">
+      <!-- Populated by folder-lab.js -->
+    </section>
+
+    <hr class="lab-divider">
+
+    <!-- ── Interactive Builder ────────────────────────────── -->
+    <p class="section-title">Interactive builder</p>
+    <p class="section-desc">Adjust the controls to build a custom variant. Changes apply on click or automatically as you move the sliders.</p>
+
+    <div class="interactive-section">
+      <p class="builder-section-title">Controls</p>
+      <div class="interactive-section-inner">
+
+        <form id="builder-form" class="builder-controls" autocomplete="off">
+          <div class="control-group">
+            <label for="builder-theme">Color theme</label>
+            <select id="builder-theme" name="theme">
+              <option value="">Manila (default)</option>
+              <option value="slate">Slate</option>
+              <option value="forest">Forest</option>
+              <option value="terracotta">Terracotta</option>
+              <option value="iris">Iris</option>
+            </select>
+          </div>
+
+          <div class="control-group">
+            <label for="builder-back-count">Back-row tab count</label>
+            <div class="range-row">
+              <input id="builder-back-count" name="backCount" type="range" min="0" max="6" value="4" step="1">
+              <span id="back-count-val" class="range-val">4</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label for="builder-front-count">Front-row tab count</label>
+            <div class="range-row">
+              <input id="builder-front-count" name="frontCount" type="range" min="0" max="6" value="0" step="1">
+              <span id="front-count-val" class="range-val">0</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label for="builder-grid-cols">Grid columns</label>
+            <div class="range-row">
+              <input id="builder-grid-cols" name="gridCols" type="range" min="6" max="31" value="13" step="1">
+              <span id="grid-cols-val" class="range-val">13</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label for="builder-tab-offset">Tab offset</label>
+            <div class="range-row">
+              <input id="builder-tab-offset" name="tabOffset" type="range" min="0" max="150" value="20" step="10">
+              <span id="tab-offset-val" class="range-val">20</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label for="builder-tab-gap">Tab gap</label>
+            <div class="range-row">
+              <input id="builder-tab-gap" name="tabGap" type="range" min="-50" max="20" value="5" step="1">
+              <span id="tab-gap-val" class="range-val">5</span>
+            </div>
+          </div>
+
+          <div class="control-group control-toggle-group">
+            <label class="builder-toggle-wrap" for="builder-reposition-tabs">
+              <input id="builder-reposition-tabs" name="repositionTabs" type="checkbox">
+              <span>Enable tab repositioning (move back tabs to front)</span>
+            </label>
+          </div>
+
+          <button type="button" id="rebuild-btn" class="rebuild-btn">Rebuild preview</button>
+        </form>
+
+        <div id="builder-preview" class="builder-preview" aria-live="polite">
+          <!-- Populated by folder-lab.js -->
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/shared/ui-kit.js" defer></script>
+  <script src="/frontend/js/shared/folder-tabs.js" defer></script>
+  <script src="/frontend/js/folder-lab.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,411 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   folder-tabs.css — Reusable stacked manila-folder tab component
+   ─────────────────────────────────────────────────────────────────────────────
+
+   Classes:
+     .ftabs-stack            — grid container (the whole two-row tab area)
+     .ftab                   — individual tab button
+     .ftab.is-back-row       — tabs visible "behind" the front row
+     .ftab.is-front-row      — tabs visible in front, overlapping the back strip
+     .ftab.is-active         — currently selected tab
+     .ftab-body              — content area below the tab rows
+
+    Color theming via data-theme attribute on .ftabs-workspace:
+     (none / "manila")       — default beige/manila ivory
+     "slate"                 — cool blue-grey
+     "forest"                — muted green
+     "terracotta"            — warm rust/orange
+
+    CSS custom properties (all defined on .ftabs-workspace):
+     --ftab-height           tab minimum height (also used for grid/strip geometry)
+     --ftab-grid-cols        number of grid columns
+     --ftab-back-strip-h     height of the back-folder body strip
+     --ftab-edge             border / edge color
+     --ftab-back-top/bottom/body
+     --ftab-front-top/bottom/body
+     --ftab-active-top/bottom/border
+     --ftab-active-left      (set dynamically by JS) seam-cover active-tab left%
+     --ftab-active-width     (set dynamically by JS) seam-cover active-tab width%
+
+   Per-tab positioning (set as inline styles by JS or CSS nth-child rules):
+    --tab-column            current tab index within its row (1-based)
+     --tab-col-start         grid column start (1-based)
+     --tab-col-span          number of columns to span (default 3)
+     --tab-row               grid row (1 = back, 2 = front)
+     --tab-offset            horizontal offset in px (back-row tabs only, to peek out from behind front row)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   CONTAINER
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.ftabs-workspace {
+    /* ── color tokens (manila default) ── */
+    --ftab-edge:              #d4c1a8;
+    --ftab-back-top:          #d7cbc0;
+    --ftab-back-bottom:       #cab9a9;
+    --ftab-back-body:         #ac9c88;
+    --ftab-front-top:         #dfd4c8;
+    --ftab-front-bottom:      #d5cab8;
+    --ftab-front-body:        #eadcc3;
+    --ftab-active-top:        #f7efdf;
+    --ftab-active-bottom:     #eee1c9;
+    --ftab-active-border:     #cdb79b;
+
+    /* ── sizing ── */
+    --ftab-height:            3.15rem;
+    --ftab-grid-cols:         13;
+    --ftab-back-strip-h:      3rem;
+    --ftab-body-radius:       12px;
+
+    /* ── seam-cover defaults (updated by JS after layout) ── */
+    --ftab-active-left:       0%;
+    --ftab-active-width:      0%;
+
+    /* ── default back-row tab offset ── */
+    --tab-offset:            20px;
+    /* ── default inter-tab gap (supports negative for overlap) ── */
+    --tab-gap:               5px;
+}
+
+.ftabs-stack {
+    position: relative;
+    isolation: isolate;
+    z-index: 2;
+    overflow: visible;
+}
+
+/* ── Back-folder body strip —
+   Absolutely positioned strip that fills the space between back-row tab
+   baseline and the front folder body. Owned by the tab layer so it sits
+   within the isolation stacking context and appears behind front-row tabs. ── */
+.ftabs-stack::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(var(--ftab-height) - 1px);
+    height: var(--ftab-back-strip-h);
+    border: 1px solid var(--ftab-edge);
+    border-top: none;
+    border-bottom: none;
+    background: linear-gradient(
+        180deg,
+        var(--ftab-back-body) 0%,
+        color-mix(in oklab, var(--ftab-back-body) 88%, #9a8874) 100%
+    );
+    pointer-events: none;
+    z-index: 1;
+}
+
+/* Hide back-strip when no back-row tabs exist */
+.ftabs-stack.no-back-row::before {
+    display: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   ROW WRAPPERS
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.ftab-row-wrap {
+    display: flex;
+    align-items: flex-end;
+    position: relative;
+    /* Clip rightward shadow spill from the last tab; generous overflow
+       top (-100px for lift), bottom (-100px for connectors), left (-100px). */
+    clip-path: inset(-100px 0 -100px -100px);
+}
+
+.ftab-row-wrap > .ftab + .ftab {
+    margin-left: var(--tab-gap, 5px);
+}
+
+.ftab-row-wrap.is-row-back {
+    z-index: 2;
+    margin-left: var(--tab-offset, 20px);
+}
+
+.ftab-row-wrap.is-row-front {
+    z-index: 4;
+    margin-top: -0.82rem;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   INDIVIDUAL TAB
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.ftab {
+    position: relative;
+    z-index: calc(10 - var(--tab-column, 1));
+    flex: 1 1 0%;
+    min-height: var(--ftab-height);
+    padding: 0.42rem 0.36rem;
+    border: 1px solid var(--ftab-edge);
+    border-bottom: none;
+    border-radius: 10px 10px 0 0;
+    background: linear-gradient(180deg, var(--ftab-front-top) 0%, var(--ftab-front-bottom) 100%);
+    color: var(--ink-soft, #7a6a58);
+    font: inherit;
+    font-size: 0.74rem;
+    line-height: 1.1;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    text-align: center;
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+    box-shadow:
+        3px 0 2px rgba(60, 40, 20, 0.22),
+        0 2px 4px rgba(93, 68, 45, 0.1),
+        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+}
+
+/* Connector strip between tab bottom and front folder body */
+.ftab::after {
+    content: "";
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    bottom: -0.6rem;
+    height: 0.66rem;
+    border-left: 1px solid var(--ftab-edge);
+    border-right: 1px solid var(--ftab-edge);
+    background: linear-gradient(180deg, var(--ftab-front-bottom) 0%, var(--ftab-front-bottom) 100%);
+    opacity: 0;
+    z-index: 1;
+}
+
+.ftab.is-edge-left::after {
+    left: 0;
+}
+
+.ftab.is-edge-right::after {
+    right: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   ROW VARIANTS
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Back row ── */
+.ftab.is-back-row {
+    background: linear-gradient(
+        180deg,
+        var(--ftab-back-top) 0%,
+        color-mix(in oklab, var(--ftab-back-bottom) 82%, #d2c0aa) 46%,
+        var(--ftab-back-body) 100%
+    );
+    color: color-mix(in oklab, var(--ink-soft, #7a6a58) 90%, #5e452f);
+    box-shadow:
+        4px 0 2px rgba(60, 40, 20, 0.26),
+        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+}
+
+/* Back-row connector strip is suppressed; the body-strip pseudo takes that role */
+.ftab.is-back-row::after {
+    display: none !important;
+}
+
+/* ── Front row ── */
+.ftab.is-front-row {
+    background: linear-gradient(
+        180deg,
+        var(--ftab-front-top) 0%,
+        color-mix(in oklab, var(--ftab-front-bottom) 82%, #d8c7af) 56%,
+        var(--ftab-back-body) 100%
+    );
+    box-shadow:
+        4px 0 2px rgba(60, 40, 20, 0.26),
+        0 2px 4px rgba(88, 63, 42, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -3px 5px rgba(88, 63, 42, 0.09);
+}
+
+.ftab.is-front-row::after {
+    bottom: -1.02rem;
+    height: 1.08rem;
+    background: linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--ftab-front-bottom) 72%, var(--ftab-front-body)) 0%,
+        var(--ftab-front-body) 100%
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   ACTIVE STATE
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.ftab.is-active {
+    background: linear-gradient(180deg, var(--ftab-active-top) 0%, var(--ftab-active-bottom) 100%);
+    color: var(--ink, #2a1f10);
+    border-color: var(--ftab-active-border);
+    box-shadow:
+        5px 0 3px rgba(60, 40, 20, 0.30),
+        0 4px 10px rgba(88, 63, 42, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.68);
+    z-index: 20;
+}
+
+.ftab.is-active::after {
+    opacity: 1;
+    background: linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--ftab-active-bottom) 72%, var(--ftab-front-body)) 0%,
+        var(--ftab-front-body) 100%
+    );
+    border-left: none;
+    border-right: none;
+    left: -2px;
+    right: -2px;
+}
+
+/* Active back-row tab lifts slightly but stays behind front row */
+.ftab.is-back-row.is-active {
+    box-shadow:
+        5px 0 3px rgba(60, 40, 20, 0.30),
+        inset 0 1px 0 rgba(255, 255, 255, 0.68);
+    background: linear-gradient(
+        180deg,
+        var(--ftab-active-top) 0%,
+        color-mix(in oklab, var(--ftab-active-bottom) 76%, var(--ftab-front-body)) 58%,
+        var(--ftab-front-body) 100%
+    );
+}
+
+.ftab.is-back-row.is-active::after {
+    bottom: -2.22rem;
+    height: 2.26rem;
+}
+
+/* Active front-row tab lifts slightly */
+.ftab.is-front-row.is-active {
+    transform: translateY(-2px);
+    background: linear-gradient(
+        180deg,
+        var(--ftab-active-top) 0%,
+        color-mix(in oklab, var(--ftab-active-bottom) 76%, var(--ftab-front-body)) 58%,
+        var(--ftab-front-body) 100%
+    );
+}
+
+.ftab.is-front-row.is-active::after {
+    bottom: -1.38rem;
+    height: 1.42rem;
+}
+
+.ftab.is-front-row.is-active.is-edge-left::after {
+    left: 0;
+}
+
+.ftab.is-front-row.is-active.is-edge-right::after {
+    right: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   FOLDER BODY
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.ftab-body {
+    position: relative;
+    z-index: 2;
+    min-height: 4rem;
+    padding: 1.2rem 0.8rem 0.8rem;
+    border: 1px solid var(--ftab-edge);
+    border-top: none;
+    border-radius: 0 var(--ftab-body-radius) var(--ftab-body-radius) var(--ftab-body-radius);
+    background: var(--ftab-front-body);
+    margin-top: -0.5rem;
+    color: var(--ink, #2a1f10);
+}
+
+.ftab-body.has-front-active-tab {
+    border-color: var(--ftab-active-border);
+}
+
+/* Disabled — the back-strip is owned by .ftabs-stack::before */
+.ftab-body::before {
+    content: none;
+}
+
+/* Seam-cover strip: a 2px rule that blends the tab/body border join,
+   with a transparent gap where the active tab sits. */
+.ftab-body::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 12px;
+    top: 0;
+    height: 2px;
+    pointer-events: none;
+    z-index: 3;
+    background: linear-gradient(
+        90deg,
+        var(--ftab-front-body) 0,
+        var(--ftab-front-body) var(--ftab-active-left),
+        transparent var(--ftab-active-left),
+        transparent calc(var(--ftab-active-left) + var(--ftab-active-width)),
+        var(--ftab-front-body) calc(var(--ftab-active-left) + var(--ftab-active-width)),
+        var(--ftab-front-body) 100%
+    );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   COLOR THEMES
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Slate (cool blue-grey) ── */
+.ftabs-workspace[data-theme="slate"] {
+    --ftab-edge:              #94afc7;
+    --ftab-back-top:          #afc3d8;
+    --ftab-back-bottom:       #9cb5cc;
+    --ftab-back-body:         #7896b2;
+    --ftab-front-top:         #c2d4e6;
+    --ftab-front-bottom:      #b4c8dc;
+    --ftab-front-body:        #d0e1ef;
+    --ftab-active-top:        #e6f0f9;
+    --ftab-active-bottom:     #daeaf6;
+    --ftab-active-border:     #8dafc9;
+}
+
+/* ── Forest (muted green) ── */
+.ftabs-workspace[data-theme="forest"] {
+    --ftab-edge:              #91b89a;
+    --ftab-back-top:          #a8c8ae;
+    --ftab-back-bottom:       #96b99e;
+    --ftab-back-body:         #6e9878;
+    --ftab-front-top:         #bcd5c3;
+    --ftab-front-bottom:      #adc8b5;
+    --ftab-front-body:        #cfe2d4;
+    --ftab-active-top:        #e2f0e6;
+    --ftab-active-bottom:     #d5eadb;
+    --ftab-active-border:     #88b593;
+}
+
+/* ── Terracotta (warm rust/orange) ── */
+.ftabs-workspace[data-theme="terracotta"] {
+    --ftab-edge:              #c4906e;
+    --ftab-back-top:          #d4a588;
+    --ftab-back-bottom:       #c49278;
+    --ftab-back-body:         #a86e58;
+    --ftab-front-top:         #e0b89e;
+    --ftab-front-bottom:      #d4a88e;
+    --ftab-front-body:        #edc9b0;
+    --ftab-active-top:        #fae4d4;
+    --ftab-active-bottom:     #f0d5be;
+    --ftab-active-border:     #c0836a;
+}
+
+/* ── Iris (soft violet) ── */
+.ftabs-workspace[data-theme="iris"] {
+    --ftab-edge:              #ab9ec8;
+    --ftab-back-top:          #c0b4d9;
+    --ftab-back-bottom:       #b0a4cc;
+    --ftab-back-body:         #8c7eb0;
+    --ftab-front-top:         #d0c8e4;
+    --ftab-front-bottom:      #c4bada;
+    --ftab-front-body:        #ddd6ee;
+    --ftab-active-top:        #ede8f6;
+    --ftab-active-bottom:     #e5dff2;
+    --ftab-active-border:     #a494c4;
+}

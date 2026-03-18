@@ -73,14 +73,6 @@
           </div>
 
           <div class="control-group">
-            <label for="builder-grid-cols">Grid columns</label>
-            <div class="range-row">
-              <input id="builder-grid-cols" name="gridCols" type="range" min="6" max="31" value="13" step="1">
-              <span id="grid-cols-val" class="range-val">13</span>
-            </div>
-          </div>
-
-          <div class="control-group">
             <label for="builder-tab-offset">Tab offset</label>
             <div class="range-row">
               <input id="builder-tab-offset" name="tabOffset" type="range" min="0" max="150" value="20" step="10">
@@ -91,19 +83,21 @@
           <div class="control-group">
             <label for="builder-tab-gap">Tab gap</label>
             <div class="range-row">
-              <input id="builder-tab-gap" name="tabGap" type="range" min="-50" max="20" value="5" step="1">
+              <input id="builder-tab-gap" name="tabGap" type="range" min="-50" max="50" value="5" step="1">
               <span id="tab-gap-val" class="range-val">5</span>
             </div>
           </div>
 
-          <div class="control-group control-toggle-group">
-            <label class="builder-toggle-wrap" for="builder-reposition-tabs">
-              <input id="builder-reposition-tabs" name="repositionTabs" type="checkbox">
-              <span>Enable tab repositioning (move back tabs to front)</span>
-            </label>
+          <div class="control-group">
+            <label for="builder-active-lift">Active tab pull-up</label>
+            <div class="range-row">
+              <input id="builder-active-lift" name="activeLift" type="range" min="0" max="30" value="2" step="1">
+              <span id="active-lift-val" class="range-val">2</span>
+            </div>
           </div>
 
           <button type="button" id="rebuild-btn" class="rebuild-btn">Rebuild preview</button>
+          <button type="button" id="reshuffle-mixed-btn" class="rebuild-btn">Reshuffle mixed colors</button>
         </form>
 
         <div id="builder-preview" class="builder-preview" aria-live="polite">
@@ -112,6 +106,35 @@
 
       </div>
     </div>
+
+    <hr class="lab-divider">
+
+    <p class="section-title">Embed references</p>
+    <p class="section-desc">Copy these references to recreate the interactive builder state or any preset example in another web page.</p>
+
+    <section class="embed-section" aria-label="Embed references">
+      <div class="embed-controls">
+        <label for="embed-source">Configuration source</label>
+        <select id="embed-source"></select>
+      </div>
+
+      <div class="embed-code-grid">
+        <article class="embed-card">
+          <h3>CSS + JS Assets</h3>
+          <pre><code id="embed-assets-code"></code></pre>
+        </article>
+
+        <article class="embed-card">
+          <h3>Mount HTML</h3>
+          <pre><code id="embed-html-code"></code></pre>
+        </article>
+
+        <article class="embed-card embed-card-wide">
+          <h3>Bootstrap JS</h3>
+          <pre><code id="embed-js-code"></code></pre>
+        </article>
+      </div>
+    </section>
 
   </main>
 

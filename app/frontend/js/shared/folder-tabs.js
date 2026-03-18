@@ -13,17 +13,91 @@
     return Math.max(min, Math.min(max, toInt(value, min)));
   }
 
+  const THEME_TOKENS = {
+    manila: {
+      '--ftab-edge': '#d4c1a8',
+      '--ftab-back-top': '#d7cbc0',
+      '--ftab-back-bottom': '#cab9a9',
+      '--ftab-back-body': '#ac9c88',
+      '--ftab-front-top': '#dfd4c8',
+      '--ftab-front-bottom': '#d5cab8',
+      '--ftab-front-body': '#eadcc3',
+      '--ftab-active-top': '#f7efdf',
+      '--ftab-active-bottom': '#eee1c9',
+      '--ftab-active-border': '#cdb79b',
+    },
+    slate: {
+      '--ftab-edge': '#94afc7',
+      '--ftab-back-top': '#afc3d8',
+      '--ftab-back-bottom': '#9cb5cc',
+      '--ftab-back-body': '#7896b2',
+      '--ftab-front-top': '#c2d4e6',
+      '--ftab-front-bottom': '#b4c8dc',
+      '--ftab-front-body': '#d0e1ef',
+      '--ftab-active-top': '#e6f0f9',
+      '--ftab-active-bottom': '#daeaf6',
+      '--ftab-active-border': '#8dafc9',
+    },
+    forest: {
+      '--ftab-edge': '#91b89a',
+      '--ftab-back-top': '#a8c8ae',
+      '--ftab-back-bottom': '#96b99e',
+      '--ftab-back-body': '#6e9878',
+      '--ftab-front-top': '#bcd5c3',
+      '--ftab-front-bottom': '#adc8b5',
+      '--ftab-front-body': '#cfe2d4',
+      '--ftab-active-top': '#e2f0e6',
+      '--ftab-active-bottom': '#d5eadb',
+      '--ftab-active-border': '#88b593',
+    },
+    terracotta: {
+      '--ftab-edge': '#c4906e',
+      '--ftab-back-top': '#d4a588',
+      '--ftab-back-bottom': '#c49278',
+      '--ftab-back-body': '#a86e58',
+      '--ftab-front-top': '#e0b89e',
+      '--ftab-front-bottom': '#d4a88e',
+      '--ftab-front-body': '#edc9b0',
+      '--ftab-active-top': '#fae4d4',
+      '--ftab-active-bottom': '#f0d5be',
+      '--ftab-active-border': '#c0836a',
+    },
+    iris: {
+      '--ftab-edge': '#ab9ec8',
+      '--ftab-back-top': '#c0b4d9',
+      '--ftab-back-bottom': '#b0a4cc',
+      '--ftab-back-body': '#8c7eb0',
+      '--ftab-front-top': '#d0c8e4',
+      '--ftab-front-bottom': '#c4bada',
+      '--ftab-front-body': '#ddd6ee',
+      '--ftab-active-top': '#ede8f6',
+      '--ftab-active-bottom': '#e5dff2',
+      '--ftab-active-border': '#a494c4',
+    },
+  };
+
+  function normalizeThemeKey(theme) {
+    if (theme === 'manila' || theme === '' || theme === null || theme === undefined) {
+      return 'manila';
+    }
+    return Object.prototype.hasOwnProperty.call(THEME_TOKENS, theme) ? theme : 'manila';
+  }
+
+  function getThemeTokens(theme) {
+    return THEME_TOKENS[normalizeThemeKey(theme)];
+  }
+
   /**
-   * Evenly distribute `count` slots over `gridCols` columns.
+   * Evenly distribute `count` slots over `columnBudget` columns.
    * Returns [{ colStart, colSpan }] left-to-right.
    */
-  function distributeSlots(count, gridCols) {
+  function distributeSlots(count, columnBudget) {
     const safeCount = clampInt(count, 0, 1000);
-    const safeGridCols = clampInt(gridCols, 1, 1000);
+    const safeColumnBudget = clampInt(columnBudget, 1, 1000);
     if (safeCount <= 0) return [];
 
-    const spanBase = Math.floor(safeGridCols / safeCount);
-    const remainder = safeGridCols % safeCount;
+    const spanBase = Math.floor(safeColumnBudget / safeCount);
+    const remainder = safeColumnBudget % safeCount;
     const positions = [];
     let colStart = 1;
 
@@ -44,15 +118,15 @@
   function buildTwoRowTabs({
     backLabels = [],
     frontLabels = [],
-    gridCols = 13,
+    columnBudget = 13,
     idPrefix = 'tab',
     backRow = 1,
     frontRow = 2,
     createRender,
   }) {
     const tabs = [];
-    const backPositions = distributeSlots(backLabels.length, gridCols);
-    const frontPositions = distributeSlots(frontLabels.length, gridCols);
+    const backPositions = distributeSlots(backLabels.length, columnBudget);
+    const frontPositions = distributeSlots(frontLabels.length, columnBudget);
 
     const renderFactory = typeof createRender === 'function'
       ? createRender
@@ -112,5 +186,7 @@
     distributeSlots,
     buildTwoRowTabs,
     createThemeCatalog,
+    getThemeTokens,
+    normalizeThemeKey,
   };
 })();

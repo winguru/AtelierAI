@@ -18,7 +18,6 @@
 
     CSS custom properties (all defined on .ftabs-workspace):
      --ftab-height           tab minimum height (also used for grid/strip geometry)
-     --ftab-grid-cols        number of grid columns
      --ftab-back-strip-h     height of the back-folder body strip
      --ftab-edge             border / edge color
      --ftab-back-top/bottom/body
@@ -51,10 +50,11 @@
     --ftab-active-top:        #f7efdf;
     --ftab-active-bottom:     #eee1c9;
     --ftab-active-border:     #cdb79b;
+    --ftab-ink:               #2a1f10;
+    --ftab-ink-soft:          #6f5645;
 
     /* ── sizing ── */
     --ftab-height:            3.15rem;
-    --ftab-grid-cols:         13;
     --ftab-back-strip-h:      3rem;
     --ftab-body-radius:       12px;
 
@@ -68,6 +68,9 @@
     --tab-gap:               5px;
     /* ── active-tab pull-up amount (interactive builder control) ── */
     --ftab-active-lift:      2px;
+    /* Fixed shadow band for exposed back-row tabs; stays visually constant
+       regardless of how much of the band lands on the tab vs connector. */
+    --ftab-back-shadow-band: 14px;
 }
 
 .ftabs-stack {
@@ -149,7 +152,7 @@
     border-bottom: none;
     border-radius: 10px 10px 0 0;
     background: linear-gradient(180deg, var(--ftab-front-top) 0%, var(--ftab-front-bottom) 100%);
-    color: var(--ink-soft, #7a6a58);
+    color: var(--ftab-ink-soft);
     font: inherit;
     font-size: 0.74rem;
     line-height: 1.1;
@@ -201,10 +204,12 @@
         color-mix(in oklab, var(--ftab-back-bottom) 82%, #d2c0aa) 46%,
         var(--ftab-back-body) 100%
     );
-    color: color-mix(in oklab, var(--ink-soft, #7a6a58) 90%, #5e452f);
+    color: color-mix(in oklab, var(--ftab-ink-soft) 90%, #5e452f);
     box-shadow:
-        3px 0 1px rgba(60, 40, 20, 0.14),
-        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+        4px 0 3px rgba(60, 40, 20, 0.28),
+        0 2px 5px rgba(88, 63, 42, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -3px 5px rgba(88, 63, 42, 0.09);
 }
 
 /* Back-row connector strip is suppressed by default;
@@ -219,13 +224,38 @@
 .ftabs-stack.has-front-row .ftab.is-back-row {
     transform: translateY(calc(-1 * var(--ftab-active-lift, 2px)));
     box-shadow:
-        3px 0 1px rgba(60, 40, 20, 0.14),
-        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+        4px 0 3px rgba(60, 40, 20, 0.28),
+        0 2px 5px rgba(88, 63, 42, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -3px 5px rgba(88, 63, 42, 0.09);
 }
 
 .ftabs-stack.has-front-row .ftab.is-back-row.is-edge-right {
     box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+        0 2px 5px rgba(88, 63, 42, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -3px 5px rgba(88, 63, 42, 0.09);
+}
+
+/* When back-row tabs are exposed, only the leftmost tab should look fully
+   connected to the back strip. Other tabs get a fixed shadow band anchored
+   to the strip edge so the darkening stays constant as pull-up changes. */
+.ftabs-stack.has-front-row .ftab.is-back-row:not(.is-edge-left)::before {
+    content: "";
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    bottom: calc(-0.6rem - var(--ftab-active-lift, 2px) + 10px);
+    height: var(--ftab-back-shadow-band, 14px);
+    background: linear-gradient(
+        180deg,
+        rgba(60, 40, 20, 0) 0%,
+        rgba(60, 40, 20, 0.07) 24%,
+        rgba(60, 40, 20, 0.17) 64%,
+        rgba(60, 40, 20, 0.3) 100%
+    );
+    pointer-events: none;
+    z-index: 2;
 }
 
 .ftabs-stack.has-front-row .ftab.is-back-row::after {
@@ -255,8 +285,8 @@
         var(--ftab-back-body) 100%
     );
     box-shadow:
-        4px 0 2px rgba(60, 40, 20, 0.26),
-        0 2px 4px rgba(88, 63, 42, 0.12),
+        4px 0 3px rgba(60, 40, 20, 0.28),
+        0 2px 5px rgba(88, 63, 42, 0.14),
         inset 0 1px 0 rgba(255, 255, 255, 0.56),
         inset 0 -3px 5px rgba(88, 63, 42, 0.09);
 }
@@ -277,7 +307,7 @@
 
 .ftab.is-active {
     background: linear-gradient(180deg, var(--ftab-active-top) 0%, var(--ftab-active-bottom) 100%);
-    color: var(--ink, #2a1f10);
+    color: var(--ftab-ink);
     border-color: var(--ftab-active-border);
     box-shadow:
         5px 0 3px rgba(60, 40, 20, 0.30),
@@ -359,12 +389,14 @@
 /* Rightmost tabs should not cast outward right shadow into the rounded corner notch. */
 .ftab.is-back-row.is-edge-right {
     box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+        0 2px 5px rgba(88, 63, 42, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.56),
+        inset 0 -3px 5px rgba(88, 63, 42, 0.09);
 }
 
 .ftab.is-front-row.is-edge-right {
     box-shadow:
-        0 2px 4px rgba(88, 63, 42, 0.12),
+        0 2px 5px rgba(88, 63, 42, 0.14),
         inset 0 1px 0 rgba(255, 255, 255, 0.56),
         inset 0 -3px 5px rgba(88, 63, 42, 0.09);
 }
@@ -394,7 +426,11 @@
     border-radius: var(--ftab-body-radius);
     background: var(--ftab-front-body);
     margin-top: -0.5rem;
-    color: var(--ink, #2a1f10);
+    color: var(--ftab-ink);
+}
+
+.ftabs-workspace .ftab-placeholder {
+    color: color-mix(in oklab, var(--ftab-ink-soft) 92%, var(--ftab-ink));
 }
 
 .ftab-body.has-front-active-tab {
@@ -426,6 +462,10 @@
         var(--ftab-front-body) calc(var(--ftab-active-left) + var(--ftab-active-width)),
         var(--ftab-front-body) 100%
     );
+}
+
+.ftab-body.is-plain::after {
+    content: none;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════

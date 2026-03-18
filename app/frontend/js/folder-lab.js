@@ -20,12 +20,10 @@
    * Build a tab descriptor array suitable for createStackedFolderWorkspace.
    * @param {string[]} backLabels   Labels for back-row (row 1) tabs.
    * @param {string[]} frontLabels  Labels for front-row (row 2) tabs.
-   * @param {number}   gridCols     Number of grid columns.
    */
   function buildTabDescriptors(
     backLabels,
     frontLabels,
-    gridCols,
     idPrefix = 'tab',
     { backRow = 1, frontRow = 2 } = {},
   ) {
@@ -37,12 +35,50 @@
     return folderTabs.buildTwoRowTabs({
       backLabels,
       frontLabels,
-      gridCols,
+      columnBudget: 13,
       idPrefix,
       backRow,
       frontRow,
       createRender: ({ label }) => makePlaceholder(label),
     });
+  }
+
+  const MIXED_THEME_VALUES = ['', 'slate', 'forest', 'terracotta', 'iris'];
+
+  function hashString(value) {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function applyMixedThemes(tabs, salt = 'mixed-default') {
+    if (!Array.isArray(tabs)) return tabs;
+    return tabs.map((tab) => ({
+      ...tab,
+      colorTheme: MIXED_THEME_VALUES[
+        hashString(`${salt}:${tab.id}:${tab.label}:${tab.row}`) % MIXED_THEME_VALUES.length
+      ],
+    }));
+  }
+
+  function resolveWorkspaceTheme(theme, { mixedSalt = 'mixed-default', scope = 'workspace' } = {}) {
+    if (!theme) return undefined;
+    if (theme !== 'mixed') return theme;
+    return MIXED_THEME_VALUES[
+      hashString(`${mixedSalt}:${scope}:empty`) % MIXED_THEME_VALUES.length
+    ];
+  }
+
+  function pickDefaultActiveTabId(tabs) {
+    if (!Array.isArray(tabs) || tabs.length === 0) return undefined;
+    return (tabs.find((t) => Number(t.row) === 2) || tabs[0]).id;
+  }
+
+  function newMixedSalt() {
+    return `mixed-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
   /* ── Preset definitions ──────────────────────────────────────────────────── */
@@ -54,7 +90,6 @@
       themeLabel: 'manila',
       backLabels: ['Attributes', 'Generation', 'Collections', 'CivitAI Tags'],
       frontLabels: ['Danbooru', 'Prompt Tags', 'User Tags', 'Utilities'],
-      gridCols: 13,
     },
     {
       label: 'Slate · 4 + 4 tabs',
@@ -62,7 +97,6 @@
       themeLabel: 'slate',
       backLabels: ['Overview', 'History', 'Settings', 'Details'],
       frontLabels: ['Output', 'Logs', 'Debug', 'Export'],
-      gridCols: 13,
     },
     {
       label: 'Forest · 3 + 3 tabs',
@@ -70,7 +104,6 @@
       themeLabel: 'forest',
       backLabels: ['Plants', 'Animals', 'Landscape'],
       frontLabels: ['Light', 'Season', 'Weather'],
-      gridCols: 12,
     },
     {
       label: 'Terracotta · 3 + 4 tabs',
@@ -78,7 +111,6 @@
       themeLabel: 'terracotta',
       backLabels: ['Material', 'Texture', 'Finish'],
       frontLabels: ['Palette', 'Glaze', 'Fire', 'Form'],
-      gridCols: 13,
     },
     {
       label: 'Iris · 5 + 5 tabs',
@@ -86,7 +118,13 @@
       themeLabel: 'iris',
       backLabels: ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'],
       frontLabels: ['One', 'Two', 'Three', 'Four', 'Five'],
-      gridCols: 15,
+    },
+    {
+      label: 'Mixed · 4 + 4 tabs',
+      theme: 'mixed',
+      themeLabel: 'mixed',
+      backLabels: ['Blend A', 'Blend B', 'Blend C', 'Blend D'],
+      frontLabels: ['Probe 1', 'Probe 2', 'Probe 3', 'Probe 4'],
     },
     {
       label: 'Manila · back row only',
@@ -94,7 +132,6 @@
       themeLabel: 'manila',
       backLabels: ['Summary', 'Data', 'Notes'],
       frontLabels: [],
-      gridCols: 12,
     },
   ];
 
@@ -104,7 +141,7 @@
     if (!(themeSelect instanceof HTMLSelectElement)) return;
     if (!folderTabs || typeof folderTabs.createThemeCatalog !== 'function') return;
 
-    const themes = folderTabs.createThemeCatalog();
+    const themes = folderTabs.createThemeCatalog([{ value: 'mixed', label: 'mixed' }]);
     if (!Array.isArray(themes) || themes.length === 0) return;
 
     const selected = themeSelect.value;
@@ -140,18 +177,19 @@
     const body = document.createElement('div');
     body.className = 'preset-card-body';
 
-    const tabs = buildTabDescriptors(
+    let tabs = buildTabDescriptors(
       preset.backLabels,
       preset.frontLabels,
-      preset.gridCols,
       `preset-${preset.themeLabel || 'manila'}`,
     );
+    if (preset.theme === 'mixed') {
+      tabs = applyMixedThemes(tabs, `preset:${preset.label}`);
+    }
     const ws = window.AtelierUi.createStackedFolderWorkspace({
       tabs,
-      gridCols: preset.gridCols,
-      activeTabId: tabs[0]?.id,
+      activeTabId: pickDefaultActiveTabId(tabs),
       ariaLabel: preset.label,
-      colorTheme: preset.theme || undefined,
+      colorTheme: preset.theme && preset.theme !== 'mixed' ? preset.theme : undefined,
     });
 
     if (ws) {
@@ -176,6 +214,15 @@
 
   let builderInstance = null;
   let builderActiveTabId = null;
+  let builderMixedSalt = newMixedSalt();
+  let builderSnapshot = {
+    theme: '',
+    backCount: 4,
+    frontCount: 0,
+    tabOffset: 20,
+    tabGap: 5,
+    activeLift: 2,
+  };
 
   function buildInteractive(opts) {
     const preview = document.getElementById('builder-preview');
@@ -185,20 +232,28 @@
       theme = '',
       backCount = 4,
       frontCount = 0,
-      gridCols = 13,
       tabOffset = 20,
       tabGap = 5,
-      repositionTabs = false,
+      activeLift = 2,
       resetActiveTab = false,
     } = opts;
+
+    builderSnapshot = {
+      theme,
+      backCount,
+      frontCount,
+      tabOffset,
+      tabGap,
+      activeLift,
+    };
 
     const backLabels = Array.from({ length: backCount }, (_, i) => `Back ${i + 1}`);
     const frontLabels = Array.from({ length: frontCount }, (_, i) => `Front ${i + 1}`);
 
-    const tabs = buildTabDescriptors(backLabels, frontLabels, gridCols, 'builder', {
-      backRow: repositionTabs ? 2 : 1,
-      frontRow: repositionTabs ? 1 : 2,
-    });
+    let tabs = buildTabDescriptors(backLabels, frontLabels, 'builder');
+    if (theme === 'mixed') {
+      tabs = applyMixedThemes(tabs, builderMixedSalt);
+    }
     if (builderInstance) {
       preview.innerHTML = '';
       builderInstance = null;
@@ -208,12 +263,15 @@
       builderActiveTabId = null;
       builderInstance = window.AtelierUi.createStackedFolderWorkspace({
         tabs: [],
-        gridCols,
         ariaLabel: 'Interactive builder preview',
-        colorTheme: theme || undefined,
+        colorTheme: resolveWorkspaceTheme(theme, {
+          mixedSalt: builderMixedSalt,
+          scope: 'builder-empty-state',
+        }),
         cssVars: {
           '--tab-offset': `${tabOffset}px`,
           '--tab-gap': `${tabGap}px`,
+          '--ftab-active-lift': `${activeLift}px`,
         },
       });
       if (builderInstance) {
@@ -234,13 +292,13 @@
 
     builderInstance = window.AtelierUi.createStackedFolderWorkspace({
       tabs,
-      gridCols,
       activeTabId: chosenActiveTabId,
       ariaLabel: 'Interactive builder preview',
-      colorTheme: theme || undefined,
+      colorTheme: theme && theme !== 'mixed' ? theme : undefined,
       cssVars: {
         '--tab-offset': `${tabOffset}px`,
         '--tab-gap': `${tabGap}px`,
+        '--ftab-active-lift': `${activeLift}px`,
       },
       onTabChange: (tabId) => {
         builderActiveTabId = tabId;
@@ -251,31 +309,205 @@
     if (builderInstance) {
       preview.append(builderInstance.root);
     }
+
+    refreshEmbedSnippets();
+  }
+
+  function quoteLines(values) {
+    return (values || []).map((v) => `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`).join(', ');
+  }
+
+  function sourceFromBuilder() {
+    const backLabels = Array.from({ length: builderSnapshot.backCount || 0 }, (_, i) => `Back ${i + 1}`);
+    const frontLabels = Array.from({ length: builderSnapshot.frontCount || 0 }, (_, i) => `Front ${i + 1}`);
+    return {
+      id: 'builder-current',
+      label: 'Interactive builder (current)',
+      mode: 'builder',
+      config: {
+        theme: builderSnapshot.theme || '',
+        backLabels,
+        frontLabels,
+        tabOffset: Number(builderSnapshot.tabOffset || 0),
+        tabGap: Number(builderSnapshot.tabGap || 0),
+        activeLift: Number(builderSnapshot.activeLift || 0),
+        mixedSalt: builderMixedSalt,
+      },
+    };
+  }
+
+  function sourceFromPreset(preset, index) {
+    return {
+      id: `preset-${index}`,
+      label: `Preset: ${preset.label}`,
+      mode: 'preset',
+      config: {
+        theme: preset.theme || '',
+        backLabels: [...preset.backLabels],
+        frontLabels: [...preset.frontLabels],
+        tabOffset: 20,
+        tabGap: 5,
+        activeLift: 2,
+        mixedSalt: `preset:${preset.label}`,
+      },
+    };
+  }
+
+  function getSelectedEmbedSource() {
+    const select = document.getElementById('embed-source');
+    if (!(select instanceof HTMLSelectElement)) return sourceFromBuilder();
+
+    const selected = select.value || 'builder-current';
+    if (selected === 'builder-current') return sourceFromBuilder();
+
+    const m = selected.match(/^preset-(\d+)$/);
+    if (!m) return sourceFromBuilder();
+    const idx = Number(m[1]);
+    const preset = PRESETS[idx];
+    if (!preset) return sourceFromBuilder();
+    return sourceFromPreset(preset, idx);
+  }
+
+  function buildEmbedJsSnippet(source) {
+    const { config } = source;
+    const themeValue = config.theme || '';
+    const backArray = quoteLines(config.backLabels);
+    const frontArray = quoteLines(config.frontLabels);
+    const hasTabs = (config.backLabels.length + config.frontLabels.length) > 0;
+
+    const lines = [];
+    lines.push('const mount = document.getElementById(\'folder-tab-mount\');');
+    lines.push('if (!mount) throw new Error(\'Missing #folder-tab-mount\');');
+    lines.push('');
+    lines.push(`const backLabels = [${backArray}];`);
+    lines.push(`const frontLabels = [${frontArray}];`);
+    lines.push(`const selectedTheme = '${themeValue}'; // '', slate, forest, terracotta, iris, mixed`);
+    lines.push('');
+    lines.push('let tabs = window.AtelierFolderTabs.buildTwoRowTabs({');
+    lines.push('  backLabels,');
+    lines.push('  frontLabels,');
+    lines.push(`  idPrefix: '${source.id}',`);
+    lines.push('  backRow: 1,');
+    lines.push('  frontRow: 2,');
+    lines.push('  createRender: ({ label }) => {');
+    lines.push('    const el = document.createElement(\'p\');');
+    lines.push('    el.className = \'ftab-placeholder\';');
+    lines.push('    el.textContent = `Content area for "${label}"`;');
+    lines.push('    return el;');
+    lines.push('  },');
+    lines.push('});');
+    lines.push('');
+    lines.push('if (selectedTheme === \'mixed\') {');
+    lines.push(`  const mixedSalt = '${String(config.mixedSalt || 'mixed-default').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}';`);
+    lines.push("  const mixedThemes = ['', 'slate', 'forest', 'terracotta', 'iris'];");
+    lines.push('  const hash = (value) => {');
+    lines.push('    let h = 2166136261;');
+    lines.push('    for (let i = 0; i < value.length; i += 1) {');
+    lines.push('      h ^= value.charCodeAt(i);');
+    lines.push('      h = Math.imul(h, 16777619);');
+    lines.push('    }');
+    lines.push('    return h >>> 0;');
+    lines.push('  };');
+    lines.push('  tabs = tabs.map((tab) => ({');
+    lines.push('    ...tab,');
+    lines.push('    colorTheme: mixedThemes[hash(`${mixedSalt}:${tab.id}:${tab.label}:${tab.row}`) % mixedThemes.length],');
+    lines.push('  }));');
+    lines.push('}');
+    lines.push('');
+    lines.push('const activeTabId = (tabs.find((t) => Number(t.row) === 2) || tabs[0])?.id;');
+    lines.push('const workspaceTheme = (() => {');
+    lines.push('  if (tabs.length > 0) return selectedTheme && selectedTheme !== \'mixed\' ? selectedTheme : undefined;');
+    lines.push('  if (selectedTheme !== \'mixed\') return selectedTheme || undefined;');
+    lines.push(`  const emptyScope = 'embed-empty-state';`);
+    lines.push("  const mixedThemes = ['', 'slate', 'forest', 'terracotta', 'iris'];");
+    lines.push('  let h = 2166136261;');
+    lines.push('  const raw = `${selectedTheme}:${emptyScope}`;');
+    lines.push('  for (let i = 0; i < raw.length; i += 1) {');
+    lines.push('    h ^= raw.charCodeAt(i);');
+    lines.push('    h = Math.imul(h, 16777619);');
+    lines.push('  }');
+    lines.push('  return mixedThemes[(h >>> 0) % mixedThemes.length] || undefined;');
+    lines.push('})();');
+    lines.push('');
+    lines.push('const workspace = window.AtelierUi.createStackedFolderWorkspace({');
+    lines.push('  tabs,');
+    lines.push('  activeTabId,');
+    lines.push(`  ariaLabel: '${String(source.label).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}',`);
+    lines.push('  colorTheme: workspaceTheme,');
+    lines.push('  emptyStateLabel: \'Default\',');
+    if (source.mode === 'builder') {
+      lines.push('  cssVars: {');
+      lines.push(`    '--tab-offset': '${config.tabOffset}px',`);
+      lines.push(`    '--tab-gap': '${config.tabGap}px',`);
+      lines.push(`    '--ftab-active-lift': '${config.activeLift}px',`);
+      lines.push('  },');
+    }
+    lines.push('});');
+    lines.push('');
+    lines.push('mount.innerHTML = \'\';');
+    lines.push('if (workspace) mount.append(workspace.root);');
+
+    return lines.join('\n');
+  }
+
+  function refreshEmbedSnippets() {
+    const assetsCode = document.getElementById('embed-assets-code');
+    const htmlCode = document.getElementById('embed-html-code');
+    const jsCode = document.getElementById('embed-js-code');
+    if (!(assetsCode && htmlCode && jsCode)) return;
+
+    const source = getSelectedEmbedSource();
+    assetsCode.textContent = [
+      '<link rel="stylesheet" href="/frontend/css/folder-tabs.css">',
+      '<script src="/frontend/js/shared/ui-kit.js" defer></script>',
+      '<script src="/frontend/js/shared/folder-tabs.js" defer></script>',
+    ].join('\n');
+
+    htmlCode.textContent = '<div id="folder-tab-mount"></div>';
+    jsCode.textContent = buildEmbedJsSnippet(source);
+  }
+
+  function initEmbedSection() {
+    const select = document.getElementById('embed-source');
+    if (!(select instanceof HTMLSelectElement)) return;
+
+    const options = [sourceFromBuilder(), ...PRESETS.map((preset, index) => sourceFromPreset(preset, index))];
+    select.innerHTML = '';
+    options.forEach((entry) => {
+      const option = document.createElement('option');
+      option.value = entry.id;
+      option.textContent = entry.label;
+      select.append(option);
+    });
+    select.value = 'builder-current';
+    select.addEventListener('change', refreshEmbedSnippets);
+    refreshEmbedSnippets();
   }
 
   function initBuilder() {
     const form = document.getElementById('builder-form');
     const rebuildBtn = document.getElementById('rebuild-btn');
+    const reshuffleMixedBtn = document.getElementById('reshuffle-mixed-btn');
     if (!form || !rebuildBtn) return;
 
     const backCountInput = form.elements['backCount'];
     const frontCountInput = form.elements['frontCount'];
-    const gridColsInput = form.elements['gridCols'];
     const tabOffsetInput = form.elements['tabOffset'];
     const tabGapInput = form.elements['tabGap'];
-    const repositionTabsInput = form.elements['repositionTabs'];
+    const activeLiftInput = form.elements['activeLift'];
+    const themeInput = form.elements['theme'];
     const backCountVal = document.getElementById('back-count-val');
     const frontCountVal = document.getElementById('front-count-val');
-    const gridColsVal = document.getElementById('grid-cols-val');
     const tabOffsetVal = document.getElementById('tab-offset-val');
     const tabGapVal = document.getElementById('tab-gap-val');
+    const activeLiftVal = document.getElementById('active-lift-val');
 
     function syncLabels() {
       if (backCountVal) backCountVal.textContent = backCountInput.value;
       if (frontCountVal) frontCountVal.textContent = frontCountInput.value;
-      if (gridColsVal) gridColsVal.textContent = gridColsInput.value;
       if (tabOffsetVal) tabOffsetVal.textContent = tabOffsetInput.value;
       if (tabGapVal) tabGapVal.textContent = tabGapInput.value;
+      if (activeLiftVal) activeLiftVal.textContent = activeLiftInput.value;
     }
 
     function rebuild({ resetActiveTab = false } = {}) {
@@ -284,12 +516,14 @@
         theme: form.elements['theme'].value,
         backCount: Number(backCountInput.value),
         frontCount: Number(frontCountInput.value),
-        gridCols: Number(gridColsInput.value),
         tabOffset: Number(tabOffsetInput.value),
         tabGap: Number(tabGapInput.value),
-        repositionTabs: Boolean(repositionTabsInput.checked),
+        activeLift: Number(activeLiftInput.value),
         resetActiveTab,
       });
+      if (reshuffleMixedBtn) {
+        reshuffleMixedBtn.disabled = themeInput.value !== 'mixed';
+      }
     }
 
     function rebuildPreserve() { rebuild(); }
@@ -297,18 +531,28 @@
 
     backCountInput.addEventListener('input', syncLabels);
     frontCountInput.addEventListener('input', syncLabels);
-    gridColsInput.addEventListener('input', syncLabels);
     tabOffsetInput.addEventListener('input', syncLabels);
     tabGapInput.addEventListener('input', syncLabels);
+    activeLiftInput.addEventListener('input', syncLabels);
 
     // Count changes reset active tab to first bottom-row tab.
     backCountInput.addEventListener('input', rebuildReset);
     frontCountInput.addEventListener('input', rebuildReset);
     // Other controls preserve active tab.
-    gridColsInput.addEventListener('input', rebuildPreserve);
     tabOffsetInput.addEventListener('input', rebuildPreserve);
     tabGapInput.addEventListener('input', rebuildPreserve);
-    repositionTabsInput.addEventListener('change', rebuildPreserve);
+    activeLiftInput.addEventListener('input', rebuildPreserve);
+    if (themeInput) {
+      themeInput.addEventListener('change', rebuildPreserve);
+    }
+
+    if (reshuffleMixedBtn) {
+      reshuffleMixedBtn.addEventListener('click', () => {
+        if (themeInput.value !== 'mixed') return;
+        builderMixedSalt = newMixedSalt();
+        rebuildPreserve();
+      });
+    }
 
     rebuildBtn.addEventListener('click', rebuildPreserve);
 
@@ -340,6 +584,7 @@
     initThemeOptions();
     initGallery();
     initBuilder();
+    initEmbedSection();
   }
 
   if (document.readyState === 'loading') {

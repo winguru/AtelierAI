@@ -1,8 +1,11 @@
 /* ── CSS variables (reuses generation-lab.css tokens) ── */
 :root {
+  --bg-top: #f7f2e9;
   --bg: #f0ece4;
-  --panel: rgba(255, 252, 246, 0.86);
-  --panel-strong: #fffaf2;
+  --bg-glow-a: rgba(196, 144, 81, 0.14);
+  --bg-glow-b: rgba(15, 118, 110, 0.08);
+  --panel: rgba(255, 252, 246, 0.93);
+  --panel-strong: #fffdf7;
   --ink: #1d2733;
   --ink-soft: #5f6d78;
   --stroke: rgba(67, 83, 96, 0.18);
@@ -11,9 +14,12 @@
 }
 
 body[data-theme="dark"] {
+  --bg-top: #111821;
   --bg: #161d26;
-  --panel: rgba(28, 37, 49, 0.9);
-  --panel-strong: #243040;
+  --bg-glow-a: rgba(78, 118, 166, 0.12);
+  --bg-glow-b: rgba(46, 148, 136, 0.08);
+  --panel: rgba(36, 48, 63, 0.94);
+  --panel-strong: #2b3a4d;
   --ink: #eef3fb;
   --ink-soft: #b3c0d0;
   --stroke: rgba(154, 170, 190, 0.3);
@@ -31,9 +37,9 @@ body {
   color: var(--ink);
   font-family: "Iowan Old Style", "Palatino Linotype", serif;
   background:
-    radial-gradient(circle at top left, rgba(196, 144, 81, 0.14), transparent 30%),
-    radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.08), transparent 28%),
-    linear-gradient(180deg, #f7f2e9 0%, var(--bg) 100%);
+    radial-gradient(circle at top left, var(--bg-glow-a), transparent 30%),
+    radial-gradient(circle at bottom right, var(--bg-glow-b), transparent 28%),
+    linear-gradient(180deg, var(--bg-top) 0%, var(--bg) 100%);
 }
 
 .lab-page {
@@ -273,6 +279,93 @@ body {
 
 .rebuild-btn:hover {
   filter: brightness(1.08);
+}
+
+/* ── Embed references ── */
+.embed-section {
+  border: 1px solid var(--stroke);
+  border-radius: 20px;
+  background: var(--panel);
+  box-shadow: 0 10px 30px rgba(31, 41, 55, 0.07);
+  backdrop-filter: blur(10px);
+  padding: 1rem;
+}
+
+.embed-controls {
+  display: grid;
+  gap: 0.35rem;
+  width: min(460px, 100%);
+  margin-bottom: 1rem;
+}
+
+.embed-controls label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.embed-controls select {
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.4rem 0.55rem;
+}
+
+.embed-code-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.embed-card {
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--panel-strong) 76%, transparent);
+  overflow: hidden;
+}
+
+.embed-card h3 {
+  margin: 0;
+  padding: 0.58rem 0.72rem;
+  border-bottom: 1px solid var(--stroke);
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.embed-card pre {
+  margin: 0;
+  padding: 0.7rem;
+  max-height: 320px;
+  overflow: auto;
+  background: color-mix(in oklab, var(--panel-strong) 88%, black 12%);
+}
+
+.embed-card code {
+  display: block;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.embed-card-wide {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .embed-code-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .embed-card-wide {
+    grid-column: auto;
+  }
 }
 
 /* ── Placeholder tab body content ── */

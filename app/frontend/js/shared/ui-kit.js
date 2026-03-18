@@ -384,11 +384,23 @@
     mountHoverChoiceControl,
     createStackedFolderWorkspace,
   };
+
+  function applyFolderThemeTokens(element, theme) {
+    if (!(element instanceof HTMLElement)) return;
+    const folderTabs = window.AtelierFolderTabs;
+    if (!folderTabs || typeof folderTabs.getThemeTokens !== 'function') return;
+
+    const tokens = folderTabs.getThemeTokens(theme);
+    Object.entries(tokens).forEach(([key, value]) => {
+      element.style.setProperty(key, value);
+    });
+  }
+
   function createStackedFolderWorkspace({
     tabs,
-    gridCols = 13,
     activeTabId,
     ariaLabel,
+    emptyStateLabel = 'Default',
     colorTheme,
     wrapperClassName,
     stackClassName,
@@ -398,22 +410,20 @@
     onTabActivate,
     onRender,
   }) {
-    if (!Array.isArray(tabs) || tabs.length === 0) {
-      return null;
-    }
+    tabs = Array.isArray(tabs) ? tabs : [];
 
     let currentActiveTabId = activeTabId;
     const availableTabIds = new Set(tabs.map((tab) => tab.id));
-    if (!availableTabIds.has(currentActiveTabId)) {
+    if (tabs.length > 0 && !availableTabIds.has(currentActiveTabId)) {
       currentActiveTabId = tabs[0].id;
     }
 
     const wrapper = document.createElement('div');
     wrapper.className = 'ftabs-workspace';
-    wrapper.style.setProperty('--ftab-grid-cols', String(gridCols));
     if (colorTheme) {
       wrapper.dataset.theme = colorTheme;
     }
+    applyFolderThemeTokens(wrapper, colorTheme);
     if (cssVars && typeof cssVars === 'object') {
       Object.entries(cssVars).forEach(([key, rawValue]) => {
         if (rawValue === undefined || rawValue === null) return;
@@ -448,12 +458,41 @@
       const width = Math.max(0, Math.min(100 - left, rawWidth));
       body.style.setProperty('--ftab-active-left', `${left}%`);
       body.style.setProperty('--ftab-active-width', `${width}%`);
+
+      const flushLeft = left < 0.5;
+      const flushRight = (left + width) > 99.5;
+      const r = 'var(--ftab-body-radius)';
+      const tl = flushLeft ? '0' : r;
+      const tr = flushRight ? '0' : r;
+      body.style.borderRadius = `${tl} ${tr} ${r} ${r}`;
+      body.style.setProperty('--ftab-seam-left', flushLeft ? '0px' : 'var(--ftab-body-radius)');
+      body.style.setProperty('--ftab-seam-right', flushRight ? '0px' : 'var(--ftab-body-radius)');
     }
 
     function renderActiveTab() {
       body.innerHTML = '';
       const activeTab = tabs.find((tab) => tab.id === currentActiveTabId) || tabs[0];
-      body.classList.toggle('has-front-active-tab', activeTab.row === 2);
+      const hasBackTabs = backWrap.children.length > 0;
+      const hasFrontTabs = frontWrap.children.length > 0;
+      const backLeftBtn = backWrap.firstElementChild;
+      const backLeftIndex = backLeftBtn ? tabButtons.indexOf(backLeftBtn) : -1;
+      const backLeftTab = backLeftIndex >= 0 ? tabs[backLeftIndex] : null;
+      const workspaceTheme = (hasBackTabs && hasFrontTabs)
+        ? (backLeftTab?.colorTheme || colorTheme)
+        : (activeTab?.colorTheme || colorTheme);
+      const bodyTheme = activeTab?.colorTheme || colorTheme;
+
+      applyFolderThemeTokens(wrapper, workspaceTheme);
+      applyFolderThemeTokens(body, bodyTheme);
+      if (workspaceTheme) {
+        wrapper.dataset.theme = workspaceTheme === 'manila' ? '' : workspaceTheme;
+      } else {
+        delete wrapper.dataset.theme;
+      }
+      const activeIndex = tabs.indexOf(activeTab);
+      const activeButton = tabButtons[activeIndex];
+      body.classList.toggle('has-front-active-tab',
+        activeButton ? activeButton.classList.contains('is-front-row') : false);
       tabs.forEach((tab, index) => {
         const button = tabButtons[index];
         if (!button) return;
@@ -462,11 +501,17 @@
         button.setAttribute('aria-selected', active ? 'true' : 'false');
         button.tabIndex = active ? 0 : -1;
       });
-      if (typeof activeTab.render === 'function') {
+      if (!activeTab) {
+        const emptyState = document.createElement('p');
+        emptyState.className = 'ftab-placeholder';
+        emptyState.textContent = `Content area for "${emptyStateLabel}"`;
+        body.append(emptyState);
+      }
+      if (activeTab && typeof activeTab.render === 'function') {
         body.append(activeTab.render());
       }
       requestAnimationFrame(updateSeam);
-      if (typeof onRender === 'function') {
+      if (activeTab && typeof onRender === 'function') {
         onRender(activeTab.id);
       }
     }
@@ -475,6 +520,7 @@
     const tabButtons = [];
     const backWrap = document.createElement('div');
     backWrap.className = 'ftab-row-wrap is-row-back';
+    backWrap.style.marginLeft = 'var(--tab-offset, 20px)';
     const frontWrap = document.createElement('div');
     frontWrap.className = 'ftab-row-wrap is-row-front';
 
@@ -482,6 +528,7 @@
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'ftab';
+      applyFolderThemeTokens(button, tab.colorTheme || colorTheme);
       const tabRow = Number(tab.row ?? 1);
       const rowKey = String(tabRow);
       const rowColumnIndex = (rowColumnCounters.get(rowKey) || 0) + 1;
@@ -498,6 +545,14 @@
       }
       button.addEventListener('click', () => {
         if (currentActiveTabId === tab.id) return;
+
+        // If a back-row tab is clicked and both rows exist, swap the two rows.
+        if (button.classList.contains('is-back-row')
+            && backWrap.children.length > 0
+            && frontWrap.children.length > 0) {
+          swapRows();
+        }
+
         const previousTabId = currentActiveTabId;
         currentActiveTabId = tab.id;
         if (typeof onTabChange === 'function') {
@@ -515,12 +570,61 @@
       tabButtons.push(button);
     });
 
-    [backWrap, frontWrap].forEach((wrap) => {
-      if (wrap.firstElementChild) wrap.firstElementChild.classList.add('is-edge-left');
-      if (wrap.lastElementChild) wrap.lastElementChild.classList.add('is-edge-right');
-    });
+    function refreshEdgeClasses() {
+      [backWrap, frontWrap].forEach((wrap) => {
+        Array.from(wrap.children).forEach((child) => {
+          child.classList.remove('is-edge-left', 'is-edge-right');
+        });
+        if (wrap.firstElementChild) wrap.firstElementChild.classList.add('is-edge-left');
+        if (wrap.lastElementChild) wrap.lastElementChild.classList.add('is-edge-right');
+      });
+    }
+
+    function swapRows() {
+      // Toggle row classes on every tab button
+      tabButtons.forEach((btn) => {
+        const wasBack = btn.classList.contains('is-back-row');
+        btn.classList.toggle('is-back-row', !wasBack);
+        btn.classList.toggle('is-front-row', wasBack);
+      });
+
+      // Move buttons to their new wrapper
+      const toBack = [];
+      const toFront = [];
+      tabButtons.forEach((btn) => {
+        if (btn.classList.contains('is-back-row')) toBack.push(btn);
+        else if (btn.classList.contains('is-front-row')) toFront.push(btn);
+      });
+      backWrap.replaceChildren(...toBack);
+      frontWrap.replaceChildren(...toFront);
+
+      // Re-assign per-row column indices
+      [backWrap, frontWrap].forEach((wrap) => {
+        Array.from(wrap.children).forEach((btn, idx) => {
+          btn.style.setProperty('--tab-column', String(idx + 1));
+        });
+      });
+
+      // Swap the inline offset between the two wrappers so it follows the tabs
+      const backMargin = backWrap.style.marginLeft;
+      const frontMargin = frontWrap.style.marginLeft;
+      backWrap.style.marginLeft = frontMargin;
+      frontWrap.style.marginLeft = backMargin;
+
+      refreshEdgeClasses();
+
+      // Re-order wrappers in the stack so backWrap is first
+      if (stack.firstElementChild !== backWrap) {
+        stack.insertBefore(backWrap, frontWrap);
+      }
+    }
+
+    refreshEdgeClasses();
     const hasBackRow = backWrap.children.length > 0;
     const hasFrontRow = frontWrap.children.length > 0;
+    if (hasFrontRow) {
+      stack.classList.add('has-front-row');
+    }
     if (hasBackRow) stack.append(backWrap);
     if (hasFrontRow) stack.append(frontWrap);
 
@@ -528,6 +632,7 @@
     // When there is no back row, hide the back-strip pseudo.
     if (!hasBackRow && !hasFrontRow) {
       stack.style.display = 'none';
+      body.classList.add('is-plain');
       body.style.borderTop = `1px solid var(--ftab-edge)`;
       body.style.borderRadius = `var(--ftab-body-radius)`;
       body.style.marginTop = '0';

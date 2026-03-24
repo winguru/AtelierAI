@@ -26,13 +26,14 @@ class CivitaiImage:
         """
         self.image_id = image_id
         self.url_hash = url_hash
-        self.image_name = image_name or "unknown"
+        self.image_name = image_name or f"image_{image_id}"
         self.mime_type = mime_type or "image/jpeg"
 
         # Basic info from image.get endpoint
         self.author = "Unknown"
         self.created_at = None
         self.nsfw = False
+        self.nsfw_level: Optional[int] = None
         self.published_at = None
         self.url_hash_only = True  # If True, need to construct full URL
 
@@ -70,9 +71,12 @@ class CivitaiImage:
         """
         if self.url_hash and self.url_hash_only:
             safe_name = self._get_safe_filename()
+            transform_segment = "original=true"
+            if str(self.mime_type or "").lower().startswith("video/"):
+                transform_segment = "transcode=true,original=true"
             return (
                 f"https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/"
-                f"{self.url_hash}/original=true/quality=90/{safe_name}"
+                f"{self.url_hash}/{transform_segment}/{safe_name}"
             )
         return self.url_hash or ""
 
@@ -87,8 +91,12 @@ class CivitaiImage:
         # Get expected extension based on MIME type
         target_ext = self._get_extension_from_mime(self.mime_type)
 
+        image_name = self.image_name if isinstance(self.image_name, str) and self.image_name.strip() else None
+        if not image_name:
+            return f"image_{self.image_id}{target_ext}"
+
         # Split current name into root and extension
-        base_name, current_ext = self.image_name.rsplit(".", 1) if "." in self.image_name else (self.image_name, "")
+        base_name, current_ext = image_name.rsplit(".", 1) if "." in image_name else (image_name, "")
 
         # Normalize current extension to lowercase for comparison
         if current_ext:
@@ -100,7 +108,7 @@ class CivitaiImage:
 
         # Scenario 2: Extension matches target (e.g. name="img.jpeg", mime="image/jpeg")
         if current_ext == target_ext:
-            return self.image_name
+            return image_name
 
         # Scenario 3: Extension mismatch (e.g. name="img.jpeg", mime="image/png")
         # We strip the wrong extension and add the correct one derived from MIME type
@@ -151,8 +159,25 @@ class CivitaiImage:
             self.author = basic_data.get("username")
 
         # NSFW status
-        nsfw_level = basic_data.get("nsfwLevel", 0)
-        self.nsfw = bool(nsfw_level > 0) if isinstance(nsfw_level, int) else bool(nsfw_level)
+        raw_nsfw_level = basic_data.get("nsfwLevel")
+        normalized_nsfw_level: Optional[int] = None
+        if isinstance(raw_nsfw_level, bool):
+            normalized_nsfw_level = int(raw_nsfw_level)
+        elif isinstance(raw_nsfw_level, int):
+            normalized_nsfw_level = raw_nsfw_level
+        elif isinstance(raw_nsfw_level, str):
+            cleaned_nsfw_level = raw_nsfw_level.strip()
+            if cleaned_nsfw_level:
+                try:
+                    normalized_nsfw_level = int(float(cleaned_nsfw_level))
+                except ValueError:
+                    normalized_nsfw_level = None
+
+        self.nsfw_level = normalized_nsfw_level
+        if normalized_nsfw_level is not None:
+            self.nsfw = normalized_nsfw_level > 0
+        else:
+            self.nsfw = bool(raw_nsfw_level)
 
         # Tags - fetch from API if provided
         if api:
@@ -163,7 +188,13 @@ class CivitaiImage:
             if self.tags:
                 print(f"  [OK] Fetched {len(self.tags)} tags for image")
             else:
-                print("  [WARN] No tags found for this image")
+                if hasattr(api, "is_rate_limited") and callable(api.is_rate_limited) and api.is_rate_limited():
+                    remaining = 0.0
+                    if hasattr(api, "rate_limit_remaining_seconds") and callable(api.rate_limit_remaining_seconds):
+                        remaining = float(api.rate_limit_remaining_seconds() or 0.0)
+                    print(f"  [INFO] Tag fetch deferred due to CivitAI rate limit backoff ({remaining:.1f}s remaining)")
+                else:
+                    print("  [WARN] No tags found for this image")
 
         # Check for tags directly in basic_data (fallback)
         elif "tags" in basic_data and isinstance(basic_data["tags"], list):
@@ -174,8 +205,13 @@ class CivitaiImage:
             self.tags = []
 
         # Image name and MIME type
-        self.image_name = basic_data.get("name", self.image_name)
-        self.mime_type = basic_data.get("mimeType", self.mime_type)
+        basic_name = basic_data.get("name")
+        if isinstance(basic_name, str) and basic_name.strip():
+            self.image_name = basic_name.strip()
+
+        basic_mime_type = basic_data.get("mimeType")
+        if isinstance(basic_mime_type, str) and basic_mime_type.strip():
+            self.mime_type = basic_mime_type.strip()
 
     def merge_generation_data(self, generation_data: Dict) -> None:
         """Merge generation data from getGenerationData endpoint.
@@ -300,6 +336,8 @@ class CivitaiImage:
             "author": self.author,
             "created_at": self.created_at,
             "nsfw": self.nsfw,
+            "nsfwLevel": self.nsfw_level,
+            "nsfw_level": self.nsfw_level,
             "model": self.model,
             "model_version": self.model_version,
             "base_model": self.base_model,
@@ -577,7 +615,19 @@ class CivitaiImage:
             or "Unknown"
         )
         image.created_at = item.get("createdAt")
-        image.nsfw = bool(item.get("nsfwLevel", 0) > 0)
+        raw_nsfw_level = item.get("nsfwLevel")
+        if isinstance(raw_nsfw_level, bool):
+            image.nsfw_level = int(raw_nsfw_level)
+        elif isinstance(raw_nsfw_level, int):
+            image.nsfw_level = raw_nsfw_level
+        elif isinstance(raw_nsfw_level, str):
+            cleaned_nsfw_level = raw_nsfw_level.strip()
+            if cleaned_nsfw_level:
+                try:
+                    image.nsfw_level = int(float(cleaned_nsfw_level))
+                except ValueError:
+                    image.nsfw_level = None
+        image.nsfw = image.nsfw_level > 0 if image.nsfw_level is not None else bool(raw_nsfw_level)
 
         # Merge generation data
         image.merge_generation_data(generation_data)

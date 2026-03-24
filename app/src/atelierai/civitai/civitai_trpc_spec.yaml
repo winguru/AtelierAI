@@ -1,121 +1,289 @@
 meta:
   api_name: CivitAI tRPC (Reverse-Engineered)
-  version: "0.1.0"
+  version: "0.2.0"
   base_url: https://civitai.com/api/trpc
   auth:
     - type: session_cookie
       name: __Secure-civitai-token
-      description: "The primary session token found in browser cookies."
+      description: Primary authenticated browser session cookie.
+    - type: optional_cookie
+      name: cf_clearance
+      description: Sometimes required depending on Cloudflare challenge state.
+    - type: derived_bearer_token
+      name: search_service_bearer
+      description: Search bearer token appears to be returned by signals.getToken and then used against search-new.civitai.com.
   conventions:
     python:
-      client_class: CivitaiTrpcClient
-      default_http_lib: httpx
+      implemented_client_class: CivitaiAPI
+      implementation_file: app/src/atelierai/civitai/civitai_api.py
+      default_http_lib: requests
+    transport:
+      http_method: GET
+      query_param_input: JSON-encoded payload in input=...
+      payload_envelope:
+        root_key: "0"
+        json_path: "0.json"
+      response_unwrap_path: "result.data.json"
+    paging_and_meta:
+      image_getInfinite_first_page:
+        cursor: null
+        meta_required_in_tested_shape: true
+      image_getInfinite_cursor_pages:
+        cursor: "nextCursor from previous response"
+        meta_required_in_tested_shape: false
+      notes:
+        - First-page calls for image.getInfinite were reliable with a meta object in the tested shape.
+        - Cursor-page calls should omit meta to avoid repeated-page behavior.
+    nsfw_levels:
+      "1": PG
+      "2": PG13
+      "4": R
+      "8": X
+      "16": XXX
+      "32": Blocked
 
 procedures:
+  signals.getToken:
+    description: Return or mint the bearer token later used by the hosted search service.
+    status:
+      implemented_in_civitai_api: false
+      validated_with_live_curl: true
+      reverse_engineered_response_shape: true
+    http:
+      method: GET
+      path_template: "{base_url}/signals.getToken"
+      headers:
+        x-client: web
+      auth:
+        required_cookie: __Secure-civitai-token
+    input:
+      type: object
+      properties:
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      description: Exact inner payload not yet captured; likely wrapped in the normal tRPC result.data.json envelope.
+    notes:
+      - Observed request shape uses only input={"json":{"authed":true}}.
+      - This procedure appears to bridge the normal logged-in session cookie to the bearer token used by search-new.civitai.com.
+
   collection.getById:
-    description: |
-      Fetch detailed information about a specific collection by ID.
-    stability: stable
+    description: Fetch a specific collection by numeric ID.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: true
     http:
       method: GET
       path_template: "{base_url}/collection.getById"
       headers:
-        x-client: "web"
-        # x-client-date: "CURRENT_TIMESTAMP_MS" (Dynamic)
-        # x-client-version: "5.0.1401"
-        # x-fingerprint: "HASH" (Required, likely derived from session/device)
+        x-client: web
     input:
       type: object
+      required: [id]
       properties:
         id:
           type: integer
-          description: The numeric ID of the collection.
         authed:
           type: boolean
           default: true
-      required: [id]
     output:
       type: object
-      description: Collection details (inferred structure).
       properties:
-        id:
-          type: integer
-        name:
-          type: string
-        user:
-          type: object
-        items:
-          type: array
+        id: { type: integer }
+        name: { type: string }
+        description: { type: ["string", "null"] }
+        user: { type: object }
 
   image.getInfinite:
-    description: |
-      Infinite scroll query for images. Supports filtering by collection, sort, period, and NSFW levels.
-      Uses a cursor for pagination.
-    stability: stable
+    description: Paged image listing used for collection and feed crawling.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: true
     http:
       method: GET
       path_template: "{base_url}/image.getInfinite"
       headers:
-        x-client: "web"
+        x-client: web
     input:
       type: object
       properties:
         collectionId:
           type: integer
-          description: Filter images by a specific collection ID.
+          description: Optional collection filter.
         period:
           type: string
-          enum: ["AllTime", "Day", "Week", "Month"]
-          default: "AllTime"
+          enum: [AllTime, Day, Week, Month]
+          default: AllTime
         sort:
           type: string
-          enum: ["Newest", "MostLiked", "MostComments"]
-          default: "Newest"
+          enum: [Newest, MostLiked, MostComments]
+          default: Newest
+        limit:
+          type: integer
+          default: 200
         browsingLevel:
           type: integer
-          description: NSFW browsing level threshold (usually 1-31).
-          default: 1
-        include:
-          type: array
-          items: { type: string }
-          description: Additional data to include (e.g., ["cosmetics"]).
+          default: 31
+          description: Bitmask-like NSFW allowance (see meta.conventions.nsfw_levels).
+        withTags:
+          type: boolean
+          default: true
+        withMeta:
+          type: boolean
+          default: true
+        disablePoi:
+          type: boolean
+          description: True means POI content is filtered/disabled.
+        disableMinor:
+          type: boolean
+          description: True means minor-related content is filtered/disabled.
         excludedTagIds:
           type: array
           items: { type: integer }
-          description: List of tag IDs to exclude from results.
-        disablePoi:
+        include:
+          type: array
+          items: { type: string }
+        types:
+          type: array
+          items: { type: string }
+        cursor:
+          type: ["string", "null"]
+          description: Use null on first page, then prior nextCursor.
+        authed:
           type: boolean
           default: true
-        disableMinor:
+      meta_behavior:
+        required_when_cursor_is_null: true
+        omit_when_cursor_present: true
+    output:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              url: { type: string }
+              name: { type: ["string", "null"] }
+              type: { type: string }
+              width: { type: ["integer", "null"] }
+              height: { type: ["integer", "null"] }
+              nsfwLevel: { type: ["integer", "null"] }
+              mimeType: { type: ["string", "null"] }
+              hash: { type: ["string", "null"] }
+        nextCursor:
+          type: ["string", "null"]
+
+  image.get:
+    description: Get details for a single image.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: false
+    http:
+      method: GET
+      path_template: "{base_url}/image.get"
+      headers:
+        x-client: web
+    input:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        authed:
           type: boolean
-          default: false
-        cursor:
-          type: string
-          nullable: true
-          description: "Pagination cursor. Use null for the first page, then the 'nextCursor' from the response."
+          default: true
+    output:
+      type: object
+      description: Image detail object; shape varies by account visibility and media type.
+
+  image.getGenerationData:
+    description: Retrieve generation metadata for an image.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: false
+    http:
+      method: GET
+      path_template: "{base_url}/image.getGenerationData"
+      headers:
+        x-client: web
+    input:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
         authed:
           type: boolean
           default: true
     output:
       type: object
       properties:
-        items:
-          type: array
-          items: { type: object }
-        nextCursor:
+        generationProcess: { type: ["string", "null"] }
+        resources: { type: ["array", "null"] }
+        additionalNetworks: { type: ["array", "null"] }
+
+  tag.getVotableTags:
+    description: Resolve votable tags for a target entity (image/model/post).
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: false
+    http:
+      method: GET
+      path_template: "{base_url}/tag.getVotableTags"
+      headers:
+        x-client: web
+    input:
+      type: object
+      required: [id, type]
+      properties:
+        id: { type: integer }
+        type:
           type: string
-          nullable: true
+          enum: [image, model, post]
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: array
+      items: { type: object }
+
+  modelVersion.getById:
+    description: Fetch model version details by version ID.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: false
+    http:
+      method: GET
+      path_template: "{base_url}/modelVersion.getById"
+      headers:
+        x-client: web
+    input:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        modelId: { type: integer }
 
   system.getBrowsingSettingAddons:
-    description: |
-      Retrieves system default browsing settings (NSFW levels, excluded tags, etc.).
-      Useful for populating default parameters for image.getInfinite.
-    stability: stable
+    description: Return account/profile browsing presets and content-filter defaults.
+    status:
+      implemented_in_civitai_api: false
+      validated_with_debug_data: true
     http:
       method: GET
       path_template: "{base_url}/system.getBrowsingSettingAddons"
       headers:
-        x-client: "web"
+        x-client: web
     input:
       type: object
       properties:
@@ -124,21 +292,120 @@ procedures:
           default: true
     output:
       type: array
-      description: "Array of setting configuration groups based on browsing level type."
       items:
         type: object
         properties:
           type:
             type: string
+            enum: [none, some]
           nsfwLevels:
             type: array
             items: { type: integer }
+          excludedFooterLinks:
+            type: array
+            items: { type: string }
           excludedTagIds:
             type: array
             items: { type: integer }
-          disablePoi:
-            type: boolean
-          disableMinor:
-            type: boolean
-          generationDefaultValues:
+          disablePoi: { type: boolean }
+          disableMinor: { type: boolean }
+          generationDefaultValues: { type: object }
+          generationMinValues: { type: object }
+
+  hiddenPreferences.getHidden:
+    description: Return hidden/blocked entities for the authenticated user.
+    status:
+      implemented_in_civitai_api: false
+      validated_with_debug_data: true
+    http:
+      method: GET
+      path_template: "{base_url}/hiddenPreferences.getHidden"
+      headers:
+        x-client: web
+    input:
+      type: object
+      properties:
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        hiddenImages:
+          type: array
+          items: { type: object }
+        hiddenModels:
+          type: array
+          items:
             type: object
+            properties:
+              id: { type: integer }
+              hidden: { type: boolean }
+        hiddenUsers:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              hidden: { type: boolean }
+        hiddenTags:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              name: { type: string }
+              hidden: { type: ["boolean", "null"] }
+              nsfwLevel: { type: ["integer", "null"] }
+        blockedUsers:
+          type: array
+          items: { type: object }
+        blockedByUsers:
+          type: array
+          items: { type: object }
+
+  collection.getAllUser:
+    description: List collections owned by the authenticated user.
+    status:
+      implemented_in_civitai_api: false
+      validated_with_debug_data: true
+    http:
+      method: GET
+      path_template: "{base_url}/collection.getAllUser"
+      headers:
+        x-client: web
+    input:
+      type: object
+      properties:
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: array
+      notes:
+        - Use `type == "Image"` collections for image ingestion and tag extraction flows.
+        - Observed non-image collection types include `Model`, `Article`, and `Post`.
+      items:
+        type: object
+        properties:
+          id: { type: integer }
+          name: { type: string }
+          description: { type: ["string", "null"] }
+          read: { type: string }
+          write: { type: string }
+          userId: { type: integer }
+          type:
+            type: string
+            enum: [Image, Model, Article, Post]
+          isOwner: { type: boolean }
+          imageId: { type: ["integer", "null"] }
+          image:
+            type: ["object", "null"]
+            properties:
+              id: { type: integer }
+              url: { type: string }
+              nsfwLevel: { type: ["integer", "null"] }
+              mimeType: { type: ["string", "null"] }
+          tags:
+            type: array
+            items: { type: object }

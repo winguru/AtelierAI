@@ -1,8 +1,9 @@
 import os
-import requests
 import json
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+
+from .http_client import CivitaiRequestError
 
 from .civitai_api import CivitaiAPI
 
@@ -71,21 +72,14 @@ class CivitaiPrivateScraper:
             print(f"  DEBUG: Payload Data: {json.dumps(payload_data, indent=2)}")
             print(f"  DEBUG: TRPC Payload: {params}")
 
-        response = requests.get(
-            f"{self.api.base_url}/{endpoint}",
-            headers=self.api._get_headers(),
-            params=params,
-        )
-
-        if debug:
-            print(f"  DEBUG: Request URI: {response.url}")
-            print(f"  DEBUG: Response Status Code: {response.status_code}")
-
-        if response.status_code != 200:
-            print(f"Error fetching collection page: {response.status_code}")
+        try:
+            data = self.api._make_raw_request(endpoint, payload_data, strict=True)
+        except CivitaiRequestError as exc:
+            print(f"Error fetching collection page: {exc}")
             return None, None
 
-        data = response.json()
+        if debug:
+            print(f"  DEBUG: Request URL: {self.api.base_url}/{endpoint}")
         try:
             next_cursor = (
                 data.get("result", {}).get("data", {}).get("json", {}).get("nextCursor")
@@ -112,7 +106,11 @@ class CivitaiPrivateScraper:
         return False
 
     def fetch_collection_items(
-        self, collection_id: int, limit: Optional[int] = None, debug: bool = False
+        self,
+        collection_id: int,
+        limit: Optional[int] = None,
+        debug: bool = False,
+        progress_callback: Optional[Callable[[int, int, int], None]] = None,
     ) -> List[Dict]:
         """Fetch collection items with full pagination support.
 
@@ -163,11 +161,15 @@ class CivitaiPrivateScraper:
             if remaining is not None and len(page_items) > remaining:
                 page_items = page_items[:remaining]
                 items.extend(page_items)
+                if progress_callback is not None:
+                    progress_callback(page_count + 1, len(page_items), len(items))
                 print(f"  Reached limit of {limit} items.")
                 break
 
             items.extend(page_items)
             page_count += 1
+            if progress_callback is not None:
+                progress_callback(page_count, len(page_items), len(items))
             print(
                 f"  Page {page_count}: Fetched {len(page_items)} items (total: {len(items)})"
             )
@@ -394,7 +396,7 @@ class CivitaiPrivateScraper:
         # Construct Image URL
         image_url = (
             "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/"
-            f"{image_hash}/original=true/quality=90/{safe_name}"
+            f"{image_hash}/original=true/{safe_name}"
         )
 
         # Get author - try multiple fields

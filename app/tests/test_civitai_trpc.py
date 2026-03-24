@@ -9,9 +9,9 @@ if 'civitai_trpc' in sys.modules:
     del sys.modules['civitai_trpc']
 
 # Load the module from file
-spec = importlib.util.spec_from_file_location("civitai_trpc", "src/civitai_trpc.py")
+spec = importlib.util.spec_from_file_location("civitai_trpc", "legacy/civitai_trpc.py")
 if spec is None:
-    raise ImportError("Could not find civitai_trpc module at src/civitai_trpc.py")
+    raise ImportError("Could not find civitai_trpc module at legacy/civitai_trpc.py")
 if spec.loader is None:
     raise ImportError("Could not load civitai_trpc module: no loader available")
 module = importlib.util.module_from_spec(spec)
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     # The __main__ block in civitai_trpc.py won't run since we imported it as a module
     # So we'll create a client and test it manually
 
-    from atelierai.civitai.civitai_trpc import CivitaiTrpcClient, CivitaiTrpcError
+    from legacy.civitai_trpc import CivitaiTrpcClient, CivitaiTrpcError
     from atelierai.config import CIVITAI_SESSION_COOKIE
 
     print("🚀 TEST: CivitAI tRPC Client (fresh import)")

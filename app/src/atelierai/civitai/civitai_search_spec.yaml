@@ -1,0 +1,144 @@
+meta:
+  api_name: CivitAI Search API (Reverse-Engineered)
+  version: "0.1.0"
+  base_url: https://search-new.civitai.com
+  auth:
+    - type: bearer_token
+      header: Authorization
+      format: "Bearer <token>"
+      description: Required for authenticated search requests.
+      acquisition:
+        source_endpoint: https://civitai.com/api/trpc/signals.getToken
+        source_auth: __Secure-civitai-token session cookie
+        observed_input:
+          json:
+            authed: true
+        notes:
+          - The exact response body from signals.getToken has not yet been captured.
+          - Current evidence suggests it returns or mints the bearer token used for this host.
+  conventions:
+    transport:
+      http_method: POST
+      content_type: application/json
+      request_body_root: queries
+    notes:
+      - This host is separate from the main tRPC API at civitai.com/api/trpc.
+      - Request syntax appears Meilisearch-compatible.
+      - Nested dotted fields are used in both facets and filters, e.g. user.username.
+
+endpoints:
+  multi-search:
+    description: Execute one or more search queries in a single POST request.
+    status:
+      request_shape_validated_from_live_curl: true
+      response_shape_fully_captured: false
+      reverse_engineered: true
+    http:
+      method: POST
+      path: /multi-search
+      required_headers:
+        Authorization: "Bearer <token>"
+        Content-Type: application/json
+      observed_headers:
+        Origin: https://civitai.com
+        Referer: https://civitai.com/
+        X-Meilisearch-Client: Meilisearch instant-meilisearch (v0.13.5) ; Meilisearch JavaScript (v0.34.0)
+    input:
+      type: object
+      required: [queries]
+      properties:
+        queries:
+          type: array
+          items:
+            type: object
+            required: [q, indexUid, limit, offset]
+            properties:
+              q:
+                type: string
+                description: Search text; may be empty.
+              indexUid:
+                type: string
+                description: Search index, e.g. images_v6.
+              facets:
+                type: array
+                items: { type: string }
+                description: Facet fields to aggregate.
+              attributesToHighlight:
+                type: array
+                items: { type: string }
+              highlightPreTag:
+                type: string
+              highlightPostTag:
+                type: string
+              limit:
+                type: integer
+              offset:
+                type: integer
+              filter:
+                type: array
+                items: { type: string }
+                description: Meilisearch-style filter expressions.
+              sort:
+                type: array
+                items: { type: string }
+                description: Sort expressions such as stats.reactionCountAllTime:desc.
+    output:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              hits:
+                type: array
+                description: Search result rows for the selected index.
+              query: { type: string }
+              limit: { type: integer }
+              offset: { type: integer }
+              estimatedTotalHits: { type: integer }
+              processingTimeMs: { type: integer }
+              facetDistribution:
+                type: [object, "null"]
+              facetStats:
+                type: [object, "null"]
+    examples:
+      bikini_weekly_reaction_search:
+        request:
+          queries:
+            - q: ""
+              indexUid: images_v6
+              facets:
+                - aspectRatio
+                - baseModel
+                - createdAtUnix
+                - tagNames
+                - techniqueNames
+                - toolNames
+                - type
+                - user.username
+              attributesToHighlight: []
+              highlightPreTag: __ais-highlight__
+              highlightPostTag: __/ais-highlight__
+              limit: 51
+              offset: 0
+              filter:
+                - '"tagNames"="bikini"'
+                - createdAtUnix>=1773633600000
+                - (poi != true OR user.username = winguru) AND (minor != true)
+              sort:
+                - stats.reactionCountAllTime:desc
+            - q: ""
+              indexUid: images_v6
+              facets:
+                - createdAtUnix
+              attributesToHighlight: []
+              highlightPreTag: __ais-highlight__
+              highlightPostTag: __/ais-highlight__
+              limit: 1
+              offset: 0
+              filter:
+                - '"tagNames"="bikini"'
+                - (poi != true OR user.username = winguru) AND (minor != true)
+              sort:
+                - stats.reactionCountAllTime:desc

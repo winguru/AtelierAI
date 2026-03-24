@@ -5,10 +5,15 @@ Refer to CIVITAI_API_REFERENCE.md for details on endpoints and usage.
 """
 
 import os
-import requests
 import json
+import random
+import threading
+import time
 from importlib import import_module
+from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+from .http_client import CivitaiHttpClient, CivitaiRequestError
 
 
 def _get_config_value(name: str) -> Optional[str]:
@@ -48,6 +53,9 @@ class CivitaiAPI:
     """
 
     _instance = None
+    _TRPC_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    _TRPC_MAX_ATTEMPTS = 4
+    _TRPC_BACKOFF_BASE_SECONDS = 0.75
 
     def __new__(cls, *args, **kwargs):
         """Singleton pattern - ensure only one instance exists."""
@@ -77,7 +85,7 @@ class CivitaiAPI:
             self.session_cookie = _get_config_value("CIVITAI_SESSION_COOKIE")
 
         self.base_url = "https://civitai.com/api/trpc"
-        self.session = requests.Session()  # Reuse connection
+        self.http_client = CivitaiHttpClient(headers_factory=self._get_headers)
 
         # Default parameters based on CivitAI API
         self.default_params = {
@@ -110,6 +118,14 @@ class CivitaiAPI:
 
         # Response cache (optional - can be enabled later)
         self._cache: Dict = {}
+        self._retry_metrics_lock = threading.Lock()
+        self._payload_retry_metrics: Dict[str, Any] = {
+            "total": 0,
+            "by_status": {},
+            "by_endpoint": {},
+        }
+        self._image_uuid_index: Dict[int, str] = {}
+        self._api_archive_lock = threading.Lock()
 
         self._initialized = True
 
@@ -228,7 +244,65 @@ class CivitaiAPI:
         input_meta = self.default_meta if input_json.get("cursor") is None else {}
         return json.dumps({"json": input_json, **input_meta}, separators=(",", ":"))
 
-    def _make_request(self, endpoint: str, payload_data: Dict) -> Optional[Dict]:
+    def _make_raw_request(
+        self,
+        endpoint: str,
+        payload_data: Dict,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict]:
+        """Make a raw request to CivitAI's tRPC API."""
+        url = f"{self.base_url}/{endpoint}"
+        params = {"input": self._build_trpc_payload(payload_data)}
+
+        try:
+            return self.http_client.request_json("GET", url, params=params)
+        except CivitaiRequestError as e:
+            if e.status_code == 403:
+                backoff = self.http_client.activate_global_backoff(90.0, reason="HTTP 403 (Cloudflare)")
+                print(f"🚫 CivitAI returned HTTP 403 (Cloudflare challenge); pausing all requests for {backoff:.0f}s")
+            if strict:
+                raise
+            status_text = f" (HTTP {e.status_code})" if e.status_code is not None else ""
+            print(f"❌ API request error{status_text}: {e}")
+            return None
+
+    def _retry_delay(self, attempt: int) -> float:
+        """Compute exponential backoff with small jitter for retry loops."""
+        jitter = random.uniform(0.0, 0.35)
+        return self._TRPC_BACKOFF_BASE_SECONDS * (2 ** max(0, attempt - 1)) + jitter
+
+    def _record_payload_retry(self, endpoint: str, status_code: Optional[int]) -> None:
+        """Track payload-level retry attempts for observability across long-running jobs."""
+        endpoint_key = str(endpoint or "unknown")
+        status_key = str(status_code) if status_code is not None else "unknown"
+        with self._retry_metrics_lock:
+            self._payload_retry_metrics["total"] = int(self._payload_retry_metrics.get("total", 0)) + 1
+
+            by_status = self._payload_retry_metrics.get("by_status")
+            if not isinstance(by_status, dict):
+                by_status = {}
+                self._payload_retry_metrics["by_status"] = by_status
+            by_status[status_key] = int(by_status.get(status_key, 0)) + 1
+
+            by_endpoint = self._payload_retry_metrics.get("by_endpoint")
+            if not isinstance(by_endpoint, dict):
+                by_endpoint = {}
+                self._payload_retry_metrics["by_endpoint"] = by_endpoint
+            by_endpoint[endpoint_key] = int(by_endpoint.get(endpoint_key, 0)) + 1
+
+    def get_payload_retry_metrics_snapshot(self) -> Dict[str, Any]:
+        """Return a copy of payload-level retry metrics collected by this singleton."""
+        with self._retry_metrics_lock:
+            by_status = self._payload_retry_metrics.get("by_status")
+            by_endpoint = self._payload_retry_metrics.get("by_endpoint")
+            return {
+                "total": int(self._payload_retry_metrics.get("total", 0)),
+                "by_status": dict(by_status) if isinstance(by_status, dict) else {},
+                "by_endpoint": dict(by_endpoint) if isinstance(by_endpoint, dict) else {},
+            }
+
+    def _make_request(self, endpoint: str, payload_data: Dict, *, strict: bool = False) -> Optional[Dict]:
         """Make a request to CivitAI API.
 
         Args:
@@ -238,61 +312,228 @@ class CivitaiAPI:
         Returns:
             Parsed JSON response, or None if request fails
         """
-        url = f"{self.base_url}/{endpoint}"
-        params = {"input": self._build_trpc_payload(payload_data)}
+        last_error: Optional[CivitaiRequestError] = None
+        max_attempts = max(1, int(self._TRPC_MAX_ATTEMPTS))
 
-        try:
-            response = self.session.get(
-                url, headers=self._get_headers(), params=params, timeout=30
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                # Navigate tRPC response structure
-                if "result" in data and "data" in data["result"]:
-                    result_data = data["result"]["data"]
-                    if "json" in result_data:
-                        return result_data["json"]
-                    return result_data
-                return data
-            else:
-                print(f"⚠️  API request failed: {response.status_code}")
+        for attempt in range(1, max_attempts + 1):
+            data = self._make_raw_request(endpoint, payload_data, strict=strict)
+            if not data:
                 return None
 
-        except Exception as e:
-            print(f"❌ API request error: {e}")
+            if not isinstance(data, dict):
+                return data
+
+            error_payload = data.get("error")
+            if isinstance(error_payload, dict):
+                error_json = error_payload.get("json") if isinstance(error_payload.get("json"), dict) else {}
+                error_data = error_json.get("data") if isinstance(error_json.get("data"), dict) else {}
+                status_code = error_data.get("httpStatus")
+                message = error_json.get("message") or error_payload.get("message") or "CivitAI tRPC request failed"
+
+                detail = message
+                if status_code is not None:
+                    detail = f"CivitAI request failed with HTTP {status_code}: {json.dumps(data, separators=(',', ':'))}"
+                elif error_data.get("path"):
+                    detail = f"{message} ({error_data.get('path')})"
+
+                normalized_status = status_code if isinstance(status_code, int) else None
+                retryable = bool(normalized_status in self._TRPC_RETRYABLE_STATUS_CODES)
+                if normalized_status == 429:
+                    backoff_seconds = self.http_client.activate_global_backoff(
+                        30.0,
+                        reason="tRPC payload 429",
+                    )
+                    if not strict:
+                        print(
+                            f"⏳ CivitAI payload rate limit; pausing all CivitAI requests for {backoff_seconds:.1f}s"
+                        )
+                exc = CivitaiRequestError(
+                    detail,
+                    status_code=normalized_status,
+                    retryable=retryable,
+                )
+
+                if retryable and attempt < max_attempts:
+                    self._record_payload_retry(endpoint, normalized_status)
+                    if not strict:
+                        status_text = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+                        print(
+                            f"⚠️  API request retry {attempt}/{max_attempts - 1}{status_text}: {message}"
+                        )
+                    time.sleep(self._retry_delay(attempt))
+                    last_error = exc
+                    continue
+
+                if strict:
+                    raise exc
+
+                status_text = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+                print(f"❌ API request error{status_text}: {exc}")
+                return None
+
+            result_wrapper = data.get("result")
+            if not isinstance(result_wrapper, dict):
+                return None
+
+            result_data = result_wrapper.get("data")
+            if isinstance(result_data, dict) and "json" in result_data:
+                result_json = result_data["json"]
+            else:
+                result_json = result_data
+
+            self._archive_metadata_response(
+                endpoint=endpoint,
+                payload_data=payload_data,
+                response_json=result_json,
+            )
+            return result_json
+
+        if strict and last_error is not None:
+            raise last_error
+        return None
+
+    def _archive_root(self) -> Path:
+        image_resources_path = _get_config_value("IMAGE_RESOURCES_PATH") or "image_resources"
+        return Path(image_resources_path) / "civitai_api_responses"
+
+    def _extract_uuid_from_hash(self, hash_value: Optional[str]) -> Optional[str]:
+        if not hash_value:
             return None
+        cleaned = str(hash_value).strip()
+        if not cleaned:
+            return None
+        first = cleaned.split("/", 1)[0].strip()
+        if len(first) > 8:
+            return first
+        return None
+
+    def _archive_json_file(self, filename: str, payload: Dict[str, Any]) -> None:
+        root = self._archive_root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / filename
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+
+    def _archive_metadata_response(self, *, endpoint: str, payload_data: Dict[str, Any], response_json: Any) -> None:
+        # Capture metadata fetches globally so import/check/probe paths all persist payloads.
+        if endpoint not in {"image.get", "image.getGenerationData", "image.getInfinite"}:
+            return
+
+        try:
+            with self._api_archive_lock:
+                if endpoint == "image.get" and isinstance(response_json, dict):
+                    image_id = payload_data.get("id")
+                    uuid_value = self._extract_uuid_from_hash(response_json.get("url"))
+                    key = None
+                    if uuid_value:
+                        key = uuid_value
+                    elif image_id is not None:
+                        key = f"imageid_{int(image_id)}"
+                    if key is None:
+                        return
+
+                    if image_id is not None and uuid_value:
+                        self._image_uuid_index[int(image_id)] = uuid_value
+
+                    self._archive_json_file(f"civitai_image_get_{key}.json", response_json)
+                    return
+
+                if endpoint == "image.getGenerationData" and isinstance(response_json, dict):
+                    image_id = payload_data.get("id")
+                    uuid_value = None
+                    if image_id is not None:
+                        uuid_value = self._image_uuid_index.get(int(image_id))
+                    key = uuid_value or (f"imageid_{int(image_id)}" if image_id is not None else None)
+                    if key is None:
+                        return
+                    self._archive_json_file(f"civitai_image_getGenerationData_{key}.json", response_json)
+                    return
+
+                if endpoint == "image.getInfinite" and isinstance(response_json, dict):
+                    items = self._find_deep_image_list(response_json)
+                    if not items:
+                        return
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        item_id = item.get("id")
+                        uuid_value = self._extract_uuid_from_hash(item.get("url"))
+                        key = uuid_value or (f"imageid_{int(item_id)}" if item_id is not None else None)
+                        if key is None:
+                            continue
+                        if item_id is not None and uuid_value:
+                            self._image_uuid_index[int(item_id)] = uuid_value
+                        self._archive_json_file(f"civitai_image_getInfinite_{key}.json", item)
+        except Exception:
+            # Archival should never break API fetch behavior.
+            pass
+
+    def is_rate_limited(self) -> bool:
+        """Return True when global CivitAI cooldown is active."""
+        return self.http_client.is_global_backoff_active()
+
+    def rate_limit_remaining_seconds(self) -> float:
+        """Return remaining global CivitAI cooldown in seconds."""
+        return self.http_client.get_global_backoff_remaining_seconds()
 
     # ===== Image API Methods =====
 
-    def fetch_image_tags(self, image_id: int) -> List[str]:
-        """Fetch tags for a specific image.
+    def fetch_image_tag_records(self, image_id: int) -> List[Dict[str, Any]]:
+        """Fetch tag records for a specific image using ID-first payloads.
 
-        Uses tag.getVotableTags endpoint which returns tags with scores.
-
-        Args:
-            image_id: CivitAI image ID
-
-        Returns:
-            List of tag strings sorted by relevance score (highest first),
-            or empty list if not found
+        Uses tag.getVotableTags endpoint and returns stable dict records sorted
+        by relevance score (highest first), preferring numeric tag IDs.
         """
-        # Use tag.getVotableTags endpoint
         response = self._make_request(
             endpoint="tag.getVotableTags",
             payload_data={"id": int(image_id), "type": "image", "authed": True},
         )
 
-        if response and isinstance(response, list):
-            # Sort tags by score (highest first) and return names
-            sorted_tags = sorted(
-                response, key=lambda t: t.get("score", 0), reverse=True
-            )
-            return [tag.get("name") for tag in sorted_tags if tag.get("name")]
+        if not response or not isinstance(response, list):
+            return []
 
-        return []
+        sorted_tags = sorted(response, key=lambda t: t.get("score", 0), reverse=True)
+        out: List[Dict[str, Any]] = []
+        for tag in sorted_tags:
+            if not isinstance(tag, dict):
+                continue
+            tag_name = tag.get("name")
+            tag_id = tag.get("id")
+            if tag_id is None and not isinstance(tag_name, str):
+                continue
 
-    def fetch_basic_info(self, image_id: int) -> Optional[Dict]:
+            normalized: Dict[str, Any] = {}
+            if tag_id is not None:
+                try:
+                    normalized["id"] = int(tag_id)
+                except (TypeError, ValueError):
+                    normalized["id"] = str(tag_id)
+            if isinstance(tag_name, str) and tag_name.strip():
+                normalized["name"] = tag_name.strip()
+            if tag.get("score") is not None:
+                normalized["score"] = tag.get("score")
+            if tag.get("type") is not None:
+                normalized["type"] = tag.get("type")
+            if tag.get("nsfwLevel") is not None:
+                normalized["nsfwLevel"] = tag.get("nsfwLevel")
+            if tag.get("automated") is not None:
+                normalized["automated"] = tag.get("automated")
+            if tag.get("concrete") is not None:
+                normalized["concrete"] = tag.get("concrete")
+
+            out.append(normalized)
+
+        return out
+
+    def fetch_image_tags(self, image_id: int) -> List[str]:
+        """Fetch tag names for a specific image.
+
+        Compatibility wrapper over fetch_image_tag_records.
+        """
+        records = self.fetch_image_tag_records(image_id)
+        return [str(tag.get("name")) for tag in records if isinstance(tag.get("name"), str)]
+
+    def fetch_basic_info(self, image_id: int, *, strict: bool = False) -> Optional[Dict]:
         """Fetch basic image information (URL, author, NSFW, created_at).
 
         Uses image.get endpoint.
@@ -304,10 +545,12 @@ class CivitaiAPI:
             Dictionary with basic image info, or None if not found
         """
         return self._make_request(
-            endpoint="image.get", payload_data={"id": int(image_id), "authed": True}
+            endpoint="image.get",
+            payload_data={"id": int(image_id), "authed": True},
+            strict=strict,
         )
 
-    def fetch_generation_data(self, image_id: int) -> Optional[Dict]:
+    def fetch_generation_data(self, image_id: int, *, strict: bool = False) -> Optional[Dict]:
         """Fetch detailed generation data for a single image.
 
         Uses image.getGenerationData endpoint.
@@ -321,6 +564,7 @@ class CivitaiAPI:
         return self._make_request(
             endpoint="image.getGenerationData",
             payload_data={"id": int(image_id), "authed": True},
+            strict=strict,
         )
 
     def fetch_image_data(self, image_id: int) -> Dict:

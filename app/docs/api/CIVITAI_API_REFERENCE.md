@@ -4,6 +4,68 @@
 
 This document documents all known CivitAI API endpoints, request formats, and response structures based on reverse-engineering and testing with the CivitAI Private Scraper project.
 
+## Table of Contents
+
+### Core Sections
+
+- [Overview](#overview)
+- [Authentication](#-authentication)
+- [Session Cookie](#session-cookie)
+- [Headers Required](#headers-required)
+- [Search Bearer Token](#search-bearer-token)
+- [Request Format (tRPC)](#-request-format-trpc)
+- [URL Structure](#url-structure)
+- [JSON Payload Structure](#json-payload-structure)
+- [Encoding](#encoding)
+- [Helper Function](#helper-function)
+- [Response Structure](#-response-structure)
+- [tRPC Response Format](#trpc-response-format)
+- [Navigation](#navigation)
+- [Known API Endpoints](#-known-api-endpoints)
+
+### API Endpoint Groups
+
+- [Search Endpoints](#search-endpoints)
+- [Image Endpoints](#image-endpoints)
+- [Tag Endpoints](#tag-endpoints)
+- [Model Endpoints](#model-endpoints)
+- [Post Endpoints](#post-endpoints)
+- [System and Preferences Endpoints](#system-and-preferences-endpoints)
+
+### API Endpoints
+
+- [POST /multi-search](#post-multi-search)
+- [signals.getToken](#signalsgettoken)
+- [image.get](#imageget)
+- [image.getGenerationData](#imagegetgenerationdata)
+- [image.getInfinite](#imagegetinfinite)
+- [tag.getVotableTags](#taggetvotabletags)
+- [tag.getById](#taggetbyid)
+- [modelVersion.getById](#modelversiongetbyid)
+- [post.get](#postget)
+- [system.getBrowsingSettingAddons](#systemgetbrowsingsettingaddons)
+- [hiddenPreferences.getHidden](#hiddenpreferencesgethidden)
+- [collection.getAllUser](#collectiongetalluser)
+
+### Examples and Reference
+
+- [Complete Data Flow Example](#-complete-data-flow-example)
+- [Fetch Single Image with All Data](#fetch-single-image-with-all-data)
+- [Common Patterns](#-common-patterns)
+- [NSFW Levels](#nsfw-levels)
+- [Image MIME Types](#image-mime-types)
+- [Model Types](#model-types)
+- [Base Models](#base-models)
+- [Error Responses](#-error-responses)
+- [Common Errors](#common-errors)
+- ["401 Unauthorized"](#401-unauthorized)
+- ["404 Not Found"](#404-not-found)
+- [Helper Code](#-helper-code)
+- [Complete Request Function](#complete-request-function)
+- [Related Documentation](#-related-documentation)
+- [Disclaimer](#-disclaimer)
+- [Version History](#-version-history)
+
 ---
 
 ## 🔑 Authentication
@@ -33,11 +95,36 @@ headers = {
 }
 ```
 
+### Search Bearer Token
+
+The hosted search service at `search-new.civitai.com` uses a separate bearer token rather than the raw `__Secure-civitai-token` cookie.
+
+**Observed token bridge endpoint:** `signals.getToken`
+
+**Observed behavior:**
+- A logged-in browser session can call `https://civitai.com/api/trpc/signals.getToken` with the normal `__Secure-civitai-token` cookie.
+- The request payload observed so far is `{"json":{"authed":true}}`.
+- This endpoint appears to return the bearer token later sent as `Authorization: Bearer <token>` to `https://search-new.civitai.com/multi-search`.
+- This relationship is inferred from captured request flow and should be treated as reverse-engineered, not officially documented.
+
+**Observed minimal request shape:**
+```http
+GET /api/trpc/signals.getToken?input=%7B%22json%22%3A%7B%22authed%22%3Atrue%7D%7D HTTP/1.1
+Host: civitai.com
+Cookie: __Secure-civitai-token=<redacted>
+Referer: https://civitai.com/
+X-Client: web
+```
+
+**Practical note:** most browser fingerprint and client-hint headers appear incidental. For documentation purposes, the normal authenticated cookie is the important requirement; CGI-style request metadata does not appear essential.
+
 ---
 
 ## 📨 Request Format (tRPC)
 
 CivitAI uses **tRPC** protocol which requires a specific JSON structure.
+
+**Note:** Not every CivitAI-adjacent endpoint uses tRPC. In particular, the hosted search service at `search-new.civitai.com` exposes separate JSON POST APIs.
 
 ### URL Structure
 
@@ -62,6 +149,31 @@ https://civitai.com/api/trpc/{endpoint}?input={encoded_payload}
   }
 }
 ```
+
+**Important:** `meta` is optional for most endpoints and is often ignored when provided.
+
+**Observed usage rule (2026-03-11):**
+- Non-infinite endpoints (`image.get`, `collection.getAllUser`, `hiddenPreferences.getHidden`, `system.getBrowsingSettingAddons`) returned identical data with and without `meta`.
+- `image.getInfinite`:
+  - First page (`cursor: null`): include `meta.values.cursor=["undefined"]`.
+  - Next pages (`cursor` is a string): omit `meta`; including `meta` can cause first-page repetition.
+
+**Validation Notes (2026-03-11):**
+- Non-infinite endpoint comparisons (with vs without `meta`):
+  - `system.getBrowsingSettingAddons`: `200/200`, payload equality `True`
+  - `hiddenPreferences.getHidden`: `200/200`, payload equality `True`
+  - `collection.getAllUser`: `200/200`, payload equality `True`
+  - `image.get`: `200/200`, payload equality `True`
+- `image.getInfinite` first page (`cursor: null`):
+  - With `meta`: `200`
+  - Without `meta`: `400` (for tested payload shape)
+- `image.getInfinite` second page (using a returned `nextCursor`):
+  - With `meta`: `200`, but returned a page fully overlapping first-page IDs (`50` overlap)
+  - Without `meta`: `200`, returned non-overlapping next-page IDs (`0` overlap)
+
+Test scripts used:
+- `app/dev/check_meta_requirement.py`
+- `/tmp/check_infinite_cursor_meta.py`
 
 ### Encoding
 
@@ -91,11 +203,16 @@ url = f"https://civitai.com/api/trpc/image.get?input={encoded_input}"
 
 ```python
 def _build_trpc_payload(input_json: dict) -> str:
-    """Wrap the input JSON into tRPC structure."""
-    return json.dumps({
-        "json": input_json,
-        "meta": {"values": {"cursor": ["undefined"]}}
-    })
+  """Wrap input JSON for tRPC.
+
+  For image.getInfinite:
+  - include meta only when cursor is None (first page)
+  - omit meta when cursor is present (next pages)
+  """
+  payload = {"json": input_json}
+  if input_json.get("cursor") is None:
+    payload["meta"] = {"values": {"cursor": ["undefined"]}}
+  return json.dumps(payload)
 ```
 
 ---
@@ -135,6 +252,179 @@ result = data.get("result", {}).get("data", {}).get("json", {})
 ---
 
 ## 📡 Known API Endpoints
+
+### Search Endpoints
+
+The dedicated search host uses bearer auth instead of the session cookie directly. The current evidence suggests the bearer token is obtained from the main-site tRPC procedure `signals.getToken` described in the authentication section above.
+
+#### `POST /multi-search`
+
+Submit one or more Meilisearch-style search queries in a single request. This endpoint is hosted on the dedicated CivitAI search service rather than the main tRPC host.
+
+**URL:** `https://search-new.civitai.com/multi-search`
+
+**Method:** `POST`
+
+**Authentication:**
+- Requires `Authorization: Bearer <token>`
+- This is distinct from the `__Secure-civitai-token` cookie used by the tRPC endpoints
+- The bearer token appears to be minted or returned by `https://civitai.com/api/trpc/signals.getToken` for an already-authenticated browser session
+
+#### `signals.getToken`
+
+Return or mint the bearer token used by the hosted search service.
+
+**URL:** `https://civitai.com/api/trpc/signals.getToken`
+
+**Method:** `GET`
+
+**Authentication:**
+- Requires the normal CivitAI session cookie: `__Secure-civitai-token=<token>`
+- No bearer token is sent to this endpoint in the observed request
+
+**Observed query string:**
+```text
+input={"json":{"authed":true}}
+```
+
+**Observed request notes:**
+- Called against the main `civitai.com/api/trpc` host, not `search-new.civitai.com`
+- Appears to be part of the browser flow before authenticated search requests
+- Likely usable with a minimal header set so long as the session cookie is valid
+
+**Observed role in auth flow:**
+1. Browser sends authenticated tRPC request to `signals.getToken`
+2. Response appears to contain a search-scoped token
+3. Browser sends that token as `Authorization: Bearer <token>` to `/multi-search`
+
+**Response shape:**
+- Not fully captured yet
+- Expected to be wrapped in the standard tRPC envelope under `result.data.json`
+
+**Observed headers:**
+```http
+Authorization: Bearer <redacted>
+Content-Type: application/json
+Origin: https://civitai.com
+Referer: https://civitai.com/
+X-Meilisearch-Client: Meilisearch instant-meilisearch (v0.13.5) ; Meilisearch JavaScript (v0.34.0)
+```
+
+**Request body:**
+```json
+{
+  "queries": [
+    {
+      "q": "",
+      "indexUid": "images_v6",
+      "facets": [
+        "aspectRatio",
+        "baseModel",
+        "createdAtUnix",
+        "tagNames",
+        "techniqueNames",
+        "toolNames",
+        "type",
+        "user.username"
+      ],
+      "attributesToHighlight": [],
+      "highlightPreTag": "__ais-highlight__",
+      "highlightPostTag": "__/ais-highlight__",
+      "limit": 51,
+      "offset": 0,
+      "filter": [
+        "\"tagNames\"=\"bikini\"",
+        "createdAtUnix>=1773633600000",
+        "(poi != true OR user.username = winguru) AND (minor != true) AND (NOT (nsfwLevel IN ['4', '8', '16', '32'] AND baseModel IN ['SD 3', 'SD 3.5', 'SD 3.5 Medium', 'SD 3.5 Large', 'SD 3.5 Large Turbo', 'SDXL Turbo', 'SVD', 'SVD XT', 'Stable Cascade'])) AND (nsfwLevel=1 OR nsfwLevel=2 OR nsfwLevel=4 OR nsfwLevel=8 OR nsfwLevel=16)"
+      ],
+      "sort": [
+        "stats.reactionCountAllTime:desc"
+      ]
+    },
+    {
+      "q": "",
+      "indexUid": "images_v6",
+      "facets": ["createdAtUnix"],
+      "attributesToHighlight": [],
+      "highlightPreTag": "__ais-highlight__",
+      "highlightPostTag": "__/ais-highlight__",
+      "limit": 1,
+      "offset": 0,
+      "filter": [
+        "\"tagNames\"=\"bikini\"",
+        "(poi != true OR user.username = winguru) AND (minor != true) AND (NOT (nsfwLevel IN ['4', '8', '16', '32'] AND baseModel IN ['SD 3', 'SD 3.5', 'SD 3.5 Medium', 'SD 3.5 Large', 'SD 3.5 Large Turbo', 'SDXL Turbo', 'SVD', 'SVD XT', 'Stable Cascade'])) AND (nsfwLevel=1 OR nsfwLevel=2 OR nsfwLevel=4 OR nsfwLevel=8 OR nsfwLevel=16)"
+      ],
+      "sort": [
+        "stats.reactionCountAllTime:desc"
+      ]
+    }
+  ]
+}
+```
+
+**Top-level fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `queries` | list | Array of independent search requests executed in one POST |
+
+**Per-query fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `q` | str | Search text; empty string is valid |
+| `indexUid` | str | Search index name, e.g. `images_v6` |
+| `facets` | list[str] | Facet fields to aggregate |
+| `attributesToHighlight` | list[str] | Fields to highlight in text results |
+| `highlightPreTag` | str | Prefix marker for search highlights |
+| `highlightPostTag` | str | Suffix marker for search highlights |
+| `limit` | int | Maximum number of hits to return |
+| `offset` | int | Offset for paginated search |
+| `filter` | list[str] | Meilisearch-compatible filter expressions |
+| `sort` | list[str] | Sort expressions such as `stats.reactionCountAllTime:desc` |
+
+**Filter behavior notes:**
+- Filter expressions are passed as strings and can combine equality, inequality, range checks, `IN`, `NOT`, `AND`, and `OR`.
+- Nested dotted fields are supported in both `facets` and filters, e.g. `user.username`.
+- This endpoint appears to follow Meilisearch filter syntax rather than the tRPC input envelope conventions.
+
+**Observed usage pattern:**
+- One query can request a page of hits and full facet buckets.
+- A second query in the same request can be used to compute a narrower aggregate, such as a single-facet time histogram or alternate sort probe.
+
+**Response shape (Meilisearch-style envelope):**
+```json
+{
+  "results": [
+    {
+      "hits": [
+        {
+          "id": 124133297,
+          "type": "video",
+          "user": {
+            "username": "fatberg_slim"
+          },
+          "stats": {
+            "reactionCountAllTime": 783
+          }
+        }
+      ],
+      "query": "",
+      "limit": 51,
+      "offset": 0,
+      "estimatedTotalHits": 0,
+      "processingTimeMs": 0,
+      "facetDistribution": {},
+      "facetStats": {}
+    }
+  ]
+}
+```
+
+**Response notes:**
+- The exact hit object depends on the selected `indexUid`.
+- For `images_v6`, hit rows are expected to resemble the image/video objects returned elsewhere in CivitAI search-driven UIs.
+- `facetDistribution` and `facetStats` are only populated when relevant facets are requested.
+
+---
 
 ### Image Endpoints
 
@@ -384,6 +674,7 @@ Fetch collection items with pagination support.
 **Pagination:**
 - Use `nextCursor` from response to fetch next page
 - Pass cursor value in subsequent requests
+- Omit `meta` for cursor-based follow-up requests (only use it for first-page `cursor: null`)
 - Stop when `nextCursor` is null or empty
 
 ---
@@ -680,6 +971,141 @@ Fetch post details (includes tags array).
 
 ---
 
+### System and Preferences Endpoints
+
+#### `system.getBrowsingSettingAddons`
+
+Fetch browsing setting addon definitions used by the site filtering UI.
+
+**URL:** `https://civitai.com/api/trpc/system.getBrowsingSettingAddons`
+
+**Tested Payload (2026-03-11):**
+```json
+{
+  "json": {
+    "authed": true
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+
+**Observed Response Shape:**
+- Top-level `json` is a list.
+- List items include keys such as:
+  - `type`
+  - `nsfwLevels`
+  - `excludedFooterLinks`
+
+**Field Notes (interpretation):**
+- `disablePoi`
+  - Disables Point of Interest (PoI) detection or related detailer/refiner behavior
+    in browsing and/or generation contexts.
+- `disableMinor`
+  - Disables minor (child) detection or related detailer/refiner behavior
+    in browsing and/or generation contexts.
+
+**`nsfwLevels` Mapping:**
+| Value | Label |
+|-------|-------|
+| `1`   | PG |
+| `2`   | PG13 |
+| `4`   | R |
+| `8`   | X |
+| `16`  | XXX |
+| `32`  | Blocked |
+
+**Saved sample output:** `data/debug_system_getBrowsingSettingAddons_response.json`
+
+---
+
+#### `hiddenPreferences.getHidden`
+
+Fetch hidden/blocked preferences for the authenticated user.
+
+**URL:** `https://civitai.com/api/trpc/hiddenPreferences.getHidden`
+
+**Tested Payload (2026-03-11):**
+```json
+{
+  "json": {
+    "authed": true
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+
+**Observed Response Shape:**
+- Top-level `json` is an object.
+- Keys observed:
+  - `hiddenImages`
+  - `hiddenModels`
+  - `hiddenUsers`
+  - `hiddenTags`
+  - `blockedUsers`
+  - `blockedByUsers`
+
+**Saved sample output:** `data/debug_hiddenPreferences_getHidden_response.json`
+
+---
+
+#### `collection.getAllUser`
+
+Fetch collections visible to the authenticated user.
+
+**URL:** `https://civitai.com/api/trpc/collection.getAllUser`
+
+**Tested Payload (2026-03-11):**
+```json
+{
+  "json": {
+    "authed": true
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+
+**Observed Response Shape:**
+- Top-level `json` is a list.
+- Observed list item keys include:
+  - `id`
+  - `name`
+  - `description`
+  - `read`
+  - `userId`
+  - `write`
+  - `imageId`
+  - `type`
+  - `isOwner`
+  - `image`
+  - `tags`
+
+**Observed Collection `type` Values (2026-03-11):**
+- `Image`
+- `Model`
+- `Article`
+- `Post`
+
+**Important Filtering Rule:**
+- For AtelierAI image ingestion (`POST /import_civitai/` with `import_type="collection"`), only use collections where `type == "Image"`.
+- For tag bootstrap/export workflows that depend on `image.getInfinite` image items, only use collections where `type == "Image"`.
+- Skip `Model`, `Article`, and `Post` collections for image-based import/tag extraction.
+
+**Saved sample output:** `data/debug_collection_getAllUser_response.json`
+
+---
+
 ## 📊 Complete Data Flow Example
 
 ### Fetch Single Image with All Data
@@ -723,11 +1149,12 @@ print(f"LoRAs: {[l['name'] for l in image.loras]}")
 | Level | Description   |
 |-------|---------------|
 | 0     | Safe          |
-| 1     | Mild          |
-| 2     | Moderate      |
-| 4     | Mature        |
-| 8     | Explicit      |
-| 16    | Very Explicit |
+| 1     | PG            |
+| 2     | PG13          |
+| 4     | R             |
+| 8     | X             |
+| 16    | XXX           |
+| 32    | Blocked       |
 
 ### Image MIME Types
 

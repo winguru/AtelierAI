@@ -1,22 +1,25 @@
 import os
-import shutil
 import hashlib
 import json
+import mimetypes
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
+from urllib.parse import urlsplit
 
 from PIL import Image
 from PIL.ExifTags import TAGS
 from sqlalchemy.orm import Session
+from atelierai.platform_detect import resolve_binary
 
 from models import ImageModel, Artist
 from image_data import ImageData
 
 # A set of supported media extensions for easy lookup.
-ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".jfif", ".mp4"}
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".jfif", ".mp4", ".webm"}
 MIME_MAPPING = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -24,6 +27,7 @@ MIME_MAPPING = {
     ".webp": "image/webp",
     ".jfif": "image/jpeg",
     ".mp4": "video/mp4",
+    ".webm": "video/webm",
 }
 
 UUID_RE = re.compile(
@@ -38,24 +42,347 @@ _EXIFTOOL_AVAILABLE = False
 _EXIFTOOL_WARNED = False
 _FFMPEG_CHECKED = False
 _FFMPEG_AVAILABLE = False
+_FFMPEG_WEBP_ENCODER_CHECKED = False
+_FFMPEG_WEBP_ENCODER_AVAILABLE = False
+_FFMPEG_APNG_FORMAT_CHECKED = False
+_FFMPEG_APNG_FORMAT_AVAILABLE = False
+_EXIFTOOL_COMMAND: Optional[str] = None
+_FFMPEG_COMMAND: Optional[str] = None
+VIDEO_POSTER_SUFFIX = ".poster.jpg"
+VIDEO_POSTER_DIRNAME = "video_posters"
+VIDEO_THUMBNAIL_DIRNAME = "video_thumbnails"
+VIDEO_THUMBNAIL_VARIANTS = {
+    "webp": {
+        "suffix": ".thumb.v2.webp",
+        "media_type": "image/webp",
+    },
+    "apng": {
+        "suffix": ".thumb.v2.apng",
+        "media_type": "image/png",
+    },
+}
+
+
+def sanitize_display_filename(
+    candidate: Optional[str],
+    *,
+    fallback_ext: str = "",
+) -> Optional[str]:
+    """Normalize display filenames and strip URL query/fragment suffixes."""
+    if not isinstance(candidate, str):
+        return None
+
+    raw_value = candidate.strip()
+    if not raw_value:
+        return None
+
+    parsed = urlsplit(raw_value)
+    path_value = parsed.path or raw_value.split("?", 1)[0].split("#", 1)[0]
+    safe_name = Path(path_value).name.strip() or Path(raw_value).name.strip()
+    safe_name = safe_name.rstrip(".")
+    if not safe_name:
+        return None
+
+    if fallback_ext and not Path(safe_name).suffix:
+        safe_name = f"{safe_name}{fallback_ext}"
+
+    return safe_name or None
 
 
 def is_exiftool_available() -> bool:
     """Return True when exiftool is available in PATH."""
-    global _EXIFTOOL_CHECKED, _EXIFTOOL_AVAILABLE
+    global _EXIFTOOL_CHECKED, _EXIFTOOL_AVAILABLE, _EXIFTOOL_COMMAND
     if not _EXIFTOOL_CHECKED:
-        _EXIFTOOL_AVAILABLE = shutil.which("exiftool") is not None
+        resolved = resolve_binary("exiftool", env_var="ATELIERAI_EXIFTOOL")
+        _EXIFTOOL_COMMAND = resolved.resolved_path
+        _EXIFTOOL_AVAILABLE = resolved.is_available
         _EXIFTOOL_CHECKED = True
     return _EXIFTOOL_AVAILABLE
 
 
 def is_ffmpeg_available() -> bool:
     """Return True when ffmpeg is available in PATH."""
-    global _FFMPEG_CHECKED, _FFMPEG_AVAILABLE
+    global _FFMPEG_CHECKED, _FFMPEG_AVAILABLE, _FFMPEG_COMMAND
     if not _FFMPEG_CHECKED:
-        _FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+        resolved = resolve_binary("ffmpeg", env_var="ATELIERAI_FFMPEG")
+        _FFMPEG_COMMAND = resolved.resolved_path
+        _FFMPEG_AVAILABLE = resolved.is_available
         _FFMPEG_CHECKED = True
     return _FFMPEG_AVAILABLE
+
+
+def get_exiftool_command() -> Optional[str]:
+    """Return the resolved exiftool executable path when available."""
+    if not is_exiftool_available():
+        return None
+    return _EXIFTOOL_COMMAND
+
+
+def get_ffmpeg_command() -> Optional[str]:
+    """Return the resolved ffmpeg executable path when available."""
+    if not is_ffmpeg_available():
+        return None
+    return _FFMPEG_COMMAND
+
+
+def is_ffmpeg_webp_encoder_available() -> bool:
+    """Return True when ffmpeg can encode animated WebP thumbnails."""
+    global _FFMPEG_WEBP_ENCODER_CHECKED, _FFMPEG_WEBP_ENCODER_AVAILABLE
+    if not is_ffmpeg_available():
+        return False
+    if not _FFMPEG_WEBP_ENCODER_CHECKED:
+        ffmpeg_command = get_ffmpeg_command()
+        if not ffmpeg_command:
+            _FFMPEG_WEBP_ENCODER_AVAILABLE = False
+            _FFMPEG_WEBP_ENCODER_CHECKED = True
+            return False
+        try:
+            result = subprocess.run(
+                [ffmpeg_command, "-hide_banner", "-encoders"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            encoder_text = f"{result.stdout}\n{result.stderr}"
+            _FFMPEG_WEBP_ENCODER_AVAILABLE = (
+                "libwebp_anim" in encoder_text or "libwebp" in encoder_text
+            )
+        except OSError:
+            _FFMPEG_WEBP_ENCODER_AVAILABLE = False
+        _FFMPEG_WEBP_ENCODER_CHECKED = True
+    return _FFMPEG_WEBP_ENCODER_AVAILABLE
+
+
+def is_ffmpeg_apng_format_available() -> bool:
+    """Return True when ffmpeg can mux animated PNG thumbnails."""
+    global _FFMPEG_APNG_FORMAT_CHECKED, _FFMPEG_APNG_FORMAT_AVAILABLE
+    if not is_ffmpeg_available():
+        return False
+    if not _FFMPEG_APNG_FORMAT_CHECKED:
+        ffmpeg_command = get_ffmpeg_command()
+        if not ffmpeg_command:
+            _FFMPEG_APNG_FORMAT_AVAILABLE = False
+            _FFMPEG_APNG_FORMAT_CHECKED = True
+            return False
+        try:
+            result = subprocess.run(
+                [ffmpeg_command, "-hide_banner", "-formats"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            format_text = f"{result.stdout}\n{result.stderr}"
+            _FFMPEG_APNG_FORMAT_AVAILABLE = " apng" in format_text or "\napng" in format_text
+        except OSError:
+            _FFMPEG_APNG_FORMAT_AVAILABLE = False
+        _FFMPEG_APNG_FORMAT_CHECKED = True
+    return _FFMPEG_APNG_FORMAT_AVAILABLE
+
+
+def get_video_thumbnail_variant() -> Optional[str]:
+    """Return the best supported animated thumbnail format for this ffmpeg build."""
+    if is_ffmpeg_webp_encoder_available():
+        return "webp"
+    if is_ffmpeg_apng_format_available():
+        return "apng"
+    return None
+
+
+def get_video_poster_path(image_path: Path, resources_root: str | Path) -> Path:
+    """Return the cached poster path for a video file under image_resources."""
+    posters_root = Path(resources_root) / VIDEO_POSTER_DIRNAME
+    return posters_root / f"{image_path.stem}{VIDEO_POSTER_SUFFIX}"
+
+
+def get_video_thumbnail_path(image_path: Path, resources_root: str | Path) -> Path:
+    """Return the cached animated thumbnail path for a video file under image_resources."""
+    thumbnails_root = Path(resources_root) / VIDEO_THUMBNAIL_DIRNAME
+    variant = get_video_thumbnail_variant()
+    if variant is not None:
+        suffix = VIDEO_THUMBNAIL_VARIANTS[variant]["suffix"]
+        return thumbnails_root / f"{image_path.stem}{suffix}"
+
+    for config in VIDEO_THUMBNAIL_VARIANTS.values():
+        existing_path = thumbnails_root / f"{image_path.stem}{config['suffix']}"
+        if existing_path.exists():
+            return existing_path
+
+    return thumbnails_root / f"{image_path.stem}{VIDEO_THUMBNAIL_VARIANTS['webp']['suffix']}"
+
+
+def get_video_thumbnail_media_type(thumbnail_path: Path) -> str:
+    """Return the media type for a cached animated thumbnail path."""
+    suffix = thumbnail_path.suffix.lower()
+    if suffix == ".apng":
+        return "image/png"
+    return "image/webp"
+
+
+def _is_cached_video_poster_current(image_path: Path, poster_path: Path) -> bool:
+    if not poster_path.exists() or not poster_path.is_file():
+        return False
+    try:
+        if poster_path.stat().st_size <= 0:
+            return False
+        return poster_path.stat().st_mtime >= image_path.stat().st_mtime
+    except OSError:
+        return False
+
+
+def _is_cached_video_thumbnail_current(image_path: Path, thumbnail_path: Path) -> bool:
+    if not thumbnail_path.exists() or not thumbnail_path.is_file():
+        return False
+    try:
+        if thumbnail_path.stat().st_size <= 0:
+            return False
+        return thumbnail_path.stat().st_mtime >= image_path.stat().st_mtime
+    except OSError:
+        return False
+
+
+def ensure_video_poster(image_path: Path, resources_root: str | Path) -> Optional[Path]:
+    """Generate and cache a JPEG poster for a video when ffmpeg is available."""
+    if not image_path.exists() or not image_path.is_file():
+        return None
+
+    poster_path = get_video_poster_path(image_path, resources_root)
+    poster_path.parent.mkdir(parents=True, exist_ok=True)
+    if _is_cached_video_poster_current(image_path, poster_path):
+        return poster_path
+
+    if not is_ffmpeg_available():
+        return poster_path if poster_path.exists() else None
+
+    ffmpeg_command = get_ffmpeg_command()
+    if not ffmpeg_command:
+        return poster_path if poster_path.exists() else None
+
+    temp_path = poster_path.with_name(
+        f".{poster_path.stem}.tmp{poster_path.suffix}"
+    )
+    for seek_offset in ("0.15", "0.0"):
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+
+            result = subprocess.run(
+                [
+                    ffmpeg_command,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-ss",
+                    seek_offset,
+                    "-i",
+                    str(image_path),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "4",
+                    str(temp_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0:
+                temp_path.replace(poster_path)
+                return poster_path
+        except OSError:
+            break
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    return poster_path if poster_path.exists() else None
+
+
+def ensure_video_thumbnail(image_path: Path, resources_root: str | Path) -> Optional[Path]:
+    """Generate and cache an animated thumbnail for a video when ffmpeg is available."""
+    if not image_path.exists() or not image_path.is_file():
+        return None
+
+    variant = get_video_thumbnail_variant()
+    if variant is None:
+        thumbnail_path = get_video_thumbnail_path(image_path, resources_root)
+        return thumbnail_path if thumbnail_path.exists() else None
+
+    thumbnail_path = get_video_thumbnail_path(image_path, resources_root)
+    thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+    if _is_cached_video_thumbnail_current(image_path, thumbnail_path):
+        return thumbnail_path
+
+    if not is_ffmpeg_available():
+        return thumbnail_path if thumbnail_path.exists() else None
+
+    ffmpeg_command = get_ffmpeg_command()
+    if not ffmpeg_command:
+        return thumbnail_path if thumbnail_path.exists() else None
+
+    temp_path = thumbnail_path.with_name(
+        f".{thumbnail_path.stem}.tmp{thumbnail_path.suffix}"
+    )
+    try:
+        if temp_path.exists():
+            temp_path.unlink()
+
+        command = [
+            ffmpeg_command,
+            "-y",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-ss",
+            "0.18",
+            "-t",
+            "2.0",
+            "-i",
+            str(image_path),
+            "-vf",
+            "fps=10,setpts=0.72*PTS,scale=384:-2:force_original_aspect_ratio=decrease:flags=lanczos",
+            "-an",
+        ]
+        if variant == "webp":
+            command.extend(
+                [
+                    "-loop",
+                    "0",
+                    "-c:v",
+                    "libwebp_anim",
+                    "-quality",
+                    "82",
+                    "-compression_level",
+                    "4",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-f",
+                    "apng",
+                    "-plays",
+                    "0",
+                ]
+            )
+        command.append(str(temp_path))
+
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0:
+            temp_path.replace(thumbnail_path)
+            return thumbnail_path
+    except OSError:
+        return thumbnail_path if thumbnail_path.exists() else None
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+    return thumbnail_path if thumbnail_path.exists() else None
 
 
 def _warn_exiftool_missing_once() -> None:
@@ -143,7 +470,13 @@ class ImageProcessor:
             if ext:
                 return ext
         if self.metadata.file_name:
-            return Path(self.metadata.file_name).suffix.lower()
+            name_suffix = Path(self.metadata.file_name).suffix.lower()
+            if name_suffix:
+                return name_suffix
+        if self.metadata.file_path:
+            path_suffix = Path(self.metadata.file_path).suffix.lower()
+            if path_suffix:
+                return path_suffix
         return None
 
     @property
@@ -169,9 +502,14 @@ class ImageProcessor:
             fallback_mimetype = MIME_MAPPING.get(self.extension or "")
             return 0, 0, fallback_mimetype, {}, {}
 
+        exiftool_command = get_exiftool_command()
+        if not exiftool_command:
+            fallback_mimetype = MIME_MAPPING.get(self.extension or "")
+            return 0, 0, fallback_mimetype, {}, {}
+
         try:
             result = subprocess.run(
-                ["exiftool", "-j", self.metadata.file_path],
+                [exiftool_command, "-j", self.metadata.file_path],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -228,9 +566,28 @@ class ImageProcessor:
         """Converts a MIME type to a file extension."""
         if mime_type is None:
             return None
+        normalized = str(mime_type).strip().lower()
+        alias_map = {
+            "image/jpg": "image/jpeg",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+            "mp4": "video/mp4",
+            "webm": "video/webm",
+        }
+        normalized = alias_map.get(normalized, normalized)
+
         for ext, mime in MIME_MAPPING.items():
-            if mime == mime_type:
+            if mime == normalized:
                 return ext
+
+        guessed = mimetypes.guess_extension(normalized, strict=False) if "/" in normalized else None
+        if guessed:
+            lowered = guessed.lower()
+            if lowered == ".jpe":
+                return ".jpg"
+            return lowered
         return None
 
     def _extract_mimetype(self, img: Image.Image) -> Optional[str]:
@@ -570,8 +927,8 @@ class ImageProcessor:
 
     def _get_metadata(self) -> tuple[int, int, Optional[str], dict, dict[str, Any]]:
         """Extracts metadata from image/video files."""
-        # Non-image formats (e.g. mp4) are handled via exiftool.
-        if self.extension == ".mp4":
+        # Non-image formats are handled via exiftool.
+        if self.extension in {".mp4", ".webm", ".mov", ".mkv"}:
             return self._extract_metadata_with_exiftool()
 
         try:
@@ -668,7 +1025,10 @@ class ImageProcessor:
         absolute_path = Path(self.library_path) / relative_filepath
         stat = os.stat(absolute_path)
 
-        display_name = original_filename or self.metadata.file_name or relative_filepath
+        display_name = sanitize_display_filename(
+            original_filename or self.metadata.file_name or relative_filepath,
+            fallback_ext=Path(relative_filepath).suffix,
+        ) or relative_filepath
 
         self.db_record = ImageModel(
             file_path=relative_filepath,

@@ -26,7 +26,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const VIDEO_POSTER_CAPTURE_TIMEOUT_MS = 8000;
     const VIDEO_THUMBNAIL_FETCH_CONCURRENCY = 1;
     const FOREGROUND_BUSY_REVEAL_DELAY_MS = 250;
-    const NSFW_PILL_ORDER = ['PG', 'PG13', 'R', 'X', 'XXX', 'Safe', 'Mature', 'Explicit'];
+    const NSFW_RATING_PILL_ORDER = ['PG', 'PG13', 'R', 'X', 'XXX'];
+    const NSFW_SAFETY_PILL_ORDER = ['Safe', 'Mature', 'Explicit'];
+    const MISSING_DATA_PILL_ORDER = [
+        'NSFW Rating',
+        'Safety Class',
+        'Artist',
+        'Source URL',
+        'Generation Info',
+        'Prompt',
+        'Tags',
+        'EXIF Data',
+        'CivitAI Meta',
+    ];
     const DETAIL_TAB_IDS = [
         'image-attributes',
         'generation-data',
@@ -37,6 +49,17 @@ document.addEventListener('DOMContentLoaded', () => {
         'user-tags',
         'utilities',
     ];
+    const DETAIL_TAB_LABELS = {
+        'image-attributes': 'Image Attributes',
+        'generation-data': 'Generation Data',
+        collections: 'Collections',
+        'civitai-tags': 'CivitAI Tags',
+        'danbooru-tags': 'Danbooru Tags',
+        'prompt-tags': 'Prompt Tags',
+        'user-tags': 'User Tags',
+        utilities: 'Utilities',
+    };
+    const TAG_SOURCE_ORDER = ['civitai', 'danbooru', 'prompt', 'user'];
 
     function createEmptyAdvancedFilters() {
         return {
@@ -44,9 +67,11 @@ document.addEventListener('DOMContentLoaded', () => {
             sourceSite: [],
             mimetype: [],
             nsfwRating: [],
+            nsfwSafety: [],
             artistName: [],
             tags: [],
             collections: [],
+            missingData: [],
         };
     }
 
@@ -184,6 +209,9 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedKeys: new Set(),
         lastSelectionAnchorKey: null,
         fullscreenSelectedKey: null,
+        fullscreenIndexHint: null,
+        fullscreenNavInFlight: false,
+        fullscreenQueuedDelta: null,
         searchRunId: 0,
         // Lower page size is intentional for testing end-of-library UI transitions.
         pageSize: TEST_PAGE_SIZE,
@@ -214,6 +242,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 prompt: [],
                 user: [],
             },
+            generationSoftware: [],
+            sourceSites: [],
+            mimetypes: [],
+            nsfwRatings: [],
+            nsfwSafety: [],
+            artistNames: [],
+            collectionNames: [],
         },
         runtimeWarnings: [],
         mediaCapabilities: null,
@@ -229,7 +264,10 @@ document.addEventListener('DOMContentLoaded', () => {
         highlightedTaskId: null,
         taskStatusById: new Map(),
         taskRefreshInFlight: false,
+        galleryRefreshInFlight: false,
         lastRenderedGallerySignature: null,
+        lastRenderedFilterSignature: null,
+        lastRenderedSelectionSignature: null,
         lastRenderedDetailKey: null,
         foregroundBusy: {
             active: false,
@@ -274,7 +312,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const advancedGenerationPills = document.getElementById('advanced-generation-pills');
     const advancedSourcePills = document.getElementById('advanced-source-pills');
     const advancedMimetypePills = document.getElementById('advanced-mimetype-pills');
-    const advancedNsfwPills = document.getElementById('advanced-nsfw-pills');
+    const advancedNsfwRatingPills = document.getElementById('advanced-nsfw-rating-pills');
+    const advancedNsfwSafetyPills = document.getElementById('advanced-nsfw-safety-pills');
+    const advancedMissingDataPills = document.getElementById('advanced-missing-data-pills');
     const advancedAuthorSelected = document.getElementById('advanced-author-selected');
     const advancedAuthorInput = document.getElementById('advanced-author-input');
     const advancedAuthorOptions = document.getElementById('advanced-author-options');
@@ -361,6 +401,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let taxonomyTreeData = [];
     let taxonomyRootRenderLimit = 200;
     let toastTimer = null;
+    let toastHideTimer = null;
     let taxonomyBootstrapDroppedFile = null;
 
     function ensureToastNode() {
@@ -377,18 +418,61 @@ document.addEventListener('DOMContentLoaded', () => {
         return node;
     }
 
+    function positionToastNode(node) {
+        if (!(node instanceof HTMLElement)) {
+            return;
+        }
+
+        const fullscreenOpen = fullscreenPreview && !fullscreenPreview.classList.contains('hidden');
+        const loopVisible = fullscreenLoopBtn && fullscreenOpen;
+
+        if (loopVisible) {
+            const loopRect = fullscreenLoopBtn.getBoundingClientRect();
+            const gapPx = 12;
+            const rightPx = Math.max(12, window.innerWidth - loopRect.left + gapPx);
+            const topPx = Math.max(8, Math.round(loopRect.top));
+            const maxWidthPx = Math.max(180, Math.round(loopRect.left - 24));
+
+            node.classList.add('app-toast--fullscreen');
+            node.style.top = `${topPx}px`;
+            node.style.bottom = 'auto';
+            node.style.right = `${rightPx}px`;
+            node.style.left = 'auto';
+            node.style.maxWidth = `${maxWidthPx}px`;
+            return;
+        }
+
+        node.classList.remove('app-toast--fullscreen');
+        node.style.top = 'auto';
+        node.style.bottom = '';
+        node.style.right = '';
+        node.style.left = 'auto';
+        node.style.maxWidth = '';
+    }
+
     function showToast(message, variant = 'info') {
         const node = ensureToastNode();
+        positionToastNode(node);
         node.textContent = message;
-        node.classList.remove('hidden', 'toast-info', 'toast-success', 'toast-warn');
+        node.classList.remove('hidden', 'toast-info', 'toast-success', 'toast-warn', 'is-visible');
         node.classList.add(`toast-${variant}`);
+        // Force a frame so visibility transition always runs.
+        window.requestAnimationFrame(() => {
+            node.classList.add('is-visible');
+        });
 
         if (toastTimer) {
             window.clearTimeout(toastTimer);
         }
+        if (toastHideTimer) {
+            window.clearTimeout(toastHideTimer);
+        }
         toastTimer = window.setTimeout(() => {
-            node.classList.add('hidden');
-        }, 2300);
+            node.classList.remove('is-visible');
+            toastHideTimer = window.setTimeout(() => {
+                node.classList.add('hidden');
+            }, 170);
+        }, 1650);
     }
 
     function isTaskTerminal(task) {
@@ -1006,19 +1090,39 @@ document.addEventListener('DOMContentLoaded', () => {
     const fullscreenPreview = document.getElementById('fullscreen-preview');
     const fullscreenLoopBtn = document.getElementById('fullscreen-loop-btn');
     const fullscreenCloseBtn = document.getElementById('fullscreen-close-btn');
+    const fullscreenDebugOverlay = document.getElementById('fullscreen-debug-overlay');
+    const fullscreenDebugFreezeBtn = document.getElementById('fullscreen-debug-freeze-btn');
+    const fullscreenDebugCopyBtn = document.getElementById('fullscreen-debug-copy-btn');
+    const fullscreenDebugContent = document.getElementById('fullscreen-debug-content');
+    const fullscreenDebugSnapshot = document.getElementById('fullscreen-debug-snapshot');
     const fullscreenImage = document.getElementById('fullscreen-image');
     const fullscreenVideo = document.getElementById('fullscreen-video');
+    const fullscreenEffectiveTagsCloud = document.getElementById('fullscreen-effective-tags-cloud');
+    const fullscreenNegativeTagsWrap = document.getElementById('fullscreen-negative-tags-wrap');
+    const fullscreenNegativeTagsCloud = document.getElementById('fullscreen-negative-tags-cloud');
     const detailTitle = document.getElementById('detail-title');
     const detailSubtitle = document.getElementById('detail-subtitle');
     const repairImageBtn = document.getElementById('repair-image-btn');
+    const rescanImageBtn = document.getElementById('rescan-image-btn');
     const deleteImageFileBtn = document.getElementById('delete-image-file-btn');
     const sendToGenerationLabBtn = document.getElementById('send-to-generation-lab-btn');
+    const sendToPerceptualLabBtn = document.getElementById('send-to-perceptual-lab-btn');
     const detailMeta = document.getElementById('detail-meta');
     const detailExif = document.getElementById('detail-exif');
     const detailCivitai = document.getElementById('detail-civitai');
-    const detailFolderTabs = Array.from(document.querySelectorAll('.detail-folder-tab[data-tab-id]'));
+    const detailFolderMount = document.getElementById('detail-folder-mount');
+    const detailPanelStash = document.getElementById('detail-panel-stash');
     const detailFolderPanels = Array.from(document.querySelectorAll('.detail-folder-panel[role="tabpanel"]'));
-    const detailFolderBody = document.querySelector('.detail-folder-body-gap');
+    const detailPanelByTabId = new Map(
+        detailFolderPanels
+            .map((panel) => {
+                const panelId = String(panel.id || '');
+                const tabId = panelId.startsWith('detail-panel-') ? panelId.slice('detail-panel-'.length) : '';
+                return [tabId, panel];
+            })
+            .filter(([tabId]) => tabId.length > 0)
+    );
+    let detailFolderWorkspace = null;
     const imageCollectionsList = document.getElementById('image-collections-list');
     const collectionSelect = document.getElementById('collection-select');
     const addToCollectionBtn = document.getElementById('add-to-collection-btn');
@@ -1038,6 +1142,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let searchDebounceTimer = null;
     let posterCaptureObserver = null;
     let videoThumbnailObserver = null;
+    let fullscreenDebugFrozen = false;
+    let fullscreenDebugPreviousIndex = null;
 
     function clearForegroundBusyRevealTimer() {
         const timerId = Number(state.foregroundBusy?.revealTimerId || 0);
@@ -1079,6 +1185,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const selectedNsfwRatings = getAdvancedFilterValues('nsfwRating')
             .map((value) => normalizeDetailFilterValue(value))
             .filter(Boolean);
+        const nsfwSafety = getAdvancedFilterValues('nsfwSafety')
+            .map((value) => normalizeDetailFilterValue(value))
+            .filter(Boolean);
         const visibilityMode = state.nsfwVisibility;
         const visibilityActive = visibilityMode !== 'explicit';
         let nsfwRatings = selectedNsfwRatings;
@@ -1101,7 +1210,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const hasUnsupportedStructuredFilters = Boolean(state.treeTagFilter)
             || getAdvancedFilterValues('tags').length > 0;
         const hasSupportedStructuredFilters = Boolean(
-            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || artistNames.length || collectionNames.length || visibilityActive
+            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || visibilityActive
         );
 
         if (!hasSupportedStructuredFilters || hasUnsupportedStructuredFilters) {
@@ -1115,6 +1224,7 @@ document.addEventListener('DOMContentLoaded', () => {
             sourceSites,
             mimetypes,
             nsfwRatings,
+            nsfwSafety,
             artistNames,
             collectionNames,
             signature: JSON.stringify({
@@ -1123,6 +1233,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 sourceSites,
                 mimetypes,
                 nsfwRatings,
+                nsfwSafety,
                 artistNames,
                 collectionNames,
                 nsfwVisibility: visibilityMode,
@@ -1146,6 +1257,7 @@ document.addEventListener('DOMContentLoaded', () => {
             config.sourceSites.forEach((value) => params.append('source_site', value));
             config.mimetypes.forEach((value) => params.append('mimetype', value));
             config.nsfwRatings.forEach((value) => params.append('nsfw_rating', value));
+            config.nsfwSafety.forEach((value) => params.append('nsfw_safety', value));
             config.artistNames.forEach((value) => params.append('artist_name', value));
             config.collectionNames.forEach((value) => params.append('collection_name', value));
         }
@@ -1163,6 +1275,7 @@ document.addEventListener('DOMContentLoaded', () => {
             config.sourceSites.forEach((value) => params.append('source_site', value));
             config.mimetypes.forEach((value) => params.append('mimetype', value));
             config.nsfwRatings.forEach((value) => params.append('nsfw_rating', value));
+            config.nsfwSafety.forEach((value) => params.append('nsfw_safety', value));
             config.artistNames.forEach((value) => params.append('artist_name', value));
             config.collectionNames.forEach((value) => params.append('collection_name', value));
         }
@@ -1504,6 +1617,193 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    function getImageNegativeUserTags(image) {
+        const values = new Set();
+        if (!image || typeof image !== 'object') {
+            return [];
+        }
+
+        addTagCollection(values, image.user_negative_tags);
+        const exif = image.exif_data && typeof image.exif_data === 'object' ? image.exif_data : {};
+        addTagCollection(values, exif.user_negative_tags);
+
+        return Array.from(values).sort((left, right) => left.localeCompare(right));
+    }
+
+    function buildEffectiveImageTagEntries(image) {
+        const bySource = extractImageScopeTags(image);
+        const negativeSet = new Set(getImageNegativeUserTags(image));
+        const entries = [];
+
+        TAG_SOURCE_ORDER.forEach((source) => {
+            const names = Array.isArray(bySource[source]) ? [...bySource[source]] : [];
+            names.sort((left, right) => left.localeCompare(right));
+            names.forEach((name) => {
+                const normalized = normalizeTagName(name);
+                if (!normalized) {
+                    return;
+                }
+                if (source === 'civitai' && negativeSet.has(normalized)) {
+                    return;
+                }
+                entries.push({
+                    name: normalized,
+                    source,
+                });
+            });
+        });
+
+        return entries;
+    }
+
+    function syncImageNegativeTagsLocally(fileHash, nextNegativeTags) {
+        const normalizedList = Array.isArray(nextNegativeTags)
+            ? nextNegativeTags
+                .map((item) => normalizeTagName(item))
+                .filter(Boolean)
+            : [];
+
+        state.allImages.forEach((entry) => {
+            if (String(entry?.file_hash || '') !== String(fileHash || '')) {
+                return;
+            }
+            entry.user_negative_tags = [...normalizedList];
+        });
+    }
+
+    async function persistImageNegativeTags(image, nextNegativeTags) {
+        if (!image?.file_hash) {
+            throw new Error('Selected image has no file hash.');
+        }
+
+        const normalizedList = Array.isArray(nextNegativeTags)
+            ? nextNegativeTags
+                .map((item) => normalizeTagName(item))
+                .filter(Boolean)
+            : [];
+
+        const result = await saveImageMetadata(image.file_hash, {
+            user_negative_tags: normalizedList,
+        });
+
+        const savedNegativeTags = Array.isArray(result?.user_negative_tags)
+            ? result.user_negative_tags
+                .map((item) => normalizeTagName(item))
+                .filter(Boolean)
+            : normalizedList;
+
+        image.user_negative_tags = [...savedNegativeTags];
+        syncImageNegativeTagsLocally(image.file_hash, savedNegativeTags);
+        return savedNegativeTags;
+    }
+
+    function createDetailTagChip({ name, source, negative = false, onRemove, showSource = true }) {
+        const chip = document.createElement('span');
+        chip.className = `detail-tag-chip source-${source}${negative ? ' negative' : ''}`;
+
+        const label = document.createElement('span');
+        label.className = 'detail-tag-chip-label';
+        label.textContent = name;
+        chip.appendChild(label);
+
+        if (showSource) {
+            const sourceBadge = document.createElement('span');
+            sourceBadge.className = 'detail-tag-chip-source';
+            sourceBadge.textContent = source;
+            chip.appendChild(sourceBadge);
+        }
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'detail-tag-chip-remove';
+        removeBtn.textContent = 'x';
+        removeBtn.setAttribute('aria-label', negative
+            ? `Remove negative override for ${name}`
+            : `Add negative override for ${name}`);
+        removeBtn.title = negative
+            ? `Remove negative override for ${name}`
+            : `Add negative override for ${name}`;
+        removeBtn.addEventListener('click', () => {
+            if (typeof onRemove === 'function') {
+                void onRemove();
+            }
+        });
+        chip.appendChild(removeBtn);
+
+        return chip;
+    }
+
+    function renderFullscreenEffectiveTags(image) {
+        if (!fullscreenEffectiveTagsCloud || !fullscreenNegativeTagsWrap || !fullscreenNegativeTagsCloud) {
+            return;
+        }
+
+        fullscreenEffectiveTagsCloud.innerHTML = '';
+        fullscreenNegativeTagsCloud.innerHTML = '';
+
+        if (!image) {
+            fullscreenNegativeTagsWrap.classList.add('hidden');
+            return;
+        }
+
+        const effectiveEntries = buildEffectiveImageTagEntries(image);
+        const negativeTags = getImageNegativeUserTags(image);
+
+        if (!effectiveEntries.length) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-tag-empty';
+            empty.textContent = 'No effective tags found for this item.';
+            fullscreenEffectiveTagsCloud.appendChild(empty);
+        } else {
+            effectiveEntries.forEach((entry) => {
+                const chip = createDetailTagChip({
+                    name: entry.name,
+                    source: entry.source,
+                    showSource: false,
+                    onRemove: async () => {
+                        const nextNegativeSet = new Set(getImageNegativeUserTags(image));
+                        nextNegativeSet.add(entry.name);
+                        try {
+                            await persistImageNegativeTags(image, Array.from(nextNegativeSet));
+                            showToast(`Added negative override: ${entry.name}`, 'success');
+                            renderFullscreenEffectiveTags(image);
+                        } catch (error) {
+                            showToast(`Could not save negative tag: ${error.message}`, 'warn');
+                        }
+                    },
+                });
+                fullscreenEffectiveTagsCloud.appendChild(chip);
+            });
+        }
+
+        if (!negativeTags.length) {
+            fullscreenNegativeTagsWrap.classList.add('hidden');
+            return;
+        }
+
+        fullscreenNegativeTagsWrap.classList.remove('hidden');
+        negativeTags.forEach((tagName) => {
+            const chip = createDetailTagChip({
+                name: tagName,
+                source: 'user',
+                negative: true,
+                showSource: false,
+                onRemove: async () => {
+                    const nextNegativeTags = getImageNegativeUserTags(image)
+                        .filter((value) => value !== tagName);
+                    try {
+                        await persistImageNegativeTags(image, nextNegativeTags);
+                        showToast(`Removed negative override: ${tagName}`, 'success');
+                        renderFullscreenEffectiveTags(image);
+                    } catch (error) {
+                        showToast(`Could not remove negative tag: ${error.message}`, 'warn');
+                    }
+                },
+            });
+            fullscreenNegativeTagsCloud.appendChild(chip);
+        });
+    }
+
     function buildSelectedImageTagsPayload(activeImage) {
         const selectedImages = getSelectedImages();
         const images = selectedImages.length
@@ -1811,13 +2111,14 @@ document.addEventListener('DOMContentLoaded', () => {
         return labels.some((label) => ['PG', 'PG13', 'R', 'X', 'XXX'].includes(String(label || '').toUpperCase()));
     }
 
-    function getImageNsfwRatings(image) {
+    function getImageNsfwRatings(image, { includeUserOverrides = true } = {}) {
         if (!image || typeof image !== 'object') {
             return [];
         }
 
         const civitaiPayload = parsePossibleJsonObject(image.civitai_data) || parsePossibleJsonObject(image.civitai) || {};
         const candidates = [
+            ...(includeUserOverrides ? [image.user_nsfw_rating, image.user_nsfw_safety_class] : []),
             image.nsfw_ratings,
             image.nsfw_rating,
             image.nsfw_level,
@@ -1855,8 +2156,242 @@ document.addEventListener('DOMContentLoaded', () => {
         return dedupeDisplayValues(fallbackLabels);
     }
 
-    function sortNsfwValues(values) {
-        const indexByValue = new Map(NSFW_PILL_ORDER.map((value, index) => [value.toLowerCase(), index]));
+    function normalizeUserNsfwRatingValue(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['pg', 'pg13', 'r', 'x', 'xxx'].includes(normalized) ? normalized : '';
+    }
+
+    function normalizeUserNsfwSafetyClassValue(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['safe', 'mature', 'explicit'].includes(normalized) ? normalized : '';
+    }
+
+    function getNsfwDisplayTokens(image, { includeUserOverrides = true } = {}) {
+        const labels = getImageNsfwRatings(image, { includeUserOverrides });
+        const granular = labels.find((label) => ['PG', 'PG13', 'R', 'X', 'XXX'].includes(String(label || '').toUpperCase())) || null;
+        const safety = labels.find((label) => ['SAFE', 'MATURE', 'EXPLICIT'].includes(String(label || '').toUpperCase())) || null;
+        return {
+            granular,
+            safety,
+        };
+    }
+
+    function formatNsfwDisplay(image) {
+        const effective = getNsfwDisplayTokens(image, { includeUserOverrides: true });
+        const pieces = [effective.granular, effective.safety].filter(Boolean);
+        if (pieces.length) {
+            return pieces.join(' / ');
+        }
+        return 'Unknown';
+    }
+
+    function renderEditableNsfwRatingItem(images) {
+        const targets = Array.isArray(images) ? images : [];
+        const initialUserRatings = targets.map((item) => normalizeUserNsfwRatingValue(item.user_nsfw_rating));
+        const initialUserSafety = targets.map((item) => normalizeUserNsfwSafetyClassValue(item.user_nsfw_safety_class));
+        let currentUserRating = new Set(initialUserRatings).size === 1 ? initialUserRatings[0] : '';
+        let currentUserSafety = new Set(initialUserSafety).size === 1 ? initialUserSafety[0] : '';
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'meta-item';
+
+        const head = document.createElement('div');
+        head.className = 'meta-item-head';
+
+        const labelNode = document.createElement('span');
+        labelNode.className = 'label';
+        labelNode.textContent = 'Rating';
+
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'edit-icon-btn';
+        editBtn.title = 'Edit';
+        editBtn.setAttribute('aria-label', 'Edit Rating');
+        editBtn.textContent = '✎';
+
+        head.appendChild(labelNode);
+        head.appendChild(editBtn);
+
+        const valueNode = document.createElement('span');
+        valueNode.className = 'value';
+
+        function getGroupNsfwDisplay(includeUserOverrides) {
+            const ratingValues = sortNsfwRatingValues(
+                getDistinctGroupValues(
+                    targets,
+                    (entry) => getNsfwDisplayTokens(entry, { includeUserOverrides }).granular,
+                ),
+            );
+            const safetyValues = sortNsfwSafetyValues(
+                getDistinctGroupValues(
+                    targets,
+                    (entry) => getNsfwDisplayTokens(entry, { includeUserOverrides }).safety,
+                ),
+            );
+
+            const parts = [];
+            if (ratingValues.length) {
+                parts.push(`Rating: ${ratingValues.join(' | ')}`);
+            }
+            if (safetyValues.length) {
+                parts.push(`Safety: ${safetyValues.join(' | ')}`);
+            }
+            return parts.length ? parts.join('; ') : 'Unknown';
+        }
+
+        function renderDisplayValue() {
+            const effectiveText = getGroupNsfwDisplay(true);
+            const metadataText = getGroupNsfwDisplay(false);
+            const overrideCount = targets.reduce((count, entry) => {
+                const hasOverride = Boolean(
+                    normalizeUserNsfwRatingValue(entry.user_nsfw_rating)
+                    || normalizeUserNsfwSafetyClassValue(entry.user_nsfw_safety_class),
+                );
+                return count + (hasOverride ? 1 : 0);
+            }, 0);
+            const overrideText = overrideCount <= 0
+                ? 'metadata'
+                : overrideCount === targets.length
+                    ? 'user override'
+                    : `${overrideCount}/${targets.length} user override`;
+            valueNode.textContent = `${effectiveText} (${overrideText})`;
+            valueNode.title = `Metadata: ${metadataText}`;
+        }
+
+        renderDisplayValue();
+
+        const editRow = document.createElement('div');
+        editRow.className = 'meta-edit-row hidden';
+
+        const controlGrid = document.createElement('div');
+        controlGrid.className = 'meta-edit-grid';
+
+        const ratingSelect = document.createElement('select');
+        ratingSelect.className = 'meta-edit-input';
+        [
+            ['', 'Use metadata rating'],
+            ['pg', 'PG'],
+            ['pg13', 'PG13'],
+            ['r', 'R'],
+            ['x', 'X'],
+            ['xxx', 'XXX'],
+        ].forEach(([value, label]) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            ratingSelect.appendChild(option);
+        });
+
+        const safetySelect = document.createElement('select');
+        safetySelect.className = 'meta-edit-input';
+        [
+            ['', 'Use metadata safety'],
+            ['safe', 'Safe'],
+            ['mature', 'Mature'],
+            ['explicit', 'Explicit'],
+        ].forEach(([value, label]) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            safetySelect.appendChild(option);
+        });
+
+        controlGrid.appendChild(ratingSelect);
+        controlGrid.appendChild(safetySelect);
+
+        const actions = document.createElement('div');
+        actions.className = 'meta-edit-actions';
+
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'btn ghost btn-sm';
+        saveBtn.textContent = 'Save';
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'btn ghost btn-sm';
+        clearBtn.textContent = 'Clear';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn ghost btn-sm';
+        cancelBtn.textContent = 'Cancel';
+
+        actions.appendChild(saveBtn);
+        actions.appendChild(clearBtn);
+        actions.appendChild(cancelBtn);
+
+        editRow.appendChild(controlGrid);
+        editRow.appendChild(actions);
+
+        function syncInputsFromCurrent() {
+            ratingSelect.value = currentUserRating;
+            safetySelect.value = currentUserSafety;
+        }
+
+        function setEditing(editing) {
+            editRow.classList.toggle('hidden', !editing);
+            valueNode.classList.toggle('hidden', editing);
+            if (editing) {
+                syncInputsFromCurrent();
+                ratingSelect.focus();
+            }
+        }
+
+        async function saveCurrentValues(nextRatingValue, nextSafetyValue) {
+            saveBtn.disabled = true;
+            clearBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            try {
+                await saveImageMetadataForGroup(targets, {
+                    user_nsfw_rating: nextRatingValue || '',
+                    user_nsfw_safety_class: nextSafetyValue || '',
+                }, (target, result) => {
+                    target.user_nsfw_rating = result.user_nsfw_rating || null;
+                    target.user_nsfw_safety_class = result.user_nsfw_safety_class || null;
+                }, 'Rating');
+
+                const refreshedRatings = targets.map((item) => normalizeUserNsfwRatingValue(item.user_nsfw_rating));
+                const refreshedSafety = targets.map((item) => normalizeUserNsfwSafetyClassValue(item.user_nsfw_safety_class));
+                currentUserRating = new Set(refreshedRatings).size === 1 ? refreshedRatings[0] : '';
+                currentUserSafety = new Set(refreshedSafety).size === 1 ? refreshedSafety[0] : '';
+                renderDisplayValue();
+                const activeImage = getSelectedImage();
+                if (activeImage) {
+                    renderDetailSubtitle(activeImage);
+                }
+                setEditing(false);
+            } catch (error) {
+                alert(`Could not save Rating: ${error.message}`);
+            } finally {
+                saveBtn.disabled = false;
+                clearBtn.disabled = false;
+                saveBtn.textContent = 'Save';
+            }
+        }
+
+        editBtn.addEventListener('click', () => setEditing(true));
+        cancelBtn.addEventListener('click', () => {
+            syncInputsFromCurrent();
+            setEditing(false);
+        });
+        saveBtn.addEventListener('click', () => {
+            const nextRating = normalizeUserNsfwRatingValue(ratingSelect.value);
+            const nextSafety = normalizeUserNsfwSafetyClassValue(safetySelect.value);
+            void saveCurrentValues(nextRating, nextSafety);
+        });
+        clearBtn.addEventListener('click', () => {
+            void saveCurrentValues('', '');
+        });
+
+        wrapper.appendChild(head);
+        wrapper.appendChild(valueNode);
+        wrapper.appendChild(editRow);
+        return wrapper;
+    }
+
+    function sortOrderedFilterValues(values, orderedValues) {
+        const indexByValue = new Map(orderedValues.map((value, index) => [value.toLowerCase(), index]));
         const uniqueValues = dedupeDisplayValues(values);
         uniqueValues.sort((left, right) => {
             const leftIndex = indexByValue.get(String(left || '').toLowerCase());
@@ -1873,6 +2408,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return String(left).localeCompare(String(right), undefined, { sensitivity: 'base' });
         });
         return uniqueValues;
+    }
+
+    function sortNsfwRatingValues(values) {
+        return sortOrderedFilterValues(values, NSFW_RATING_PILL_ORDER);
+    }
+
+    function sortNsfwSafetyValues(values) {
+        return sortOrderedFilterValues(values, NSFW_SAFETY_PILL_ORDER);
     }
 
     function isNsfwLabel(label) {
@@ -1897,6 +2440,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const normalized = normalizeDetailFilterValue(value);
         if (!normalized) {
             return false;
+        }
+        if (normalized === 'n/a') {
+            return true;
         }
         return getNsfwVisibilityServerRatings(mode).includes(normalized);
     }
@@ -1953,6 +2499,37 @@ document.addEventListener('DOMContentLoaded', () => {
         return Array.from(selections).some((value) => normalizedValues.has(value));
     }
 
+    const _NSFW_GRANULAR_RATINGS = new Set(['pg', 'pg13', 'r', 'x', 'xxx']);
+    const _NSFW_SAFETY_CLASSES = new Set(['safe', 'mature', 'explicit']);
+
+    function imageMatchesNsfwCategoryFilter(image, category, allowedValues) {
+        const selections = getAdvancedFilterValueSet(category);
+        if (!selections.size) {
+            return true;
+        }
+        const tokens = getNsfwDisplayTokens(image, { includeUserOverrides: true });
+        const imageValue = category === 'nsfwRating' ? tokens.granular : tokens.safety;
+        const normalizedValue = normalizeDetailFilterValue(imageValue);
+        for (const selection of selections) {
+            if (selection === 'n/a') {
+                if (!normalizedValue || !allowedValues.has(normalizedValue)) {
+                    return true;
+                }
+            } else if (normalizedValue === selection) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function imageMatchesNsfwRatingFilter(image) {
+        return imageMatchesNsfwCategoryFilter(image, 'nsfwRating', _NSFW_GRANULAR_RATINGS);
+    }
+
+    function imageMatchesNsfwSafetyFilter(image) {
+        return imageMatchesNsfwCategoryFilter(image, 'nsfwSafety', _NSFW_SAFETY_CLASSES);
+    }
+
     function imageMatchesAnyFilter(imageValue, category) {
         const selections = getAdvancedFilterValueSet(category);
         if (!selections.size) {
@@ -1975,6 +2552,119 @@ document.addEventListener('DOMContentLoaded', () => {
         return Array.from(selections).some((value) => normalizedCollections.has(value));
     }
 
+    function isMissingDataConditionMet(image, condition) {
+        // Accepts both "no artist" (legacy) and "artist" (new label without "No" prefix).
+        const raw = normalizeDetailFilterValue(condition);
+        const key = raw && !raw.startsWith('no ') ? `no ${raw}` : raw;
+        if (key === 'no nsfw rating') {
+            const { granular } = getNsfwDisplayTokens(image, { includeUserOverrides: true });
+            return !granular || !_NSFW_GRANULAR_RATINGS.has(normalizeDetailFilterValue(granular));
+        }
+        if (key === 'no safety class') {
+            const { safety } = getNsfwDisplayTokens(image, { includeUserOverrides: true });
+            return !safety || !_NSFW_SAFETY_CLASSES.has(normalizeDetailFilterValue(safety));
+        }
+        if (key === 'no artist') {
+            return !String(image?.artist_name || '').trim();
+        }
+        if (key === 'no source url') {
+            return !String(image?.source_url || '').trim();
+        }
+        if (key === 'no generation info') {
+            return !String(image?.generation_software || '').trim();
+        }
+        if (key === 'no prompt') {
+            const exif = parsePossibleJsonObject(image?.exif_data) || {};
+            const civitai = parsePossibleJsonObject(image?.civitai_data) || parsePossibleJsonObject(image?.civitai) || {};
+            const exifPrompt = String(exif.prompt || exif.Prompt || '').trim();
+            const civitaiPrompt = String((civitai.meta || {}).prompt || '').trim();
+            return !exifPrompt && !civitaiPrompt;
+        }
+        if (key === 'no tags') {
+            return getImageTagSet(image).size === 0;
+        }
+        if (key === 'no exif data') {
+            const exif = parsePossibleJsonObject(image?.exif_data);
+            return !exif || Object.keys(exif).length === 0;
+        }
+        if (key === 'no civitai meta') {
+            if (!isCivitaiHostedImage(image)) {
+                return false;
+            }
+            const civitai = parsePossibleJsonObject(image?.civitai_data) || parsePossibleJsonObject(image?.civitai) || {};
+            return Object.keys(civitai).length === 0;
+        }
+        return false;
+    }
+
+    function getDataExtractionMode(label) {
+        const norm = normalizeDetailFilterValue(label);
+        if (!norm) {
+            return null;
+        }
+        for (const v of getAdvancedFilterValues('missingData')) {
+            const colonIdx = v.indexOf(':');
+            if (colonIdx < 0) {
+                continue;
+            }
+            const prefix = v.substring(0, colonIdx).toLowerCase();
+            const rest = normalizeDetailFilterValue(v.substring(colonIdx + 1));
+            if (rest === norm && (prefix === 'present' || prefix === 'absent')) {
+                return prefix;
+            }
+        }
+        return null;
+    }
+
+    async function cycleDataExtractionPill(label) {
+        const norm = normalizeDetailFilterValue(label);
+        if (!norm) {
+            return;
+        }
+        const current = getDataExtractionMode(label);
+        // Remove any existing entry for this label
+        state.advancedFilters.missingData = state.advancedFilters.missingData.filter((v) => {
+            const colonIdx = v.indexOf(':');
+            if (colonIdx < 0) {
+                return true;
+            }
+            return normalizeDetailFilterValue(v.substring(colonIdx + 1)) !== norm;
+        });
+        // Advance to next state: null → present → absent → null
+        if (current === null) {
+            state.advancedFilters.missingData.push(`present:${label}`);
+        } else if (current === 'present') {
+            state.advancedFilters.missingData.push(`absent:${label}`);
+        }
+        // current === 'absent' → entry was removed above (back to unselected)
+        await applyFilter({ ensureSearchCoverage: true });
+        renderAdvancedFilters();
+    }
+
+    function imageMatchesMissingDataFilter(image) {
+        const values = getAdvancedFilterValues('missingData');
+        if (!values.length) {
+            return true;
+        }
+        // AND semantics: image must satisfy ALL selected conditions.
+        for (const entry of values) {
+            const colonIdx = entry.indexOf(':');
+            if (colonIdx < 0) {
+                continue;
+            }
+            const mode = entry.substring(0, colonIdx).toLowerCase();
+            const label = entry.substring(colonIdx + 1);
+            const isMissing = isMissingDataConditionMet(image, label);
+            if (mode === 'present' && isMissing) {
+                return false;
+            }
+            if (mode === 'absent' && !isMissing) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     function imageMatchesDetailFilters(image) {
         if (!imageMatchesNsfwVisibility(image)) {
             return false;
@@ -1988,7 +2678,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!imageMatchesAnyFilter(image?.mimetype, 'mimetype')) {
             return false;
         }
-        if (!imageMatchesAnyMultiValueFilter(getImageNsfwRatings(image), 'nsfwRating')) {
+        if (!imageMatchesNsfwRatingFilter(image)) {
+            return false;
+        }
+        if (!imageMatchesNsfwSafetyFilter(image)) {
             return false;
         }
         if (!imageMatchesAnyFilter(image?.artist_name, 'artistName')) {
@@ -2006,6 +2699,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     return false;
                 }
             }
+        }
+
+        if (!imageMatchesMissingDataFilter(image)) {
+            return false;
         }
 
         return true;
@@ -2044,14 +2741,86 @@ document.addEventListener('DOMContentLoaded', () => {
         return button;
     }
 
+    function createDataExtractionPill(label) {
+        const displayLabel = String(label || '').trim();
+        if (!displayLabel) {
+            return null;
+        }
+
+        const mode = getDataExtractionMode(displayLabel);
+
+        const button = document.createElement('button');
+        button.type = 'button';
+
+        if (mode === 'present') {
+            button.className = 'advanced-filter-pill is-active';
+            button.setAttribute('aria-pressed', 'true');
+            button.title = `${displayLabel}: showing items that have this data (click for missing, hover to clear)`;
+        } else if (mode === 'absent') {
+            button.className = 'advanced-filter-pill is-absent';
+            button.setAttribute('aria-pressed', 'mixed');
+            button.title = `${displayLabel}: showing items missing this data (click to clear, hover to clear)`;
+        } else {
+            button.className = 'advanced-filter-pill';
+            button.setAttribute('aria-pressed', 'false');
+            button.title = `Filter by ${displayLabel}`;
+        }
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'pill-label';
+        labelSpan.textContent = displayLabel;
+        button.appendChild(labelSpan);
+
+        const removeSpan = document.createElement('span');
+        removeSpan.className = 'pill-remove';
+        removeSpan.setAttribute('aria-hidden', 'true');
+        removeSpan.textContent = '×';
+        button.appendChild(removeSpan);
+
+        removeSpan.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const norm = normalizeDetailFilterValue(displayLabel);
+            state.advancedFilters.missingData = state.advancedFilters.missingData.filter((v) => {
+                const colonIdx = v.indexOf(':');
+                if (colonIdx < 0) {
+                    return true;
+                }
+                return normalizeDetailFilterValue(v.substring(colonIdx + 1)) !== norm;
+            });
+            await applyFilter({ ensureSearchCoverage: true });
+            renderAdvancedFilters();
+        });
+
+        button.addEventListener('click', () => {
+            void cycleDataExtractionPill(displayLabel);
+        });
+
+        return button;
+    }
+
+    function renderDataExtractionPills(container) {
+        if (!container) {
+            return;
+        }
+        container.innerHTML = '';
+        MISSING_DATA_PILL_ORDER.forEach((label) => {
+            const pill = createDataExtractionPill(label);
+            if (pill) {
+                container.appendChild(pill);
+            }
+        });
+    }
+
     function renderAdvancedFilterPillGroup(container, category, values) {
         if (!container) {
             return;
         }
         container.innerHTML = '';
         const sortedValues = category === 'nsfwRating'
-            ? sortNsfwValues(values)
-            : getSortedUniqueDisplayValues(values);
+            ? sortNsfwRatingValues(values)
+            : category === 'nsfwSafety'
+                ? sortNsfwSafetyValues(values)
+                : getSortedUniqueDisplayValues(values);
         sortedValues.forEach((value) => {
             const pill = createAdvancedFilterPill(category, value);
             if (pill) {
@@ -2111,17 +2880,31 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const generationOptions = getSortedUniqueDisplayValues(state.allImages.map((image) => image?.generation_software));
-        const sourceOptions = getSortedUniqueDisplayValues(state.allImages.map((image) => image?.source_site));
-        const mimetypeOptions = getSortedUniqueDisplayValues(state.allImages.map((image) => image?.mimetype));
-        const nsfwOptions = sortNsfwValues([
-            ...NSFW_PILL_ORDER,
-            ...state.allImages.flatMap((image) => getImageNsfwRatings(image)),
+        const generationOptions = getSortedUniqueDisplayValues([
+            ...(Array.isArray(state.filterOptions?.generationSoftware) ? state.filterOptions.generationSoftware : []),
+            ...getAdvancedFilterValues('generationSoftware'),
+        ]);
+        const sourceOptions = getSortedUniqueDisplayValues([
+            ...(Array.isArray(state.filterOptions?.sourceSites) ? state.filterOptions.sourceSites : []),
+            ...getAdvancedFilterValues('sourceSite'),
+        ]);
+        const mimetypeOptions = getSortedUniqueDisplayValues([
+            ...(Array.isArray(state.filterOptions?.mimetypes) ? state.filterOptions.mimetypes : []),
+            ...getAdvancedFilterValues('mimetype'),
+        ]);
+        const nsfwRatingOptions = sortNsfwRatingValues([
+            ...NSFW_RATING_PILL_ORDER,
+            ...(Array.isArray(state.filterOptions?.nsfwRatings) ? state.filterOptions.nsfwRatings : []),
             ...getAdvancedFilterValues('nsfwRating'),
         ]);
+        const nsfwSafetyOptions = sortNsfwSafetyValues([
+            ...NSFW_SAFETY_PILL_ORDER,
+            ...(Array.isArray(state.filterOptions?.nsfwSafety) ? state.filterOptions.nsfwSafety : []),
+            ...getAdvancedFilterValues('nsfwSafety'),
+        ]);
         const authorOptions = getSortedUniqueDisplayValues([
+            ...(Array.isArray(state.filterOptions?.artistNames) ? state.filterOptions.artistNames : []),
             ...state.artistNames,
-            ...state.allImages.map((image) => image?.artist_name),
             ...getAdvancedFilterValues('artistName'),
         ]);
         const tagOptions = getSortedUniqueDisplayValues([
@@ -2129,18 +2912,20 @@ document.addEventListener('DOMContentLoaded', () => {
             ...getAdvancedFilterValues('tags'),
         ]);
         const collectionOptions = getSortedUniqueDisplayValues([
+            ...(Array.isArray(state.filterOptions?.collectionNames) ? state.filterOptions.collectionNames : []),
             ...state.collections.map((collection) => collection?.name),
-            ...state.allImages.flatMap((image) => Array.isArray(image?.collection_names) ? image.collection_names : []),
             ...getAdvancedFilterValues('collections'),
         ]);
 
         renderAdvancedFilterPillGroup(advancedGenerationPills, 'generationSoftware', generationOptions);
         renderAdvancedFilterPillGroup(advancedSourcePills, 'sourceSite', sourceOptions);
         renderAdvancedFilterPillGroup(advancedMimetypePills, 'mimetype', mimetypeOptions);
-        renderAdvancedFilterPillGroup(advancedNsfwPills, 'nsfwRating', nsfwOptions);
+        renderAdvancedFilterPillGroup(advancedNsfwRatingPills, 'nsfwRating', nsfwRatingOptions);
+        renderAdvancedFilterPillGroup(advancedNsfwSafetyPills, 'nsfwSafety', nsfwSafetyOptions);
         renderAdvancedFilterSelectedChips(advancedAuthorSelected, 'artistName');
         renderAdvancedFilterSelectedChips(advancedTagSelected, 'tags');
         renderAdvancedFilterSelectedChips(advancedCollectionSelected, 'collections');
+        renderDataExtractionPills(advancedMissingDataPills);
         populateDatalist(advancedAuthorOptions, authorOptions);
         populateDatalist(advancedTagOptions, tagOptions);
         populateDatalist(advancedCollectionOptions, collectionOptions);
@@ -2219,6 +3004,13 @@ document.addEventListener('DOMContentLoaded', () => {
         return {
             tagNamesBySource,
             tagNames: Array.isArray(result?.tag_names) ? result.tag_names : [],
+            generationSoftware: Array.isArray(result?.generation_software) ? result.generation_software : [],
+            sourceSites: Array.isArray(result?.source_sites) ? result.source_sites : [],
+            mimetypes: Array.isArray(result?.mimetypes) ? result.mimetypes : [],
+            nsfwRatings: Array.isArray(result?.nsfw_ratings) ? result.nsfw_ratings : [],
+            nsfwSafety: Array.isArray(result?.nsfw_safety) ? result.nsfw_safety : [],
+            artistNames: Array.isArray(result?.artist_names) ? result.artist_names : [],
+            collectionNames: Array.isArray(result?.collection_names) ? result.collection_names : [],
         };
     }
 
@@ -2249,9 +3041,81 @@ document.addEventListener('DOMContentLoaded', () => {
         return `/image_library/${encodedPath}${version}`;
     }
 
+    function getCivitaiMediaUrl(image) {
+        const candidates = [
+            image?.json_metadata?.civitai?.url,
+            image?.civitai?.url,
+            image?.civitai_data?.url,
+            image?.civitai_url,
+            image?.source_url,
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.trim()) {
+                return candidate.trim();
+            }
+        }
+        return '';
+    }
+
+    function looksLikeVideoUrl(url) {
+        if (!url || typeof url !== 'string') {
+            return false;
+        }
+        const text = url.toLowerCase();
+        if (/\.(mp4|webm|mov|mkv)(\?|#|$)/i.test(text)) {
+            return true;
+        }
+        if (text.includes('transcode=true') && text.includes('.mp4')) {
+            return true;
+        }
+        return false;
+    }
+
+    function extractCivitaiMediaUuid(url) {
+        if (!url || typeof url !== 'string') {
+            return '';
+        }
+        const match = String(url).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+        return match ? String(match[0]).toLowerCase() : '';
+    }
+
+    function getCivitaiPlayableVideoUrl(url) {
+        const uuid = extractCivitaiMediaUuid(url);
+        if (!uuid) {
+            return '';
+        }
+        return `https://image-b2.civitai.com/file/civitai-media-cache/${uuid}/original`;
+    }
+
+    function getMediaUrlForDisplay(image) {
+        const localUrl = getImageUrl(image);
+        const civitaiUrl = getCivitaiMediaUrl(image);
+        if (looksLikeVideoUrl(civitaiUrl)) {
+            const playableVideoUrl = getCivitaiPlayableVideoUrl(civitaiUrl);
+            if (playableVideoUrl) {
+                return playableVideoUrl;
+            }
+            return civitaiUrl;
+        }
+        if (!isVideoAsset(image)) {
+            return localUrl;
+        }
+        return localUrl;
+    }
+
     function isVideoAsset(image) {
         const mimetype = typeof image?.mimetype === 'string' ? image.mimetype : '';
-        return mimetype.toLowerCase().startsWith('video/');
+        if (mimetype.toLowerCase().startsWith('video/')) {
+            return true;
+        }
+
+        const filePath = String(image?.file_path || image?.file_name || '').toLowerCase();
+        if (/\.(mp4|webm|mov|mkv)$/.test(filePath)) {
+            return true;
+        }
+
+        const civitaiUrl = getCivitaiMediaUrl(image);
+        return looksLikeVideoUrl(civitaiUrl);
     }
 
     function releaseVideoElement(video) {
@@ -2744,13 +3608,78 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function closeFullscreenPreview() {
+        updateFullscreenDebugOverlay('close-fullscreen');
         fullscreenPreview.classList.add('hidden');
         fullscreenPreview.setAttribute('aria-hidden', 'true');
         state.fullscreenSelectedKey = null;
+        state.fullscreenIndexHint = null;
+        if (fullscreenDebugOverlay) {
+            fullscreenDebugOverlay.classList.add('hidden');
+        }
+        renderFullscreenEffectiveTags(null);
         fullscreenImage.classList.add('hidden');
         fullscreenImage.removeAttribute('src');
         releaseVideoElement(fullscreenVideo);
         fullscreenVideo.classList.add('hidden');
+    }
+
+    function updateFullscreenDebugOverlay(reason, extra = {}) {
+        if (!fullscreenDebugOverlay || !fullscreenDebugContent) {
+            return;
+        }
+        const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
+        const shouldShow = fullscreenOpen && state.debugVisible;
+        fullscreenDebugOverlay.classList.toggle('hidden', !shouldShow);
+        if (!shouldShow) {
+            return;
+        }
+
+        const currentKey = state.fullscreenSelectedKey || state.selectedKey || null;
+        const currentIndex = currentKey
+            ? state.filteredImages.findIndex((img) => img.__key === currentKey)
+            : -1;
+        const hintedIndex = Number.isInteger(state.fullscreenIndexHint)
+            ? Number(state.fullscreenIndexHint)
+            : null;
+
+        const payload = {
+            ts: new Date().toISOString(),
+            reason,
+            key: currentKey,
+            selectedKey: state.selectedKey,
+            fullscreenSelectedKey: state.fullscreenSelectedKey,
+            currentIndex,
+            hintedIndex,
+            filteredCount: state.filteredImages.length,
+            allCount: state.allImages.length,
+            hasMore: state.hasMore,
+            loadingPage: state.loadingPage,
+            refreshInFlight: state.galleryRefreshInFlight,
+            serverFilterMode: state.serverFilterMode,
+            ...extra,
+        };
+
+        if (!fullscreenDebugFrozen) {
+            fullscreenDebugContent.textContent = JSON.stringify(payload, null, 2);
+        }
+
+        if (currentIndex === -1 && fullscreenDebugPreviousIndex !== -1) {
+            if (fullscreenDebugSnapshot) {
+                fullscreenDebugSnapshot.textContent = JSON.stringify(payload, null, 2);
+            }
+            try {
+                window.localStorage.setItem('atelier.fullscreenDebug.indexLoss', JSON.stringify(payload));
+            } catch {
+                // Ignore storage errors.
+            }
+        }
+        fullscreenDebugPreviousIndex = currentIndex;
+
+        try {
+            window.localStorage.setItem('atelier.fullscreenDebug.last', JSON.stringify(payload));
+        } catch {
+            // Ignore storage errors.
+        }
     }
 
     function syncFullscreenLoopUi() {
@@ -2762,16 +3691,33 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function openFullscreenPreviewFromImage(image) {
-        const mediaUrl = getImageUrl(image);
+        const mediaUrl = getMediaUrlForDisplay(image);
         if (!mediaUrl) {
             return;
         }
 
-        state.fullscreenSelectedKey = image.__key || null;
+        if (fullscreenDebugSnapshot) {
+            try {
+                const priorSnapshot = window.localStorage.getItem('atelier.fullscreenDebug.indexLoss');
+                fullscreenDebugSnapshot.textContent = priorSnapshot || '{}';
+            } catch {
+                fullscreenDebugSnapshot.textContent = '{}';
+            }
+        }
 
-        const videoMode = isVideoAsset(image);
+        state.fullscreenSelectedKey = image.__key || null;
+        const nextHint = state.filteredImages.findIndex((img) => img.__key === state.fullscreenSelectedKey);
+        if (nextHint >= 0) {
+            state.fullscreenIndexHint = nextHint;
+        }
+
+        const videoMode = looksLikeVideoUrl(mediaUrl) || isVideoAsset(image);
         fullscreenPreview.classList.remove('hidden');
         fullscreenPreview.setAttribute('aria-hidden', 'false');
+        updateFullscreenDebugOverlay('open-fullscreen', {
+            mediaType: videoMode ? 'video' : 'image',
+        });
+        renderFullscreenEffectiveTags(image);
         if (videoMode) {
             fullscreenImage.classList.add('hidden');
             fullscreenImage.removeAttribute('src');
@@ -2793,50 +3739,142 @@ document.addEventListener('DOMContentLoaded', () => {
         if (fullscreenPreview.classList.contains('hidden')) {
             return;
         }
-        if (!Array.isArray(state.filteredImages) || !state.filteredImages.length) {
+
+        if (state.fullscreenNavInFlight) {
+            state.fullscreenQueuedDelta = Number(delta) || 0;
+            updateFullscreenDebugOverlay('nav-queued', {
+                delta,
+                queuedDelta: state.fullscreenQueuedDelta,
+            });
             return;
         }
 
-        const currentKey = state.fullscreenSelectedKey || state.selectedKey;
-        const currentIndex = state.filteredImages.findIndex((img) => img.__key === currentKey);
-        const baseIndex = currentIndex >= 0 ? currentIndex : 0;
-
-        if (delta < 0 && baseIndex <= 0) {
-            return;
-        }
-
-        let nextIndex = baseIndex + delta;
-        if (delta > 0 && nextIndex >= state.filteredImages.length) {
-            if (state.hasMore && !state.loadingPage) {
-                const priorLength = state.filteredImages.length;
-                await loadNextPage();
-
-                // If the page load did not expand results (or filter excludes them), stay put.
-                if (state.filteredImages.length <= priorLength) {
-                    return;
-                }
-
-                const refreshedKey = state.fullscreenSelectedKey || state.selectedKey;
-                const refreshedIndex = state.filteredImages.findIndex((img) => img.__key === refreshedKey);
-                const anchoredIndex = refreshedIndex >= 0 ? refreshedIndex : baseIndex;
-                nextIndex = anchoredIndex + 1;
-            } else {
+        state.fullscreenNavInFlight = true;
+        try {
+            if (!Array.isArray(state.filteredImages) || !state.filteredImages.length) {
+                updateFullscreenDebugOverlay('nav-ignored-empty', { delta });
                 return;
             }
-        }
 
-        if (nextIndex < 0 || nextIndex >= state.filteredImages.length) {
-            return;
-        }
+            const currentKey = state.fullscreenSelectedKey || state.selectedKey;
+            let currentIndex = state.filteredImages.findIndex((img) => img.__key === currentKey);
+            const hintedIndex = Number.isInteger(state.fullscreenIndexHint) ? Number(state.fullscreenIndexHint) : -1;
 
-        const nextImage = state.filteredImages[nextIndex];
-        if (!nextImage) {
-            return;
-        }
+            // During import refresh, selected/fullscreen keys can temporarily fall outside the loaded page window.
+            // Try to recover a real anchor by loading additional pages toward the hinted index.
+            if (currentIndex < 0 && currentKey && state.hasMore && !state.loadingPage) {
+                let loads = 0;
+                const maxLoads = 2;
+                const targetLength = hintedIndex >= 0 ? (hintedIndex + 1) : 0;
+                while (loads < maxLoads && state.hasMore && !state.loadingPage) {
+                    const beforeLength = state.filteredImages.length;
+                    await loadNextPage({ recomputeFilter: false });
+                    refreshFilteredImagesAfterPageLoad();
+                    loads += 1;
+                    currentIndex = state.filteredImages.findIndex((img) => img.__key === currentKey);
+                    const progressed = state.filteredImages.length > beforeLength;
+                    const reachedHintWindow = targetLength > 0 && state.filteredImages.length >= targetLength;
+                    if (currentIndex >= 0 || !progressed || reachedHintWindow) {
+                        break;
+                    }
+                }
+                updateFullscreenDebugOverlay('nav-anchor-recover', {
+                    delta,
+                    currentKey,
+                    recoveredIndex: currentIndex,
+                    hintedIndex,
+                    filteredCount: state.filteredImages.length,
+                    loads,
+                });
+            }
 
-        state.fullscreenSelectedKey = nextImage.__key;
-        setSingleSelectionAndRender(nextImage.__key);
-        openFullscreenPreviewFromImage(nextImage);
+            const baseIndex = currentIndex >= 0
+                ? currentIndex
+                : Math.max(0, Math.min(hintedIndex >= 0 ? hintedIndex : 0, state.filteredImages.length - 1));
+            updateFullscreenDebugOverlay('nav-base', {
+                delta,
+                currentIndex,
+                hintedIndex,
+                baseIndex,
+            });
+
+            if (delta < 0 && baseIndex <= 0) {
+                updateFullscreenDebugOverlay('nav-blocked-start', { delta, baseIndex });
+                return;
+            }
+
+            let nextIndex = baseIndex + delta;
+            if (delta > 0 && nextIndex >= state.filteredImages.length) {
+                if (state.hasMore && !state.loadingPage) {
+                    const priorLength = state.filteredImages.length;
+                    await loadNextPage({ recomputeFilter: false });
+                    refreshFilteredImagesAfterPageLoad();
+
+                // If the page load did not expand results (or filter excludes them), stay put.
+                    if (state.filteredImages.length <= priorLength) {
+                        updateFullscreenDebugOverlay('nav-blocked-no-expand', {
+                            delta,
+                            baseIndex,
+                            priorLength,
+                            currentLength: state.filteredImages.length,
+                        });
+                        return;
+                    }
+
+                    const refreshedKey = state.fullscreenSelectedKey || state.selectedKey;
+                    const refreshedIndex = state.filteredImages.findIndex((img) => img.__key === refreshedKey);
+                    const anchoredIndex = refreshedIndex >= 0 ? refreshedIndex : baseIndex;
+                    nextIndex = anchoredIndex + 1;
+                    updateFullscreenDebugOverlay('nav-extended-after-load', {
+                        delta,
+                        baseIndex,
+                        refreshedIndex,
+                        anchoredIndex,
+                        nextIndex,
+                    });
+                } else {
+                    updateFullscreenDebugOverlay('nav-blocked-end', {
+                        delta,
+                        nextIndex,
+                        filteredCount: state.filteredImages.length,
+                        hasMore: state.hasMore,
+                        loadingPage: state.loadingPage,
+                    });
+                    return;
+                }
+            }
+
+            if (nextIndex < 0 || nextIndex >= state.filteredImages.length) {
+                updateFullscreenDebugOverlay('nav-out-of-range', {
+                    delta,
+                    nextIndex,
+                    filteredCount: state.filteredImages.length,
+                });
+                return;
+            }
+
+            const nextImage = state.filteredImages[nextIndex];
+            if (!nextImage) {
+                return;
+            }
+
+            state.fullscreenSelectedKey = nextImage.__key;
+            state.fullscreenIndexHint = nextIndex;
+            setSingleSelectionAndRender(nextImage.__key);
+            openFullscreenPreviewFromImage(nextImage);
+            updateFullscreenDebugOverlay('nav-committed', {
+                delta,
+                nextIndex,
+                nextKey: nextImage.__key,
+            });
+        } finally {
+            state.fullscreenNavInFlight = false;
+            const queuedDelta = state.fullscreenQueuedDelta;
+            state.fullscreenQueuedDelta = null;
+            if (queuedDelta) {
+                void navigateFullscreenBy(queuedDelta);
+            }
+        }
     }
 
     function navigateFullscreenToBoundary(target) {
@@ -2855,8 +3893,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         state.fullscreenSelectedKey = nextImage.__key;
+        state.fullscreenIndexHint = target === 'first' ? 0 : state.filteredImages.length - 1;
         setSingleSelectionAndRender(nextImage.__key);
         openFullscreenPreviewFromImage(nextImage);
+        updateFullscreenDebugOverlay('nav-boundary', {
+            target,
+            nextKey: nextImage.__key,
+            nextIndex: state.fullscreenIndexHint,
+        });
     }
 
     function isTypingTarget(event) {
@@ -2885,6 +3929,15 @@ document.addEventListener('DOMContentLoaded', () => {
         setSingleSelectionAndRender(nextImage.__key, { scrollIntoView: true });
     }
 
+    function refreshFilteredImagesAfterPageLoad() {
+        if (state.serverFilterMode) {
+            state.filteredImages = state.allImages.slice();
+            return;
+        }
+        const query = searchInput.value.trim().toLowerCase();
+        state.filteredImages = computeFilteredImages(query);
+    }
+
     async function navigateGalleryBy(delta) {
         if (!Array.isArray(state.filteredImages) || !state.filteredImages.length) {
             return;
@@ -2901,7 +3954,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (delta > 0 && nextIndex >= state.filteredImages.length) {
             if (state.hasMore && !state.loadingPage) {
                 const priorLength = state.filteredImages.length;
-                await loadNextPage();
+                await loadNextPage({ recomputeFilter: false });
+                refreshFilteredImagesAfterPageLoad();
                 if (state.filteredImages.length <= priorLength) {
                     return;
                 }
@@ -2934,7 +3988,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Ensure End can target the real last loaded/available image.
         while (state.hasMore && !state.loadingPage) {
             const priorLength = state.filteredImages.length;
-            await loadNextPage();
+            await loadNextPage({ recomputeFilter: false });
+            refreshFilteredImagesAfterPageLoad();
             if (state.filteredImages.length <= priorLength) {
                 break;
             }
@@ -2961,9 +4016,13 @@ document.addEventListener('DOMContentLoaded', () => {
         return image.file_name || image.file_path || image.file_hash || 'Untitled';
     }
 
-    function renderMetaItem(label, value) {
+    function renderMetaItem(label, value, options = {}) {
+        const { spanTwo = false } = options;
         const wrapper = document.createElement('div');
         wrapper.className = 'meta-item';
+        if (spanTwo) {
+            wrapper.classList.add('meta-item--span-2');
+        }
 
         const labelNode = document.createElement('span');
         labelNode.className = 'label';
@@ -2982,6 +4041,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const {
             label,
             value,
+            inputValue,
+            spanTwo = false,
             inputType = 'text',
             placeholder = '',
             suggestions = null,
@@ -2992,9 +4053,13 @@ document.addEventListener('DOMContentLoaded', () => {
             onSave,
         } = config;
         let currentValue = value;
+        let currentInputValue = typeof inputValue === 'string' ? inputValue : value;
 
         const wrapper = document.createElement('div');
         wrapper.className = 'meta-item';
+        if (spanTwo) {
+            wrapper.classList.add('meta-item--span-2');
+        }
 
         const head = document.createElement('div');
         head.className = 'meta-item-head';
@@ -3074,7 +4139,7 @@ document.addEventListener('DOMContentLoaded', () => {
         input.className = 'meta-edit-input';
         input.type = inputType;
         input.placeholder = placeholder;
-        input.value = currentValue || '';
+        input.value = currentInputValue || '';
 
         if (Array.isArray(suggestions) && suggestions.length) {
             const listId = `meta-edit-list-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
@@ -3121,7 +4186,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         editBtn.addEventListener('click', () => setEditing(true));
         cancelBtn.addEventListener('click', () => {
-            input.value = currentValue || '';
+            input.value = currentInputValue || '';
             setEditing(false);
         });
         const saveCurrentValue = async () => {
@@ -3131,8 +4196,9 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const savedValue = await onSave(nextValue);
                 currentValue = savedValue;
+                currentInputValue = typeof savedValue === 'string' ? savedValue : currentInputValue;
                 renderDisplayValue(currentValue);
-                input.value = savedValue || '';
+                input.value = currentInputValue || '';
                 setEditing(false);
             } catch (error) {
                 alert(`Could not save ${label}: ${error.message}`);
@@ -3151,7 +4217,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (event.key === 'Escape') {
                 event.preventDefault();
-                input.value = currentValue || '';
+                input.value = currentInputValue || '';
                 setEditing(false);
             }
         });
@@ -3295,6 +4361,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderImageCountControl();
 
         updateCollectionActionLabels();
+        updateImageToolActionLabels();
     }
 
     function saveSelectionToStorage() {
@@ -3331,23 +4398,37 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function syncSelectionState() {
+        const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
+        if (fullscreenOpen && state.fullscreenSelectedKey && state.selectedKey !== state.fullscreenSelectedKey) {
+            state.selectedKey = state.fullscreenSelectedKey;
+        }
         const availableKeys = new Set(state.allImages.map((image) => image.__key));
+        const deferSelectedKeyFallback = Boolean(
+            !state.serverFilterMode
+            && state.selectedKey
+            && !availableKeys.has(state.selectedKey)
+            && state.galleryRefreshInFlight
+            && state.hasMore
+        );
+
         if (!state.serverFilterMode) {
-            state.selectedKeys = new Set([...state.selectedKeys].filter((key) => availableKeys.has(key)));
+            state.selectedKeys = new Set(
+                [...state.selectedKeys].filter((key) => availableKeys.has(key) || key === state.selectedKey)
+            );
         }
 
-        if (state.selectedKey && !availableKeys.has(state.selectedKey)) {
+        if (state.selectedKey && !availableKeys.has(state.selectedKey) && !deferSelectedKeyFallback && !fullscreenOpen) {
             state.selectedKey = null;
         }
 
         const visibleKeys = new Set(state.filteredImages.map((image) => image.__key));
         const visibleSelectedKeys = getVisibleSelectionKeys();
 
-        if (state.selectedKey && !visibleKeys.has(state.selectedKey)) {
+        if (state.selectedKey && !visibleKeys.has(state.selectedKey) && !(deferSelectedKeyFallback && !visibleSelectedKeys.length) && !fullscreenOpen) {
             state.selectedKey = visibleSelectedKeys[0] || null;
         }
 
-        if (!state.selectedKey && visibleSelectedKeys.length) {
+        if (!state.selectedKey && visibleSelectedKeys.length && !fullscreenOpen) {
             state.selectedKey = visibleSelectedKeys[0];
         }
 
@@ -3360,40 +4441,113 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function getSelectionRenderSignature() {
+    function updateGallerySelectionTiles() {
+        const tiles = galleryGrid.querySelectorAll('.tile[data-key]');
+        if (!tiles.length) {
+            return;
+        }
+
+        const hasAnySelection = state.selectedKeys.size > 0;
+        tiles.forEach((tile) => {
+            const key = tile.dataset.key || '';
+            const isSelected = state.selectedKeys.has(key);
+            const isActive = state.selectedKey === key;
+            tile.classList.toggle('selected', isSelected);
+            tile.classList.toggle('active', isActive);
+            tile.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+            tile.setAttribute('aria-current', isActive ? 'true' : 'false');
+
+            const existingIndicator = tile.querySelector('.tile-selection-indicator');
+            if (hasAnySelection && !existingIndicator) {
+                const selectionIndicator = document.createElement('span');
+                selectionIndicator.className = 'tile-selection-indicator';
+                selectionIndicator.setAttribute('aria-hidden', 'true');
+                tile.insertBefore(selectionIndicator, tile.firstChild || null);
+            } else if (!hasAnySelection && existingIndicator) {
+                existingIndicator.remove();
+            }
+        });
+    }
+
+    function getFilterRenderSignature() {
         const queryActive = searchInput.value.trim().length > 0;
         const treeTagFilterActive = Boolean(state.treeTagFilter);
         const detailFiltersActive = hasActiveDetailFilters();
         const filteredKeys = state.filteredImages.map((image) => image.__key).join('|');
-        const visibleSelectedKeys = getVisibleSelectionKeys().join('|');
 
         return [
             queryActive ? 'query:1' : 'query:0',
             treeTagFilterActive ? 'tree:1' : 'tree:0',
             detailFiltersActive ? `detail:${serializeDetailFilters()}` : 'detail:0',
             `filtered:${filteredKeys}`,
-            `selected:${visibleSelectedKeys}`,
-            `active:${state.selectedKey || ''}`,
-            `selected-count:${state.selectedKeys.size}`,
             `total:${state.totalImageCount}`,
         ].join('::');
     }
 
+    function getSelectionVisualSignature() {
+        const visibleSelectedKeys = getVisibleSelectionKeys().join('|');
+        return [
+            `selected:${visibleSelectedKeys}`,
+            `active:${state.selectedKey || ''}`,
+            `selected-count:${state.selectedKeys.size}`,
+        ].join('::');
+    }
+
+    function getSelectionRenderSignature() {
+        return `${getFilterRenderSignature()}::${getSelectionVisualSignature()}`;
+    }
+
     function renderSelectionState(options = {}) {
-        const force = options.force !== false;
-        const nextGallerySignature = getSelectionRenderSignature();
-        const nextDetailKey = getSelectedImage()?.__key || null;
+        const force = options.force === true;
+        const nextFilterSignature = getFilterRenderSignature();
+        const nextSelectionSignature = getSelectionVisualSignature();
+        const nextGallerySignature = `${nextFilterSignature}::${nextSelectionSignature}`;
+        const selectedImage = getSelectedImage();
+        const nextDetailKey = selectedImage?.__key || null;
+        const filterChanged = state.lastRenderedFilterSignature !== nextFilterSignature;
+        const selectionChanged = state.lastRenderedSelectionSignature !== nextSelectionSignature;
+        const detailChanged = state.lastRenderedDetailKey !== nextDetailKey;
         const shouldRender = force
-            || state.lastRenderedGallerySignature !== nextGallerySignature
-            || state.lastRenderedDetailKey !== nextDetailKey;
+            || filterChanged
+            || selectionChanged
+            || detailChanged;
 
         if (!shouldRender) {
             return;
         }
 
-        renderAdvancedFilters();
-        renderGallery();
-        showDetails(getSelectedImage());
+        updateSelectionUi();
+
+        const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
+
+        // Full gallery redraw is only needed when filter/data changes.
+        // Selection-only changes can be applied by toggling tile classes in place.
+        if (!fullscreenOpen || force) {
+            const shouldFullRender = force || filterChanged || !galleryGrid.querySelector('.tile');
+            if (shouldFullRender) {
+                renderAdvancedFilters();
+                renderGallery();
+            } else if (selectionChanged) {
+                updateGallerySelectionTiles();
+            }
+        }
+
+        const shouldHoldDetailDuringRefresh = Boolean(
+            fullscreenOpen
+            && !selectedImage
+            && (state.galleryRefreshInFlight || state.fullscreenSelectedKey || state.selectedKey)
+        );
+        if (!shouldHoldDetailDuringRefresh) {
+            showDetails(selectedImage);
+        }
+        updateFullscreenDebugOverlay('render-selection', {
+            force,
+            shouldHoldDetailDuringRefresh,
+            selectedImagePresent: Boolean(selectedImage),
+            nextDetailKey,
+        });
+        state.lastRenderedFilterSignature = nextFilterSignature;
+        state.lastRenderedSelectionSignature = nextSelectionSignature;
         state.lastRenderedGallerySignature = nextGallerySignature;
         state.lastRenderedDetailKey = nextDetailKey;
     }
@@ -3616,6 +4770,82 @@ document.addEventListener('DOMContentLoaded', () => {
         return state.allImages.filter((image) => state.selectedKeys.has(image.__key));
     }
 
+    function getDetailSelectionGroup(activeImage) {
+        const selectedImages = getSelectedImages();
+        if (selectedImages.length) {
+            return selectedImages;
+        }
+        return activeImage ? [activeImage] : [];
+    }
+
+    function getDistinctGroupValues(images, readValue, { sort = false } = {}) {
+        const values = [];
+        const targets = Array.isArray(images) ? images : [];
+        targets.forEach((image) => {
+            const rawValue = readValue(image);
+            if (Array.isArray(rawValue)) {
+                rawValue.forEach((item) => values.push(item));
+            } else {
+                values.push(rawValue);
+            }
+        });
+
+        const distinct = dedupeDisplayValues(values);
+        if (sort) {
+            distinct.sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }));
+        }
+        return distinct;
+    }
+
+    function getCommonGroupValue(values) {
+        return Array.isArray(values) && values.length === 1 ? values[0] : '';
+    }
+
+    function formatGroupDisplayValue(values, emptyLabel = 'N/A') {
+        const list = Array.isArray(values) ? values : [];
+        return list.length ? list.join(' | ') : emptyLabel;
+    }
+
+    async function saveImageMetadataForGroup(images, patchData, applyResult, fieldLabel) {
+        const targets = (Array.isArray(images) ? images : [])
+            .filter((image) => image && typeof image.file_hash === 'string' && image.file_hash.trim());
+        if (!targets.length) {
+            throw new Error('No selected items are available for update.');
+        }
+
+        let successCount = 0;
+        const errors = [];
+        for (const target of targets) {
+            try {
+                const result = await saveImageMetadata(target.file_hash, patchData);
+                if (typeof applyResult === 'function') {
+                    applyResult(target, result);
+                }
+                successCount += 1;
+            } catch (error) {
+                errors.push(error instanceof Error ? error.message : String(error));
+            }
+        }
+
+        if (successCount <= 0) {
+            throw new Error(errors[0] || `Could not save ${fieldLabel}.`);
+        }
+
+        if (targets.length > 1) {
+            if (errors.length) {
+                showToast(`Updated ${successCount}/${targets.length} items for ${fieldLabel}.`, 'warn');
+            } else {
+                showToast(`Updated ${targets.length} items for ${fieldLabel}.`, 'success');
+            }
+        }
+
+        return {
+            successCount,
+            totalCount: targets.length,
+            errors,
+        };
+    }
+
     function getCollectionActionTargets() {
         const selectedImages = getSelectedImages();
         if (selectedImages.length) {
@@ -3623,6 +4853,39 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const activeImage = getSelectedImage();
         return activeImage ? [activeImage] : [];
+    }
+
+    function getImageToolActionTargets() {
+        return getCollectionActionTargets().filter((image) => Boolean(image?.file_hash));
+    }
+
+    function updateImageToolActionLabels() {
+        const targetCount = getImageToolActionTargets().length;
+        const hasTargets = targetCount > 0;
+        const noun = targetCount === 1 ? 'item' : 'items';
+
+        const repairLabel = hasTargets
+            ? `Repair ${targetCount} selected ${noun}`
+            : 'Repair media';
+        repairImageBtn.title = repairLabel;
+        repairImageBtn.setAttribute('aria-label', repairLabel);
+        repairImageBtn.disabled = !hasTargets;
+
+        if (rescanImageBtn) {
+            const rescanLabel = hasTargets
+                ? `Rescan metadata for ${targetCount} selected ${noun}`
+                : 'Rescan metadata for this media item';
+            rescanImageBtn.title = rescanLabel;
+            rescanImageBtn.setAttribute('aria-label', rescanLabel);
+            rescanImageBtn.disabled = !hasTargets;
+        }
+
+        const deleteLabel = hasTargets
+            ? `Delete ${targetCount} selected ${noun} and sidecars`
+            : 'Delete image file and sidecar';
+        deleteImageFileBtn.title = deleteLabel;
+        deleteImageFileBtn.setAttribute('aria-label', deleteLabel);
+        deleteImageFileBtn.disabled = !hasTargets;
     }
 
     function updateCollectionActionLabels() {
@@ -4305,9 +5568,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function getAvailableDetailTabIds() {
-        return detailFolderTabs
-            .map((tab) => String(tab.dataset.tabId || '').trim())
-            .filter((tabId) => tabId.length > 0);
+        return DETAIL_TAB_IDS.filter((tabId) => detailPanelByTabId.has(tabId));
     }
 
     function resolveDetailTabId(nextTabId) {
@@ -4319,52 +5580,34 @@ document.addEventListener('DOMContentLoaded', () => {
         return available.includes(normalized) ? normalized : available[0];
     }
 
-    function applyDetailTabRowLayout(activeTabId) {
-        if (!detailFolderTabs.length) {
-            return;
+    function focusActiveDetailTabButton() {
+        const activeButton = detailFolderWorkspace?.stackEl?.querySelector('.ftab[aria-selected="true"]');
+        if (activeButton instanceof HTMLElement) {
+            activeButton.focus();
         }
-
-        const orderedTabIds = getAvailableDetailTabIds();
-        const rowSize = Math.ceil(orderedTabIds.length / 2);
-        const activeIndex = orderedTabIds.indexOf(activeTabId);
-        const resolvedActiveIndex = activeIndex >= 0 ? activeIndex : 0;
-        const frontRowStart = resolvedActiveIndex < rowSize ? 0 : rowSize;
-        const backRowStart = frontRowStart === 0 ? rowSize : 0;
-
-        detailFolderTabs.forEach((tab, index) => {
-            const inFrontRow = index >= frontRowStart && index < frontRowStart + rowSize;
-            const slotIndex = inFrontRow ? (index - frontRowStart) : (index - backRowStart);
-            const gridColumnStart = inFrontRow ? (1 + (slotIndex * 3)) : (2 + (slotIndex * 3));
-            const gridRow = inFrontRow ? 2 : 1;
-
-            tab.style.setProperty('--tab-col-start', String(gridColumnStart));
-            tab.style.setProperty('--tab-row', String(gridRow));
-            tab.classList.toggle('is-front-row', inFrontRow);
-            tab.classList.toggle('is-back-row', !inFrontRow);
-        });
     }
 
-    function syncDetailActiveTabBridge() {
-        if (!detailFolderBody || !detailFolderTabs.length) {
-            return;
-        }
-        const activeTab = detailFolderTabs.find((tab) => tab.classList.contains('is-active'));
-        if (!activeTab) {
-            return;
-        }
-        const bodyRect = detailFolderBody.getBoundingClientRect();
-        const tabRect = activeTab.getBoundingClientRect();
-        if (!bodyRect.width || !Number.isFinite(bodyRect.width)) {
-            return;
-        }
-
-        const rawLeftPct = ((tabRect.left - bodyRect.left) / bodyRect.width) * 100;
-        const rawWidthPct = (tabRect.width / bodyRect.width) * 100;
-        const leftPct = Math.max(0, Math.min(100, rawLeftPct));
-        const widthPct = Math.max(0, Math.min(100 - leftPct, rawWidthPct));
-
-        detailFolderBody.style.setProperty('--active-tab-left', `${leftPct}%`);
-        detailFolderBody.style.setProperty('--active-tab-width', `${widthPct}%`);
+    function buildDetailFolderTabs() {
+        const availableTabIds = getAvailableDetailTabIds();
+        const splitIndex = Math.ceil(availableTabIds.length / 2);
+        return availableTabIds.map((tabId, index) => ({
+            id: tabId,
+            label: DETAIL_TAB_LABELS[tabId] || tabId,
+            // Put the first half on the front/lower strip so Image Attributes starts bottom-left.
+            row: index < splitIndex ? 2 : 1,
+            render: () => {
+                const panel = detailPanelByTabId.get(tabId);
+                if (!panel) {
+                    const placeholder = document.createElement('p');
+                    placeholder.className = 'detail-placeholder';
+                    placeholder.textContent = `Content area for "${DETAIL_TAB_LABELS[tabId] || tabId}".`;
+                    return placeholder;
+                }
+                panel.hidden = false;
+                panel.classList.add('is-active');
+                return panel;
+            },
+        }));
     }
 
     function setActiveDetailTab(nextTabId, { persist = true, focus = false } = {}) {
@@ -4374,92 +5617,119 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         state.detailActiveTabId = resolvedId;
-        applyDetailTabRowLayout(resolvedId);
-
-        let activeTabButton = null;
-        detailFolderTabs.forEach((tab) => {
-            const tabId = String(tab.dataset.tabId || '').trim();
-            const isActive = tabId === resolvedId;
-            tab.classList.toggle('is-active', isActive);
-            tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
-            tab.tabIndex = isActive ? 0 : -1;
-            if (isActive) {
-                activeTabButton = tab;
-            }
-        });
-
-        detailFolderPanels.forEach((panel) => {
-            const panelId = String(panel.id || '');
-            const panelTabId = panelId.startsWith('detail-panel-') ? panelId.slice('detail-panel-'.length) : '';
-            const isActive = panelTabId === resolvedId;
-            panel.hidden = !isActive;
-            panel.classList.toggle('is-active', isActive);
-        });
-
-        syncDetailActiveTabBridge();
+        if (detailFolderWorkspace) {
+            detailFolderWorkspace.setActiveTabId(resolvedId);
+        }
 
         if (persist) {
             writeStoredString(STORAGE_KEYS.detailActiveTab, resolvedId);
         }
 
-        if (focus && activeTabButton) {
-            activeTabButton.focus();
+        if (focus) {
+            focusActiveDetailTabButton();
         }
     }
 
+    function bindDetailFolderKeyboardSupport() {
+        if (!detailFolderWorkspace?.stackEl) {
+            return;
+        }
+        detailFolderWorkspace.stackEl.addEventListener('keydown', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement) || !target.closest('.ftab')) {
+                return;
+            }
+            const orderedTabIds = getAvailableDetailTabIds();
+            if (!orderedTabIds.length) {
+                return;
+            }
+            const currentId = resolveDetailTabId(state.detailActiveTabId);
+            const currentIndex = currentId ? orderedTabIds.indexOf(currentId) : -1;
+            if (currentIndex < 0) {
+                return;
+            }
+
+            const moveToIndex = (nextIndex) => {
+                const wrappedIndex = (nextIndex + orderedTabIds.length) % orderedTabIds.length;
+                setActiveDetailTab(orderedTabIds[wrappedIndex], { persist: true, focus: true });
+            };
+
+            if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+                event.preventDefault();
+                moveToIndex(currentIndex + 1);
+                return;
+            }
+            if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                moveToIndex(currentIndex - 1);
+                return;
+            }
+            if (event.key === 'Home') {
+                event.preventDefault();
+                moveToIndex(0);
+                return;
+            }
+            if (event.key === 'End') {
+                event.preventDefault();
+                moveToIndex(orderedTabIds.length - 1);
+            }
+        });
+    }
+
     function initializeDetailFolderTabs() {
-        if (!detailFolderTabs.length || !detailFolderPanels.length) {
+        if (!detailFolderMount || !uiKit || typeof uiKit.createStackedFolderWorkspace !== 'function') {
             return;
         }
 
-        detailFolderTabs.forEach((tab) => {
-            tab.addEventListener('click', () => {
-                const tabId = String(tab.dataset.tabId || '').trim();
-                setActiveDetailTab(tabId, { persist: true, focus: false });
+        if (detailPanelStash instanceof HTMLElement) {
+            detailFolderPanels.forEach((panel) => {
+                panel.hidden = true;
+                panel.classList.remove('is-active');
+                detailPanelStash.append(panel);
             });
+        }
 
-            tab.addEventListener('keydown', (event) => {
-                const orderedTabIds = getAvailableDetailTabIds();
-                if (!orderedTabIds.length) {
-                    return;
-                }
-                const currentTabId = String(tab.dataset.tabId || '').trim();
-                const currentIndex = orderedTabIds.indexOf(currentTabId);
-                if (currentIndex < 0) {
-                    return;
-                }
+        const tabs = buildDetailFolderTabs();
+        if (!tabs.length) {
+            return;
+        }
 
-                const moveToIndex = (nextIndex) => {
-                    const wrappedIndex = (nextIndex + orderedTabIds.length) % orderedTabIds.length;
-                    setActiveDetailTab(orderedTabIds[wrappedIndex], { persist: true, focus: true });
-                };
+        // Main app default: always open on Image Attributes when available.
+        const defaultTabId = tabs.some((tab) => tab.id === 'image-attributes')
+            ? 'image-attributes'
+            : tabs[0].id;
+        state.detailActiveTabId = defaultTabId;
 
-                if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-                    event.preventDefault();
-                    moveToIndex(currentIndex + 1);
-                    return;
-                }
-                if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-                    event.preventDefault();
-                    moveToIndex(currentIndex - 1);
-                    return;
-                }
-                if (event.key === 'Home') {
-                    event.preventDefault();
-                    moveToIndex(0);
-                    return;
-                }
-                if (event.key === 'End') {
-                    event.preventDefault();
-                    moveToIndex(orderedTabIds.length - 1);
-                    return;
-                }
-                if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    setActiveDetailTab(currentTabId, { persist: true, focus: true });
-                }
-            });
+        detailFolderWorkspace = uiKit.createStackedFolderWorkspace({
+            tabs,
+            activeTabId: defaultTabId,
+            ariaLabel: 'Detail folders',
+            wrapperClassName: 'detail-folder-workspace',
+            stackClassName: 'detail-folder-stack',
+            bodyClassName: 'detail-folder-body',
+            onTabChange: (tabId) => {
+                state.detailActiveTabId = tabId;
+                writeStoredString(STORAGE_KEYS.detailActiveTab, tabId);
+            },
         });
+
+        const tabButtons = Array.from(detailFolderWorkspace.stackEl.querySelectorAll('.ftab'));
+        tabs.forEach((tab, index) => {
+            const button = tabButtons[index];
+            const panel = detailPanelByTabId.get(tab.id);
+            if (!button) {
+                return;
+            }
+            button.id = `detail-tab-${tab.id}`;
+            button.dataset.tabId = tab.id;
+            if (panel) {
+                button.setAttribute('aria-controls', panel.id);
+                panel.setAttribute('aria-labelledby', button.id);
+            }
+        });
+
+        detailFolderMount.replaceChildren(detailFolderWorkspace.root);
+        bindDetailFolderKeyboardSupport();
 
         setActiveDetailTab(state.detailActiveTabId, { persist: false, focus: false });
     }
@@ -4481,7 +5751,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 sendToGenerationLabBtn.removeAttribute('data-href');
                 sendToGenerationLabBtn.title = 'Open the Generation Metadata Lab for this item';
             }
+            if (sendToPerceptualLabBtn) {
+                sendToPerceptualLabBtn.classList.add('hidden');
+                sendToPerceptualLabBtn.disabled = true;
+                sendToPerceptualLabBtn.removeAttribute('data-href');
+                sendToPerceptualLabBtn.title = 'Open the Perceptual Analyzer Lab for this item';
+            }
             repairImageBtn.disabled = true;
+            if (rescanImageBtn) {
+                rescanImageBtn.disabled = true;
+            }
             deleteImageFileBtn.disabled = true;
             currentDebugImage = null;
             debugBadge.classList.add('hidden');
@@ -4494,10 +5773,11 @@ document.addEventListener('DOMContentLoaded', () => {
         debugBadge.classList.toggle('hidden', !state.debugVisible);
         setActiveDetailTab(state.detailActiveTabId, { persist: false, focus: false });
 
-        const imageUrl = getImageUrl(image);
-        const videoMode = isVideoAsset(image);
+        const imageUrl = getMediaUrlForDisplay(image);
+        const videoMode = looksLikeVideoUrl(imageUrl) || isVideoAsset(image);
         currentDebugImage = image;
         const generationLabDestination = getGenerationLabDestination(image);
+        const perceptualLabDestination = getPerceptualLabDestination(image);
         if (sendToGenerationLabBtn) {
             if (generationLabDestination) {
                 sendToGenerationLabBtn.classList.remove('hidden');
@@ -4511,7 +5791,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 sendToGenerationLabBtn.title = 'Open the Generation Metadata Lab for this item';
             }
         }
+        if (sendToPerceptualLabBtn) {
+            if (perceptualLabDestination) {
+                sendToPerceptualLabBtn.classList.remove('hidden');
+                sendToPerceptualLabBtn.disabled = false;
+                sendToPerceptualLabBtn.dataset.href = perceptualLabDestination.href;
+                sendToPerceptualLabBtn.title = perceptualLabDestination.title;
+            } else {
+                sendToPerceptualLabBtn.classList.add('hidden');
+                sendToPerceptualLabBtn.disabled = true;
+                sendToPerceptualLabBtn.removeAttribute('data-href');
+                sendToPerceptualLabBtn.title = 'Open the Perceptual Analyzer Lab for this item';
+            }
+        }
         repairImageBtn.disabled = false;
+        if (rescanImageBtn) {
+            rescanImageBtn.disabled = false;
+        }
         deleteImageFileBtn.disabled = false;
 
         // Guard against layout expansion glitches in some browser/video combinations.
@@ -4561,74 +5857,110 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         image.artist_profile = deriveArtistProfileUrl(image);
+        const detailEditTargets = getDetailSelectionGroup(image);
+        const artistValues = getDistinctGroupValues(detailEditTargets, (entry) => entry.artist_name, { sort: true });
+        const artistProfileValues = getDistinctGroupValues(detailEditTargets, (entry) => deriveArtistProfileUrl(entry), { sort: true });
+        const sourceUrlValues = getDistinctGroupValues(detailEditTargets, (entry) => entry.source_url, { sort: true });
         detailImage.alt = safeText(image.file_name, 'Selected image');
         detailTitle.textContent = safeText(image.file_name, image.file_hash || 'Untitled');
         renderDetailSubtitle(image);
 
         detailMeta.innerHTML = '';
+        const jsonMetadata = image && typeof image.json_metadata === 'object' && image.json_metadata !== null
+            ? image.json_metadata
+            : {};
+        const civitaiPayload = jsonMetadata && typeof jsonMetadata.civitai === 'object' && jsonMetadata.civitai !== null
+            ? jsonMetadata.civitai
+            : {};
+        const imageUuid = safeText(image.civitai_uuid || civitaiPayload.uuid || jsonMetadata.civitai_uuid || null);
         const metaNodes = [
-            renderMetaItem('Hash', image.file_hash),
-            renderMetaItem('Dimensions', image.width && image.height ? `${image.width} x ${image.height}` : null),
+            renderMetaItem('Hash', image.file_hash, { spanTwo: true }),
+            renderMetaItem('UUID', imageUuid, { spanTwo: true }),
+            renderMetaItem('Dimentions', image.width && image.height ? `${image.width} x ${image.height}` : null),
             renderMetaItem('Size', formatBytes(image.file_size)),
             renderMetaItem('Created', image.date_created),
             renderMetaItem('Modified', image.date_modified),
             renderEditableMetaItem({
                 label: 'Artist',
-                value: image.artist_name,
+                value: formatGroupDisplayValue(artistValues),
+                inputValue: getCommonGroupValue(artistValues),
                 placeholder: 'Artist name (leave blank to clear)',
                 suggestions: state.artistNames,
-                displayClickTitle: 'Filter gallery to this artist',
-                onDisplayClick: (artistName) => {
-                    void filterGalleryByArtist(artistName);
-                },
+                displayClickTitle: artistValues.length === 1 ? 'Filter gallery to this artist' : '',
+                onDisplayClick: artistValues.length === 1
+                    ? (artistName) => {
+                        void filterGalleryByArtist(artistName);
+                    }
+                    : null,
                 onSave: async (nextValue) => {
-                    const result = await saveImageMetadata(image.file_hash, {
+                    await saveImageMetadataForGroup(detailEditTargets, {
                         artist_name: nextValue,
-                    });
+                    }, (target, result) => {
+                        target.artist_id = result.artist_id ?? null;
+                        target.artist_name = result.artist_name ?? null;
+                        target.artist_profile = result.artist_profile ?? deriveArtistProfileUrl(target);
+                    }, 'Artist');
 
-                    image.artist_id = result.artist_id ?? null;
-                    image.artist_name = result.artist_name ?? null;
-                    image.artist_profile = result.artist_profile ?? deriveArtistProfileUrl(image);
+                    const nextArtistValues = getDistinctGroupValues(
+                        detailEditTargets,
+                        (entry) => entry.artist_name,
+                        { sort: true },
+                    );
                     state.artistNames = getSortedUniqueDisplayValues([
                         ...state.artistNames,
                         ...state.allImages.map((entry) => entry?.artist_name),
                     ]);
                     renderAdvancedFilters();
-                    return image.artist_name;
+                    return formatGroupDisplayValue(nextArtistValues);
                 },
             }),
             renderEditableMetaItem({
                 label: 'Artist Profile',
-                value: deriveArtistProfileUrl(image),
+                value: formatGroupDisplayValue(artistProfileValues),
                 inputType: 'url',
+                inputValue: getCommonGroupValue(artistProfileValues),
                 placeholder: 'https://... (leave blank to clear)',
-                isUrlValue: true,
+                isUrlValue: artistProfileValues.length === 1,
                 onSave: async (nextValue) => {
-                    const result = await saveImageMetadata(image.file_hash, {
+                    await saveImageMetadataForGroup(detailEditTargets, {
                         artist_profile: nextValue,
-                    });
+                    }, (target, result) => {
+                        target.artist_profile = result.artist_profile ?? deriveArtistProfileUrl(target);
+                    }, 'Artist Profile');
 
-                    image.artist_profile = result.artist_profile ?? deriveArtistProfileUrl(image);
-                    return image.artist_profile;
+                    const nextArtistProfileValues = getDistinctGroupValues(
+                        detailEditTargets,
+                        (entry) => deriveArtistProfileUrl(entry),
+                        { sort: true },
+                    );
+                    return formatGroupDisplayValue(nextArtistProfileValues);
                 },
             }),
             renderEditableMetaItem({
-                label: 'Image Profile',
-                value: image.source_url,
+                label: 'Image Source',
+                value: formatGroupDisplayValue(sourceUrlValues),
                 inputType: 'url',
+                inputValue: getCommonGroupValue(sourceUrlValues),
                 placeholder: 'https://... (leave blank to clear)',
-                isUrlValue: true,
+                isUrlValue: sourceUrlValues.length === 1,
                 onSave: async (nextValue) => {
-                    const result = await saveImageMetadata(image.file_hash, {
+                    await saveImageMetadataForGroup(detailEditTargets, {
                         source_url: nextValue,
-                    });
+                    }, (target, result) => {
+                        target.source_url = result.source_url || null;
+                        target.source_site = result.source_site || null;
+                    }, 'Image Source');
 
-                    image.source_url = result.source_url || null;
-                    image.source_site = result.source_site || null;
+                    const nextSourceValues = getDistinctGroupValues(
+                        detailEditTargets,
+                        (entry) => entry.source_url,
+                        { sort: true },
+                    );
                     renderDetailSubtitle(image);
-                    return image.source_url;
+                    return formatGroupDisplayValue(nextSourceValues);
                 },
             }),
+            renderEditableNsfwRatingItem(detailEditTargets),
         ];
         metaNodes.forEach((node) => detailMeta.appendChild(node));
 
@@ -4654,10 +5986,15 @@ document.addEventListener('DOMContentLoaded', () => {
         renderImageCountControl();
 
         updateSelectionUi();
+        const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
 
         if (!state.filteredImages.length) {
-            galleryGrid.innerHTML = '<p>No items match your filter.</p>';
-            showDetails(null);
+            galleryGrid.innerHTML = state.galleryRefreshInFlight
+                ? '<p>Refreshing gallery...</p>'
+                : '<p>No items match your filter.</p>';
+            if (!state.galleryRefreshInFlight && !fullscreenOpen) {
+                showDetails(null);
+            }
             return;
         }
 
@@ -4683,8 +6020,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 tile.appendChild(selectionIndicator);
             }
 
-            const mediaUrl = getImageUrl(image);
-            const videoMode = isVideoAsset(image);
+            const mediaUrl = getMediaUrlForDisplay(image);
+            const videoMode = looksLikeVideoUrl(mediaUrl) || isVideoAsset(image);
 
             let mediaNode;
             if (videoMode) {
@@ -4916,6 +6253,24 @@ document.addEventListener('DOMContentLoaded', () => {
         return null;
     }
 
+    function getPerceptualLabDestination(image) {
+        if (!image || typeof image !== 'object') {
+            return null;
+        }
+
+        const fileHash = String(image.file_hash || '').trim();
+        if (!fileHash) {
+            return null;
+        }
+
+        const params = new URLSearchParams();
+        params.set('fileHash', fileHash);
+        return {
+            href: `/perceptual-lab?${params.toString()}`,
+            title: `Open Perceptual Analyzer Lab for local image ${fileHash}`,
+        };
+    }
+
     async function filterGalleryByArtist(artistName) {
         const normalizedArtist = String(artistName || '').trim();
         if (!normalizedArtist) {
@@ -5009,9 +6364,9 @@ document.addEventListener('DOMContentLoaded', () => {
         appendDetailSubtitleChip(detailSubtitle, image.generation_software, 'generation source', 'generationSoftware');
         appendDetailSubtitleChip(detailSubtitle, image.source_site, 'hosting site', 'sourceSite');
         appendDetailSubtitleChip(detailSubtitle, image.mimetype, 'mimetype', 'mimetype');
-        sortNsfwValues(getImageNsfwRatings(image)).forEach((rating) => {
-            appendDetailSubtitleChip(detailSubtitle, rating, 'nsfw rating', 'nsfwRating');
-        });
+        const nsfwTokens = getNsfwDisplayTokens(image);
+        appendDetailSubtitleChip(detailSubtitle, nsfwTokens.granular, 'nsfw rating', 'nsfwRating');
+        appendDetailSubtitleChip(detailSubtitle, nsfwTokens.safety, 'nsfw safety', 'nsfwSafety');
     }
 
     async function applyFilter(options = {}) {
@@ -5045,6 +6400,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     state.hasMore = true;
                     state.loadingPage = false;
                     state.lastRenderedGallerySignature = null;
+                    state.lastRenderedFilterSignature = null;
+                    state.lastRenderedSelectionSignature = null;
                     state.lastRenderedDetailKey = null;
                     galleryGrid.innerHTML = '';
                     updatePagingUi();
@@ -5162,11 +6519,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function loadReferenceData() {
-        const [artistsRes, licensesRes, collections, filterOptions] = await Promise.all([
+        const [artistsRes, licensesRes, collections] = await Promise.all([
             fetch('/artists/'),
             fetch('/licenses/'),
             fetchCollections(),
-            fetchFilterOptions(),
         ]);
 
         const artists = await artistsRes.json();
@@ -5191,16 +6547,36 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         state.collections = collections;
-        state.filterOptions = filterOptions;
         syncCollectionSelect();
         renderAdvancedFilters();
+    }
+
+    async function hydrateFilterOptionsInBackground() {
+        try {
+            const filterOptions = await fetchFilterOptions();
+            state.filterOptions = filterOptions;
+            renderAdvancedFilters();
+        } catch (error) {
+            // Keep startup resilient; this can be retried via page refresh.
+            console.warn('Failed to hydrate filter options in background:', error);
+        }
     }
 
     async function resetAndLoadImages(options = {}) {
         const preserveSelection = options.preserveSelection === true;
         const showRefreshUi = options.showRefreshUi !== false;
-        const previousSelectedKey = preserveSelection ? state.selectedKey : null;
-        const previousSelectedKeys = preserveSelection ? Array.from(state.selectedKeys) : [];
+        const previousSelectedKey = preserveSelection
+            ? (state.fullscreenSelectedKey || state.selectedKey)
+            : null;
+        const previousSelectedKeys = preserveSelection
+            ? (() => {
+                const keys = new Set(state.selectedKeys);
+                if (previousSelectedKey) {
+                    keys.add(previousSelectedKey);
+                }
+                return Array.from(keys);
+            })()
+            : [];
         const previousSelectionAnchorKey = preserveSelection ? state.lastSelectionAnchorKey : null;
 
         if (showRefreshUi) {
@@ -5208,6 +6584,7 @@ document.addEventListener('DOMContentLoaded', () => {
             refreshBtn.textContent = 'Refreshing...';
         }
 
+        state.galleryRefreshInFlight = true;
         state.allImages = [];
         state.filteredImages = [];
         state.filteredMatchCount = 0;
@@ -5222,6 +6599,8 @@ document.addEventListener('DOMContentLoaded', () => {
         state.hasMore = true;
         state.loadingPage = false;
         state.lastRenderedGallerySignature = null;
+        state.lastRenderedFilterSignature = null;
+        state.lastRenderedSelectionSignature = null;
         state.lastRenderedDetailKey = null;
         galleryGrid.innerHTML = '';
         updatePagingUi();
@@ -5239,7 +6618,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             galleryGrid.innerHTML = `<p>Error loading images: ${error.message}</p>`;
             renderImageCountControl();
-            showDetails(null);
+            if (fullscreenPreview.classList.contains('hidden')) {
+                showDetails(null);
+            }
         } finally {
             try {
                 state.imagesStateSignature = await fetchImagesStateSignature();
@@ -5251,6 +6632,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 refreshBtn.disabled = false;
                 refreshBtn.textContent = 'Refresh';
             }
+
+            renderSelectionState({ force: true });
+            state.galleryRefreshInFlight = false;
         }
     }
 
@@ -5449,6 +6833,39 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+    if (fullscreenDebugFreezeBtn) {
+        fullscreenDebugFreezeBtn.addEventListener('click', () => {
+            fullscreenDebugFrozen = !fullscreenDebugFrozen;
+            fullscreenDebugFreezeBtn.textContent = fullscreenDebugFrozen ? 'Unfreeze' : 'Freeze';
+            fullscreenDebugFreezeBtn.setAttribute('aria-pressed', fullscreenDebugFrozen ? 'true' : 'false');
+            updateFullscreenDebugOverlay('debug-freeze-toggle', {
+                frozen: fullscreenDebugFrozen,
+            });
+        });
+    }
+    if (fullscreenDebugCopyBtn) {
+        fullscreenDebugCopyBtn.addEventListener('click', async () => {
+            const liveText = fullscreenDebugContent ? String(fullscreenDebugContent.textContent || '').trim() : '';
+            const snapshotText = fullscreenDebugSnapshot ? String(fullscreenDebugSnapshot.textContent || '').trim() : '';
+            const bundle = [
+                'LIVE:',
+                liveText || '{}',
+                '',
+                'INDEX_LOSS_SNAPSHOT:',
+                snapshotText || '{}',
+            ].join('\n');
+            try {
+                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                    await navigator.clipboard.writeText(bundle);
+                    updateFullscreenDebugOverlay('debug-copy', { copied: true });
+                    return;
+                }
+            } catch {
+                // fall through
+            }
+            updateFullscreenDebugOverlay('debug-copy', { copied: false, reason: 'clipboard_unavailable' });
+        });
+    }
     fullscreenPreview.addEventListener('click', (event) => {
         if (event.target === fullscreenPreview) {
             closeFullscreenPreview();
@@ -5533,6 +6950,7 @@ document.addEventListener('DOMContentLoaded', () => {
         writeStoredBool(STORAGE_KEYS.debug, state.debugVisible);
         syncLayoutMode();
         debugBadge.classList.toggle('hidden', !state.debugVisible || !currentDebugImage);
+        updateFullscreenDebugOverlay('debug-toggle', { debugVisible: state.debugVisible });
         scheduleGalleryGridHeightSync();
     });
     thumbSizeSlider.addEventListener('input', () => {
@@ -5620,67 +7038,156 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+
+    function beginButtonBusyState(button, busyLabel = '...', hasTargetsFn = null) {
+        const previousHtml = button.innerHTML;
+        button.disabled = true;
+        button.textContent = busyLabel;
+        return () => {
+            button.innerHTML = previousHtml;
+            const hasTargets = typeof hasTargetsFn === 'function'
+                ? Boolean(hasTargetsFn())
+                : Boolean(getSelectedImage());
+            button.disabled = !hasTargets;
+        };
+    }
+
     repairImageBtn.addEventListener('click', async () => {
-        const image = getSelectedImage();
-        if (!image?.file_hash) {
-            return;
-        }
-        if (!window.confirm('Run repair for this media item? This checks metadata mismatches, rebuilds sidecar/resources, and replaces the file only when needed.')) {
+        const images = getImageToolActionTargets();
+        if (!images.length) {
             return;
         }
 
-        repairImageBtn.disabled = true;
-        const oldLabel = repairImageBtn.textContent;
-        repairImageBtn.textContent = '...';
+        const targetCount = images.length;
+        const noun = targetCount === 1 ? 'media item' : 'media items';
+        if (!window.confirm(`Run repair for ${targetCount} selected ${noun}? This checks metadata mismatches, rebuilds sidecar/resources, and replaces files only when needed.`)) {
+            return;
+        }
+
+        const endRepairBusyState = beginButtonBusyState(
+            repairImageBtn,
+            '...',
+            () => getImageToolActionTargets().length > 0,
+        );
         try {
-            const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/repair`, {
-                method: 'POST',
-            });
-            const result = await response.json();
-            if (!response.ok) {
-                throw new Error(result.detail || `HTTP ${response.status}`);
+            const successes = [];
+            const failures = [];
+
+            for (const image of images) {
+                try {
+                    const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/repair`, {
+                        method: 'POST',
+                    });
+                    const result = await response.json();
+                    if (!response.ok) {
+                        throw new Error(result.detail || `HTTP ${response.status}`);
+                    }
+                    successes.push({ image, result });
+                } catch (error) {
+                    failures.push({ image, message: error.message });
+                }
             }
 
             await resetAndLoadImages({ preserveSelection: false, showRefreshUi: false });
-            await focusImageByHash(result.repaired_file_hash || image.file_hash);
-
-            const lines = [];
-            lines.push(result.created_new_image ? 'Created repaired image.' : 'Repair completed in place.');
-
-            if (Array.isArray(result.issues_found) && result.issues_found.length) {
-                lines.push('');
-                lines.push('Issues found:');
-                result.issues_found.forEach((issue) => lines.push(`- ${issue}`));
+            const focusTarget = successes[successes.length - 1];
+            if (focusTarget) {
+                await focusImageByHash(focusTarget.result.repaired_file_hash || focusTarget.image.file_hash);
             }
 
-            if (Array.isArray(result.actions_taken) && result.actions_taken.length) {
+            const lines = [
+                `Repair completed for ${successes.length}/${images.length} selected item${images.length === 1 ? '' : 's'}.`,
+            ];
+
+            if (failures.length) {
                 lines.push('');
-                lines.push('Actions taken:');
-                result.actions_taken.forEach((action) => lines.push(`- ${action}`));
+                lines.push('Failures:');
+                failures.slice(0, 10).forEach(({ image, message }) => {
+                    lines.push(`- ${image.file_name || image.file_hash}: ${message}`);
+                });
+                if (failures.length > 10) {
+                    lines.push(`- ...and ${failures.length - 10} more`);
+                }
             }
 
-            if (result.png_inspection && typeof result.png_inspection === 'object') {
+            const createdCount = successes.filter(({ result }) => result.created_new_image).length;
+            if (createdCount > 0) {
                 lines.push('');
-                lines.push(`PNG inspected: ${result.png_inspection.is_damaged ? 'damaged' : 'ok'}`);
-                lines.push(`PNG chunks: ${result.png_inspection.parsed_chunks ?? 0}`);
-                lines.push(`PNG bad CRC chunks: ${result.png_inspection.bad_crc_count ?? 0}`);
-            }
-
-            if (Array.isArray(result.warnings) && result.warnings.length) {
-                lines.push('');
-                lines.push('Warnings:');
-                result.warnings.forEach((warning) => lines.push(`- ${warning}`));
+                lines.push(`Created repaired copies: ${createdCount}`);
             }
 
             alert(lines.join('\n'));
         } catch (error) {
             alert(`Could not repair image: ${error.message}`);
         } finally {
-            repairImageBtn.textContent = oldLabel;
-            const selected = getSelectedImage();
-            repairImageBtn.disabled = !selected;
+            endRepairBusyState();
         }
     });
+    if (rescanImageBtn) {
+        rescanImageBtn.addEventListener('click', async () => {
+            const images = getImageToolActionTargets();
+            if (!images.length) {
+                return;
+            }
+
+            const targetCount = images.length;
+            const noun = targetCount === 1 ? 'media item' : 'media items';
+            if (!window.confirm(`Rescan metadata for ${targetCount} selected ${noun}? This reruns single-file hydration (EXIF, generation software, CivitAI enrichment, and sidecar normalization).`)) {
+                return;
+            }
+
+            const endRescanBusyState = beginButtonBusyState(
+                rescanImageBtn,
+                '...',
+                () => getImageToolActionTargets().length > 0,
+            );
+            try {
+                const successes = [];
+                const failures = [];
+
+                for (const image of images) {
+                    try {
+                        const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/rescan`, {
+                            method: 'POST',
+                        });
+                        const result = await response.json();
+                        if (!response.ok) {
+                            throw new Error(result.detail || `HTTP ${response.status}`);
+                        }
+                        successes.push({ image, result });
+                    } catch (error) {
+                        failures.push({ image, message: error.message });
+                    }
+                }
+
+                await resetAndLoadImages({ preserveSelection: false, showRefreshUi: false });
+                const focusTarget = successes[successes.length - 1];
+                if (focusTarget) {
+                    await focusImageByHash(focusTarget.result.file_hash || focusTarget.image.file_hash);
+                }
+
+                const lines = [
+                    `Rescan completed for ${successes.length}/${images.length} selected item${images.length === 1 ? '' : 's'}.`,
+                ];
+
+                if (failures.length) {
+                    lines.push('');
+                    lines.push('Failures:');
+                    failures.slice(0, 10).forEach(({ image, message }) => {
+                        lines.push(`- ${image.file_name || image.file_hash}: ${message}`);
+                    });
+                    if (failures.length > 10) {
+                        lines.push(`- ...and ${failures.length - 10} more`);
+                    }
+                }
+
+                alert(lines.join('\n'));
+            } catch (error) {
+                alert(`Could not rescan image metadata: ${error.message}`);
+            } finally {
+                endRescanBusyState();
+            }
+        });
+    }
     if (sendToGenerationLabBtn) {
         sendToGenerationLabBtn.addEventListener('click', () => {
             const href = String(sendToGenerationLabBtn.dataset.href || '').trim();
@@ -5691,21 +7198,36 @@ document.addEventListener('DOMContentLoaded', () => {
             window.open(href, '_blank', 'noopener');
         });
     }
+    if (sendToPerceptualLabBtn) {
+        sendToPerceptualLabBtn.addEventListener('click', () => {
+            const href = String(sendToPerceptualLabBtn.dataset.href || '').trim();
+            if (!href) {
+                showToast('No Perceptual Analyzer Lab destination is available for this item.', 'warn');
+                return;
+            }
+            window.open(href, '_blank', 'noopener');
+        });
+    }
 
     deleteImageFileBtn.addEventListener('click', async () => {
-        const image = getSelectedImage();
-        if (!image?.file_hash) {
+        const images = getImageToolActionTargets();
+        if (!images.length) {
             return;
         }
 
+        const previewLines = images.slice(0, 6).map((image) => `- ${image.file_name || image.file_hash}`);
+        if (images.length > 6) {
+            previewLines.push(`- ...and ${images.length - 6} more`);
+        }
+
         const message = [
-            'Mark this image as deleted?',
+            `Mark ${images.length} selected item${images.length === 1 ? '' : 's'} as deleted?`,
             '',
             'Files will be preserved on disk until you run Trash Purge.',
-            'The image will be hidden from the gallery.',
+            'Selected items will be hidden from the gallery.',
             '',
-            `Hash: ${image.file_hash}`,
-            `Path: ${image.file_path || image.file_name || 'N/A'}`,
+            'Selected files:',
+            ...previewLines,
         ].join('\n');
         if (!window.confirm(message)) {
             return;
@@ -5713,21 +7235,45 @@ document.addEventListener('DOMContentLoaded', () => {
 
         deleteImageFileBtn.disabled = true;
         try {
-            const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/file`, {
-                method: 'DELETE',
-            });
-            const result = await response.json();
-            if (!response.ok) {
-                throw new Error(result.detail || `HTTP ${response.status}`);
+            const successes = [];
+            const failures = [];
+
+            for (const image of images) {
+                try {
+                    const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/file`, {
+                        method: 'DELETE',
+                    });
+                    const result = await response.json();
+                    if (!response.ok) {
+                        throw new Error(result.detail || `HTTP ${response.status}`);
+                    }
+                    successes.push({ image, result });
+                } catch (error) {
+                    failures.push({ image, message: error.message });
+                }
             }
 
             await resetAndLoadImages({ preserveSelection: false, showRefreshUi: false });
-            alert(result.message || 'Image marked deleted.');
+
+            const lines = [
+                `Marked ${successes.length}/${images.length} selected item${images.length === 1 ? '' : 's'} as deleted.`,
+            ];
+            if (failures.length) {
+                lines.push('');
+                lines.push('Failures:');
+                failures.slice(0, 10).forEach(({ image, message }) => {
+                    lines.push(`- ${image.file_name || image.file_hash}: ${message}`);
+                });
+                if (failures.length > 10) {
+                    lines.push(`- ...and ${failures.length - 10} more`);
+                }
+            }
+
+            alert(lines.join('\n'));
         } catch (error) {
             alert(`Could not delete image: ${error.message}`);
         } finally {
-            const selected = getSelectedImage();
-            deleteImageFileBtn.disabled = !selected;
+            deleteImageFileBtn.disabled = getImageToolActionTargets().length <= 0;
         }
     });
     createCollectionBtn.addEventListener('click', async () => {
@@ -6490,7 +8036,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     resizeObserver = new ResizeObserver(() => {
         scheduleGalleryGridHeightSync();
-        syncDetailActiveTabBridge();
+        detailFolderWorkspace?.updateSeam?.();
     });
     resizeObserver.observe(detailsPane);
     resizeObserver.observe(detailsContent);
@@ -6498,8 +8044,15 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', scheduleGalleryGridHeightSync);
     scheduleGalleryGridHeightSync();
 
-    Promise.all([loadReferenceData(), resetAndLoadImages({ preserveSelection: true, showRefreshUi: false }), refreshInactiveUtilities(), refreshTaxonomyAdmin(), refreshTasks({ silent: true })]).catch((error) => {
+    const initialGalleryLoad = resetAndLoadImages({ preserveSelection: true, showRefreshUi: false });
+    const initialReferenceLoad = loadReferenceData();
+
+    Promise.all([initialReferenceLoad, initialGalleryLoad, refreshTasks({ silent: true })]).catch((error) => {
         galleryGrid.innerHTML = `<p>Startup error: ${error.message}</p>`;
+    });
+
+    initialGalleryLoad.finally(() => {
+        void hydrateFilterOptionsInBackground();
     });
 
     if (treeEmbedFrame) {

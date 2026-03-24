@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AtelierAI Gallery</title>
+    <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+    <link rel="stylesheet" href="/frontend/css/folder-tabs.css">
     <link rel="stylesheet" href="/frontend/css/style.css">
 </head>
 <body>
@@ -14,10 +16,27 @@
                 <h1>Image Gallery</h1>
             </div>
             <div class="header-actions">
+                <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+                    <input id="theme-toggle" type="checkbox">
+                    <span>Dark mode</span>
+                </label>
+                <div id="nsfw-visibility-control" class="header-toggle-wrap nsfw-visibility-control" role="group" aria-label="NSFW visibility">
+                    <span class="nsfw-visibility-prefix">Show:</span>
+                    <button id="nsfw-visibility-current" class="nsfw-visibility-current" type="button" aria-haspopup="true" aria-expanded="false">Explicit</button>
+                    <div class="nsfw-visibility-options" role="menu" aria-label="NSFW visibility levels">
+                        <button type="button" class="nsfw-visibility-option" data-nsfw-level="safe" role="menuitemradio" aria-checked="false">Safe</button>
+                        <button type="button" class="nsfw-visibility-option" data-nsfw-level="mature" role="menuitemradio" aria-checked="false">Mature</button>
+                        <button type="button" class="nsfw-visibility-option" data-nsfw-level="explicit" role="menuitemradio" aria-checked="true">Explicit</button>
+                    </div>
+                </div>
                 <button id="refresh-btn" class="btn ghost" type="button">Refresh</button>
                 <label class="toggle-wrap header-toggle-wrap" for="auto-refresh-toggle">
                     <input id="auto-refresh-toggle" type="checkbox" checked>
                     <span>Auto-refresh</span>
+                </label>
+                <label class="toggle-wrap header-toggle-wrap" for="debug-toggle">
+                    <input id="debug-toggle" type="checkbox" checked>
+                    <span>Debug</span>
                 </label>
                 <button id="scan-btn" class="btn solid" type="button">Rescan Library</button>
                 <button id="purge-deleted-btn" class="btn ghost" type="button" title="Purge deleted files from disk">&#128465;</button>
@@ -29,16 +48,113 @@
                 <div class="gallery-toolbar">
                     <div class="toolbar-row toolbar-row-primary">
                         <input id="search-input" type="search" placeholder="Search by filename, source, software...">
-                        <label class="toggle-wrap" for="infinite-scroll-toggle">
-                            <input id="infinite-scroll-toggle" type="checkbox" checked>
-                            <span>Infinite scroll</span>
-                        </label>
-                        <label class="toggle-wrap" for="debug-toggle">
-                            <input id="debug-toggle" type="checkbox" checked>
-                            <span>Debug</span>
-                        </label>
-                        <span id="image-count" class="count-pill">0 images</span>
+                        <div class="toolbar-utility-group">
+                            <div id="image-count" class="count-pill count-pill-split" role="group" aria-label="Gallery match and filter actions"></div>
+                        </div>
                     </div>
+
+                    <details id="advanced-filters-panel" class="advanced-filters-panel">
+                        <summary>
+                            <span>Advanced Filters</span>
+                            <span class="advanced-filters-summary-group">
+                                <span id="selection-count" class="count-pill selection-pill" hidden>No selection</span>
+                                <span id="advanced-filters-summary" class="count-pill">No active filters</span>
+                            </span>
+                        </summary>
+                        <div class="advanced-filters-body">
+                            <div class="advanced-filters-actions">
+                                <p class="advanced-filters-note">Combine categories to narrow the gallery without replacing the text search.</p>
+                                <button id="advanced-filters-clear" class="btn ghost btn-sm" type="button">Clear All</button>
+                            </div>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-generation-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-generation-title" class="advanced-filter-title">Generation Source</h3>
+                                    <p class="advanced-filter-hint">Best for a small fixed set like ComfyUI or A1111.</p>
+                                </div>
+                                <div id="advanced-generation-pills" class="advanced-filter-pill-group"></div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-source-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-source-title" class="advanced-filter-title">Hosting Source</h3>
+                                    <p class="advanced-filter-hint">Select one or more hosting sites.</p>
+                                </div>
+                                <div id="advanced-source-pills" class="advanced-filter-pill-group"></div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-mimetype-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-mimetype-title" class="advanced-filter-title">MIME Type</h3>
+                                    <p class="advanced-filter-hint">Useful for splitting stills from video assets.</p>
+                                </div>
+                                <div id="advanced-mimetype-pills" class="advanced-filter-pill-group"></div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-nsfw-rating-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-nsfw-rating-title" class="advanced-filter-title">NSFW Rating</h3>
+                                    <p class="advanced-filter-hint">Filter by imported granular rating labels.</p>
+                                </div>
+                                <div id="advanced-nsfw-rating-pills" class="advanced-filter-pill-group"></div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-nsfw-safety-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-nsfw-safety-title" class="advanced-filter-title">NSFW Safety Level</h3>
+                                    <p class="advanced-filter-hint">Filter by imported safe, mature, or explicit safety classes.</p>
+                                </div>
+                                <div id="advanced-nsfw-safety-pills" class="advanced-filter-pill-group"></div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-author-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-author-title" class="advanced-filter-title">Author</h3>
+                                    <p class="advanced-filter-hint">Add one or more artists.</p>
+                                </div>
+                                <div id="advanced-author-selected" class="advanced-filter-selected hidden"></div>
+                                <div class="advanced-filter-input-row">
+                                    <input id="advanced-author-input" list="advanced-author-options" type="text" placeholder="Add author filter">
+                                    <datalist id="advanced-author-options"></datalist>
+                                    <button id="advanced-author-add" class="btn ghost btn-sm" type="button">Add</button>
+                                </div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-tag-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-tag-title" class="advanced-filter-title">Tags</h3>
+                                    <p class="advanced-filter-hint">Selected tags are combined together.</p>
+                                </div>
+                                <div id="advanced-tag-selected" class="advanced-filter-selected hidden"></div>
+                                <div class="advanced-filter-input-row">
+                                    <input id="advanced-tag-input" list="advanced-tag-options" type="text" placeholder="Add tag filter">
+                                    <datalist id="advanced-tag-options"></datalist>
+                                    <button id="advanced-tag-add" class="btn ghost btn-sm" type="button">Add</button>
+                                </div>
+                            </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-collection-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-collection-title" class="advanced-filter-title">Collections</h3>
+                                    <p class="advanced-filter-hint">Add one or more collection names.</p>
+                                </div>
+                                <div id="advanced-collection-selected" class="advanced-filter-selected hidden"></div>
+                                <div class="advanced-filter-input-row">
+                                    <input id="advanced-collection-input" list="advanced-collection-options" type="text" placeholder="Add collection filter">
+                                    <datalist id="advanced-collection-options"></datalist>
+                                    <button id="advanced-collection-add" class="btn ghost btn-sm" type="button">Add</button>
+                                </div>
+                            </section>
+
+                            <section class="advanced-filter-section data-extraction-section" aria-labelledby="advanced-data-extraction-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-data-extraction-title" class="advanced-filter-title">Data Extraction</h3>
+                                    <p class="advanced-filter-hint">Filter by data presence or absence. All selected conditions must match (AND).</p>
+                                </div>
+                                <div id="advanced-missing-data-pills" class="advanced-filter-pill-group"></div>
+                            </section>
+                        </div>
+                    </details>
 
                     <div id="tree-tag-filter-indicator" class="toolbar-row tree-tag-filter-row hidden" aria-live="polite">
                         <span class="tree-tag-filter-label">Tag Filter:</span>
@@ -49,23 +165,31 @@
                     </div>
 
                     <div class="toolbar-row toolbar-row-secondary">
-                        <label class="slider-wrap" for="thumb-size-slider">
-                            <span>Thumb Size</span>
-                            <input id="thumb-size-slider" type="range" min="120" max="260" step="5" value="165">
-                            <output id="thumb-size-value" for="thumb-size-slider">165px</output>
-                        </label>
-                        <div class="preset-wrap" role="group" aria-label="Thumbnail size presets">
-                            <button type="button" class="btn ghost btn-sm thumb-preset" data-size="130">Compact</button>
-                            <button type="button" class="btn ghost btn-sm thumb-preset" data-size="165">Balanced</button>
-                            <button type="button" class="btn ghost btn-sm thumb-preset" data-size="220">Large</button>
+                        <div class="toolbar-secondary-leading">
+                            <label class="slider-wrap" for="thumb-size-slider">
+                                <span>Thumb Size</span>
+                                <input id="thumb-size-slider" type="range" min="120" max="260" step="5" value="165">
+                                <output id="thumb-size-value" for="thumb-size-slider">165px</output>
+                            </label>
+                            <div class="preset-wrap" role="group" aria-label="Thumbnail size presets">
+                                <button type="button" class="btn ghost btn-sm thumb-preset" data-size="130">Compact</button>
+                                <button type="button" class="btn ghost btn-sm thumb-preset" data-size="165">Balanced</button>
+                                <button type="button" class="btn ghost btn-sm thumb-preset" data-size="220">Large</button>
+                            </div>
                         </div>
-                        <label class="sort-wrap" for="sort-order-select">
-                            <span>Sort</span>
-                            <select id="sort-order-select">
-                                <option value="first_added">First Added</option>
-                                <option value="last_added">Last Added</option>
-                            </select>
-                        </label>
+                        <div class="toolbar-secondary-trailing">
+                            <label class="toggle-wrap toolbar-inline-toggle" for="infinite-scroll-toggle">
+                                <input id="infinite-scroll-toggle" type="checkbox" checked>
+                                <span>Infinite scroll</span>
+                            </label>
+                            <label class="sort-wrap" for="sort-order-select">
+                                <span>Sort</span>
+                                <select id="sort-order-select">
+                                    <option value="first_added">First Added</option>
+                                    <option value="last_added">Last Added</option>
+                                </select>
+                            </label>
+                        </div>
                     </div>
                 </div>
                 <div id="runtime-warning-banner" class="runtime-warning-banner hidden" aria-live="polite"></div>
@@ -79,14 +203,16 @@
 
             <aside class="details-pane">
                 <div id="details-empty" class="details-empty">
-                    <h2>Select an image</h2>
-                    <p>Choose a thumbnail from the gallery to inspect metadata, generation details, and source links.</p>
+                    <h2>Select an item</h2>
+                    <p>Choose one or more thumbnails from the gallery. The details pane stays focused on the active item.</p>
                 </div>
 
                 <div id="details-content" class="details-content hidden">
                     <div id="detail-media-frame" class="detail-media-frame">
-                        <img id="detail-image" class="detail-image" alt="Selected image preview">
-                        <video id="detail-video" class="detail-image hidden" controls playsinline preload="metadata"></video>
+                        <div id="detail-media-preview" class="detail-media-preview">
+                            <img id="detail-image" class="detail-image" alt="Selected image preview">
+                            <video id="detail-video" class="detail-image hidden" controls playsinline preload="metadata"></video>
+                        </div>
                     </div>
                     <section id="debug-badge" class="debug-badge" aria-live="polite">
                         <p class="debug-title">Debug</p>
@@ -98,41 +224,100 @@
                             <p id="detail-subtitle"></p>
                         </div>
                         <div class="detail-header-actions">
-                            <button id="repair-image-btn" class="btn ghost btn-sm" type="button" title="Repair PNG">&#128295;</button>
-                            <button id="delete-image-file-btn" class="btn ghost btn-sm" type="button" title="Delete image file and sidecar">Delete File</button>
+                            <button id="repair-image-btn" class="btn ghost btn-sm" type="button" title="Repair media">&#128295;</button>
+                            <button id="rescan-image-btn" class="btn ghost btn-sm detail-icon-btn" type="button" title="Rescan metadata for this media item" aria-label="Rescan metadata for this media item" disabled>
+                                <svg class="detail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M19.146 4.854l-1.489 1.489A8 8 0 1 0 12 20a8.094 8.094 0 0 0 7.371-4.886 1 1 0 1 0-1.842-.779A6.071 6.071 0 0 1 12 18a6 6 0 1 1 4.243-10.243l-1.39 1.39a.5.5 0 0 0 .354.854H19.5A.5.5 0 0 0 20 9.5V5.207a.5.5 0 0 0-.854-.353z" fill="currentColor"></path>
+                                </svg>
+                            </button>
+                            <button id="delete-image-file-btn" class="btn ghost btn-sm detail-icon-btn" type="button" title="Delete image file and sidecar" aria-label="Delete image file and sidecar">
+                                <svg class="detail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-2 6h2v8H7V9Zm4 0h2v8h-2V9Zm4 0h2v8h-2V9ZM6 21l-1-14h14l-1 14H6Z" fill="currentColor"></path>
+                                </svg>
+                            </button>
+                            <button id="send-to-generation-lab-btn" class="btn ghost btn-sm detail-icon-btn hidden" type="button" title="Send to Generation Metadata Lab" aria-label="Send to Generation Metadata Lab">
+                                <svg class="detail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M9 3h6v2h-1v4.4l4.9 7.36A2 2 0 0 1 17.24 20H6.76a2 2 0 0 1-1.66-3.24L10 9.4V5H9V3Zm2.4 8.2-4.63 6.95c-.09.13.01.35.19.35h10.08c.18 0 .28-.22.19-.35L12.6 11.2V5h-1.2v6.2Zm-.4 2.3a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm2 1a1 1 0 1 1 2 0 1 1 0 0 1-2 0Z" fill="currentColor"></path>
+                                </svg>
+                            </button>
+                            <button id="send-to-perceptual-lab-btn" class="btn ghost btn-sm detail-icon-btn hidden" type="button" title="Send to Perceptual Analyzer Lab" aria-label="Send to Perceptual Analyzer Lab">
+                                <svg class="detail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                    <path d="M4 5h4v2H6v2H4V5Zm6 0h4v2h-4V5Zm6 0h4v4h-2V7h-2V5ZM4 11h2v2H4v-2Zm14 0h2v2h-2v-2ZM4 15h2v2h2v2H4v-4Zm14 2h2v4h-4v-2h2v-2ZM8 9h8v6H8V9Zm2 2v2h4v-2h-4Z" fill="currentColor"></path>
+                                </svg>
+                            </button>
                         </div>
                     </div>
-                    <div id="detail-meta" class="meta-grid"></div>
-                    <section class="detail-block collections-block">
-                        <h3>Collections</h3>
-                        <div id="image-collections-list" class="collections-list"></div>
-                        <div class="collections-actions">
-                            <label>
-                                Select Collection
-                                <select id="collection-select"></select>
-                            </label>
-                            <button id="add-to-collection-btn" class="btn ghost btn-sm" type="button">Add Image to Collection</button>
-                            <label>
-                                New Collection
-                                <input id="new-collection-name" type="text" placeholder="Collection name">
-                            </label>
-                            <button id="create-collection-btn" class="btn ghost btn-sm" type="button">Create Collection</button>
-                            <label>
-                                Rename Selected
-                                <input id="rename-collection-name" type="text" placeholder="New name">
-                            </label>
-                            <button id="rename-collection-btn" class="btn ghost btn-sm" type="button">Rename Collection</button>
-                            <button id="delete-collection-btn" class="btn ghost btn-sm" type="button">Delete Selected Collection</button>
-                        </div>
-                    </section>
-                    <section class="detail-block">
-                        <h3>EXIF / Generation Data</h3>
-                        <pre id="detail-exif" class="json-block"></pre>
-                    </section>
-                    <section class="detail-block">
-                        <h3>CivitAI Data</h3>
-                        <pre id="detail-civitai" class="json-block"></pre>
-                    </section>
+                    <div id="detail-folder-mount" class="detail-folder-host"></div>
+                    <div id="detail-panel-stash" class="detail-panel-stash hidden" aria-hidden="true">
+                        <section id="detail-panel-image-attributes" class="detail-folder-panel is-active" role="tabpanel" aria-labelledby="detail-tab-image-attributes">
+                            <div id="detail-meta" class="meta-grid"></div>
+                        </section>
+                        <section id="detail-panel-generation-data" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-generation-data" hidden>
+                            <section class="detail-block">
+                                <h3>EXIF / Generation Data</h3>
+                                <pre id="detail-exif" class="json-block"></pre>
+                            </section>
+                            <section class="detail-block">
+                                <h3>CivitAI Data</h3>
+                                <pre id="detail-civitai" class="json-block"></pre>
+                            </section>
+                        </section>
+                        <section id="detail-panel-collections" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-collections" hidden>
+                            <section class="detail-block collections-block">
+                                <h3>Collections</h3>
+                                <div id="image-collections-list" class="collections-list"></div>
+                                <div class="collections-actions">
+                                    <label>
+                                        Select Collection
+                                        <select id="collection-select"></select>
+                                    </label>
+                                    <button id="add-to-collection-btn" class="btn ghost btn-sm" type="button">Add Active Item to Collection</button>
+                                    <button id="remove-from-collection-btn" class="btn ghost btn-sm" type="button">Remove Active Item from Collection</button>
+                                    <label>
+                                        New Collection
+                                        <input id="new-collection-name" type="text" placeholder="Collection name">
+                                    </label>
+                                    <button id="create-collection-btn" class="btn ghost btn-sm" type="button">Create Collection</button>
+                                    <label>
+                                        Rename Selected
+                                        <input id="rename-collection-name" type="text" placeholder="New name">
+                                    </label>
+                                    <button id="rename-collection-btn" class="btn ghost btn-sm" type="button">Rename Collection</button>
+                                    <button id="delete-collection-btn" class="btn ghost btn-sm" type="button">Delete Selected Collection</button>
+                                </div>
+                            </section>
+                        </section>
+                        <section id="detail-panel-civitai-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-civitai-tags" hidden>
+                            <section class="detail-block">
+                                <h3>CivitAI Tags</h3>
+                                <p class="detail-placeholder">Tag panel scaffold. Wiring to authority-tag data can be added next.</p>
+                            </section>
+                        </section>
+                        <section id="detail-panel-danbooru-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-danbooru-tags" hidden>
+                            <section class="detail-block">
+                                <h3>Danbooru Tags</h3>
+                                <p class="detail-placeholder">Tag panel scaffold. Wiring to authority-tag data can be added next.</p>
+                            </section>
+                        </section>
+                        <section id="detail-panel-prompt-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-prompt-tags" hidden>
+                            <section class="detail-block">
+                                <h3>Prompt Tags</h3>
+                                <p class="detail-placeholder">Tag panel scaffold. Wiring to prompt extraction output can be added next.</p>
+                            </section>
+                        </section>
+                        <section id="detail-panel-user-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-user-tags" hidden>
+                            <section class="detail-block">
+                                <h3>User Tags</h3>
+                                <p class="detail-placeholder">Tag panel scaffold. Wiring to editable user tags can be added next.</p>
+                            </section>
+                        </section>
+                        <section id="detail-panel-utilities" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-utilities" hidden>
+                            <section class="detail-block">
+                                <h3>Utilities</h3>
+                                <p class="detail-placeholder">Utility panel scaffold. Add quick actions here as needed.</p>
+                            </section>
+                        </section>
+                    </div>
                 </div>
             </aside>
         </main>
@@ -189,7 +374,52 @@
                         <button id="sync-civitai-collections-btn" class="btn ghost" type="button">Sync My CivitAI Collections</button>
                     </div>
                 </form>
-                <pre id="import-output" class="status-output"></pre>
+                <section class="task-panel" aria-labelledby="task-panel-title">
+                    <div class="task-panel-header">
+                        <h3 id="task-panel-title">Background Tasks</h3>
+                        <button id="refresh-tasks-btn" class="btn ghost btn-sm" type="button">Refresh</button>
+                    </div>
+                    <div id="task-summary" class="task-summary"></div>
+                    <div class="task-columns">
+                        <section class="task-column" aria-labelledby="active-task-list-title">
+                            <h4 id="active-task-list-title" class="task-column-title">Active Jobs</h4>
+                            <div id="active-task-list" class="task-list"></div>
+                        </section>
+                        <section class="task-column" aria-labelledby="task-history-title">
+                            <h4 id="task-history-title" class="task-column-title">Job History</h4>
+                            <div id="task-history-list" class="task-list"></div>
+                        </section>
+                    </div>
+                    <section class="task-detail-panel" aria-labelledby="task-detail-title">
+                        <div class="task-detail-header">
+                            <h4 id="task-detail-title" class="task-column-title">Job Details</h4>
+                            <div class="task-detail-actions">
+                                <button id="task-retry-failed-btn" class="btn ghost btn-sm hidden" type="button">Retry Failed Items</button>
+                                <span id="task-detail-status" class="task-status-badge task-status-queued hidden">queued</span>
+                            </div>
+                        </div>
+                        <div id="task-detail-empty" class="task-empty">Select a job to inspect its details.</div>
+                        <div id="task-detail-content" class="task-detail-content hidden">
+                            <div id="task-detail-summary" class="task-detail-summary"></div>
+                            <section class="task-detail-section">
+                                <h5>Failed Items</h5>
+                                <div id="task-failed-items" class="task-detail-list"></div>
+                            </section>
+                            <section class="task-detail-section">
+                                <h5>Unavailable Items</h5>
+                                <div id="task-unavailable-items" class="task-detail-list"></div>
+                            </section>
+                            <section class="task-detail-section">
+                                <h5>Recent Activity</h5>
+                                <div id="task-recent-activity" class="task-detail-list"></div>
+                            </section>
+                            <section class="task-detail-section">
+                                <h5>Raw Details</h5>
+                                <pre id="import-output" class="status-output"></pre>
+                            </section>
+                        </div>
+                    </section>
+                </section>
             </details>
         </section>
 
@@ -383,10 +613,36 @@
     <div id="fullscreen-preview" class="fullscreen-preview hidden" aria-hidden="true">
         <button id="fullscreen-loop-btn" class="fullscreen-loop-btn" type="button" aria-pressed="true">Loop: On</button>
         <button id="fullscreen-close-btn" class="fullscreen-close-btn" type="button" aria-label="Close fullscreen preview">X</button>
+        <section id="fullscreen-debug-overlay" class="fullscreen-debug-overlay hidden" aria-live="polite">
+            <div class="fullscreen-debug-head">
+                <p class="fullscreen-debug-title">Fullscreen Debug</p>
+                <div class="fullscreen-debug-actions">
+                    <button id="fullscreen-debug-freeze-btn" class="fullscreen-debug-btn" type="button" aria-pressed="false">Freeze</button>
+                    <button id="fullscreen-debug-copy-btn" class="fullscreen-debug-btn" type="button">Copy</button>
+                </div>
+            </div>
+            <p class="fullscreen-debug-label">Live</p>
+            <pre id="fullscreen-debug-content" class="fullscreen-debug-content"></pre>
+            <p class="fullscreen-debug-label">Index Loss Snapshot</p>
+            <pre id="fullscreen-debug-snapshot" class="fullscreen-debug-content fullscreen-debug-snapshot"></pre>
+        </section>
         <img id="fullscreen-image" class="fullscreen-media hidden" alt="Fullscreen preview">
         <video id="fullscreen-video" class="fullscreen-media hidden" controls playsinline preload="metadata"></video>
+        <aside id="fullscreen-effective-tags-panel" class="fullscreen-effective-tags-panel" aria-label="Effective image tags">
+            <div class="detail-effective-tags-head">
+                <h3>Effective Tags</h3>
+                <p>Click <strong>x</strong> on a chip to add a negative user override for that tag.</p>
+            </div>
+            <div id="fullscreen-effective-tags-cloud" class="detail-effective-tags-cloud"></div>
+            <div id="fullscreen-negative-tags-wrap" class="detail-negative-tags-wrap hidden">
+                <h4>Negative Overrides</h4>
+                <div id="fullscreen-negative-tags-cloud" class="detail-negative-tags-cloud"></div>
+            </div>
+        </aside>
     </div>
 
-    <script src="/frontend/js/main.js"></script>
+    <script src="/frontend/js/shared/preferences.js"></script>
+    <script src="/frontend/js/shared/ui-kit.js"></script>
+    <script src="/frontend/js/main.js?v=20260324-video-media-fallback-4"></script>
 </body>
 </html>

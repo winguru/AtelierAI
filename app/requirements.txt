@@ -7,6 +7,8 @@ exifread
 python-dotenv
 requests
 wcwidth
+ImageHash
+blurhash
 
 # CivitAI automatic authentication
 

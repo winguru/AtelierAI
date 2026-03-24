@@ -27,10 +27,26 @@ if not _raw_library_path:
 
 IMAGE_LIBRARY_PATH = str(Path(_raw_library_path).expanduser())
 
+_raw_resources_path = os.getenv("IMAGE_RESOURCES_PATH", "image_resources").strip()
+if not _raw_resources_path:
+    _raw_resources_path = "image_resources"
+
+IMAGE_RESOURCES_PATH = str(Path(_raw_resources_path).expanduser())
+
 try:
     Path(IMAGE_LIBRARY_PATH).mkdir(parents=True, exist_ok=True)
 except OSError as e:
     raise RuntimeError(f"Could not create image library directory '{IMAGE_LIBRARY_PATH}': {e}") from e
+
+try:
+    resources_root = Path(IMAGE_RESOURCES_PATH)
+    resources_root.mkdir(parents=True, exist_ok=True)
+    (resources_root / "video_posters").mkdir(parents=True, exist_ok=True)
+    (resources_root / "video_thumbnails").mkdir(parents=True, exist_ok=True)
+    (resources_root / "thumbnails").mkdir(parents=True, exist_ok=True)
+    (resources_root / "extracted_metadata").mkdir(parents=True, exist_ok=True)
+except OSError as e:
+    raise RuntimeError(f"Could not create image resources directory '{IMAGE_RESOURCES_PATH}': {e}") from e
 
 
 

@@ -36,6 +36,74 @@ def extract_civitai_image_id(source_url: str) -> Optional[int]:
         return None
 
 
+def _extract_civitai_uuid_from_url_hash(url_hash: Optional[str]) -> Optional[str]:
+    """Extract UUID/GUID-like key from CivitAI's image url hash field."""
+    if not url_hash:
+        return None
+
+    text_hash = str(url_hash).strip()
+    if not text_hash:
+        return None
+
+    parts = text_hash.split("/")
+    if parts:
+        candidate = parts[0].strip()
+        if candidate and len(candidate) > 8:
+            return candidate
+    return text_hash if len(text_hash) > 8 else None
+
+
+def extract_civitai_uuid(payload: Optional[dict[str, Any]]) -> Optional[str]:
+    """Read civitai UUID/GUID key from normalized or raw payloads."""
+    if not isinstance(payload, dict):
+        return None
+
+    direct = payload.get("civitai_uuid")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    raw_url = payload.get("url")
+    if isinstance(raw_url, str):
+        uuid_value = _extract_civitai_uuid_from_url_hash(raw_url)
+        if uuid_value:
+            return uuid_value
+
+    image_payload = payload.get("image")
+    if isinstance(image_payload, dict):
+        image_url = image_payload.get("url")
+        if isinstance(image_url, str):
+            uuid_value = _extract_civitai_uuid_from_url_hash(image_url)
+            if uuid_value:
+                return uuid_value
+
+    return None
+
+
+def extract_civitai_hash(payload: Optional[dict[str, Any]]) -> Optional[str]:
+    """Read civitai perceptual hash-like value from normalized or raw payloads."""
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("civitai_hash", "hash"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_hash = metadata.get("hash")
+        if isinstance(metadata_hash, str) and metadata_hash.strip():
+            return metadata_hash.strip()
+
+    image_payload = payload.get("image")
+    if isinstance(image_payload, dict):
+        image_hash = image_payload.get("hash")
+        if isinstance(image_hash, str) and image_hash.strip():
+            return image_hash.strip()
+
+    return None
+
+
 def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, Any]]:
     """Fetch and normalize CivitAI data for a source URL.
 
@@ -69,10 +137,21 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
         image = CivitaiImage.from_single_image(
             basic_info=basic_info or {"id": image_id},
             generation_data=generation_data or {},
-            api=api,
+            api=None,
         )
 
         data = image.to_dict(include_full_url=True)
+
+        # Store CivitAI tags as ID-first records for stable uniqueness.
+        # Keep a tag_names list as a compatibility fallback for older consumers.
+        tag_records = api.fetch_image_tag_records(image_id)
+        if tag_records:
+            data["tags"] = tag_records
+            data["tag_names"] = [
+                str(tag.get("name"))
+                for tag in tag_records
+                if isinstance(tag.get("name"), str) and str(tag.get("name")).strip()
+            ]
 
         # Normalize author fields for downstream metadata consumers.
         # Keep a stable naming scheme and avoid the ambiguous `author` key.
@@ -100,6 +179,15 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
             image_name = basic_info.get("name")
             if isinstance(image_name, str) and image_name.strip():
                 data["image_name"] = image_name.strip()
+
+            civitai_uuid = extract_civitai_uuid(basic_info)
+            if civitai_uuid:
+                data["civitai_uuid"] = civitai_uuid
+
+            civitai_hash = extract_civitai_hash(basic_info)
+            if civitai_hash:
+                data["civitai_hash"] = civitai_hash
+
         return data
     except Exception as e:
         # Enrichment should not block uploads, so fail open.

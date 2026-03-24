@@ -4,6 +4,7 @@
         "libpq",
         "PYTHONPATH"
     ],
+    "python.terminal.useEnvFile": true,
     "python.envFile": "${workspaceFolder}/.vscode/.env",
     "python.analysis.typeCheckingMode": "standard",
     "python.analysis.extraPaths": [

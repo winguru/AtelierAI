@@ -11,6 +11,17 @@ from typing import Dict, List, Tuple
 from atelierai.civitai import CivitaiPrivateScraper
 from atelierai.civitai.civitai_api import CivitaiAPI
 from atelierai.civitai.console_utils import ConsoleFormatter
+from atelierai.utils.prompt_phrases import (
+    PHRASE_STOP_WORDS,
+    detect_prompt_style as shared_detect_prompt_style,
+    extract_concepts as shared_extract_concepts,
+    extract_nlp_concepts as shared_extract_nlp_concepts,
+    extract_nlp_style_phrases as shared_extract_nlp_style_phrases,
+    extract_phrases as shared_extract_phrases,
+    extract_tag_style_concepts as shared_extract_tag_style_concepts,
+    extract_tag_style_phrases as shared_extract_tag_style_phrases,
+    normalize_phrase_breaks as shared_normalize_phrase_breaks,
+)
 
 
 # ==========================================
@@ -20,7 +31,6 @@ from atelierai.civitai.console_utils import ConsoleFormatter
 
 class CollectionAnalyzer:
     """Analyze scraped collection data to find common patterns."""
-
     def __init__(self, scraped_data: List[Dict]):
         """Initialize analyzer with scraped data."""
         self.data = scraped_data
@@ -51,357 +61,43 @@ class CollectionAnalyzer:
 
     def detect_prompt_style(self, prompt: str) -> str:
         """Detect if prompt is tag-style or NLP-style."""
-        if not prompt:
-            return "tag"
-
-        comma_count = prompt.count(",")
-        word_count = len(prompt.split())
-        has_weights = bool(re.search(r":\s*\d+\.?\d*", prompt))
-        has_brackets = bool(re.search(r"<[^>]+>", prompt))
-
-        if comma_count >= 3 and (comma_count / max(word_count, 1)) > 0.1:
-            return "tag"
-        if has_weights or has_brackets:
-            return "tag"
-
-        return "nlp"
+        return shared_detect_prompt_style(prompt)
 
     def extract_tag_style_concepts(self, prompt: str) -> List[str]:
         """Extract concepts from tag-style prompts."""
-        if not prompt:
-            return []
-
-        prompt = re.sub(r"\s*:\s*-?\d+\.?\d*", "", prompt)
-        prompt = re.sub(r"<[^>]+>", "", prompt)
-        concepts = [c.strip() for c in prompt.split(",")]
-
-        cleaned_concepts = []
-        for concept in concepts:
-            concept = re.sub(r"\s+", " ", concept).strip()
-            concept = re.sub(r"\([^)]*\)", "", concept).strip()
-            if len(concept) >= 2:
-                cleaned_concepts.append(concept.lower())
-
-        return cleaned_concepts
+        return shared_extract_tag_style_concepts(prompt)
 
     def extract_nlp_concepts(self, prompt: str) -> List[str]:
         """Extract concepts from natural language prompts."""
-        if not prompt:
-            return []
-
-        sentences = re.split(r"[.!?]+", prompt)
-        stop_words = {
-            "a",
-            "an",
-            "the",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "from",
-            "with",
-            "by",
-            "as",
-            "is",
-            "was",
-            "were",
-            "be",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "must",
-            "can",
-            "of",
-            "it",
-            "its",
-            "this",
-            "that",
-            "these",
-            "those",
-            "his",
-            "her",
-            "their",
-            "our",
-            "my",
-            "your",
-            "he",
-            "she",
-            "they",
-            "them",
-            "him",
-            "me",
-            "us",
-            "into",
-            "onto",
-            "upon",
-            "over",
-            "under",
-            "through",
-            "during",
-            "before",
-            "after",
-            "while",
-            "when",
-            "where",
-            "why",
-            "how",
-            "what",
-            "which",
-            "who",
-            "whose",
-            "whom",
-            "if",
-            "then",
-            "so",
-            "because",
-            "since",
-            "although",
-            "though",
-            "while",
-            "unless",
-            "until",
-            "also",
-            "very",
-            "too",
-            "quite",
-            "rather",
-            "just",
-            "only",
-            "even",
-            "still",
-            "already",
-            "yet",
-            "some",
-            "many",
-            "few",
-            "most",
-            "much",
-            "little",
-            "more",
-            "less",
-        }
-
-        concepts = []
-        for sentence in sentences:
-            phrases = [p.strip() for p in sentence.split(",")]
-
-            for phrase in phrases:
-                phrase = re.sub(r"\s+", " ", phrase).strip()
-                if len(phrase) < 4:
-                    continue
-
-                words = phrase.split()
-                concept_words = []
-                for word in words:
-                    word_clean = word.lower().strip(".,!?;:")
-                    if word_clean and word_clean not in stop_words:
-                        concept_words.append(word_clean)
-
-                if len(concept_words) >= 2:
-                    concept = " ".join(concept_words)
-                    concepts.append(concept)
-                elif len(concept_words) == 1:
-                    concepts.append(concept_words[0])
-
-        return concepts
+        return shared_extract_nlp_concepts(prompt)
 
     def extract_concepts(self, prompt: str) -> List[str]:
         """Extract concepts from a prompt, detecting style automatically."""
-        if not prompt:
-            return []
-
-        style = self.detect_prompt_style(prompt)
-
-        if style == "tag":
-            return self.extract_tag_style_concepts(prompt)
-        else:
-            return self.extract_nlp_concepts(prompt)
+        return shared_extract_concepts(prompt)
 
     def _get_phrase_stop_words(self) -> set:
         """Get the set of stop words for phrase extraction."""
-        return {
-            "a",
-            "an",
-            "the",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "from",
-            "with",
-            "by",
-            "as",
-            "is",
-            "was",
-            "were",
-            "be",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "must",
-            "can",
-            "of",
-            "it",
-            "its",
-            "this",
-            "that",
-            "these",
-            "those",
-            "his",
-            "her",
-            "their",
-            "our",
-            "my",
-            "your",
-            "into",
-            "onto",
-            "upon",
-            "over",
-            "under",
-            "through",
-            "during",
-            "before",
-            "after",
-            "while",
-            "when",
-            "where",
-            "why",
-            "how",
-            "what",
-            "which",
-            "who",
-            "whose",
-            "whom",
-            "if",
-            "then",
-            "so",
-            "because",
-            "since",
-            "although",
-            "though",
-            "while",
-            "unless",
-            "until",
-            "also",
-            "very",
-            "too",
-            "quite",
-            "rather",
-            "just",
-            "only",
-            "even",
-            "still",
-            "already",
-            "yet",
-            "some",
-            "many",
-            "few",
-            "most",
-            "much",
-            "little",
-            "more",
-            "less",
-        }
+        return set(PHRASE_STOP_WORDS)
+
+    def _normalize_phrase_breaks(self, prompt: str) -> str:
+        """Treat prompt newlines and explicit break markers as separators."""
+        return shared_normalize_phrase_breaks(prompt)
 
     def _extract_tag_style_phrases(self, prompt: str) -> List[str]:
         """Extract phrases from tag-style prompts."""
-        phrases = []
-        raw_phrases = [p.strip() for p in prompt.split(",")]
-
-        for phrase in raw_phrases:
-            phrase = re.sub(r"\s*:\s*-?\d+\.?\d*", "", phrase)
-            phrase = re.sub(r"\([^)]*\)", "", phrase)
-            phrase = re.sub(r"<[^>]+>", "", phrase)
-            phrase = re.sub(r"\s+", " ", phrase).strip().lower()
-
-            if len(phrase) >= 2:
-                phrases.append(phrase)
-
-        return phrases
+        return shared_extract_tag_style_phrases(prompt)
 
     def _extract_nlp_style_phrases(
         self, prompt: str, min_words: int, max_words: int
     ) -> List[str]:
         """Extract phrases from natural language prompts."""
-        phrases = []
-        stop_words = self._get_phrase_stop_words()
-        sentences = re.split(r"[.!?]+", prompt)
-
-        for sentence in sentences:
-            raw_phrases = [p.strip() for p in sentence.split(",")]
-            for phrase in raw_phrases:
-                self._extract_subphrases(
-                    phrase, phrases, stop_words, min_words, max_words
-                )
-
-        return phrases
-
-    def _extract_subphrases(
-        self,
-        phrase: str,
-        phrases: List[str],
-        stop_words: set,
-        min_words: int,
-        max_words: int,
-    ) -> None:
-        """Extract subphrases of varying lengths from a phrase."""
-        phrase = re.sub(r"\s+", " ", phrase).strip().lower()
-        words = phrase.split()
-        meaningful_words = [w for w in words if w not in stop_words]
-
-        if len(meaningful_words) >= min_words and len(phrase) >= 3:
-            for n in range(min_words, min(max_words + 1, len(words) + 1)):
-                for i in range(len(words) - n + 1):
-                    sub_phrase = " ".join(words[i : i + n])
-                    sub_words = sub_phrase.split()
-                    sub_meaningful = [w for w in sub_words if w not in stop_words]
-
-                    if len(sub_meaningful) >= 1:
-                        phrases.append(sub_phrase)
+        return shared_extract_nlp_style_phrases(prompt, min_words, max_words)
 
     def extract_phrases(
         self, prompt: str, min_words: int = 2, max_words: int = 4
     ) -> List[str]:
         """Extract common phrases from a prompt."""
-        if not prompt:
-            return []
-
-        style = self.detect_prompt_style(prompt)
-
-        if style == "tag":
-            return self._extract_tag_style_phrases(prompt)
-        else:
-            return self._extract_nlp_style_phrases(prompt, min_words, max_words)
+        return shared_extract_phrases(prompt, min_words=min_words, max_words=max_words)
 
     def analyze(self) -> None:
         """Analyze all scraped data and compile statistics."""

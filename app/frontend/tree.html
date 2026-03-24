@@ -4,13 +4,32 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Concept Prototype</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
   <link rel="stylesheet" href="/frontend/css/tree.css">
 </head>
 <body>
   <main class="concept-page">
     <header class="concept-header">
-      <h1>Concept Hierarchy Prototype</h1>
-      <p>Prototype mode: shared scope controls, 4 tag source panes, and 4 concept panes.</p>
+      <div class="concept-header-row">
+        <div>
+          <h1>Concept Hierarchy Prototype</h1>
+          <p>Prototype mode: shared scope controls, 4 tag source panes, and 4 concept panes.</p>
+        </div>
+        <div class="global-pref-row" aria-label="Page preferences">
+          <label class="toggle-wrap" for="theme-toggle">
+            <input id="theme-toggle" type="checkbox">
+            <span>Dark mode</span>
+          </label>
+          <label class="toggle-wrap" for="count-single-tags-toggle">
+            <input id="count-single-tags-toggle" type="checkbox">
+            <span>Count single tags</span>
+          </label>
+          <label class="toggle-wrap" for="edit-mode-toggle">
+            <input id="edit-mode-toggle" type="checkbox">
+            <span>Edit mode</span>
+          </label>
+        </div>
+      </div>
     </header>
 
     <section class="scope-controls-wrap" aria-label="Tag scope controls">
@@ -21,6 +40,27 @@
     <section id="tag-board" class="tag-board" aria-label="Tag source panes"></section>
 
     <section id="tag-details" class="tag-details" aria-label="Selected tag details"></section>
+
+    <section class="concept-search-wrap" aria-label="Concept search">
+      <label class="concept-search-label" for="concept-search-input">Search concept:</label>
+      <div class="concept-search-input-wrap">
+        <input
+          id="concept-search-input"
+          class="concept-search-input"
+          type="search"
+          placeholder="Start typing concept name"
+          autocomplete="off"
+        >
+        <div id="concept-search-suggestions" class="concept-search-suggestions" role="listbox" aria-label="Concept search suggestions"></div>
+      </div>
+      <span class="concept-search-divider" aria-hidden="true"></span>
+      <span class="concept-search-label">Sort:</span>
+      <div id="concept-sort-controls" class="concept-sort-controls" role="group" aria-label="Sort concepts">
+        <button type="button" class="concept-sort-btn" data-sort-mode="entry">Entry Order</button>
+        <button type="button" class="concept-sort-btn" data-sort-mode="alpha">Alphabetical</button>
+        <button type="button" class="concept-sort-btn" data-sort-mode="children">Sub-Concepts</button>
+      </div>
+    </section>
 
     <section id="concept-board" class="concept-board" aria-label="Concept panes"></section>
 
@@ -36,6 +76,8 @@
     </footer>
   </main>
 
-  <script src="/frontend/js/tree.js" defer></script>
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/shared/ui-kit.js" defer></script>
+  <script src="/frontend/js/tree.js?v=20260324-association-autoscroll" defer></script>
 </body>
 </html>

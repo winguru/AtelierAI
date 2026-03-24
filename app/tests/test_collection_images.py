@@ -3,7 +3,7 @@
 Test if the collection has images by fetching without filters.
 """
 
-from atelierai.civitai.civitai_trpc_v3 import CivitaiTrpcClient
+from legacy.civitai_trpc_v3 import CivitaiTrpcClient
 from atelierai.config import CIVITAI_SESSION_COOKIE
 
 FINGERPRINT = "48cc7067da9614a09cdfa515bb51ec3d8d362efa293d0d8f9d15f7c9919bac80cbdaff9cd1e91cd02902e40dd02b38d8"

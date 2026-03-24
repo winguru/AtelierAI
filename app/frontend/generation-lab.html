@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generation Lab</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/folder-tabs.css">
+  <link rel="stylesheet" href="/frontend/css/generation-lab.css">
+</head>
+<body>
+  <main class="lab-page">
+    <header class="lab-header">
+      <div>
+        <p class="lab-kicker">Prototype</p>
+        <h1>Generation Metadata Lab</h1>
+        <p class="lab-subtitle">Inspect one item at a time, compare raw payloads against normalized output, and surface extraction gaps before they reach the gallery.</p>
+      </div>
+      <div class="global-pref-row" aria-label="Page preferences">
+        <label class="toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="lab-link" href="/tree">Open concept prototype</a>
+      </div>
+    </header>
+
+    <section class="lab-controls" aria-label="Prototype controls">
+      <form id="civitai-form" class="control-card">
+        <h2>CivitAI Image</h2>
+        <label for="civitai-id">Image ID</label>
+        <div class="control-row">
+          <input id="civitai-id" name="civitai-id" type="number" min="1" placeholder="105135032">
+          <button type="submit">Inspect</button>
+        </div>
+        <p class="control-help">Fetches raw API payloads plus a normalized prototype preview. Known missing IDs should return a structured 404 report instead of crashing the page.</p>
+      </form>
+
+      <form id="local-form" class="control-card">
+        <h2>Local Image</h2>
+        <label for="local-hash">File hash</label>
+        <div class="control-row">
+          <input id="local-hash" name="local-hash" type="text" placeholder="Paste an existing file hash">
+          <button type="submit">Inspect</button>
+        </div>
+        <p class="control-help">Loads stored DB fields, sidecar JSON, EXIF payloads, and any normalized generation rows already persisted for that image.</p>
+      </form>
+    </section>
+
+    <section id="status-panel" class="status-panel is-idle" aria-live="polite">
+      <strong id="status-title">Ready</strong>
+      <span id="status-message">Choose a CivitAI image ID, a local file hash, or both to inspect together.</span>
+    </section>
+
+    <section id="export-panel" class="export-panel is-disabled" aria-label="Inspection export">
+      <div>
+        <strong id="export-title">Export JSON</strong>
+        <p id="export-message" class="export-message">Load an inspection to copy or download structured JSON for collaboration.</p>
+      </div>
+      <div class="export-actions">
+        <button id="copy-export-btn" type="button" disabled>Copy JSON</button>
+        <button id="download-export-btn" type="button" disabled>Download JSON</button>
+      </div>
+    </section>
+
+    <section id="inspection-panels" class="inspection-panels" aria-label="Inspection output">
+      <article class="result-card inspection-empty">
+        <h2>No inspection loaded</h2>
+        <p>Run one or both inspections to compare the local record against the CivitAI source in one place.</p>
+      </article>
+    </section>
+
+    <footer class="lab-footer">
+      <span>Prototype mode: read-only validation surface for generation extraction.</span>
+    </footer>
+  </main>
+
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/shared/folder-tabs.js" defer></script>
+  <script src="/frontend/js/shared/ui-kit.js" defer></script>
+  <script src="/frontend/js/generation-lab.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Perceptual Analyzer Lab</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/generation-lab.css">
+  <link rel="stylesheet" href="/frontend/css/perceptual-lab.css">
+</head>
+<body>
+  <main class="lab-page">
+    <header class="lab-header">
+      <div>
+        <p class="lab-kicker">Prototype</p>
+        <h1>Perceptual Analyzer Lab</h1>
+        <p class="lab-subtitle">Compute multiple perceptual hashes, compare against CivitAI hash-like values, and run similarity search against your local AtelierAI catalog.</p>
+      </div>
+      <div class="global-pref-row" aria-label="Page preferences">
+        <label class="toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="lab-link" href="/">Open gallery</a>
+      </div>
+    </header>
+
+    <section class="lab-controls" aria-label="Perceptual lab controls">
+      <form id="target-form" class="control-card control-card-wide">
+        <h2>Target Image</h2>
+        <label for="target-hash">File hash</label>
+        <div class="control-row">
+          <input id="target-hash" name="target-hash" type="text" placeholder="Paste an existing file hash" required>
+          <button type="submit">Analyze</button>
+        </div>
+
+        <div class="perceptual-grid">
+          <label>
+            Hash size
+            <input id="hash-size" type="number" min="4" max="32" step="1" value="8">
+          </label>
+          <label>
+            Similarity algorithm
+            <select id="similarity-algorithm">
+              <option value="phash">pHash</option>
+              <option value="dhash">dHash</option>
+              <option value="ahash">aHash</option>
+              <option value="whash">wHash</option>
+              <option value="blurhash">BlurHash (4x4)</option>
+            </select>
+          </label>
+          <label>
+            Max distance
+            <input id="max-distance" type="number" min="0" max="256" step="1" value="12">
+          </label>
+          <label>
+            Match limit
+            <input id="match-limit" type="number" min="1" max="200" step="1" value="40">
+          </label>
+          <label>
+            Candidates scanned
+            <input id="max-candidates" type="number" min="50" max="5000" step="50" value="1200">
+          </label>
+        </div>
+
+        <div class="control-row">
+          <button id="run-similarity-btn" type="button">Run Similarity Search</button>
+        </div>
+
+        <p class="control-help">Analysis computes local image hashes and compares them to hash-like values discovered in CivitAI payload fields. Similarity search compares the selected algorithm against the local catalog.</p>
+      </form>
+    </section>
+
+    <section id="status-panel" class="status-panel is-idle" aria-live="polite">
+      <strong id="status-title">Ready</strong>
+      <span id="status-message">Enter a local file hash to begin.</span>
+    </section>
+
+    <section class="inspection-panels" aria-label="Perceptual outputs">
+      <article class="result-card blurhash-card">
+        <h2>BlurHash Comparison</h2>
+        <div id="blurhash-compare" class="blurhash-compare is-empty">
+          <p class="blurhash-empty">Run analysis to decode the CivitAI hash, render previews, and compare the nearest local BlurHash candidate.</p>
+        </div>
+      </article>
+      <article class="result-card">
+        <h2>Hash Analysis</h2>
+        <pre id="analysis-output" class="json-block">No analysis loaded.</pre>
+      </article>
+      <article class="result-card">
+        <h2>Similarity Matches</h2>
+        <div id="similarity-visual" class="similarity-visual is-empty">
+          <p class="similarity-empty">Run similarity search to render visual target and match thumbnails.</p>
+        </div>
+        <pre id="similarity-output" class="json-block">No similarity search run.</pre>
+      </article>
+    </section>
+
+    <footer class="lab-footer">
+      <span>Prototype mode: exploratory perceptual hashing and nearest-neighbor style matching.</span>
+    </footer>
+  </main>
+
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/perceptual-lab.js" defer></script>
+</body>
+</html>

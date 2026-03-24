@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Model Lab</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/generation-lab.css">
+  <link rel="stylesheet" href="/frontend/css/model-lab.css">
+</head>
+<body>
+  <main class="lab-page">
+    <header class="lab-header">
+      <div>
+        <p class="lab-kicker">Prototype</p>
+        <h1>Model Reference Lab</h1>
+        <p class="lab-subtitle">Inspect model references extracted from local media and CivitAI metadata, then compare them against an optional local ComfyUI or LoRA Manager catalog.</p>
+      </div>
+      <div class="global-pref-row" aria-label="Page preferences">
+        <label class="toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="lab-link" href="/generation-lab">Open generation lab</a>
+      </div>
+    </header>
+
+    <section class="lab-controls model-lab-controls" aria-label="Model lab controls">
+      <form id="civitai-form" class="control-card">
+        <h2>CivitAI Image</h2>
+        <label for="civitai-id">Image ID</label>
+        <div class="control-row">
+          <input id="civitai-id" name="civitai-id" type="number" min="1" placeholder="26300466">
+          <button type="submit">Inspect</button>
+        </div>
+        <p class="control-help">Uses the generation prototype pipeline, then isolates checkpoints, LoRAs, VAEs, embeddings, and other resource references for model-centric inspection.</p>
+      </form>
+
+      <form id="local-form" class="control-card">
+        <h2>Local Image</h2>
+        <label for="local-hash">File hash</label>
+        <div class="control-row">
+          <input id="local-hash" name="local-hash" type="text" placeholder="Paste an existing file hash">
+          <button type="submit">Inspect</button>
+        </div>
+        <p class="control-help">Reads the stored normalized generation rows for a local image and converts them into a model-reference view.</p>
+      </form>
+
+      <form id="catalog-form" class="control-card control-card-wide">
+        <h2>Local Catalog</h2>
+        <label for="catalog-url">Unified catalog URL</label>
+        <div class="stacked-control-row">
+          <input id="catalog-url" name="catalog-url" type="url" placeholder="Optional: exact ComfyUI or LoRA Manager catalog endpoint">
+        </div>
+        <label for="checkpoints-url">Checkpoint list URL</label>
+        <div class="stacked-control-row">
+          <input id="checkpoints-url" name="checkpoints-url" type="url" placeholder="Optional: exact checkpoint endpoint">
+        </div>
+        <label for="loras-url">LoRA list URL</label>
+        <div class="stacked-control-row">
+          <input id="loras-url" name="loras-url" type="url" placeholder="Optional: exact LoRA endpoint">
+        </div>
+        <div class="catalog-actions-row">
+          <label class="checkbox-row" for="include-catalog">
+            <input id="include-catalog" name="include-catalog" type="checkbox">
+            <span>Include local catalog in item inspections</span>
+          </label>
+          <label class="inline-number-field" for="image-limit">
+            <span>Catalog image limit</span>
+            <input id="image-limit" name="image-limit" type="number" min="1" max="2000" value="250">
+          </label>
+          <button id="catalog-submit-btn" type="submit">Load Catalog</button>
+        </div>
+        <p class="control-help">If you leave the URLs blank, the backend will fall back to env vars: <code>ATELIER_COMFYUI_MODEL_CATALOG_URL</code>, <code>ATELIER_COMFYUI_CHECKPOINTS_URL</code>, and <code>ATELIER_COMFYUI_LORAS_URL</code>.</p>
+      </form>
+    </section>
+
+    <section id="status-panel" class="status-panel is-idle" aria-live="polite">
+      <strong id="status-title">Ready</strong>
+      <span id="status-message">Inspect a remote image, a local image, a library catalog, or any combination of those sources.</span>
+    </section>
+
+    <section id="export-panel" class="export-panel is-disabled" aria-label="Inspection export">
+      <div>
+        <strong id="export-title">Export JSON</strong>
+        <p id="export-message" class="export-message">Load one or more model-reference views to export structured JSON for analysis or follow-up normalization work.</p>
+      </div>
+      <div class="export-actions">
+        <button id="copy-export-btn" type="button" disabled>Copy JSON</button>
+        <button id="download-export-btn" type="button" disabled>Download JSON</button>
+      </div>
+    </section>
+
+    <section id="inspection-panels" class="inspection-panels" aria-label="Model lab output">
+      <article class="result-card inspection-empty">
+        <h2>No inspection loaded</h2>
+        <p>Run one of the model reference inspections to review extracted checkpoints, LoRAs, hashes, and local-install matches.</p>
+      </article>
+    </section>
+
+    <footer class="lab-footer">
+      <span>Prototype mode: read-only surface for model reference extraction and local availability matching.</span>
+    </footer>
+  </main>
+
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/shared/ui-kit.js" defer></script>
+  <script src="/frontend/js/model-lab.js" defer></script>
+</body>
+</html>

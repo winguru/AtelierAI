@@ -1,0 +1,204 @@
+:root {
+  --global-control-font: "Avenir Next", "Nunito Sans", "Trebuchet MS", sans-serif;
+}
+
+.global-pref-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.global-pref-row .toggle-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  padding: 0.35rem 0.62rem;
+  background: color-mix(in oklab, var(--panel) 88%, white 12%);
+  font-family: var(--global-control-font);
+}
+
+.global-pref-row .toggle-wrap span {
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-soft);
+}
+
+.global-pref-row .toggle-wrap input {
+  margin: 0;
+}
+
+.folder-workspace {
+  position: relative;
+  padding-top: 0.95rem;
+}
+
+.folder-tab-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: flex-end;
+  margin: 0 0 -1px 0.8rem;
+  position: relative;
+  z-index: 2;
+}
+
+.folder-tab {
+  border: 1px solid #d8ccb4;
+  border-bottom: 0;
+  border-radius: 16px 16px 0 0;
+  background: linear-gradient(180deg, #ead6aa 0%, #e3c68d 100%);
+  color: #5b4a2e;
+  font: inherit;
+  font-size: 0.88rem;
+  line-height: 1.2;
+  padding: 0.58rem 1rem 0.54rem;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(103, 79, 35, 0.08);
+}
+
+.folder-tab.is-active {
+  background: linear-gradient(180deg, #f6e9c9 0%, #f0dfb8 100%);
+  color: #3f2f1a;
+  transform: translateY(1px);
+}
+
+.folder-body {
+  border: 1px solid #d8ccb4;
+  border-radius: 22px;
+  border-top-left-radius: 18px;
+  background: linear-gradient(180deg, rgba(249, 241, 224, 0.96) 0%, rgba(255, 251, 244, 0.98) 100%);
+  box-shadow: 0 18px 36px rgba(54, 44, 24, 0.08);
+  padding: 1.2rem;
+  min-width: 0;
+}
+
+body[data-theme="dark"] .global-pref-row .toggle-wrap {
+  background: color-mix(in oklab, var(--panel) 92%, black 8%);
+  border-color: color-mix(in oklab, var(--stroke) 85%, black 15%);
+}
+
+body[data-theme="dark"] .folder-tab {
+  border-color: #586579;
+  background: linear-gradient(180deg, #314052 0%, #2a3647 100%);
+  color: #d9e4f5;
+  box-shadow: 0 8px 18px rgba(7, 13, 24, 0.28);
+}
+
+body[data-theme="dark"] .folder-tab.is-active {
+  background: linear-gradient(180deg, #425168 0%, #3a465d 100%);
+  color: #f3f7ff;
+}
+
+body[data-theme="dark"] .folder-body {
+  border-color: #586579;
+  background: linear-gradient(180deg, rgba(32, 42, 54, 0.95) 0%, rgba(27, 36, 47, 0.98) 100%);
+  box-shadow: 0 18px 36px rgba(3, 8, 17, 0.38);
+}
+
+.nsfw-visibility-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.nsfw-visibility-prefix {
+  color: var(--ink-soft);
+}
+
+.nsfw-visibility-current {
+  border: 1px solid var(--stroke);
+  background: color-mix(in oklab, var(--panel) 90%, white 10%);
+  color: var(--ink);
+  border-radius: 8px;
+  min-width: 7.8rem;
+  justify-content: space-between;
+  padding: 0.32rem 0.56rem;
+  font: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.nsfw-visibility-current::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 6px solid currentColor;
+  opacity: 0.9;
+  transform: translateY(1px);
+  transition: transform 120ms ease;
+}
+
+.nsfw-visibility-control.is-open .nsfw-visibility-current::after {
+  transform: rotate(180deg) translateY(-1px);
+}
+
+.nsfw-visibility-current:hover,
+.nsfw-visibility-current:focus-visible {
+  border-color: color-mix(in oklab, var(--accent) 56%, var(--stroke) 44%);
+  outline: none;
+}
+
+.nsfw-visibility-options {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  display: none;
+  min-width: 8.2rem;
+  padding: 0.35rem;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--panel) 94%, white 6%);
+  box-shadow: var(--shadow);
+  z-index: 30;
+}
+
+.nsfw-visibility-control.is-open .nsfw-visibility-options {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.nsfw-visibility-option {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  padding: 0.36rem 0.5rem;
+  cursor: pointer;
+}
+
+.nsfw-visibility-option:hover,
+.nsfw-visibility-option:focus-visible,
+.nsfw-visibility-option.is-active {
+  background: color-mix(in oklab, var(--accent) 14%, transparent 86%);
+  border-color: color-mix(in oklab, var(--accent) 62%, var(--stroke) 38%);
+  outline: none;
+}
+
+body[data-theme="dark"] .nsfw-visibility-current {
+  background: #1a1f27;
+  border-color: #3d4451;
+  color: var(--ink);
+}
+
+body[data-theme="dark"] .nsfw-visibility-options {
+  background: #1d222b;
+  border-color: #414957;
+}
+
+body[data-theme="dark"] .nsfw-visibility-option:hover,
+body[data-theme="dark"] .nsfw-visibility-option:focus-visible,
+body[data-theme="dark"] .nsfw-visibility-option.is-active {
+  background: rgba(255, 138, 76, 0.2);
+  border-color: rgba(255, 138, 76, 0.5);
+}

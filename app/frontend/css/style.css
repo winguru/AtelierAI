@@ -930,6 +930,37 @@ h1 {
     white-space: nowrap;
 }
 
+.tile-caption-secondary {
+    font-size: 0.66rem;
+    letter-spacing: 0.03em;
+    color: rgba(255, 255, 255, 0.78);
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.tile-variant-badge {
+    position: absolute;
+    top: 0.42rem;
+    right: 0.42rem;
+    z-index: 4;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.6rem;
+    padding: 0.22rem 0.48rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(17, 12, 8, 0.72);
+    color: #fff7ef;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+}
+
 .tile-collections {
     position: absolute;
     top: 0.38rem;
@@ -978,6 +1009,10 @@ h1 {
 
 .tile.active .tile-selection-indicator {
     transform: scale(1.15);
+}
+
+.tile.has-variant-badge .tile-collections {
+    top: 2.1rem;
 }
 
 .details-pane {

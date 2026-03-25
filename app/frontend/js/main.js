@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     const STORAGE_KEYS = {
         infinite: 'atelier.gallery.infiniteScroll',
+        groupVariants: 'atelier.gallery.groupVariants',
         debug: 'atelier.gallery.debugVisible',
         autoRefresh: 'atelier.gallery.autoRefresh',
         fullscreenLoop: 'atelier.gallery.fullscreenLoop',
@@ -219,6 +220,7 @@ document.addEventListener('DOMContentLoaded', () => {
         hasMore: true,
         loadingPage: false,
         infiniteEnabled: readStoredBool(STORAGE_KEYS.infinite, true),
+        groupVariantsEnabled: readStoredBool(STORAGE_KEYS.groupVariants, true),
         debugVisible: readStoredBool(STORAGE_KEYS.debug, true),
         autoRefreshEnabled: readStoredBool(STORAGE_KEYS.autoRefresh, true),
         fullscreenLoopEnabled: readStoredBool(STORAGE_KEYS.fullscreenLoop, true),
@@ -290,6 +292,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const galleryStatus = document.getElementById('gallery-status');
     const loadMoreBtn = document.getElementById('load-more-btn');
     const infiniteScrollToggle = document.getElementById('infinite-scroll-toggle');
+    const variantGroupingToggle = document.getElementById('variant-grouping-toggle');
     const themeToggle = document.getElementById('theme-toggle');
     const nsfwVisibilityControl = document.getElementById('nsfw-visibility-control');
     const nsfwVisibilityCurrent = document.getElementById('nsfw-visibility-current');
@@ -1246,6 +1249,7 @@ document.addEventListener('DOMContentLoaded', () => {
             skip: String(skip),
             limit: String(limit),
             sort_by: state.sortOrder,
+            group_variants: state.groupVariantsEnabled ? 'true' : 'false',
         });
 
         const config = state.serverFilterMode ? state.activeServerFilterConfig : null;
@@ -1266,7 +1270,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function buildImageKeysRequestUrl(config = null) {
-        const params = new URLSearchParams();
+        const params = new URLSearchParams({
+            group_variants: state.groupVariantsEnabled ? 'true' : 'false',
+        });
         if (config) {
             if (config.search) {
                 params.set('search', config.search);
@@ -1664,7 +1670,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : [];
 
         state.allImages.forEach((entry) => {
-            if (String(entry?.file_hash || '') !== String(fileHash || '')) {
+            if (String(getEditableFileHash(entry) || '') !== String(fileHash || '')) {
                 return;
             }
             entry.user_negative_tags = [...normalizedList];
@@ -1672,7 +1678,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function persistImageNegativeTags(image, nextNegativeTags) {
-        if (!image?.file_hash) {
+        const editableHash = getEditableFileHash(image);
+        if (!editableHash) {
             throw new Error('Selected image has no file hash.');
         }
 
@@ -1682,7 +1689,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 .filter(Boolean)
             : [];
 
-        const result = await saveImageMetadata(image.file_hash, {
+        const result = await saveImageMetadata(editableHash, {
             user_negative_tags: normalizedList,
         });
 
@@ -1693,7 +1700,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : normalizedList;
 
         image.user_negative_tags = [...savedNegativeTags];
-        syncImageNegativeTagsLocally(image.file_hash, savedNegativeTags);
+        syncImageNegativeTagsLocally(editableHash, savedNegativeTags);
         return savedNegativeTags;
     }
 
@@ -3087,7 +3094,135 @@ document.addEventListener('DOMContentLoaded', () => {
         return `https://image-b2.civitai.com/file/civitai-media-cache/${uuid}/original`;
     }
 
+    function getEditableFileHash(image) {
+        if (!image || typeof image !== 'object') {
+            return '';
+        }
+        const editableHash = String(image.editable_file_hash || '').trim();
+        if (editableHash) {
+            return editableHash;
+        }
+        return String(image.file_hash || '').trim();
+    }
+
+    function getImageVariants(image) {
+        if (!image || typeof image !== 'object') {
+            return [];
+        }
+        if (Array.isArray(image.__variants)) {
+            return image.__variants;
+        }
+        if (Array.isArray(image.variants)) {
+            return image.variants;
+        }
+        return [];
+    }
+
+    function getVariantCount(image) {
+        const variants = getImageVariants(image);
+        if (variants.length) {
+            return variants.length;
+        }
+        const parsedCount = Number(image?.variant_count || 0);
+        return Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 1;
+    }
+
+    function getActiveVariantIndex(image) {
+        const variants = getImageVariants(image);
+        if (!variants.length) {
+            return 0;
+        }
+
+        const activeVariantKey = String(image?.active_variant_key || '').trim();
+        if (activeVariantKey) {
+            const keyedIndex = variants.findIndex((variant) => String(variant?.variant_key || '').trim() === activeVariantKey);
+            if (keyedIndex >= 0) {
+                return keyedIndex;
+            }
+        }
+
+        const rawIndex = Number(image?.variant_index || 0);
+        if (Number.isInteger(rawIndex) && rawIndex >= 0 && rawIndex < variants.length) {
+            return rawIndex;
+        }
+
+        return 0;
+    }
+
+    function getActiveVariant(image) {
+        const variants = getImageVariants(image);
+        if (!variants.length) {
+            return null;
+        }
+        return variants[getActiveVariantIndex(image)] || null;
+    }
+
+    function syncClientImageVariantState(image) {
+        if (!image || typeof image !== 'object') {
+            return image;
+        }
+
+        const basePayload = image.__baseImageData && typeof image.__baseImageData === 'object'
+            ? image.__baseImageData
+            : { ...image };
+        const variants = Array.isArray(image.__variants)
+            ? image.__variants
+            : (Array.isArray(image.variants) ? image.variants.map((variant) => ({ ...variant })) : []);
+
+        const nextImage = image;
+        const nextVariant = variants[getActiveVariantIndex({ ...basePayload, __variants: variants, active_variant_key: image.active_variant_key, variant_index: image.variant_index })] || null;
+        Object.assign(nextImage, basePayload);
+        if (nextVariant && typeof nextVariant === 'object') {
+            Object.assign(nextImage, nextVariant);
+        }
+        nextImage.__baseImageData = basePayload;
+        nextImage.__variants = variants;
+        nextImage.variants = variants;
+        nextImage.variant_count = variants.length || Number(basePayload.variant_count || 0) || 1;
+        nextImage.variant_index = nextVariant ? variants.findIndex((variant) => variant === nextVariant) : 0;
+        nextImage.active_variant_key = nextVariant?.variant_key || basePayload.active_variant_key || null;
+        nextImage.editable_file_hash = getEditableFileHash(basePayload);
+        nextImage.__activeVariant = nextVariant;
+        return nextImage;
+    }
+
+    function setImageVariantIndex(image, nextIndex) {
+        const variants = getImageVariants(image);
+        if (!variants.length) {
+            return false;
+        }
+        const boundedIndex = Math.max(0, Math.min(variants.length - 1, Number(nextIndex) || 0));
+        image.variant_index = boundedIndex;
+        image.active_variant_key = variants[boundedIndex]?.variant_key || null;
+        syncClientImageVariantState(image);
+        return true;
+    }
+
+    function stepImageVariant(image, delta) {
+        const variants = getImageVariants(image);
+        if (!variants.length || !delta) {
+            return false;
+        }
+        const currentIndex = getActiveVariantIndex(image);
+        const nextIndex = currentIndex + delta;
+        if (nextIndex < 0 || nextIndex >= variants.length) {
+            return false;
+        }
+        return setImageVariantIndex(image, nextIndex);
+    }
+
+    function activateDefaultVariant(image) {
+        if (!image || typeof image !== 'object') {
+            return false;
+        }
+        return setImageVariantIndex(image, 0);
+    }
+
     function getMediaUrlForDisplay(image) {
+        const directDisplayUrl = typeof image?.display_url === 'string' ? image.display_url.trim() : '';
+        if (directDisplayUrl) {
+            return directDisplayUrl;
+        }
         const localUrl = getImageUrl(image);
         const civitaiUrl = getCivitaiMediaUrl(image);
         if (looksLikeVideoUrl(civitaiUrl)) {
@@ -3115,7 +3250,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const civitaiUrl = getCivitaiMediaUrl(image);
-        return looksLikeVideoUrl(civitaiUrl);
+        const displayUrl = typeof image?.display_url === 'string' ? image.display_url : '';
+        return looksLikeVideoUrl(displayUrl) || looksLikeVideoUrl(civitaiUrl);
+    }
+
+    function looksLikeImageUrl(url) {
+        const value = String(url || '').trim().toLowerCase();
+        if (!value) {
+            return false;
+        }
+        return /\.(avif|bmp|gif|jpe?g|png|tiff?|webp)(?:$|[?#])/.test(value);
+    }
+
+    function shouldRenderAsVideo(image, mediaUrl = '') {
+        const resolvedUrl = String(mediaUrl || '').trim();
+        if (resolvedUrl) {
+            if (looksLikeImageUrl(resolvedUrl)) {
+                return false;
+            }
+            if (looksLikeVideoUrl(resolvedUrl)) {
+                return true;
+            }
+        }
+
+        const activeVariant = getActiveVariant(image);
+        const variantMimetype = typeof activeVariant?.mimetype === 'string' ? activeVariant.mimetype.trim().toLowerCase() : '';
+        if (variantMimetype) {
+            return variantMimetype.startsWith('video/');
+        }
+
+        return isVideoAsset(image);
     }
 
     function releaseVideoElement(video) {
@@ -3139,8 +3303,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function getVideoPosterCacheKey(image, mediaUrl) {
-        if (image && typeof image.file_hash === 'string' && image.file_hash.trim()) {
-            return `hash:${image.file_hash}`;
+        const editableHash = getEditableFileHash(image);
+        if (editableHash) {
+            return `hash:${editableHash}`;
         }
         return mediaUrl ? `url:${mediaUrl}` : '';
     }
@@ -3711,7 +3876,7 @@ document.addEventListener('DOMContentLoaded', () => {
             state.fullscreenIndexHint = nextHint;
         }
 
-        const videoMode = looksLikeVideoUrl(mediaUrl) || isVideoAsset(image);
+        const videoMode = shouldRenderAsVideo(image, mediaUrl);
         fullscreenPreview.classList.remove('hidden');
         fullscreenPreview.setAttribute('aria-hidden', 'false');
         updateFullscreenDebugOverlay('open-fullscreen', {
@@ -3791,6 +3956,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const baseIndex = currentIndex >= 0
                 ? currentIndex
                 : Math.max(0, Math.min(hintedIndex >= 0 ? hintedIndex : 0, state.filteredImages.length - 1));
+            const currentImage = state.filteredImages[baseIndex] || null;
+            if (currentImage && stepImageVariant(currentImage, delta)) {
+                state.fullscreenSelectedKey = currentImage.__key;
+                state.fullscreenIndexHint = baseIndex;
+                assignSingleSelection(currentImage.__key);
+                renderSelectionState({ force: true });
+                openFullscreenPreviewFromImage(currentImage);
+                updateFullscreenDebugOverlay('nav-variant-committed', {
+                    delta,
+                    baseIndex,
+                    nextVariantIndex: getActiveVariantIndex(currentImage),
+                    variantKey: currentImage.active_variant_key,
+                });
+                return;
+            }
             updateFullscreenDebugOverlay('nav-base', {
                 delta,
                 currentIndex,
@@ -3945,6 +4125,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const currentIndex = state.filteredImages.findIndex((img) => img.__key === state.selectedKey);
         const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+        const currentImage = state.filteredImages[baseIndex] || null;
+
+        if (currentImage && stepImageVariant(currentImage, delta)) {
+            activateVariantAndRender(currentImage, getActiveVariantIndex(currentImage), { scrollIntoView: true });
+            return;
+        }
 
         if (delta < 0 && baseIndex <= 0) {
             return;
@@ -4001,15 +4187,21 @@ document.addEventListener('DOMContentLoaded', () => {
     function toClientImage(image, indexOffset) {
         // Keep keys stable across refresh/import reordering so detail/fullscreen state
         // stays attached to the same logical image.
-        const stablePart = image.file_hash
+        const stablePart = image.gallery_item_key
+            || image.file_hash
             || (image.id ? `id:${image.id}` : '')
             || (image.file_path ? `path:${image.file_path}` : '')
             || (image.file_name ? `name:${image.file_name}` : '')
             || `row-${indexOffset}`;
-        return {
+        const clientImage = {
             ...image,
             __key: stablePart,
+            __baseImageData: { ...image },
+            __variants: Array.isArray(image?.variants)
+                ? image.variants.map((variant) => ({ ...variant }))
+                : [],
         };
+        return syncClientImageVariantState(clientImage);
     }
 
     function pickCaption(image) {
@@ -4564,6 +4756,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function activateVariantAndRender(image, nextVariantIndex, options = {}) {
+        if (!image || typeof image !== 'object') {
+            return false;
+        }
+
+        const changed = setImageVariantIndex(image, nextVariantIndex);
+        if (!changed) {
+            return false;
+        }
+
+        if (image.__key) {
+            assignSingleSelection(image.__key);
+        }
+        renderSelectionState({ force: true });
+
+        if (options.scrollIntoView && image.__key) {
+            const activeTile = galleryGrid.querySelector(`.tile[data-key="${CSS.escape(image.__key)}"]`);
+            if (activeTile) {
+                activeTile.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+        }
+
+        return true;
+    }
+
     function toggleSelectionAndRender(key) {
         if (!key) {
             return;
@@ -4808,7 +5025,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function saveImageMetadataForGroup(images, patchData, applyResult, fieldLabel) {
         const targets = (Array.isArray(images) ? images : [])
-            .filter((image) => image && typeof image.file_hash === 'string' && image.file_hash.trim());
+            .filter((image) => getEditableFileHash(image));
         if (!targets.length) {
             throw new Error('No selected items are available for update.');
         }
@@ -4817,9 +5034,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const errors = [];
         for (const target of targets) {
             try {
-                const result = await saveImageMetadata(target.file_hash, patchData);
+                const result = await saveImageMetadata(getEditableFileHash(target), patchData);
                 if (typeof applyResult === 'function') {
                     applyResult(target, result);
+                    if (target.__baseImageData && typeof target.__baseImageData === 'object') {
+                        Object.assign(target.__baseImageData, target);
+                        syncClientImageVariantState(target);
+                    }
                 }
                 successCount += 1;
             } catch (error) {
@@ -4856,7 +5077,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function getImageToolActionTargets() {
-        return getCollectionActionTargets().filter((image) => Boolean(image?.file_hash));
+        return getCollectionActionTargets().filter((image) => Boolean(getEditableFileHash(image)));
     }
 
     function updateImageToolActionLabels() {
@@ -4945,9 +5166,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function addImagesToCollection(collectionId, images) {
-        const fileHashes = images
-            .map((image) => image?.file_hash)
-            .filter((value) => typeof value === 'string' && value.trim());
+        const fileHashes = [...new Set(images
+            .map((image) => getEditableFileHash(image))
+            .filter((value) => typeof value === 'string' && value.trim()))];
         if (!fileHashes.length) {
             throw new Error('No selected items are available for collection add.');
         }
@@ -4967,9 +5188,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function removeImagesFromCollection(collectionId, images) {
-        const fileHashes = images
-            .map((image) => image?.file_hash)
-            .filter((value) => typeof value === 'string' && value.trim());
+        const fileHashes = [...new Set(images
+            .map((image) => getEditableFileHash(image))
+            .filter((value) => typeof value === 'string' && value.trim()))];
         if (!fileHashes.length) {
             throw new Error('No selected items are available for collection removal.');
         }
@@ -4999,7 +5220,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const target = state.allImages.find((img) => img.file_hash === fileHash);
+        const target = state.allImages.find((img) => getEditableFileHash(img) === fileHash);
         if (!target) {
             return;
         }
@@ -5513,11 +5734,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const collectionId = ids[idx];
             removeBtn.addEventListener('click', async () => {
-                if (!image?.file_hash || !collectionId) {
+                const editableHash = getEditableFileHash(image);
+                if (!editableHash || !collectionId) {
                     return;
                 }
                 try {
-                    const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/collections/${collectionId}`, {
+                    const response = await fetch(`/images/${encodeURIComponent(editableHash)}/collections/${collectionId}`, {
                         method: 'DELETE',
                     });
                     const result = await response.json();
@@ -5774,7 +5996,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setActiveDetailTab(state.detailActiveTabId, { persist: false, focus: false });
 
         const imageUrl = getMediaUrlForDisplay(image);
-        const videoMode = looksLikeVideoUrl(imageUrl) || isVideoAsset(image);
+        const videoMode = shouldRenderAsVideo(image, imageUrl);
         currentDebugImage = image;
         const generationLabDestination = getGenerationLabDestination(image);
         const perceptualLabDestination = getPerceptualLabDestination(image);
@@ -5874,6 +6096,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : {};
         const imageUuid = safeText(image.civitai_uuid || civitaiPayload.uuid || jsonMetadata.civitai_uuid || null);
         const metaNodes = [
+            renderMetaItem('Variant', getVariantCount(image) > 1 ? `${getActiveVariantIndex(image) + 1}/${getVariantCount(image)}${image.variant_label ? ` | ${image.variant_label}` : ''}` : (image.variant_label || null), { spanTwo: true }),
             renderMetaItem('Hash', image.file_hash, { spanTwo: true }),
             renderMetaItem('UUID', imageUuid, { spanTwo: true }),
             renderMetaItem('Dimentions', image.width && image.height ? `${image.width} x ${image.height}` : null),
@@ -6007,6 +6230,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const tile = document.createElement('button');
             const isSelected = state.selectedKeys.has(image.__key);
             const isActive = state.selectedKey === image.__key;
+            const variantCount = getVariantCount(image);
             tile.className = `tile ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}`.trim();
             tile.type = 'button';
             tile.dataset.key = image.__key;
@@ -6020,8 +6244,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 tile.appendChild(selectionIndicator);
             }
 
+            if (variantCount > 1) {
+                tile.classList.add('has-variant-badge');
+                const variantBadge = document.createElement('span');
+                variantBadge.className = 'tile-variant-badge';
+                variantBadge.textContent = `${getActiveVariantIndex(image) + 1}/${variantCount}`;
+                tile.appendChild(variantBadge);
+            }
+
             const mediaUrl = getMediaUrlForDisplay(image);
-            const videoMode = looksLikeVideoUrl(mediaUrl) || isVideoAsset(image);
+            const videoMode = shouldRenderAsVideo(image, mediaUrl);
 
             let mediaNode;
             if (videoMode) {
@@ -6080,6 +6312,16 @@ document.addEventListener('DOMContentLoaded', () => {
             primaryCaption.className = 'tile-caption-primary';
             primaryCaption.textContent = safeText(caption);
             captionSpan.appendChild(primaryCaption);
+
+            if (variantCount > 1 || image.variant_label) {
+                const secondaryCaption = document.createElement('span');
+                secondaryCaption.className = 'tile-caption-secondary';
+                secondaryCaption.textContent = safeText(
+                    image.variant_label || `Variant ${getActiveVariantIndex(image) + 1}`,
+                    '',
+                );
+                captionSpan.appendChild(secondaryCaption);
+            }
 
             const collectionNames = Array.isArray(image.collection_names)
                 ? image.collection_names.filter((name) => typeof name === 'string' && name.trim())
@@ -6231,7 +6473,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const civitaiImageId = extractCivitaiImageIdFromImage(image);
-        const fileHash = String(image.file_hash || '').trim();
+        const fileHash = getEditableFileHash(image);
         if (civitaiImageId || fileHash) {
             const params = new URLSearchParams();
             if (civitaiImageId) {
@@ -6258,7 +6500,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return null;
         }
 
-        const fileHash = String(image.file_hash || '').trim();
+        const fileHash = getEditableFileHash(image);
         if (!fileHash) {
             return null;
         }
@@ -6671,7 +6913,15 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const selectedBefore = state.selectedKey;
         setSingleSelectionAndRender(key);
+        if (selectedBefore !== key) {
+            const selectedImage = getImageByKey(key);
+            if (selectedImage) {
+                activateDefaultVariant(selectedImage);
+                renderSelectionState({ force: true });
+            }
+        }
     });
 
     if (imageCount) {
@@ -6802,11 +7052,31 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!currentDebugImage) {
             return;
         }
+        const failingUrl = detailVideo.currentSrc || getMediaUrlForDisplay(currentDebugImage) || '';
+        if (looksLikeImageUrl(failingUrl)) {
+            detailVideo.classList.add('hidden');
+            detailVideo.style.display = 'none';
+            releaseVideoElement(detailVideo);
+            detailImage.classList.remove('hidden');
+            detailImage.style.display = 'block';
+            detailImage.style.visibility = 'visible';
+            detailImage.style.opacity = '1';
+            detailImage.src = failingUrl;
+            setDebugBadge({
+                key: currentDebugImage.__key,
+                file_hash: currentDebugImage.file_hash,
+                file_path: currentDebugImage.file_path,
+                url: failingUrl,
+                status: 'video-fallback-to-image',
+                ...getImageLayoutDebug(detailImage),
+            });
+            return;
+        }
         setDebugBadge({
             key: currentDebugImage.__key,
             file_hash: currentDebugImage.file_hash,
             file_path: currentDebugImage.file_path,
-            url: detailVideo.currentSrc || getImageUrl(currentDebugImage),
+            url: failingUrl || getImageUrl(currentDebugImage),
             status: 'video-error',
             ...getImageLayoutDebug(detailVideo),
         });
@@ -6945,6 +7215,13 @@ document.addEventListener('DOMContentLoaded', () => {
         writeStoredBool(STORAGE_KEYS.infinite, state.infiniteEnabled);
         updatePagingUi();
     });
+    if (variantGroupingToggle) {
+        variantGroupingToggle.addEventListener('change', async () => {
+            state.groupVariantsEnabled = variantGroupingToggle.checked;
+            writeStoredBool(STORAGE_KEYS.groupVariants, state.groupVariantsEnabled);
+            await resetAndLoadImages();
+        });
+    }
     debugToggle.addEventListener('change', () => {
         state.debugVisible = debugToggle.checked;
         writeStoredBool(STORAGE_KEYS.debug, state.debugVisible);
@@ -7075,7 +7352,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             for (const image of images) {
                 try {
-                    const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/repair`, {
+                    const response = await fetch(`/images/${encodeURIComponent(getEditableFileHash(image))}/repair`, {
                         method: 'POST',
                     });
                     const result = await response.json();
@@ -7102,7 +7379,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 lines.push('');
                 lines.push('Failures:');
                 failures.slice(0, 10).forEach(({ image, message }) => {
-                    lines.push(`- ${image.file_name || image.file_hash}: ${message}`);
+                    lines.push(`- ${image.file_name || getEditableFileHash(image)}: ${message}`);
                 });
                 if (failures.length > 10) {
                     lines.push(`- ...and ${failures.length - 10} more`);
@@ -7146,7 +7423,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 for (const image of images) {
                     try {
-                        const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/rescan`, {
+                        const response = await fetch(`/images/${encodeURIComponent(getEditableFileHash(image))}/rescan`, {
                             method: 'POST',
                         });
                         const result = await response.json();
@@ -7162,7 +7439,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 await resetAndLoadImages({ preserveSelection: false, showRefreshUi: false });
                 const focusTarget = successes[successes.length - 1];
                 if (focusTarget) {
-                    await focusImageByHash(focusTarget.result.file_hash || focusTarget.image.file_hash);
+                    await focusImageByHash(focusTarget.result.file_hash || getEditableFileHash(focusTarget.image));
                 }
 
                 const lines = [
@@ -7173,7 +7450,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     lines.push('');
                     lines.push('Failures:');
                     failures.slice(0, 10).forEach(({ image, message }) => {
-                        lines.push(`- ${image.file_name || image.file_hash}: ${message}`);
+                        lines.push(`- ${image.file_name || getEditableFileHash(image)}: ${message}`);
                     });
                     if (failures.length > 10) {
                         lines.push(`- ...and ${failures.length - 10} more`);
@@ -7215,7 +7492,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const previewLines = images.slice(0, 6).map((image) => `- ${image.file_name || image.file_hash}`);
+        const previewLines = images.slice(0, 6).map((image) => `- ${image.file_name || getEditableFileHash(image)}`);
         if (images.length > 6) {
             previewLines.push(`- ...and ${images.length - 6} more`);
         }
@@ -7240,7 +7517,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             for (const image of images) {
                 try {
-                    const response = await fetch(`/images/${encodeURIComponent(image.file_hash)}/file`, {
+                    const response = await fetch(`/images/${encodeURIComponent(getEditableFileHash(image))}/file`, {
                         method: 'DELETE',
                     });
                     const result = await response.json();
@@ -7262,7 +7539,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 lines.push('');
                 lines.push('Failures:');
                 failures.slice(0, 10).forEach(({ image, message }) => {
-                    lines.push(`- ${image.file_name || image.file_hash}: ${message}`);
+                    lines.push(`- ${image.file_name || getEditableFileHash(image)}: ${message}`);
                 });
                 if (failures.length > 10) {
                     lines.push(`- ...and ${failures.length - 10} more`);
@@ -8019,6 +8296,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     infiniteScrollToggle.checked = state.infiniteEnabled;
+    if (variantGroupingToggle) {
+        variantGroupingToggle.checked = state.groupVariantsEnabled;
+    }
     debugToggle.checked = state.debugVisible;
     autoRefreshToggle.checked = state.autoRefreshEnabled;
     if (themeToggle) {

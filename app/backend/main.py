@@ -3,6 +3,7 @@
 import argparse
 import base64
 import binascii
+import glob
 import hashlib
 import io
 import logging
@@ -154,6 +155,23 @@ class _PreparedCivitaiImport:
     raw_generation_data: Optional[dict[str, Any]] = None
     raw_infinite: Optional[dict[str, Any]] = None
     api_response_paths: dict[str, str] = field(default_factory=dict)  # Pre-saved response file paths
+    effective_image_url: Optional[str] = None
+    mismatch_static_temp_path: Optional[Path] = None
+    mismatch_source_url: Optional[str] = None
+    mismatch_mime_type: Optional[str] = None
+    mismatch_file_hash: Optional[str] = None
+
+
+@dataclass
+class _CivitaiDownloadResult:
+    temp_path: Path
+    selected_url: str
+    selected_category: str
+    selected_mime_type: Optional[str]
+    mismatch_static_temp_path: Optional[Path] = None
+    mismatch_source_url: Optional[str] = None
+    mismatch_mime_type: Optional[str] = None
+    mismatch_file_hash: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +223,7 @@ class _SearchCacheEntry:
 
 _SEARCH_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ATELIER_SEARCH_CACHE_TTL_SECONDS", "30")))
 _SEARCH_CACHE_MAX_ITEMS = max(16, int(os.getenv("ATELIER_SEARCH_CACHE_MAX_ITEMS", "512")))
+_JSON_CACHE_SCHEMA_VERSION = int(os.getenv("ATELIER_JSON_CACHE_SCHEMA_VERSION", "2"))
 _FILTER_OPTIONS_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ATELIER_FILTER_OPTIONS_CACHE_TTL_SECONDS", "120")))
 _search_cache_lock = threading.RLock()
 _search_cache_version = 0
@@ -370,7 +389,9 @@ def _current_search_cache_version() -> int:
 
 def _build_json_cache_headers(cache_key: str, *, max_age_seconds: int = 0) -> dict[str, str]:
     version = _current_search_cache_version()
-    digest = hashlib.sha1(f"{cache_key}|v={version}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(
+        f"{cache_key}|v={version}|schema={_JSON_CACHE_SCHEMA_VERSION}".encode("utf-8")
+    ).hexdigest()
     etag = f'W/"{digest}"'
     return {
         "ETag": etag,
@@ -601,6 +622,31 @@ def _ensure_civitai_hash_column() -> None:
 
         if "civitai_hash" not in existing:
             connection.execute(text("ALTER TABLE images ADD COLUMN civitai_hash VARCHAR"))
+
+
+def _ensure_image_variant_columns() -> None:
+    """Backfill image variant grouping columns for existing sqlite databases."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+
+        if "variant_group_key" not in existing:
+            connection.execute(text("ALTER TABLE images ADD COLUMN variant_group_key VARCHAR"))
+        if "variant_sort_index" not in existing:
+            connection.execute(text("ALTER TABLE images ADD COLUMN variant_sort_index INTEGER"))
+        if "variant_role" not in existing:
+            connection.execute(text("ALTER TABLE images ADD COLUMN variant_role VARCHAR"))
+
+        connection.execute(
+            text(
+                "UPDATE images "
+                "SET variant_group_key = file_hash "
+                "WHERE (variant_group_key IS NULL OR variant_group_key = '') "
+                "AND file_hash IS NOT NULL AND file_hash != ''"
+            )
+        )
 
 
 def _parse_civitai_image_id(value: str) -> int:
@@ -1079,6 +1125,146 @@ def _guess_suffix(mime_type: Optional[str]) -> str:
     return ".jpg"
 
 
+def _sha256_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _detect_downloaded_media(file_path: Path) -> tuple[str, Optional[str]]:
+    """Return (category, mime_type) inferred from file bytes and extension."""
+    try:
+        with open(file_path, "rb") as handle:
+            header = handle.read(64)
+    except OSError:
+        return "unknown", None
+
+    if header.startswith(b"\xff\xd8"):
+        return "image", "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image", "image/png"
+    if header.startswith(b"GIF8"):
+        return "image", "image/gif"
+    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image", "image/webp"
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        brand = header[8:12]
+        if brand == b"qt  ":
+            return "video", "video/quicktime"
+        return "video", "video/mp4"
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video", "video/webm"
+
+    suffix = file_path.suffix.lower()
+    if suffix in {".mp4", ".m4v", ".mov", ".mkv", ".webm"}:
+        return "video", None
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return "image", None
+    return "unknown", None
+
+
+def _build_civitai_video_candidate_urls(target: dict[str, Any]) -> list[str]:
+    """Build ordered candidate URLs for declared CivitAI video downloads."""
+    urls: list[str] = []
+
+    primary_url = str(target.get("image_url") or "").strip()
+    if primary_url:
+        urls.append(primary_url)
+
+    url_hash = target.get("civitai_url_hash")
+    file_name = str(target.get("original_filename") or "").strip()
+    mime_type = target.get("mime_type")
+
+    original_url = _build_civitai_media_url(
+        url_hash,
+        file_name,
+        mime_type,
+        use_video_transcode=False,
+    )
+    if original_url:
+        urls.append(original_url)
+
+    civitai_uuid = str(target.get("civitai_uuid") or "").strip() or _extract_civitai_uuid_from_url_hash(url_hash)
+    if civitai_uuid:
+        urls.append(f"https://image-b2.civitai.com/file/civitai-media-cache/{civitai_uuid}/original")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in urls:
+        normalized = candidate.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _download_civitai_image_with_validation(
+    *,
+    image_id: int,
+    target: dict[str, Any],
+) -> _CivitaiDownloadResult:
+    declared_mime = _normalize_mime_type(target.get("mime_type"))
+    declared_video = declared_mime.startswith("video/")
+    declared_file_size = target.get("declared_file_size")
+
+    candidate_urls = _build_civitai_video_candidate_urls(target) if declared_video else [str(target.get("image_url") or "").strip()]
+    candidate_urls = [url for url in candidate_urls if url]
+    if not candidate_urls:
+        raise HTTPException(status_code=502, detail=f"CivitAI image {image_id} did not include a downloadable URL.")
+
+    mismatch_temp_path: Optional[Path] = None
+    mismatch_source_url: Optional[str] = None
+    mismatch_mime_type: Optional[str] = None
+    mismatch_file_hash: Optional[str] = None
+
+    for image_url in candidate_urls:
+        temp_path = _download_civitai_image(
+            image_url=image_url,
+            image_id=image_id,
+            mime_type=target.get("mime_type"),
+            declared_file_size=declared_file_size,
+        )
+        media_category, media_mime = _detect_downloaded_media(temp_path)
+
+        if declared_video and media_category != "video":
+            if media_category == "image" and mismatch_temp_path is None:
+                mismatch_temp_path = temp_path
+                mismatch_source_url = image_url
+                mismatch_mime_type = media_mime
+                mismatch_file_hash = _sha256_file(temp_path)
+            else:
+                _cleanup_temp_file(temp_path)
+            continue
+
+        return _CivitaiDownloadResult(
+            temp_path=temp_path,
+            selected_url=image_url,
+            selected_category=media_category,
+            selected_mime_type=media_mime,
+            mismatch_static_temp_path=mismatch_temp_path,
+            mismatch_source_url=mismatch_source_url,
+            mismatch_mime_type=mismatch_mime_type,
+            mismatch_file_hash=mismatch_file_hash,
+        )
+
+    if mismatch_temp_path is not None:
+        _cleanup_temp_file(mismatch_temp_path)
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            f"CivitAI image {image_id} declares video media, but all candidate download URLs returned non-video content. "
+            "Ingestion aborted to avoid storing a static image as the primary asset."
+        ),
+    )
+
+
 def _download_civitai_image(
     image_url: str,
     image_id: int,
@@ -1186,8 +1372,17 @@ def _url_looks_like_video(url: Optional[str]) -> bool:
 def _get_civitai_source_variant_path(image_id: int, actual_path: Path, actual_mime_type: Optional[str]) -> Path:
     variant_root = Path(IMAGE_RESOURCES_PATH) / _CIVITAI_SOURCE_VARIANT_DIRNAME
     variant_root.mkdir(parents=True, exist_ok=True)
-    suffix = actual_path.suffix.lower() or _guess_suffix(actual_mime_type)
-    return variant_root / f"{image_id}{suffix}"
+    suffix = _guess_suffix(actual_mime_type) or actual_path.suffix.lower()
+    if not suffix:
+        suffix = ".bin"
+
+    try:
+        variant_hash = _sha256_file(actual_path)
+    except Exception:
+        variant_hash = ""
+
+    base_name = variant_hash or str(image_id)
+    return variant_root / f"{base_name}{suffix}"
 
 
 def _preserve_civitai_source_variant(
@@ -1219,13 +1414,17 @@ def _preserve_civitai_source_variant(
         variant_path = _get_civitai_source_variant_path(prepared.image_id, actual_path, actual_mime_type)
         if not variant_path.exists() or actual_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns:
             shutil.copy2(actual_path, variant_path)
+        variant_file_hash = _sha256_file(variant_path)
         variant_metadata = {
             "image_id": prepared.image_id,
+            "image_db_id": image_db_id,
             "declared_mimetype": prepared.mime_type,
             "actual_mimetype": image.mimetype,
             "declared_filename": prepared.original_filename,
             "library_file_path": str(image.file_path),
+            "library_file_hash": image.file_hash,
             "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
+            "variant_file_hash": variant_file_hash,
             "image_url": prepared.image_url,
             "source_url": prepared.source_url,
             "declared_file_size": prepared.declared_file_size,
@@ -1247,23 +1446,35 @@ def _preserve_civitai_source_variant(
                 preview_extension = _guess_suffix(preview_mime_type)
                 variant_root = Path(IMAGE_RESOURCES_PATH) / _CIVITAI_SOURCE_VARIANT_DIRNAME
                 variant_root.mkdir(parents=True, exist_ok=True)
-                variant_path = variant_root / f"{prepared.image_id}{preview_extension}"
-                with open(variant_path, "wb") as handle:
+                temp_preview_path = variant_root / f"temp_preview_{prepared.image_id}{preview_extension}"
+                with open(temp_preview_path, "wb") as handle:
                     for chunk in response.iter_content(chunk_size=1024 * 256):
                         if chunk:
                             handle.write(chunk)
+
+                variant_file_hash = _sha256_file(temp_preview_path)
+                variant_path = variant_root / f"{variant_file_hash}{preview_extension}"
+                if variant_path.exists():
+                    temp_preview_path.unlink(missing_ok=True)
+                else:
+                    temp_preview_path.rename(variant_path)
+
                 variant_metadata = {
                     "image_id": prepared.image_id,
+                    "image_db_id": image_db_id,
                     "declared_mimetype": prepared.mime_type,
-                    "actual_mimetype": image.mimetype,
+                    "actual_mimetype": preview_mime_type,
                     "declared_filename": prepared.original_filename,
                     "library_file_path": str(image.file_path),
+                    "library_file_hash": image.file_hash,
                     "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
+                    "variant_file_hash": variant_file_hash,
+                    "civitai_uuid": prepared.civitai_uuid,
                     "image_url": prepared.image_url,
                     "preview_image_url": prepared.preview_image_url,
                     "source_url": prepared.source_url,
                     "declared_file_size": prepared.declared_file_size,
-                    "actual_file_size": actual_path.stat().st_size,
+                    "actual_file_size": variant_path.stat().st_size,
                     "preview_file_size": variant_path.stat().st_size,
                     "reason": "civitai_video_preview_variant",
                     "saved_at": datetime.utcnow().isoformat() + "Z",
@@ -1288,6 +1499,67 @@ def _preserve_civitai_source_variant(
         image,
         additional_data={"civitai_source_variant": variant_metadata},
     )
+
+
+def _persist_mismatch_static_variant(
+    db: Session,
+    *,
+    prepared: _PreparedCivitaiImport,
+    image_db_id: int,
+) -> None:
+    mismatch_path = prepared.mismatch_static_temp_path
+    if mismatch_path is None or not mismatch_path.exists():
+        return
+
+    image = db.query(ImageModel).filter(ImageModel.id == image_db_id).first()
+    if image is None:
+        return
+
+    category, detected_mime = _detect_downloaded_media(mismatch_path)
+    if category != "image":
+        return
+
+    variant_path = _get_civitai_source_variant_path(prepared.image_id, mismatch_path, detected_mime)
+    if not variant_path.exists() or mismatch_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns:
+        shutil.copy2(mismatch_path, variant_path)
+
+    variant_file_hash = _sha256_file(variant_path)
+    variant_metadata = {
+        "image_id": prepared.image_id,
+        "image_db_id": image_db_id,
+        "declared_mimetype": prepared.mime_type,
+        "actual_mimetype": detected_mime or "image/unknown",
+        "declared_filename": prepared.original_filename,
+        "library_file_path": str(image.file_path),
+        "library_file_hash": image.file_hash,
+        "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
+        "variant_file_hash": variant_file_hash,
+        "image_url": prepared.image_url,
+        "selected_video_url": prepared.effective_image_url,
+        "mismatch_source_url": prepared.mismatch_source_url,
+        "source_url": prepared.source_url,
+        "declared_file_size": prepared.declared_file_size,
+        "actual_file_size": variant_path.stat().st_size,
+        "reason": "civitai_video_url_served_static_fallback",
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    metadata_path = variant_path.with_suffix(f"{variant_path.suffix}.json")
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(variant_metadata, handle, indent=2)
+
+    merged_json = dict(image.json_metadata) if isinstance(image.json_metadata, dict) else {}
+    merged_json["civitai_source_variant_static"] = variant_metadata
+    image.json_metadata = merged_json
+
+    actual_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+    if actual_path.exists():
+        processor = ImageProcessor(str(actual_path), db, IMAGE_LIBRARY_PATH)
+        processor.save_json_metadata(
+            actual_path,
+            image,
+            additional_data={"civitai_source_variant_static": variant_metadata},
+        )
 
 
 def _save_civitai_api_responses(
@@ -1479,6 +1751,7 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
         "original_filename": original_filename,
         "artist_name": author_name,
         "source_url": f"https://civitai.com/images/{image_id}",
+        "civitai_url_hash": url_hash,
         "civitai_uuid": civitai_uuid,
         "civitai_hash": perceptual_hash,
         "raw_basic_info": basic_info,
@@ -3678,6 +3951,22 @@ def _import_single_civitai_image(
     existing_by_source = _find_existing_image_by_source_url(db, source_url)
     if existing_by_source is not None:
         existing_status = (getattr(existing_by_source, "image_status", None) or "active").lower()
+        if existing_status == "placeholder":
+            return {
+                "image_id": image_id,
+                "image_db_id": existing_by_source.id,
+                "images_added": 0,
+                "images_skipped": 1,
+                "images_recovered": 0,
+                "json_files_created": 0,
+                "metadata_backfilled": False,
+                "skip_reason": "placeholder_source_url",
+                "existing_image_id": existing_by_source.id,
+                "existing_file_hash": existing_by_source.file_hash,
+                "existing_file_path": existing_by_source.file_path,
+                "existing_source_url": existing_by_source.source_url,
+                "error": None,
+            }
         if existing_status == "tombstoned":
             return {
                 "image_id": image_id,
@@ -3745,39 +4034,45 @@ def _import_single_civitai_image(
             recovered_existing = True
 
     temp_path = None
+    mismatch_static_temp_path: Optional[Path] = None
     try:
         target = _resolve_civitai_image_target(api, image_id)
-        temp_path = _download_civitai_image(
-            image_url=target["image_url"],
+        download_result = _download_civitai_image_with_validation(
             image_id=image_id,
-            mime_type=target["mime_type"],
+            target=target,
         )
+        temp_path = download_result.temp_path
+        mismatch_static_temp_path = download_result.mismatch_static_temp_path
 
-        ingest_result = ImageCollection(db).ingest_uploaded_file(
-            uploaded_file_path=temp_path,
+        prepared = _PreparedCivitaiImport(
+            image_id=image_id,
+            image_url=target["image_url"],
+            mime_type=target["mime_type"],
+            declared_file_size=target.get("declared_file_size"),
+            preview_image_url=target.get("preview_image_url"),
             original_filename=target["original_filename"],
             artist_name=target["artist_name"],
             source_url=target["source_url"],
-            license_id=None,
+            temp_path=temp_path,
+            civitai_uuid=target.get("civitai_uuid"),
+            civitai_hash=target.get("civitai_hash"),
+            raw_basic_info=target.get("raw_basic_info"),
+            raw_generation_data=target.get("raw_generation_data"),
+            api_response_paths=target.get("api_response_paths", {}),
+            effective_image_url=download_result.selected_url,
+            mismatch_static_temp_path=download_result.mismatch_static_temp_path,
+            mismatch_source_url=download_result.mismatch_source_url,
+            mismatch_mime_type=download_result.mismatch_mime_type,
+            mismatch_file_hash=download_result.mismatch_file_hash,
         )
-        return {
-            "image_id": image_id,
-            "image_db_id": ingest_result.get("image_id"),
-            "images_added": int(ingest_result.get("images_added", 0)),
-            "images_skipped": int(ingest_result.get("images_skipped", 0)),
-            "images_recovered": 1 if recovered_existing else 0,
-            "json_files_created": int(ingest_result.get("json_files_created", 0)),
-            "metadata_backfilled": False,
-            "skip_reason": ingest_result.get("skip_reason"),
-            "existing_image_id": ingest_result.get("existing_image_id"),
-            "existing_file_hash": ingest_result.get("existing_file_hash"),
-            "existing_file_path": ingest_result.get("existing_file_path"),
-            "existing_source_url": ingest_result.get("existing_source_url"),
-            "error": None,
-        }
+        return _ingest_prepared_civitai_import(
+            db,
+            prepared=prepared,
+            recovered_existing=recovered_existing,
+        )
     except _CivitaiImageUnavailableError as e:
         if e.status_code == 404:
-            return _build_civitai_unavailable_result(image_id, e, api=api)
+            return _build_civitai_unavailable_result(image_id, e, api=api, db=db)
         return {
             "image_id": image_id,
             "image_db_id": None,
@@ -3795,7 +4090,7 @@ def _import_single_civitai_image(
         }
     except HTTPException as e:
         if e.status_code == 404:
-            return _build_civitai_unavailable_result(image_id, e, api=api)
+            return _build_civitai_unavailable_result(image_id, e, api=api, db=db)
         return {
             "image_id": image_id,
             "image_db_id": None,
@@ -3813,7 +4108,7 @@ def _import_single_civitai_image(
         }
     except CivitaiRequestError as e:
         if e.status_code == 404:
-            return _build_civitai_unavailable_result(image_id, e, api=api)
+            return _build_civitai_unavailable_result(image_id, e, api=api, db=db)
         return {
             "image_id": image_id,
             "image_db_id": None,
@@ -3888,8 +4183,8 @@ def _find_existing_image_by_source_url(db: Session, source_url: str) -> Optional
         .all()
     )
     if direct_matches:
-        # Priority: active > tombstoned > deleted
-        for status in ("active", "tombstoned", "deleted"):
+        # Priority: active > placeholder > tombstoned > deleted
+        for status in ("active", "placeholder", "tombstoned", "deleted"):
             for candidate in direct_matches:
                 candidate_status = (candidate.image_status or "active").lower()
                 if candidate_status == status:
@@ -3918,7 +4213,7 @@ def _find_existing_image_by_source_url(db: Session, source_url: str) -> Optional
             continue
 
     if fallback_matches:
-        for status in ("active", "tombstoned", "deleted"):
+        for status in ("active", "placeholder", "tombstoned", "deleted"):
             for candidate in fallback_matches:
                 candidate_status = (candidate.image_status or "active").lower()
                 if candidate_status == status:
@@ -4877,6 +5172,8 @@ def _build_civitai_unavailable_result(
     exc: Exception,
     *,
     api: Optional[CivitaiAPI] = None,
+    db: Optional[Session] = None,
+    attach_collection_id: Optional[int] = None,
     collection_id: Optional[int] = None,
     collection_name: Optional[str] = None,
     collection_item: Optional[dict[str, Any]] = None,
@@ -4894,7 +5191,73 @@ def _build_civitai_unavailable_result(
         "remote_not_found",
         skip_message=_format_civitai_unavailable_skip_message(detail),
     )
+    placeholder_image_id: Optional[int] = None
+    placeholder_created = False
+    if db is not None:
+        source_url = str(detail.get("source_url") or _build_civitai_image_source_url(image_id)).strip()
+        existing = _find_existing_image_by_source_url(db, source_url)
+        existing_status = (getattr(existing, "image_status", None) or "active").lower() if existing is not None else ""
+
+        if existing is None or existing_status == "placeholder":
+            placeholder_hash = hashlib.sha256(f"civitai-placeholder:{source_url}".encode("utf-8")).hexdigest()
+            placeholder_path = f"placeholders/{placeholder_hash[:2]}/{placeholder_hash}.placeholder"
+            placeholder_reason = str(detail.get("classification") or "civitai_remote_unavailable").strip() or "civitai_remote_unavailable"
+
+            civitai_unavailable_payload = {
+                "unavailable_detail": detail,
+                "placeholder": {
+                    "kind": "civitai_remote_unavailable",
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            }
+
+            if existing is None:
+                placeholder = ImageModel(
+                    file_path=placeholder_path,
+                    file_name=f"civitai-unavailable-{image_id}.placeholder",
+                    file_hash=placeholder_hash,
+                    file_size=0,
+                    width=None,
+                    height=None,
+                    mimetype="application/x-civitai-placeholder",
+                    date_created=datetime.utcnow(),
+                    date_modified=datetime.utcnow(),
+                    image_status="placeholder",
+                    status_reason=placeholder_reason,
+                    replaced_by_image_id=None,
+                    source_url=source_url,
+                    source_site="civitai",
+                    exif_data={},
+                    json_metadata={"civitai": civitai_unavailable_payload},
+                )
+                db.add(placeholder)
+                db.flush()
+                placeholder_image_id = int(placeholder.id)
+                placeholder_created = True
+            else:
+                merged_json = dict(existing.json_metadata) if isinstance(existing.json_metadata, dict) else {}
+                civitai_json = merged_json.get("civitai") if isinstance(merged_json.get("civitai"), dict) else {}
+                civitai_json.update(civitai_unavailable_payload)
+                merged_json["civitai"] = civitai_json
+
+                existing.image_status = "placeholder"
+                existing.status_reason = placeholder_reason
+                existing.replaced_by_image_id = None
+                existing.source_url = source_url
+                existing.source_site = "civitai"
+                existing.mimetype = existing.mimetype or "application/x-civitai-placeholder"
+                existing.json_metadata = merged_json
+                existing.date_modified = datetime.utcnow()
+                placeholder_image_id = int(existing.id)
+
+            if attach_collection_id is not None and placeholder_image_id is not None:
+                _ensure_image_in_collection(db, placeholder_image_id, attach_collection_id)
+
+            _commit_with_lock_retry(db, context=f"Unavailable placeholder commit for CivitAI image {image_id}")
+
     result["unavailable_detail"] = detail
+    result["placeholder_image_id"] = placeholder_image_id
+    result["placeholder_created"] = placeholder_created
     _log_civitai_unavailable_item(detail)
     return result
 
@@ -5095,6 +5458,26 @@ def _handle_existing_civitai_image(
         return None, False
 
     existing_status = (getattr(existing_by_source, "image_status", None) or "active").lower()
+    if existing_status == "placeholder":
+        if attach_collection_id is not None:
+            _ensure_image_in_collection(db, existing_by_source.id, attach_collection_id)
+        return {
+            "image_id": image_id,
+            "image_db_id": existing_by_source.id,
+            "images_added": 0,
+            "images_skipped": 1,
+            "images_recovered": 0,
+            "json_files_created": 0,
+            "metadata_backfilled": False,
+            "skip_reason": "placeholder_source_url",
+            "existing_image_id": existing_by_source.id,
+            "existing_file_hash": existing_by_source.file_hash,
+            "existing_file_path": existing_by_source.file_path,
+            "existing_source_url": existing_by_source.source_url,
+            "error": None,
+            "cancelled": False,
+        }, False
+
     if existing_status == "tombstoned":
         return {
             "image_id": image_id,
@@ -5179,12 +5562,11 @@ def _prepare_civitai_download(
     task_context.mark_item(item_key, "fetching_metadata", "Fetching CivitAI metadata")
     target = _resolve_civitai_image_target(api, image_id, strict=True)
     task_context.mark_item(item_key, "downloading", "Downloading media")
-    temp_path = _download_civitai_image(
-        image_url=target["image_url"],
+    download_result = _download_civitai_image_with_validation(
         image_id=image_id,
-        mime_type=target["mime_type"],
-        declared_file_size=target.get("declared_file_size"),
+        target=target,
     )
+    temp_path = download_result.temp_path
     
     # Extract collection item (get.Infinite metadata) if available
     collection_item = _collection_context_item(collection_context, image_id)
@@ -5213,6 +5595,11 @@ def _prepare_civitai_download(
         raw_generation_data=target.get("raw_generation_data"),
         raw_infinite=collection_item if isinstance(collection_item, dict) else None,
         api_response_paths={**target.get("api_response_paths", {}), **collection_paths},
+        effective_image_url=download_result.selected_url,
+        mismatch_static_temp_path=download_result.mismatch_static_temp_path,
+        mismatch_source_url=download_result.mismatch_source_url,
+        mismatch_mime_type=download_result.mismatch_mime_type,
+        mismatch_file_hash=download_result.mismatch_file_hash,
     )
 
 
@@ -5287,6 +5674,11 @@ def _ingest_prepared_civitai_import(
         if attach_collection_id is not None:
             _ensure_image_in_collection(db, image_db_id, attach_collection_id)
         _preserve_civitai_source_variant(
+            db,
+            prepared=prepared,
+            image_db_id=image_db_id,
+        )
+        _persist_mismatch_static_variant(
             db,
             prepared=prepared,
             image_db_id=image_db_id,
@@ -5438,7 +5830,803 @@ def _normalize_merged_image_payload(
     ):
         normalized["file_name"] = db_file_name
 
+    # Sidecar payloads can contain null values that should not override DB truth.
+    for key in ("civitai_uuid", "civitai_hash"):
+        if normalized.get(key) in (None, "") and db_payload.get(key):
+            normalized[key] = db_payload.get(key)
+
+    if isinstance(normalized.get("civitai"), dict) and isinstance(db_payload.get("civitai"), dict):
+        merged_civitai = dict(normalized.get("civitai") or {})
+        db_civitai = dict(db_payload.get("civitai") or {})
+        for key in ("uuid", "hash"):
+            if merged_civitai.get(key) in (None, "") and db_civitai.get(key):
+                merged_civitai[key] = db_civitai.get(key)
+        normalized["civitai"] = merged_civitai
+
     return normalized
+
+
+def _variant_group_key_for_image(image: ImageModel, merged_payload: dict[str, Any]) -> str:
+    explicit_key = str(
+        getattr(image, "variant_group_key", None)
+        or merged_payload.get("variant_group_key")
+        or ""
+    ).strip()
+    if explicit_key:
+        return explicit_key
+    return str(image.file_hash or image.id or image.file_path or "").strip()
+
+
+def _variant_sort_index_for_image(image: ImageModel, fallback: int) -> int:
+    try:
+        value = getattr(image, "variant_sort_index", None)
+        if value is None:
+            return int(fallback)
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def _encode_relative_static_path(path_value: str) -> str:
+    return "/".join(quote(part, safe="") for part in str(path_value or "").split("/"))
+
+
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _get_nested_value(payload: Any, path: tuple[str, ...]) -> Any:
+    current = payload
+    for part in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _first_non_empty_string(payloads: list[Any], paths: list[tuple[str, ...]]) -> str:
+    for payload in payloads:
+        for path in paths:
+            value = _get_nested_value(payload, path)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _first_positive_int(payloads: list[Any], paths: list[tuple[str, ...]]) -> Optional[int]:
+    for payload in payloads:
+        for path in paths:
+            parsed = _coerce_positive_int(_get_nested_value(payload, path))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _extract_civitai_variant_payloads(merged_payload: dict[str, Any], *, include_merged: bool = True) -> list[Any]:
+    payloads: list[Any] = [merged_payload] if include_merged else []
+    json_metadata = merged_payload.get("json_metadata")
+    if isinstance(json_metadata, dict):
+        payloads.append(json_metadata)
+        civitai_meta = json_metadata.get("civitai")
+        civitai_data_meta = json_metadata.get("civitai_data")
+        if isinstance(civitai_meta, dict):
+            payloads.append(civitai_meta)
+            if isinstance(civitai_meta.get("image"), dict):
+                payloads.append(civitai_meta.get("image"))
+            if isinstance(civitai_meta.get("meta"), dict):
+                payloads.append(civitai_meta.get("meta"))
+        if isinstance(civitai_data_meta, dict):
+            payloads.append(civitai_data_meta)
+            if isinstance(civitai_data_meta.get("image"), dict):
+                payloads.append(civitai_data_meta.get("image"))
+            if isinstance(civitai_data_meta.get("meta"), dict):
+                payloads.append(civitai_data_meta.get("meta"))
+
+    for key in ("civitai", "civitai_data"):
+        candidate = merged_payload.get(key)
+        if isinstance(candidate, dict):
+            payloads.append(candidate)
+            if isinstance(candidate.get("image"), dict):
+                payloads.append(candidate.get("image"))
+            if isinstance(candidate.get("meta"), dict):
+                payloads.append(candidate.get("meta"))
+    return payloads
+
+
+def _extract_civitai_media_name(payloads: list[Any], *, image_id: int, media_url: str, mime_type: Optional[str]) -> str:
+    preferred_name = _first_non_empty_string(
+        payloads,
+        [
+            ("name",),
+            ("file_name",),
+            ("filename",),
+            ("original_filename",),
+            ("meta", "name"),
+            ("image", "name"),
+        ],
+    )
+    return _build_civitai_original_filename(image_id, preferred_name, media_url, mime_type)
+
+
+def _extract_civitai_media_mime_type(payloads: list[Any]) -> str:
+    return _normalize_mime_type(
+        _first_non_empty_string(
+            payloads,
+            [
+                ("mimeType",),
+                ("mime_type",),
+                ("meta", "mimeType"),
+                ("image", "mimeType"),
+            ],
+        )
+    )
+
+
+def _extract_civitai_media_size(payloads: list[Any]) -> Optional[int]:
+    return _first_positive_int(
+        payloads,
+        [
+            ("size",),
+            ("fileSize",),
+            ("meta", "size"),
+            ("metadata", "size"),
+            ("image", "size"),
+        ],
+    )
+
+
+def _extract_civitai_media_dimensions(payloads: list[Any], fallback_width: Any, fallback_height: Any) -> tuple[Optional[int], Optional[int]]:
+    width = _first_positive_int(payloads, [("width",), ("meta", "width"), ("image", "width")])
+    height = _first_positive_int(payloads, [("height",), ("meta", "height"), ("image", "height")])
+    if width is None:
+        width = _coerce_positive_int(fallback_width)
+    if height is None:
+        height = _coerce_positive_int(fallback_height)
+    return width, height
+
+
+def _extract_civitai_media_url_from_payload(merged_payload: dict[str, Any]) -> str:
+    payloads = _extract_civitai_variant_payloads(merged_payload)
+    return _first_non_empty_string(
+        payloads,
+        [
+            ("url",),
+            ("media_url",),
+            ("image_url",),
+        ],
+    )
+
+
+def _extract_civitai_playable_video_url(merged_payload: dict[str, Any]) -> str:
+    media_url = _extract_civitai_media_url_from_payload(merged_payload)
+    if not _url_looks_like_video(media_url):
+        return ""
+
+    media_uuid = _extract_civitai_uuid_from_url_hash(media_url)
+    if not media_uuid:
+        return media_url
+
+    return f"https://image-b2.civitai.com/file/civitai-media-cache/{media_uuid}/original"
+
+
+def _get_asset_category_from_mime(mime_type: Optional[str]) -> str:
+    """Determine if asset should be 'video' or 'image' based on MIME type. Returns 'video', 'image', or 'unknown'."""
+    if not mime_type:
+        return "unknown"
+    normalized = str(mime_type).split(";", 1)[0].strip().lower()
+    if normalized.startswith("video/"):
+        return "video"
+    if normalized.startswith("image/"):
+        return "image"
+    return "unknown"
+
+
+def _get_asset_category_from_path(file_path: Optional[str]) -> str:
+    """Determine if asset should be 'video' or 'image' based on file extension."""
+    if not file_path:
+        return "unknown"
+    suffix = Path(str(file_path)).suffix.lower()
+    if suffix in {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".flv", ".wmv"}:
+        return "video"
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}:
+        return "image"
+    return "unknown"
+
+
+def _get_local_asset_category(local_file_path: Optional[str], db_mime_type: Optional[str]) -> str:
+    """
+    Determine asset category (video/image/unknown) using MIME type first, then extension.
+    
+    Returns 'video', 'image', or 'unknown'.
+    """
+    category_from_mime = _get_asset_category_from_mime(db_mime_type)
+    if category_from_mime != "unknown":
+        return category_from_mime
+    return _get_asset_category_from_path(local_file_path)
+
+
+def _get_civitai_asset_category(civitai_url: Optional[str], civitai_mime_type: Optional[str]) -> str:
+    """
+    Determine CivitAI asset category (video/image/unknown) from URL or MIME type.
+    
+    Returns 'video', 'image', or 'unknown'.
+    """
+    category_from_mime = _get_asset_category_from_mime(civitai_mime_type)
+    if category_from_mime != "unknown":
+        return category_from_mime
+    return _get_asset_category_from_path(civitai_url)
+
+
+def _validate_local_file_health(file_path_obj: Path) -> tuple[bool, Optional[str]]:
+    """
+    Validate local file exists and is not corrupted.
+    
+    Returns: (is_healthy, error_message)
+    - is_healthy: True if file is valid and readable
+    - error_message: None if healthy, otherwise description of issue
+    """
+    if not file_path_obj.exists():
+        return False, f"File does not exist: {file_path_obj}"
+    
+    try:
+        file_size = file_path_obj.stat().st_size
+        if file_size == 0:
+            return False, "File is empty (0 bytes)"
+        if file_size < 100:  # All valid images/videos are > 100 bytes
+            return False, "File too small to be valid media"
+    except OSError as e:
+        return False, f"Cannot stat file: {e}"
+    
+    # Check file magic bytes for known formats
+    suffix = file_path_obj.suffix.lower()
+    try:
+        with open(file_path_obj, "rb") as f:
+            header = f.read(12)
+            
+            if suffix == ".png":
+                # PNG files start with specific magic bytes: 89 50 4E 47 0D 0A 1A 0A
+                if header[:8] != b'\x89PNG\r\n\x1a\n':
+                    return False, "PNG file has invalid magic bytes (corrupted)"
+            
+            elif suffix in {".jpg", ".jpeg"}:
+                # JPEG files start with FFD8
+                if header[:2] != b'\xff\xd8':
+                    return False, "JPEG file has invalid magic bytes (corrupted)"
+            
+            elif suffix == ".webp":
+                # WEBP files start with RIFF...WEBP
+                if not header.startswith(b'RIFF') or header[8:12] != b'WEBP':
+                    return False, "WEBP file has invalid structure (corrupted)"
+            
+            elif suffix == ".mp4":
+                # MP4 is more complex - just check it's not empty
+                if len(header) == 0:
+                    return False, "MP4 file appears empty"
+    
+    except IOError as e:
+        return False, f"Cannot read file: {e}"
+    
+    return True, None
+
+
+def _build_local_image_variant(image: ImageModel, merged_payload: dict[str, Any], *, group_key: str) -> dict[str, Any]:
+    variant_role = str(getattr(image, "variant_role", None) or merged_payload.get("variant_role") or "library").strip() or "library"
+    variant = {
+        "variant_key": f"variant:local:{group_key}:{image.file_hash}",
+        "variant_label": "Library Asset",
+        "variant_role": variant_role,
+        "variant_sort_index": _variant_sort_index_for_image(image, 100),
+        "file_name": merged_payload.get("file_name"),
+        "file_hash": image.file_hash,
+        "file_size": merged_payload.get("file_size"),
+        "width": merged_payload.get("width"),
+        "height": merged_payload.get("height"),
+        "mimetype": merged_payload.get("mimetype"),
+        "file_path": merged_payload.get("file_path"),
+        "display_url": None,
+        "poster_url": merged_payload.get("video_poster_url") or merged_payload.get("poster_url"),
+        "video_poster_url": merged_payload.get("video_poster_url"),
+        "video_thumbnail_url": merged_payload.get("video_thumbnail_url"),
+        "preview_image_url": merged_payload.get("preview_image_url") or merged_payload.get("video_poster_url"),
+        "source_url": merged_payload.get("source_url"),
+        "civitai_uuid": merged_payload.get("civitai_uuid") or image.civitai_uuid,
+        "civitai_hash": merged_payload.get("civitai_hash") or image.civitai_hash,
+        "resource_origin": "library",
+        "resource_status": "available",
+        "is_remote": False,
+        "is_local": True,
+        "editable_file_hash": image.file_hash,
+    }
+    return variant
+
+
+def _build_civitai_video_variant(
+    image: ImageModel,
+    merged_payload: dict[str, Any],
+    *,
+    group_key: str,
+    poster_url: Optional[str],
+    local_asset_category: str,
+) -> Optional[dict[str, Any]]:
+    """
+    Build a CivitAI remote video variant.
+    
+    Only creates a variant if:
+    1. CivitAI payload points to a video URL
+    2. Local asset is NOT already a video (to avoid duplicates)
+       - If local is image and remote is video, we have a genuine multi-variant resource
+       - If local is video and remote points to video, it's the same asset via different access path
+    
+    Args:
+        image: ImageModel record
+        merged_payload: Combined DB + sidecar metadata
+        group_key: Variant grouping key
+        poster_url: Optional poster/thumbnail URL from local asset
+        local_asset_category: Category of local asset ('video', 'image', 'unknown')
+    
+    Returns: Dict representing variant, or None if variant should not be created
+    """
+    playable_url = _extract_civitai_playable_video_url(merged_payload)
+    if not playable_url:
+        return None
+    
+    # Skip remote video variant if local asset is already a video
+    # This prevents duplicate variants of the same asset
+    if local_asset_category == "video":
+        return None
+
+    payloads = _extract_civitai_variant_payloads(merged_payload, include_merged=False)
+    extracted_mime_type = _extract_civitai_media_mime_type(payloads)
+    guessed_mime_type = "video/mp4"
+    lower_url = playable_url.lower()
+    if lower_url.endswith(".webm"):
+        guessed_mime_type = "video/webm"
+    elif lower_url.endswith(".mov"):
+        guessed_mime_type = "video/quicktime"
+    mime_type = extracted_mime_type if extracted_mime_type.startswith("video/") else guessed_mime_type
+    image_id = extract_civitai_image_id(str(image.source_url or "")) or int(image.id)
+    file_name = _extract_civitai_media_name(payloads, image_id=image_id, media_url=playable_url, mime_type=mime_type)
+    width, height = _extract_civitai_media_dimensions(payloads, None, None)
+    file_size = _extract_civitai_media_size(payloads)
+    media_uuid = _extract_civitai_uuid_from_url_hash(playable_url)
+    variant_suffix = media_uuid or str(image_id)
+
+    return {
+        "variant_key": f"variant:civitai-video:{group_key}:{variant_suffix}",
+        "variant_label": "Source Video",
+        "variant_role": "source_video",
+        "variant_sort_index": 0,
+        "file_name": file_name,
+        "file_hash": None,
+        "file_size": file_size,
+        "width": width,
+        "height": height,
+        "mimetype": mime_type,
+        "file_path": None,
+        "display_url": playable_url,
+        "poster_url": poster_url,
+        "video_poster_url": poster_url,
+        "video_thumbnail_url": None,
+        "preview_image_url": poster_url,
+        "source_url": merged_payload.get("source_url"),
+        "resource_origin": "civitai",
+        "resource_status": "remote",
+        "is_remote": True,
+        "is_local": False,
+        "editable_file_hash": image.file_hash,
+        "civitai_uuid": merged_payload.get("civitai_uuid") or image.civitai_uuid or media_uuid,
+        "civitai_hash": merged_payload.get("civitai_hash") or image.civitai_hash,
+    }
+
+
+
+def _build_static_resource_variant(
+    image: ImageModel,
+    variant_metadata: dict[str, Any],
+    *,
+    group_key: str,
+    variant_key_suffix: str,
+    variant_label: str,
+    variant_role: str,
+    variant_sort_index: int,
+) -> Optional[dict[str, Any]]:
+    relative_path = str(variant_metadata.get("variant_file_path") or "").strip()
+    if not relative_path:
+        return None
+
+    file_name = Path(relative_path).name
+    resource_path = Path(IMAGE_RESOURCES_PATH) / relative_path
+    resources_root = Path(IMAGE_RESOURCES_PATH)
+    metadata_mime = _normalize_mime_type(variant_metadata.get("actual_mimetype") or variant_metadata.get("declared_mimetype"))
+    metadata_size = _coerce_positive_int(variant_metadata.get("actual_file_size"))
+    metadata_hash = str(variant_metadata.get("variant_file_hash") or "").strip() or None
+
+    # Prefer hash-named files when available so stale legacy metadata paths
+    # still resolve to the migrated canonical resource.
+    if metadata_hash:
+        normalized_hash = metadata_hash.lower()
+        suffix_candidates: list[str] = []
+        legacy_suffix = Path(relative_path).suffix.lower()
+        if legacy_suffix:
+            suffix_candidates.append(legacy_suffix)
+        guessed_suffix = _guess_suffix(metadata_mime)
+        if guessed_suffix and guessed_suffix not in suffix_candidates:
+            suffix_candidates.append(guessed_suffix)
+
+        for suffix in suffix_candidates:
+            candidate = resources_root / "civitai_source_variants" / f"{normalized_hash}{suffix}"
+            if candidate.exists() and candidate.is_file():
+                resource_path = candidate
+                relative_path = str(resource_path.relative_to(resources_root))
+                file_name = resource_path.name
+                break
+        else:
+            glob_pattern = str(resources_root / "civitai_source_variants" / f"{normalized_hash}.*")
+            for candidate_path in glob.glob(glob_pattern):
+                candidate = Path(candidate_path)
+                if candidate.suffix.lower() == ".json":
+                    continue
+                if candidate.exists() and candidate.is_file():
+                    resource_path = candidate
+                    relative_path = str(resource_path.relative_to(resources_root))
+                    file_name = resource_path.name
+                    break
+
+    mimetype = metadata_mime
+    file_size = metadata_size
+    file_hash = metadata_hash
+    if resource_path.exists() and resource_path.is_file():
+        _, detected_mime = _detect_downloaded_media(resource_path)
+        if detected_mime:
+            mimetype = detected_mime
+        file_size = int(resource_path.stat().st_size)
+        file_hash = _sha256_file(resource_path)
+
+    if mimetype.startswith("image/"):
+        current_suffix = Path(file_name).suffix.lower()
+        if current_suffix in _VIDEO_FILE_SUFFIXES:
+            canonical_suffix = _guess_suffix(mimetype)
+            canonical_path = resource_path.with_suffix(canonical_suffix)
+            if canonical_path.exists() and canonical_path.is_file():
+                resource_path = canonical_path
+                relative_path = str(resource_path.relative_to(resources_root))
+                file_size = int(resource_path.stat().st_size)
+                file_hash = _sha256_file(resource_path)
+                file_name = resource_path.name
+            else:
+                file_name = f"{Path(file_name).stem}{canonical_suffix}"
+
+    display_url = f"/image_resources/{_encode_relative_static_path(relative_path)}"
+
+    return {
+        "variant_key": f"variant:{variant_key_suffix}:{group_key}:{file_name}",
+        "variant_label": variant_label,
+        "variant_role": variant_role,
+        "variant_sort_index": variant_sort_index,
+        "file_name": file_name,
+        "file_hash": file_hash,
+        "file_size": file_size,
+        "width": None,
+        "height": None,
+        "mimetype": mimetype or None,
+        "file_path": relative_path,
+        "display_url": display_url,
+        "poster_url": display_url,
+        "video_poster_url": None,
+        "video_thumbnail_url": None,
+        "preview_image_url": display_url,
+        "source_url": str(variant_metadata.get("source_url") or image.source_url or "").strip() or None,
+        "resource_origin": "image_resources",
+        "resource_status": "archived",
+        "is_remote": False,
+        "is_local": False,
+        "editable_file_hash": image.file_hash,
+        "civitai_uuid": variant_metadata.get("civitai_uuid") or image.civitai_uuid,
+        "civitai_hash": image.civitai_hash,
+    }
+
+
+def _dedupe_image_variants(variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen_keys: set[str] = set()
+    seen_display_urls: set[str] = set()
+    seen_archived_hashes: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for variant in sorted(variants, key=lambda item: (int(item.get("variant_sort_index") or 0), str(item.get("variant_key") or ""))):
+        variant_key = str(variant.get("variant_key") or "").strip()
+        display_url = str(variant.get("display_url") or "").strip()
+        variant_hash = str(variant.get("file_hash") or "").strip().lower()
+        is_archived = str(variant.get("resource_origin") or "") == "image_resources"
+        if variant_key and variant_key in seen_keys:
+            continue
+        if display_url and display_url in seen_display_urls:
+            continue
+        if is_archived and variant_hash and variant_hash in seen_archived_hashes:
+            continue
+        if variant_key:
+            seen_keys.add(variant_key)
+        if display_url:
+            seen_display_urls.add(display_url)
+        if is_archived and variant_hash:
+            seen_archived_hashes.add(variant_hash)
+        deduped.append(variant)
+    return deduped
+
+
+def _build_image_variants(image: ImageModel, merged_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    group_key = _variant_group_key_for_image(image, merged_payload)
+    local_variant = _build_local_image_variant(image, merged_payload, group_key=group_key)
+    variants: list[dict[str, Any]] = []
+
+    # Determine local asset category to help decide which variants to create
+    local_asset_category = _get_local_asset_category(
+        merged_payload.get("file_path"),
+        merged_payload.get("mimetype")
+    )
+    
+    # Validate local file health (if it should exist)
+    local_file_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+    if local_file_path.exists():
+        is_healthy, health_issue = _validate_local_file_health(local_file_path)
+        if not is_healthy:
+            # Log issue but continue - we'll use whatever metadata we have
+            pass  # Health issues are tracked at display time, not variant build time
+
+    # Only create CivitAI remote video variant if local asset is NOT already a video
+    # This prevents duplicates when downloading videos directly from CivitAI
+    remote_video_variant = _build_civitai_video_variant(
+        image,
+        merged_payload,
+        group_key=group_key,
+        poster_url=local_variant.get("poster_url") or local_variant.get("preview_image_url"),
+        local_asset_category=local_asset_category,
+    )
+    if remote_video_variant is not None:
+        variants.append(remote_video_variant)
+
+    variants.append(local_variant)
+
+    json_metadata = merged_payload.get("json_metadata")
+    static_variant_meta: Optional[dict[str, Any]] = None
+    archived_variant_meta: Optional[dict[str, Any]] = None
+
+    if isinstance(json_metadata, dict):
+        candidate_static = json_metadata.get("civitai_source_variant_static")
+        if isinstance(candidate_static, dict):
+            static_variant_meta = candidate_static
+        candidate_archived = json_metadata.get("civitai_source_variant")
+        if isinstance(candidate_archived, dict):
+            archived_variant_meta = candidate_archived
+
+    if static_variant_meta is None and isinstance(merged_payload.get("civitai_source_variant_static"), dict):
+        static_variant_meta = merged_payload.get("civitai_source_variant_static")
+    if archived_variant_meta is None and isinstance(merged_payload.get("civitai_source_variant"), dict):
+        archived_variant_meta = merged_payload.get("civitai_source_variant")
+
+    if isinstance(static_variant_meta, dict):
+        static_variant = _build_static_resource_variant(
+            image,
+            static_variant_meta,
+            group_key=group_key,
+            variant_key_suffix="static-source",
+            variant_label="Archived Static Source",
+            variant_role="static_source",
+            variant_sort_index=200,
+        )
+        if static_variant is not None:
+            variants.append(static_variant)
+
+    if isinstance(archived_variant_meta, dict):
+        archived_variant = _build_static_resource_variant(
+            image,
+            archived_variant_meta,
+            group_key=group_key,
+            variant_key_suffix="archived-source",
+            variant_label="Archived Source Variant",
+            variant_role="archived_source",
+            variant_sort_index=210,
+        )
+        if archived_variant is not None:
+            variants.append(archived_variant)
+
+    return _dedupe_image_variants(variants)
+
+
+
+def _merge_display_item_variant(base_payload: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
+    display_item = dict(base_payload)
+    for field_name in (
+        "file_name",
+        "file_hash",
+        "file_size",
+        "width",
+        "height",
+        "mimetype",
+        "file_path",
+        "source_url",
+        "video_poster_url",
+        "video_thumbnail_url",
+        "preview_image_url",
+        "civitai_uuid",
+        "civitai_hash",
+    ):
+        if field_name in variant:
+            display_item[field_name] = variant.get(field_name)
+
+    display_item["display_url"] = variant.get("display_url")
+    display_item["poster_url"] = variant.get("poster_url")
+    display_item["variant_key"] = variant.get("variant_key")
+    display_item["variant_label"] = variant.get("variant_label")
+    display_item["variant_role"] = variant.get("variant_role")
+    display_item["variant_sort_index"] = variant.get("variant_sort_index")
+    display_item["resource_origin"] = variant.get("resource_origin")
+    display_item["resource_status"] = variant.get("resource_status")
+    display_item["is_remote_resource"] = bool(variant.get("is_remote"))
+    display_item["is_local_resource"] = bool(variant.get("is_local"))
+    display_item["editable_file_hash"] = variant.get("editable_file_hash") or base_payload.get("editable_file_hash")
+    return display_item
+
+
+def _build_grouped_display_item(image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]) -> dict[str, Any]:
+    group_key = _variant_group_key_for_image(image, merged_payload)
+    default_variant = variants[0] if variants else {}
+    base_payload = dict(merged_payload)
+    base_payload["editable_file_hash"] = image.file_hash
+    base_payload["group_primary_file_hash"] = image.file_hash
+    base_payload["base_image_id"] = image.id
+    base_payload["variant_group_key"] = group_key
+    base_payload["variant_count"] = len(variants)
+    base_payload["variants"] = variants
+    base_payload["default_variant_key"] = default_variant.get("variant_key")
+    base_payload["active_variant_key"] = default_variant.get("variant_key")
+    base_payload["gallery_item_key"] = f"group:{group_key}"
+    base_payload["display_mode"] = "grouped"
+    base_payload["variant_index"] = 0
+    return _merge_display_item_variant(base_payload, default_variant)
+
+
+def _build_flat_variant_display_items(image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    group_key = _variant_group_key_for_image(image, merged_payload)
+    flat_items: list[dict[str, Any]] = []
+    for variant_index, variant in enumerate(variants):
+        base_payload = dict(merged_payload)
+        base_payload["editable_file_hash"] = image.file_hash
+        base_payload["group_primary_file_hash"] = image.file_hash
+        base_payload["base_image_id"] = image.id
+        base_payload["variant_group_key"] = group_key
+        base_payload["variant_count"] = len(variants)
+        base_payload["variants"] = [variant]
+        base_payload["default_variant_key"] = variant.get("variant_key")
+        base_payload["active_variant_key"] = variant.get("variant_key")
+        base_payload["gallery_item_key"] = variant.get("variant_key")
+        base_payload["display_mode"] = "variant"
+        base_payload["variant_index"] = variant_index
+        flat_items.append(_merge_display_item_variant(base_payload, variant))
+    return flat_items
+
+
+def _build_display_items_for_image(image: ImageModel, merged_payload: dict[str, Any], *, group_variants: bool) -> list[dict[str, Any]]:
+    variants = _build_image_variants(image, merged_payload)
+    if not variants:
+        return []
+    if group_variants:
+        return [_build_grouped_display_item(image, merged_payload, variants)]
+    return _build_flat_variant_display_items(image, merged_payload, variants)
+
+
+def _load_display_image_items(
+    db: Session,
+    *,
+    sort_by: str,
+    search: Optional[str],
+    generation_software: Optional[list[str]],
+    source_site: Optional[list[str]],
+    mimetype: Optional[list[str]],
+    nsfw_rating: Optional[list[str]],
+    nsfw_safety: Optional[list[str]],
+    artist_name: Optional[list[str]],
+    collection_name: Optional[list[str]],
+    group_variants: bool,
+) -> list[dict[str, Any]]:
+    display_cache_key = _build_search_cache_key(
+        "images_display_items",
+        payload={
+            "sort_by": str(sort_by),
+            "search": str(search or "").strip().lower(),
+            "generation_software": _normalize_cache_list(generation_software),
+            "source_site": _normalize_cache_list(source_site),
+            "mimetype": _normalize_cache_list(mimetype),
+            "nsfw_rating": _normalize_cache_list(nsfw_rating),
+            "nsfw_safety": _normalize_cache_list(nsfw_safety),
+            "artist_name": _normalize_cache_list(artist_name),
+            "collection_name": _normalize_cache_list(collection_name),
+            "group_variants": bool(group_variants),
+        },
+    )
+    cached_items = _search_cache_get(display_cache_key)
+    if isinstance(cached_items, list):
+        return cached_items
+
+    images_query = db.query(ImageModel).options(
+        joinedload(ImageModel.artist),
+        joinedload(ImageModel.license),
+        joinedload(ImageModel.collections),
+    ).filter(_active_image_filter())
+    images_query = _apply_image_list_filters(
+        images_query,
+        search=search,
+        source_sites=source_site,
+        mimetypes=mimetype,
+        artist_names=artist_name,
+        collection_names=collection_name,
+    )
+
+    generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
+    nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
+    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
+
+    constrained_ids: Optional[set[int]] = None
+    for filtered_ids in (generation_filtered_ids, nsfw_filtered_ids, nsfw_safety_filtered_ids):
+        if filtered_ids is None:
+            continue
+        filtered_set = set(filtered_ids)
+        constrained_ids = filtered_set if constrained_ids is None else constrained_ids.intersection(filtered_set)
+
+    if constrained_ids is not None:
+        if constrained_ids:
+            images_query = images_query.filter(ImageModel.id.in_(list(constrained_ids)))
+        else:
+            images_query = images_query.filter(text("1 = 0"))
+
+    if sort_by == "last_added":
+        images_query = images_query.order_by(ImageModel.id.desc())
+    else:
+        images_query = images_query.order_by(ImageModel.id.asc())
+
+    images = images_query.all()
+    display_items: list[dict[str, Any]] = []
+    for image in images:
+        db_dict = ImageData.from_db_record(image).to_dict()
+
+        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
+        sidecar_dict: dict[str, Any] = {}
+        if sidecar_path.exists():
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    sidecar_dict = loaded
+            except (OSError, json.JSONDecodeError):
+                sidecar_dict = {}
+
+        merged = {**db_dict, **sidecar_dict}
+        merged = _normalize_merged_image_payload(
+            image,
+            db_payload=db_dict,
+            merged_payload=merged,
+        )
+        if (image.mimetype or "").lower().startswith("video/"):
+            image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+            poster_path = get_video_poster_path(image_path, IMAGE_RESOURCES_PATH)
+            thumbnail_path = get_video_thumbnail_path(image_path, IMAGE_RESOURCES_PATH)
+            if poster_path.exists() and poster_path.is_file():
+                merged["video_poster_url"] = f"/images/{image.file_hash}/video_poster"
+            if thumbnail_path.exists() and thumbnail_path.is_file():
+                merged["video_thumbnail_url"] = f"/images/{image.file_hash}/video_thumbnail"
+        merged["collection_names"] = [c.name for c in image.collections]
+        merged["collection_ids"] = [c.id for c in image.collections]
+        nsfw_ratings = _read_nsfw_ratings_for_image(image)
+        merged["nsfw_ratings"] = nsfw_ratings
+        merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
+        merged["user_nsfw_rating"] = image.user_nsfw_rating
+        merged["user_nsfw_safety_class"] = image.user_nsfw_safety_class
+        display_items.extend(_build_display_items_for_image(image, merged, group_variants=group_variants))
+
+    _search_cache_put(display_cache_key, display_items)
+    return display_items
 
 
 def _replace_image_with_uploaded_file(
@@ -5481,6 +6669,11 @@ def _replace_image_with_uploaded_file(
             prepared=prepared_variant,
             image_db_id=repaired_image.id,
         )
+        _persist_mismatch_static_variant(
+            db,
+            prepared=prepared_variant,
+            image_db_id=repaired_image.id,
+        )
 
     return {
         "ingest_result": ingest_result,
@@ -5509,13 +6702,16 @@ def _archive_static_civitai_source_variant(
     suffix = actual_path.suffix.lower() or _guess_suffix(actual_mime_type)
     variant_path = variant_root / f"{civitai_image_id}_static_source{suffix}"
     shutil.copy2(actual_path, variant_path)
+    variant_file_hash = _sha256_file(variant_path)
 
     variant_metadata = {
         "image_id": civitai_image_id,
         "declared_mimetype": declared_mime_type,
         "actual_mimetype": image.mimetype,
         "library_file_path": str(image.file_path),
+        "library_file_hash": image.file_hash,
         "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
+        "variant_file_hash": variant_file_hash,
         "source_url": image.source_url,
         "expected_source_url": expected_source_url,
         "actual_file_size": actual_path.stat().st_size,
@@ -5625,6 +6821,8 @@ def _process_civitai_image_ids(
                         image_id,
                         exc,
                         api=api,
+                        db=db,
+                        attach_collection_id=attach_collection_id,
                         collection_id=(collection_context or {}).get("collection_id"),
                         collection_name=(collection_context or {}).get("collection_name"),
                         collection_item=_collection_context_item(collection_context, image_id),
@@ -5729,19 +6927,23 @@ def _process_civitai_image_ids(
                                 desired_image_db_ids.add(image_db_id)
                 except Exception as exc:
                     if _is_civitai_remote_not_found_error(exc):
-                        result = _build_civitai_unavailable_result(
-                            image_id,
-                            exc,
-                            api=api,
-                            collection_id=(collection_context or {}).get("collection_id"),
-                            collection_name=(collection_context or {}).get("collection_name"),
-                            collection_item=_collection_context_item(collection_context, image_id),
-                        )
+                        with SessionLocal() as db:
+                            result = _build_civitai_unavailable_result(
+                                image_id,
+                                exc,
+                                api=api,
+                                db=db,
+                                attach_collection_id=attach_collection_id,
+                                collection_id=(collection_context or {}).get("collection_id"),
+                                collection_name=(collection_context or {}).get("collection_name"),
+                                collection_item=_collection_context_item(collection_context, image_id),
+                            )
                     else:
                         result = _build_failed_civitai_import_result(image_id, str(exc))
                 finally:
                     if prepared is not None:
                         _cleanup_temp_file(prepared.temp_path)
+                        _cleanup_temp_file(prepared.mismatch_static_temp_path)
 
                 results.append(result)
                 _apply_civitai_task_result(
@@ -6744,6 +7946,7 @@ async def lifespan(app: FastAPI):
     _ensure_user_nsfw_columns()
     _ensure_civitai_uuid_column()
     _ensure_civitai_hash_column()
+    _ensure_image_variant_columns()
 
     print("AtelierAI API is ready to go!")
 
@@ -7187,6 +8390,7 @@ def read_images(
     response: Response,
     skip: int = 0,
     limit: int = 10,
+    group_variants: bool = Query(default=True),
     sort_by: Literal["first_added", "last_added"] = "first_added",
     search: Optional[str] = None,
     generation_software: Optional[list[str]] = Query(default=None),
@@ -7207,6 +8411,7 @@ def read_images(
         payload={
             "skip": int(skip),
             "limit": int(limit),
+            "group_variants": bool(group_variants),
             "sort_by": str(sort_by),
             "search": str(search or "").strip().lower(),
             "generation_software": _normalize_cache_list(generation_software),
@@ -7231,92 +8436,27 @@ def read_images(
         if isinstance(items, list):
             return items
 
-    # Use joinedload to efficiently fetch the related objects
-    images_query = db.query(ImageModel).options(
-        joinedload(ImageModel.artist),
-        joinedload(ImageModel.license),
-        joinedload(ImageModel.collections),
-    ).filter(_active_image_filter())
-    images_query = _apply_image_list_filters(
-        images_query,
+    display_items = _load_display_image_items(
+        db,
+        sort_by=sort_by,
         search=search,
-        source_sites=source_site,
-        mimetypes=mimetype,
-        artist_names=artist_name,
-        collection_names=collection_name,
+        generation_software=generation_software,
+        source_site=source_site,
+        mimetype=mimetype,
+        nsfw_rating=nsfw_rating,
+        nsfw_safety=nsfw_safety,
+        artist_name=artist_name,
+        collection_name=collection_name,
+        group_variants=group_variants,
     )
-    generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
-    nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
-    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
-
-    constrained_ids: Optional[set[int]] = None
-    for filtered_ids in (generation_filtered_ids, nsfw_filtered_ids, nsfw_safety_filtered_ids):
-        if filtered_ids is None:
-            continue
-        filtered_set = set(filtered_ids)
-        constrained_ids = filtered_set if constrained_ids is None else constrained_ids.intersection(filtered_set)
-
-    if constrained_ids is not None:
-        if constrained_ids:
-            images_query = images_query.filter(ImageModel.id.in_(list(constrained_ids)))
-        else:
-            images_query = images_query.filter(text("1 = 0"))
-    if sort_by == "last_added":
-        images_query = images_query.order_by(ImageModel.id.desc())
-    else:
-        images_query = images_query.order_by(ImageModel.id.asc())
-
-    response.headers["X-Filtered-Count"] = str(images_query.count())
-
-    images = images_query.offset(skip).limit(limit).all()
-
-    # Build DB payload and merge raw sidecar JSON (source of authority) when present.
-    response_payload: list[dict] = []
-    for image in images:
-        db_dict = ImageData.from_db_record(image).to_dict()
-
-        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(
-            ".json"
-        )
-
-        sidecar_dict: dict = {}
-        if sidecar_path.exists():
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    sidecar_dict = loaded
-            except (OSError, json.JSONDecodeError):
-                sidecar_dict = {}
-
-        # Sidecar values override DB where present.
-        merged = {**db_dict, **sidecar_dict}
-        merged = _normalize_merged_image_payload(
-            image,
-            db_payload=db_dict,
-            merged_payload=merged,
-        )
-        if (image.mimetype or "").lower().startswith("video/"):
-            image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
-            poster_path = get_video_poster_path(image_path, IMAGE_RESOURCES_PATH)
-            thumbnail_path = get_video_thumbnail_path(image_path, IMAGE_RESOURCES_PATH)
-            if poster_path.exists() and poster_path.is_file():
-                merged["video_poster_url"] = f"/images/{image.file_hash}/video_poster"
-            if thumbnail_path.exists() and thumbnail_path.is_file():
-                merged["video_thumbnail_url"] = f"/images/{image.file_hash}/video_thumbnail"
-        merged["collection_names"] = [c.name for c in image.collections]
-        merged["collection_ids"] = [c.id for c in image.collections]
-        nsfw_ratings = _read_nsfw_ratings_for_image(image)
-        merged["nsfw_ratings"] = nsfw_ratings
-        merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
-        merged["user_nsfw_rating"] = image.user_nsfw_rating
-        merged["user_nsfw_safety_class"] = image.user_nsfw_safety_class
-        response_payload.append(merged)
+    filtered_count = len(display_items)
+    response.headers["X-Filtered-Count"] = str(filtered_count)
+    response_payload = display_items[skip:skip + limit]
 
     _search_cache_put(
         cache_key,
         {
-            "filtered_count": int(response.headers.get("X-Filtered-Count") or 0),
+            "filtered_count": filtered_count,
             "items": response_payload,
         },
     )
@@ -7347,6 +8487,7 @@ def read_images_state(db: Session = Depends(get_db)):
 def read_image_keys(
     request: Request,
     response: Response,
+    group_variants: bool = Query(default=True),
     search: Optional[str] = None,
     generation_software: Optional[list[str]] = Query(default=None),
     source_site: Optional[list[str]] = Query(default=None),
@@ -7360,6 +8501,7 @@ def read_image_keys(
     cache_key = _build_search_cache_key(
         "image_keys",
         payload={
+            "group_variants": bool(group_variants),
             "search": str(search or "").strip().lower(),
             "generation_software": _normalize_cache_list(generation_software),
             "source_site": _normalize_cache_list(source_site),
@@ -7380,43 +8522,20 @@ def read_image_keys(
     if isinstance(cached_keys, list):
         return [str(file_hash) for file_hash in cached_keys if file_hash]
 
-    base_images_query = db.query(ImageModel).filter(_active_image_filter())
-    base_images_query = _apply_image_list_filters(
-        base_images_query,
+    display_items = _load_display_image_items(
+        db,
+        sort_by="first_added",
         search=search,
-        source_sites=source_site,
-        mimetypes=mimetype,
-        artist_names=artist_name,
-        collection_names=collection_name,
+        generation_software=generation_software,
+        source_site=source_site,
+        mimetype=mimetype,
+        nsfw_rating=nsfw_rating,
+        nsfw_safety=nsfw_safety,
+        artist_name=artist_name,
+        collection_name=collection_name,
+        group_variants=group_variants,
     )
-    generation_filtered_ids = _filter_image_ids_by_generation_software(
-        base_images_query,
-        generation_software,
-    )
-    nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(
-        base_images_query,
-        nsfw_rating,
-    )
-    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(
-        base_images_query,
-        nsfw_safety,
-    )
-
-    constrained_ids: Optional[set[int]] = None
-    for filtered_ids in (generation_filtered_ids, nsfw_filtered_ids, nsfw_safety_filtered_ids):
-        if filtered_ids is None:
-            continue
-        filtered_set = set(filtered_ids)
-        constrained_ids = filtered_set if constrained_ids is None else constrained_ids.intersection(filtered_set)
-
-    images_query = base_images_query.with_entities(ImageModel.file_hash)
-    if constrained_ids is not None:
-        if constrained_ids:
-            images_query = images_query.filter(ImageModel.id.in_(list(constrained_ids)))
-        else:
-            images_query = images_query.filter(text("1 = 0"))
-    images_query = images_query.order_by(ImageModel.id.asc())
-    keys = [str(file_hash) for (file_hash,) in images_query.all() if file_hash]
+    keys = [str(item.get("gallery_item_key") or "") for item in display_items if item.get("gallery_item_key")]
     _search_cache_put(cache_key, keys)
     return keys
 
@@ -7657,13 +8776,14 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             )
 
         _temp_path: Optional[Path] = None
+        _mismatch_temp_path: Optional[Path] = None
         try:
-            _temp_path = _download_civitai_image(
-                image_url=str(_civitai_target_missing["image_url"]),
+            _download_result = _download_civitai_image_with_validation(
                 image_id=civitai_image_id_missing,
-                mime_type=_civitai_target_missing.get("mime_type"),
-                declared_file_size=_civitai_target_missing.get("declared_file_size"),
+                target=_civitai_target_missing,
             )
+            _temp_path = _download_result.temp_path
+            _mismatch_temp_path = _download_result.mismatch_static_temp_path
             try:
                 _dl_processor = ImageProcessor(str(_temp_path), db, IMAGE_LIBRARY_PATH)
             except Exception as exc:
@@ -7739,6 +8859,11 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                     temp_path=_temp_path,
                     civitai_uuid=_civitai_target_missing.get("civitai_uuid"),
                     civitai_hash=_civitai_target_missing.get("civitai_hash"),
+                    effective_image_url=_download_result.selected_url,
+                    mismatch_static_temp_path=_download_result.mismatch_static_temp_path,
+                    mismatch_source_url=_download_result.mismatch_source_url,
+                    mismatch_mime_type=_download_result.mismatch_mime_type,
+                    mismatch_file_hash=_download_result.mismatch_file_hash,
                 )
                 _replacement = _replace_image_with_uploaded_file(
                     db,
@@ -7786,6 +8911,7 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             )
         finally:
             _cleanup_temp_file(_temp_path)
+            _cleanup_temp_file(mismatch_temp_path)
 
     actions_taken: list[str] = []
     issues_found: list[str] = []
@@ -7836,10 +8962,12 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
 
     if declared_civitai_mime and declared_civitai_mime != actual_mime and civitai_target and civitai_image_id is not None:
         temp_path = None
+        mismatch_temp_path = None
         try:
             declared_video_like = declared_civitai_mime.startswith("video/") or _url_looks_like_video(
                 civitai_target.get("image_url") if isinstance(civitai_target, dict) else None
             )
+            archived_variant = None
             if declared_video_like:
                 archived_variant = _archive_static_civitai_source_variant(
                     image=image,
@@ -7852,12 +8980,12 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                         "Archived existing static source variant under image_resources/civitai_source_variants."
                     )
 
-            temp_path = _download_civitai_image(
-                image_url=str(civitai_target["image_url"]),
+            download_result = _download_civitai_image_with_validation(
                 image_id=civitai_image_id,
-                mime_type=civitai_target.get("mime_type"),
-                declared_file_size=civitai_target.get("declared_file_size"),
+                target=civitai_target,
             )
+            temp_path = download_result.temp_path
+            mismatch_temp_path = download_result.mismatch_static_temp_path
             prepared_variant = _PreparedCivitaiImport(
                 image_id=civitai_image_id,
                 image_url=str(civitai_target["image_url"]),
@@ -7870,6 +8998,11 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                 temp_path=temp_path,
                 civitai_uuid=civitai_target.get("civitai_uuid"),
                 civitai_hash=civitai_target.get("civitai_hash"),
+                effective_image_url=download_result.selected_url,
+                mismatch_static_temp_path=download_result.mismatch_static_temp_path,
+                mismatch_source_url=download_result.mismatch_source_url,
+                mismatch_mime_type=download_result.mismatch_mime_type,
+                mismatch_file_hash=download_result.mismatch_file_hash,
             )
             replacement = _replace_image_with_uploaded_file(
                 db,
@@ -7884,6 +9017,18 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             )
             repaired_image = replacement.get("repaired_image")
             created_new_image = bool(replacement.get("created_new_image"))
+            if repaired_image is not None and archived_variant:
+                merged_json = dict(repaired_image.json_metadata) if isinstance(repaired_image.json_metadata, dict) else {}
+                merged_json["civitai_source_variant_static"] = archived_variant
+                repaired_image.json_metadata = merged_json
+                repaired_path_for_sidecar = Path(IMAGE_LIBRARY_PATH) / str(repaired_image.file_path)
+                if repaired_path_for_sidecar.exists():
+                    repaired_processor = ImageProcessor(str(repaired_path_for_sidecar), db, IMAGE_LIBRARY_PATH)
+                    repaired_processor.save_json_metadata(
+                        repaired_path_for_sidecar,
+                        repaired_image,
+                        additional_data={"civitai_source_variant_static": archived_variant},
+                    )
             if repaired_image is not None:
                 repaired_path = Path(IMAGE_LIBRARY_PATH) / str(repaired_image.file_path)
                 if _normalize_mime_type(repaired_image.mimetype).startswith("video/"):
@@ -7912,6 +9057,7 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             raise HTTPException(status_code=500, detail=f"Failed to replace mismatched CivitAI media: {exc}")
         finally:
             _cleanup_temp_file(temp_path)
+            _cleanup_temp_file(mismatch_temp_path)
 
     current_path = image_path
     if current_path.name != expected_library_name:
@@ -8122,16 +9268,18 @@ def get_image_status_counts(db: Session = Depends(get_db)):
     active = db.query(ImageModel).filter(_active_image_filter()).count()
     deleted = db.query(ImageModel).filter(ImageModel.image_status == "deleted").count()
     tombstoned = db.query(ImageModel).filter(ImageModel.image_status == "tombstoned").count()
+    placeholder = db.query(ImageModel).filter(ImageModel.image_status == "placeholder").count()
     return {
         "active": active,
         "deleted": deleted,
         "tombstoned": tombstoned,
+        "placeholder": placeholder,
     }
 
 
 @app.get("/utilities/inactive_images", response_model=List[dict])
 def get_inactive_images(
-    status: Literal["all", "deleted", "tombstoned"] = "all",
+    status: Literal["all", "deleted", "tombstoned", "placeholder"] = "all",
     limit: int = 200,
     db: Session = Depends(get_db),
 ):
@@ -8142,10 +9290,13 @@ def get_inactive_images(
         query = query.filter(ImageModel.image_status == "deleted")
     elif status == "tombstoned":
         query = query.filter(ImageModel.image_status == "tombstoned")
+    elif status == "placeholder":
+        query = query.filter(ImageModel.image_status == "placeholder")
     else:
         query = query.filter(
             (ImageModel.image_status == "deleted")
             | (ImageModel.image_status == "tombstoned")
+            | (ImageModel.image_status == "placeholder")
         )
 
     rows = query.limit(capped_limit).all()
@@ -8165,6 +9316,112 @@ def get_inactive_images(
         }
         for row in rows
     ]
+
+
+@app.get("/utilities/placeholders", response_model=List[dict])
+def get_placeholder_images(
+    limit: int = 200,
+    classification: Optional[str] = None,
+    collection_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    capped_limit = max(1, min(int(limit), 1000))
+    normalized_classification = str(classification or "").strip().lower()
+
+    query = (
+        db.query(ImageModel)
+        .options(joinedload(ImageModel.collections))
+        .filter(ImageModel.image_status == "placeholder")
+        .order_by(ImageModel.id.desc())
+    )
+    rows = query.limit(capped_limit).all()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        civitai_payload = row.json_metadata.get("civitai") if isinstance(row.json_metadata, dict) else {}
+        unavailable_detail = civitai_payload.get("unavailable_detail") if isinstance(civitai_payload, dict) else {}
+        if not isinstance(unavailable_detail, dict):
+            unavailable_detail = {}
+
+        item_classification = str(unavailable_detail.get("classification") or "").strip().lower()
+        if normalized_classification and item_classification != normalized_classification:
+            continue
+
+        row_collection_ids = [int(c.id) for c in row.collections]
+        if collection_id is not None and int(collection_id) not in row_collection_ids:
+            continue
+
+        items.append(
+            {
+                "id": row.id,
+                "file_hash": row.file_hash,
+                "file_name": row.file_name,
+                "file_path": row.file_path,
+                "image_status": row.image_status or "active",
+                "status_reason": row.status_reason,
+                "source_url": row.source_url,
+                "source_site": row.source_site,
+                "mimetype": row.mimetype,
+                "date_modified": (
+                    row.date_modified.isoformat() if row.date_modified is not None else None
+                ),
+                "collection_ids": row_collection_ids,
+                "collection_names": [str(c.name) for c in row.collections],
+                "unavailable_detail": unavailable_detail,
+                "classification": unavailable_detail.get("classification"),
+                "endpoint": unavailable_detail.get("endpoint"),
+                "status_code": unavailable_detail.get("status_code"),
+            }
+        )
+
+    return items
+
+
+@app.get("/utilities/placeholders/summary", response_model=dict)
+def get_placeholder_summary(
+    collection_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(ImageModel)
+        .options(joinedload(ImageModel.collections))
+        .filter(ImageModel.image_status == "placeholder")
+        .order_by(ImageModel.id.desc())
+    )
+    rows = query.all()
+
+    by_classification: dict[str, int] = {}
+    by_endpoint: dict[str, int] = {}
+    by_status_code: dict[str, int] = {}
+    total = 0
+
+    for row in rows:
+        row_collection_ids = {int(c.id) for c in row.collections}
+        if collection_id is not None and int(collection_id) not in row_collection_ids:
+            continue
+
+        civitai_payload = row.json_metadata.get("civitai") if isinstance(row.json_metadata, dict) else {}
+        unavailable_detail = civitai_payload.get("unavailable_detail") if isinstance(civitai_payload, dict) else {}
+        if not isinstance(unavailable_detail, dict):
+            unavailable_detail = {}
+
+        classification = str(unavailable_detail.get("classification") or "unknown").strip().lower() or "unknown"
+        endpoint = str(unavailable_detail.get("endpoint") or "unknown").strip() or "unknown"
+        raw_status = unavailable_detail.get("status_code")
+        status_code = str(raw_status) if raw_status is not None else "unknown"
+
+        total += 1
+        by_classification[classification] = by_classification.get(classification, 0) + 1
+        by_endpoint[endpoint] = by_endpoint.get(endpoint, 0) + 1
+        by_status_code[status_code] = by_status_code.get(status_code, 0) + 1
+
+    return {
+        "total": total,
+        "collection_id": collection_id,
+        "by_classification": dict(sorted(by_classification.items(), key=lambda item: item[0])),
+        "by_endpoint": dict(sorted(by_endpoint.items(), key=lambda item: item[0])),
+        "by_status_code": dict(sorted(by_status_code.items(), key=lambda item: item[0])),
+    }
 
 
 @app.post("/utilities/images/{file_hash}/restore", response_model=dict)

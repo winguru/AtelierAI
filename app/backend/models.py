@@ -39,6 +39,9 @@ class ImageModel(Base):
     image_status = Column(String, nullable=False, default="active")
     status_reason = Column(String, nullable=True)
     replaced_by_image_id = Column(Integer, ForeignKey("images.id"), nullable=True)
+    variant_group_key = Column(String, nullable=True, index=True)
+    variant_sort_index = Column(Integer, nullable=True)
+    variant_role = Column(String, nullable=True)
 
     # Attribution & Licensing
     source_url = Column(Text)
@@ -126,6 +129,9 @@ class ImageModel(Base):
             "image_status": self.image_status or "active",
             "status_reason": self.status_reason,
             "replaced_by_image_id": self.replaced_by_image_id,
+            "variant_group_key": self.variant_group_key,
+            "variant_sort_index": self.variant_sort_index,
+            "variant_role": self.variant_role,
             "source_url": self.source_url,
             "source_site": self.source_site,
             "civitai_uuid": self.civitai_uuid,

@@ -36,6 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
         'Source URL',
         'Generation Info',
         'Prompt',
+        'A1111 Metadata',
+        'ComfyUI Metadata',
         'Tags',
         'EXIF Data',
         'CivitAI Meta',
@@ -43,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const DETAIL_TAB_IDS = [
         'image-attributes',
         'generation-data',
+        'generation',
         'collections',
         'civitai-tags',
         'danbooru-tags',
@@ -52,7 +55,8 @@ document.addEventListener('DOMContentLoaded', () => {
     ];
     const DETAIL_TAB_LABELS = {
         'image-attributes': 'Image Attributes',
-        'generation-data': 'Generation Data',
+        'generation-data': 'Metadata',
+        generation: 'Generation',
         collections: 'Collections',
         'civitai-tags': 'CivitAI Tags',
         'danbooru-tags': 'Danbooru Tags',
@@ -262,6 +266,9 @@ document.addEventListener('DOMContentLoaded', () => {
         videoThumbnailInflight: new Map(),
         videoThumbnailQueue: [],
         videoThumbnailActiveFetches: 0,
+        generationPrototypeCache: new Map(),
+        generationPrototypeInflight: new Map(),
+        detailGenerationRenderToken: 0,
         tasks: [],
         highlightedTaskId: null,
         taskStatusById: new Map(),
@@ -1110,9 +1117,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const deleteImageFileBtn = document.getElementById('delete-image-file-btn');
     const sendToGenerationLabBtn = document.getElementById('send-to-generation-lab-btn');
     const sendToPerceptualLabBtn = document.getElementById('send-to-perceptual-lab-btn');
+    const sendToModelLabBtn = document.getElementById('send-to-model-lab-btn');
     const detailMeta = document.getElementById('detail-meta');
     const detailExif = document.getElementById('detail-exif');
     const detailCivitai = document.getElementById('detail-civitai');
+    const detailGeneration = document.getElementById('detail-generation');
     const detailFolderMount = document.getElementById('detail-folder-mount');
     const detailPanelStash = document.getElementById('detail-panel-stash');
     const detailFolderPanels = Array.from(document.querySelectorAll('.detail-folder-panel[role="tabpanel"]'));
@@ -2028,6 +2037,575 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function isNonEmptyGenerationValue(value) {
+        if (value == null) {
+            return false;
+        }
+        if (typeof value === 'string') {
+            return value.trim().length > 0;
+        }
+        if (Array.isArray(value)) {
+            return value.length > 0;
+        }
+        if (typeof value === 'object') {
+            return Object.keys(value).length > 0;
+        }
+        return true;
+    }
+
+    function stringifyGenerationValue(value) {
+        if (value == null) {
+            return '';
+        }
+        if (typeof value === 'string') {
+            return value.trim();
+        }
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            return String(value);
+        }
+        if (Array.isArray(value)) {
+            const compact = value
+                .map((item) => stringifyGenerationValue(item))
+                .filter(Boolean);
+            if (!compact.length) {
+                return '';
+            }
+            return compact.join(', ');
+        }
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch {
+            return String(value);
+        }
+    }
+
+    function getFirstPromptByRole(prompts, role) {
+        const targetRole = String(role || '').trim().toLowerCase();
+        if (!Array.isArray(prompts) || !targetRole) {
+            return '';
+        }
+
+        for (const prompt of prompts) {
+            if (!prompt || typeof prompt !== 'object') {
+                continue;
+            }
+            const promptRole = String(prompt.prompt_role || '').trim().toLowerCase();
+            if (promptRole !== targetRole) {
+                continue;
+            }
+            const text = String(prompt.prompt_text || '').trim();
+            if (text) {
+                return text;
+            }
+        }
+        return '';
+    }
+
+    function getStageModelDescriptor(stageResources) {
+        if (!Array.isArray(stageResources)) {
+            return '';
+        }
+
+        let fallback = '';
+        for (const resource of stageResources) {
+            if (!resource || typeof resource !== 'object') {
+                continue;
+            }
+            const type = String(resource.resource_type || resource.modelType || resource.type || '').trim().toLowerCase();
+            const name = String(resource.display_name || resource.modelName || resource.name || '').trim();
+            if (!name) {
+                continue;
+            }
+            const version = String(resource.version_name || resource.versionName || '').trim();
+            const descriptor = version ? `${name} (${version})` : name;
+            if (type === 'checkpoint' || type === 'model') {
+                return descriptor;
+            }
+            if (!fallback) {
+                fallback = descriptor;
+            }
+        }
+
+        return fallback;
+    }
+
+    function collectStageFieldValues(fieldValues) {
+        const collected = {};
+        if (!Array.isArray(fieldValues)) {
+            return collected;
+        }
+
+        fieldValues.forEach((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return;
+            }
+            const key = String(entry.field_key || entry.key || '').trim();
+            if (!key) {
+                return;
+            }
+            const rawValue = entry.field_value ?? entry.value;
+            if (!isNonEmptyGenerationValue(rawValue)) {
+                return;
+            }
+            const label = `Field: ${key}`;
+            if (collected[label]) {
+                return;
+            }
+            collected[label] = rawValue;
+        });
+
+        return collected;
+    }
+
+    function getGenerationStageName(stage, stageIndex) {
+        const explicit = String(stage?.stage_label || stage?.method_variant || '').trim();
+        if (explicit) {
+            return explicit;
+        }
+        const role = String(stage?.stage_role || '').trim();
+        if (role) {
+            const titleRole = role
+                .split(/[_\s-]+/)
+                .filter(Boolean)
+                .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                .join(' ');
+            return titleRole;
+        }
+        return `Step ${stageIndex + 1}`;
+    }
+
+    function getGenerationStagesForProcess(process) {
+        const stages = Array.isArray(process?.stages) ? process.stages.filter((stage) => stage && typeof stage === 'object') : [];
+        if (stages.length) {
+            return stages;
+        }
+        return [
+            {
+                stage_index: 0,
+                stage_role: 'base',
+                stage_label: 'Base',
+                sampler_name: process?.sampler_name,
+                scheduler_name: process?.scheduler_name,
+                steps: process?.steps,
+                cfg_scale: process?.cfg_scale,
+                seed: process?.seed,
+                width: process?.width,
+                height: process?.height,
+                prompts: Array.isArray(process?.prompts) ? process.prompts : [],
+                resources: Array.isArray(process?.resources) ? process.resources : [],
+                field_values: Array.isArray(process?.field_values) ? process.field_values : [],
+                raw_stage_json: process?.raw_payload_json || {},
+            },
+        ];
+    }
+
+    function buildGenerationParameterMap(image, process, stage) {
+        const stagePrompts = Array.isArray(stage?.prompts) && stage.prompts.length
+            ? stage.prompts
+            : (Array.isArray(process?.prompts) ? process.prompts : []);
+        const stageResources = Array.isArray(stage?.resources) && stage.resources.length
+            ? stage.resources
+            : (Array.isArray(process?.resources) ? process.resources : []);
+        const stageFieldValues = Array.isArray(stage?.field_values) && stage.field_values.length
+            ? stage.field_values
+            : (Array.isArray(process?.field_values) ? process.field_values : []);
+
+        const exif = parsePossibleJsonObject(image?.exif_data) || {};
+        const civitai = parsePossibleJsonObject(image?.civitai_data) || parsePossibleJsonObject(image?.civitai) || {};
+        const civitaiMeta = civitai && typeof civitai.meta === 'object' ? civitai.meta : {};
+
+        const positivePrompt = getFirstPromptByRole(stagePrompts, 'positive')
+            || String(exif.Prompt || exif.prompt || exif.parameters || '').trim()
+            || String(civitaiMeta.prompt || '').trim();
+        const negativePrompt = getFirstPromptByRole(stagePrompts, 'negative')
+            || String(exif.NegativePrompt || exif.negative_prompt || '').trim()
+            || String(civitaiMeta.negativePrompt || civitaiMeta.negative_prompt || '').trim();
+
+        const model = getStageModelDescriptor(stageResources)
+            || String(exif.Model || exif.model || '').trim()
+            || String(civitaiMeta.model || '').trim();
+
+        const rawMap = {
+            Prompt: positivePrompt,
+            'Negative Prompt': negativePrompt,
+            Model: model,
+            Sampler: stage?.sampler_name ?? exif.Sampler ?? exif.sampler ?? civitaiMeta.sampler,
+            Scheduler: stage?.scheduler_name ?? exif.Scheduler ?? exif.scheduler ?? civitaiMeta.scheduler,
+            Steps: stage?.steps ?? exif.Steps ?? exif.steps ?? civitaiMeta.steps,
+            'CFG Scale': stage?.cfg_scale ?? exif['CFG scale'] ?? exif.cfg_scale ?? civitaiMeta.cfgScale,
+            Seed: stage?.seed ?? exif.Seed ?? exif.seed ?? civitaiMeta.seed,
+            'Clip Skip': stage?.clip_skip ?? exif['Clip skip'] ?? exif.clip_skip ?? civitaiMeta.clipSkip,
+            'Denoise Strength': stage?.denoise_strength ?? exif['Denoising strength'] ?? exif.denoise_strength ?? civitaiMeta.denoise,
+            Strength: stage?.strength,
+            Width: stage?.width ?? exif.Width ?? exif.width ?? civitaiMeta.width,
+            Height: stage?.height ?? exif.Height ?? exif.height ?? civitaiMeta.height,
+            'Base Width': stage?.base_width,
+            'Base Height': stage?.base_height,
+            Platform: process?.platform_name,
+            'Method Family': process?.method_family,
+            'Method Variant': process?.method_variant,
+        };
+
+        const resourceLabels = stageResources
+            .map((resource) => String(resource?.display_name || resource?.modelName || resource?.name || '').trim())
+            .filter(Boolean);
+        if (resourceLabels.length) {
+            rawMap.Resources = resourceLabels.join(', ');
+        }
+
+        const fieldMap = collectStageFieldValues(stageFieldValues);
+        Object.entries(fieldMap).forEach(([key, value]) => {
+            rawMap[key] = value;
+        });
+
+        const compactMap = {};
+        Object.entries(rawMap).forEach(([key, value]) => {
+            if (!isNonEmptyGenerationValue(value)) {
+                return;
+            }
+            compactMap[key] = value;
+        });
+
+        return {
+            display: compactMap,
+            raw: {
+                process,
+                stage,
+                prompts: stagePrompts,
+                resources: stageResources,
+                field_values: stageFieldValues,
+                extracted_parameters: compactMap,
+            },
+        };
+    }
+
+    function createGenerationParameterNode(label, value) {
+        const row = document.createElement('div');
+        row.className = 'generation-param-row';
+
+        const labelNode = document.createElement('span');
+        labelNode.className = 'generation-param-label';
+        labelNode.textContent = label;
+        row.appendChild(labelNode);
+
+        const valueText = stringifyGenerationValue(value);
+        if (valueText.includes('\n') || valueText.length > 180) {
+            const pre = document.createElement('pre');
+            pre.className = 'generation-param-value generation-param-pre';
+            pre.textContent = valueText;
+            row.appendChild(pre);
+            return row;
+        }
+
+        const valueNode = document.createElement('span');
+        valueNode.className = 'generation-param-value';
+        valueNode.textContent = valueText;
+        row.appendChild(valueNode);
+        return row;
+    }
+
+    function getGenerationProcessLabel(process, processIndex) {
+        const labelParts = [];
+        const method = String(process?.method_family || '').trim();
+        const platform = String(process?.platform_name || '').trim();
+        if (method) {
+            labelParts.push(method);
+        }
+        if (platform && platform.toLowerCase() !== method.toLowerCase()) {
+            labelParts.push(platform);
+        }
+        const title = labelParts.length ? labelParts.join(' - ') : 'Process';
+        return `${title} ${processIndex + 1}`;
+    }
+
+    function buildFallbackGenerationProcessesFromImage(image) {
+        const exif = parsePossibleJsonObject(image?.exif_data) || {};
+        const civitai = parsePossibleJsonObject(image?.civitai_data) || parsePossibleJsonObject(image?.civitai) || {};
+        const civitaiMeta = civitai && typeof civitai.meta === 'object' ? civitai.meta : {};
+        const civitaiResources = Array.isArray(civitai?.resources)
+            ? civitai.resources.filter((item) => item && typeof item === 'object')
+            : [];
+
+        const promptText = String(
+            exif.Prompt || exif.prompt || civitaiMeta.prompt || ''
+        ).trim();
+        const negativePromptText = String(
+            exif.NegativePrompt || exif.negative_prompt || civitaiMeta.negativePrompt || civitaiMeta.negative_prompt || ''
+        ).trim();
+
+        const prompts = [];
+        if (promptText) {
+            prompts.push({
+                prompt_role: 'positive',
+                prompt_text: promptText,
+                source_type: 'metadata_fallback',
+                raw_prompt_json: { source: 'metadata_fallback.prompt' },
+            });
+        }
+        if (negativePromptText) {
+            prompts.push({
+                prompt_role: 'negative',
+                prompt_text: negativePromptText,
+                source_type: 'metadata_fallback',
+                raw_prompt_json: { source: 'metadata_fallback.negative_prompt' },
+            });
+        }
+
+        const resources = civitaiResources.map((resource) => ({
+            resource_type: String(resource.modelType || resource.type || 'other').toLowerCase(),
+            display_name: String(resource.modelName || resource.name || '').trim() || null,
+            version_name: String(resource.versionName || '').trim() || null,
+            raw_resource_json: resource,
+        }));
+
+        const hasGenerationSignals = Boolean(
+            prompts.length
+            || resources.length
+            || isNonEmptyGenerationValue(exif.Sampler)
+            || isNonEmptyGenerationValue(exif.Steps)
+            || isNonEmptyGenerationValue(exif.Seed)
+            || isNonEmptyGenerationValue(exif['CFG scale'])
+            || isNonEmptyGenerationValue(civitaiMeta.sampler)
+            || isNonEmptyGenerationValue(civitaiMeta.steps)
+            || isNonEmptyGenerationValue(civitaiMeta.seed)
+            || isNonEmptyGenerationValue(civitaiMeta.cfgScale)
+        );
+
+        if (!hasGenerationSignals) {
+            return [];
+        }
+
+        const methodFamily = String(
+            civitai?.process || civitaiMeta.process || image?.generation_software || 'metadata_fallback'
+        ).trim();
+        const platformName = String(
+            civitai?.engine || civitaiMeta.engine || image?.generation_software || 'metadata_fallback'
+        ).trim();
+
+        return [
+            {
+                source_type: 'metadata_fallback',
+                method_family: methodFamily || 'metadata_fallback',
+                platform_name: platformName || 'metadata_fallback',
+                stage_count: 1,
+                prompts,
+                resources,
+                stages: [
+                    {
+                        stage_index: 0,
+                        stage_role: 'base',
+                        stage_label: 'Base',
+                        sampler_name: exif.Sampler ?? exif.sampler ?? civitaiMeta.sampler,
+                        scheduler_name: exif.Scheduler ?? exif.scheduler ?? civitaiMeta.scheduler,
+                        steps: exif.Steps ?? exif.steps ?? civitaiMeta.steps,
+                        cfg_scale: exif['CFG scale'] ?? exif.cfg_scale ?? civitaiMeta.cfgScale,
+                        seed: exif.Seed ?? exif.seed ?? civitaiMeta.seed,
+                        clip_skip: exif['Clip skip'] ?? exif.clip_skip ?? civitaiMeta.clipSkip,
+                        denoise_strength: exif['Denoising strength'] ?? exif.denoise_strength ?? civitaiMeta.denoise,
+                        width: exif.Width ?? exif.width ?? civitaiMeta.width ?? image?.width,
+                        height: exif.Height ?? exif.height ?? civitaiMeta.height ?? image?.height,
+                        prompts,
+                        resources,
+                        field_values: [],
+                        raw_stage_json: {
+                            exif,
+                            civitai_meta: civitaiMeta,
+                        },
+                    },
+                ],
+            },
+        ];
+    }
+
+    function renderGenerationProcessFolders(container, image, processes) {
+        if (!Array.isArray(processes) || !processes.length) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-placeholder';
+            empty.textContent = 'No extracted generation process data is available for this image yet.';
+            container.appendChild(empty);
+            return;
+        }
+
+        processes.forEach((process, processIndex) => {
+            const processFolder = document.createElement('details');
+            processFolder.className = 'generation-process-folder';
+            if (processIndex === 0) {
+                processFolder.open = true;
+            }
+
+            const processSummary = document.createElement('summary');
+            processSummary.textContent = getGenerationProcessLabel(process, processIndex);
+            processFolder.appendChild(processSummary);
+
+            const processBody = document.createElement('div');
+            processBody.className = 'generation-process-body';
+
+            const stages = getGenerationStagesForProcess(process);
+            stages.forEach((stage, stageIndex) => {
+                const stepFolder = document.createElement('details');
+                stepFolder.className = 'generation-step-folder';
+                if (processIndex === 0 && stageIndex === 0) {
+                    stepFolder.open = true;
+                }
+
+                const stepSummary = document.createElement('summary');
+                stepSummary.textContent = getGenerationStageName(stage, stageIndex);
+                stepFolder.appendChild(stepSummary);
+
+                const stepBody = document.createElement('div');
+                stepBody.className = 'generation-step-body';
+
+                const { display, raw } = buildGenerationParameterMap(image, process, stage);
+                const entries = Object.entries(display);
+                if (!entries.length) {
+                    const placeholder = document.createElement('p');
+                    placeholder.className = 'detail-placeholder';
+                    placeholder.textContent = 'No generation parameters were extracted for this step.';
+                    stepBody.appendChild(placeholder);
+                } else {
+                    const grid = document.createElement('div');
+                    grid.className = 'generation-param-grid';
+                    entries.forEach(([label, value]) => {
+                        grid.appendChild(createGenerationParameterNode(label, value));
+                    });
+                    stepBody.appendChild(grid);
+                }
+
+                const rawTitle = document.createElement('h4');
+                rawTitle.className = 'generation-raw-title';
+                rawTitle.textContent = 'All Extracted Parameters';
+                stepBody.appendChild(rawTitle);
+
+                const rawPre = document.createElement('pre');
+                rawPre.className = 'json-block generation-raw-json';
+                rawPre.textContent = JSON.stringify(raw, null, 2);
+                stepBody.appendChild(rawPre);
+
+                stepFolder.appendChild(stepBody);
+                processBody.appendChild(stepFolder);
+            });
+
+            processFolder.appendChild(processBody);
+            container.appendChild(processFolder);
+        });
+    }
+
+    async function fetchGenerationPrototypeForImage(image, { forceRefresh = false } = {}) {
+        const fileHash = String(getEditableFileHash(image) || '').trim();
+        if (!fileHash) {
+            return null;
+        }
+
+        if (forceRefresh) {
+            state.generationPrototypeCache.delete(fileHash);
+        }
+
+        if (!forceRefresh && state.generationPrototypeCache.has(fileHash)) {
+            return state.generationPrototypeCache.get(fileHash);
+        }
+
+        if (state.generationPrototypeInflight.has(fileHash)) {
+            return state.generationPrototypeInflight.get(fileHash);
+        }
+
+        const request = (async () => {
+            const response = await fetch(`/images/${encodeURIComponent(fileHash)}/generation-prototype`);
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!response.ok) {
+                const detail = payload && typeof payload === 'object' && payload.detail
+                    ? String(payload.detail)
+                    : `Request failed with HTTP ${response.status}`;
+                throw new Error(detail);
+            }
+
+            const safePayload = payload && typeof payload === 'object' ? payload : {};
+            state.generationPrototypeCache.set(fileHash, safePayload);
+            return safePayload;
+        })();
+
+        state.generationPrototypeInflight.set(fileHash, request);
+        try {
+            return await request;
+        } finally {
+            state.generationPrototypeInflight.delete(fileHash);
+        }
+    }
+
+    async function renderDetailGenerationPanel(image) {
+        if (!(detailGeneration instanceof HTMLElement)) {
+            return;
+        }
+
+        detailGeneration.innerHTML = '';
+        if (!image || typeof image !== 'object') {
+            return;
+        }
+
+        const fileHash = String(getEditableFileHash(image) || '').trim();
+        if (!fileHash) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-placeholder';
+            empty.textContent = 'Generation data requires a persisted file hash.';
+            detailGeneration.appendChild(empty);
+            return;
+        }
+
+        const token = state.detailGenerationRenderToken + 1;
+        state.detailGenerationRenderToken = token;
+
+        const loading = document.createElement('p');
+        loading.className = 'detail-placeholder';
+        loading.textContent = 'Loading extracted generation data...';
+        detailGeneration.appendChild(loading);
+
+        let payload = null;
+        try {
+            payload = await fetchGenerationPrototypeForImage(image);
+        } catch (error) {
+            if (state.detailGenerationRenderToken !== token) {
+                return;
+            }
+            payload = null;
+        }
+
+        if (state.detailGenerationRenderToken !== token) {
+            return;
+        }
+
+        const selectedImage = getSelectedImage();
+        const selectedHash = String(getEditableFileHash(selectedImage) || '').trim();
+        if (selectedHash && selectedHash !== fileHash) {
+            return;
+        }
+
+        const normalized = payload && typeof payload === 'object' ? (payload.normalized || {}) : {};
+        const processCandidates = [
+            normalized.processes,
+            image.generation_processes,
+            image.generationProcesses,
+            image?.generation?.processes,
+        ];
+        const processes = processCandidates.find((candidate) => Array.isArray(candidate) && candidate.length) || [];
+        const fallbackProcesses = buildFallbackGenerationProcessesFromImage(image);
+        const resolvedProcesses = processes.length ? processes : fallbackProcesses;
+
+        detailGeneration.innerHTML = '';
+        renderGenerationProcessFolders(detailGeneration, image, resolvedProcesses);
+
+        if (!processes.length && payload === null) {
+            const note = document.createElement('p');
+            note.className = 'detail-placeholder';
+            note.textContent = 'Showing metadata fallback because generation prototype data could not be loaded.';
+            detailGeneration.prepend(note);
+        }
+    }
+
     function dedupeDisplayValues(values) {
         const seen = new Set();
         const deduped = [];
@@ -2563,6 +3141,83 @@ document.addEventListener('DOMContentLoaded', () => {
         // Accepts both "no artist" (legacy) and "artist" (new label without "No" prefix).
         const raw = normalizeDetailFilterValue(condition);
         const key = raw && !raw.startsWith('no ') ? `no ${raw}` : raw;
+        const exif = parsePossibleJsonObject(image?.exif_data) || {};
+
+        const hasExifValue = (...candidates) => candidates.some((candidate) => {
+            const value = exif?.[candidate];
+            if (value == null) {
+                return false;
+            }
+            if (typeof value === 'string') {
+                return value.trim().length > 0;
+            }
+            if (Array.isArray(value)) {
+                return value.length > 0;
+            }
+            if (typeof value === 'object') {
+                return Object.keys(value).length > 0;
+            }
+            return true;
+        });
+
+        const looksLikeA1111UserCommentPayload = () => {
+            const exifParameters = [exif?.parameters, exif?.Parameters]
+                .find((value) => typeof value === 'string' && value.trim().length > 0);
+            if (typeof exifParameters === 'string') {
+                const normalizedParameters = exifParameters.trim().toLowerCase();
+                const hasSteps = normalizedParameters.includes('steps:');
+                const hasSeed = normalizedParameters.includes('seed:');
+                const hasSampler = normalizedParameters.includes('sampler:');
+                const hasCfg = normalizedParameters.includes('cfg scale:');
+                const hasNegativePrompt = normalizedParameters.includes('negative prompt:');
+                if (hasSteps && (hasCfg || hasSampler || hasSeed || hasNegativePrompt)) {
+                    return true;
+                }
+            }
+
+            const exactUserComment = exif?.user_comment;
+            if (typeof exactUserComment === 'string' && exactUserComment.trim().length > 0) {
+                return true;
+            }
+
+            const legacyUserComment = exif?.UserComment;
+            if (typeof legacyUserComment !== 'string') {
+                return false;
+            }
+
+            const text = legacyUserComment.trim();
+            if (!text) {
+                return false;
+            }
+
+            // Some exporters place JSON payloads (often Comfy/CivitAI-specific) in UserComment.
+            // Treat only classic A1111 parameter strings as A1111 metadata.
+            if (text.startsWith('{') || text.startsWith('[')) {
+                try {
+                    const parsed = JSON.parse(text);
+                    if (parsed && typeof parsed === 'object') {
+                        const promptLike = parsed.prompt ?? parsed.workflow ?? parsed['resource-stack'];
+                        if (promptLike != null) {
+                            return false;
+                        }
+                    }
+                } catch {
+                    // If parsing fails, continue with textual heuristic below.
+                }
+            }
+
+            const normalized = text.toLowerCase();
+            if (normalized.includes('civitai resources:')) {
+                return false;
+            }
+            const hasSteps = normalized.includes('steps:');
+            const hasSeed = normalized.includes('seed:');
+            const hasSampler = normalized.includes('sampler:');
+            const hasCfg = normalized.includes('cfg scale:');
+            const hasNegativePrompt = normalized.includes('negative prompt:');
+            return hasSteps && (hasCfg || hasSampler || hasSeed || hasNegativePrompt);
+        };
+
         if (key === 'no nsfw rating') {
             const { granular } = getNsfwDisplayTokens(image, { includeUserOverrides: true });
             return !granular || !_NSFW_GRANULAR_RATINGS.has(normalizeDetailFilterValue(granular));
@@ -2581,11 +3236,16 @@ document.addEventListener('DOMContentLoaded', () => {
             return !String(image?.generation_software || '').trim();
         }
         if (key === 'no prompt') {
-            const exif = parsePossibleJsonObject(image?.exif_data) || {};
             const civitai = parsePossibleJsonObject(image?.civitai_data) || parsePossibleJsonObject(image?.civitai) || {};
             const exifPrompt = String(exif.prompt || exif.Prompt || '').trim();
             const civitaiPrompt = String((civitai.meta || {}).prompt || '').trim();
             return !exifPrompt && !civitaiPrompt;
+        }
+        if (key === 'no a1111 metadata') {
+            return !looksLikeA1111UserCommentPayload();
+        }
+        if (key === 'no comfyui metadata') {
+            return !hasExifValue('prompt', 'Prompt', 'workflow', 'Workflow');
         }
         if (key === 'no tags') {
             return getImageTagSet(image).size === 0;
@@ -3048,6 +3708,117 @@ document.addEventListener('DOMContentLoaded', () => {
         return `/image_library/${encodedPath}${version}`;
     }
 
+    function toAbsoluteUrl(rawUrl) {
+        const value = String(rawUrl || '').trim();
+        if (!value) {
+            return '';
+        }
+        if (/^https?:\/\//i.test(value)) {
+            return value;
+        }
+        if (value.startsWith('//')) {
+            return `${window.location.protocol}${value}`;
+        }
+        try {
+            return new URL(value, window.location.origin).toString();
+        } catch {
+            return '';
+        }
+    }
+
+    function getDragDropImageUrl(image) {
+        const urls = getDragDropImageUrls(image);
+        if (!urls.length) {
+            return '';
+        }
+        const localUrl = toAbsoluteUrl(getImageUrl(image));
+        if (localUrl && urls.includes(localUrl)) {
+            return localUrl;
+        }
+        return urls[0];
+    }
+
+    function getDragDropImageUrls(image) {
+        const pushUrl = (collector, url) => {
+            const absolute = toAbsoluteUrl(url);
+            if (!absolute) {
+                return;
+            }
+            if (!looksLikeImageUrl(absolute)) {
+                return;
+            }
+            if (!collector.includes(absolute)) {
+                collector.push(absolute);
+            }
+        };
+
+        const urls = [];
+        const mediaUrl = getMediaUrlForDisplay(image);
+        const civitaiUrl = getCivitaiMediaUrl(image);
+        const sourceUrl = String(image?.source_url || '').trim();
+        const localUrl = getImageUrl(image);
+
+        // Prefer externally reachable HTTPS URLs first for cross-site drop targets.
+        if (/^https:\/\//i.test(String(mediaUrl || '').trim())) {
+            pushUrl(urls, mediaUrl);
+        }
+        if (/^https:\/\//i.test(String(civitaiUrl || '').trim())) {
+            pushUrl(urls, civitaiUrl);
+        }
+        if (/^https:\/\//i.test(sourceUrl)) {
+            pushUrl(urls, sourceUrl);
+        }
+
+        // Keep local preview URL as fallback for local tools on trusted origins.
+        pushUrl(urls, localUrl);
+        pushUrl(urls, mediaUrl);
+        pushUrl(urls, civitaiUrl);
+        pushUrl(urls, sourceUrl);
+
+        return urls;
+    }
+
+    function getDragDropFilename(image) {
+        const rawName = String(image?.file_name || image?.file_path || image?.file_hash || 'atelier-image').trim();
+        const baseName = rawName.split('/').pop() || 'atelier-image';
+        return baseName || 'atelier-image';
+    }
+
+    function wireImageDragPayload(target, resolveImage) {
+        if (!(target instanceof HTMLImageElement) || typeof resolveImage !== 'function') {
+            return;
+        }
+
+        target.draggable = true;
+        target.addEventListener('dragstart', (event) => {
+            const image = resolveImage();
+            if (!image || typeof image !== 'object') {
+                return;
+            }
+
+            const dragUrls = getDragDropImageUrls(image);
+            if (!dragUrls.length) {
+                return;
+            }
+            const dragUrl = getDragDropImageUrl(image);
+            const uriListPayload = dragUrls.join('\r\n');
+
+            const transfer = event.dataTransfer;
+            if (!transfer) {
+                return;
+            }
+
+            const fileName = getDragDropFilename(image);
+            const mimeType = String(image?.mimetype || 'application/octet-stream').trim() || 'application/octet-stream';
+            transfer.effectAllowed = 'copy';
+            transfer.setData('text/uri-list', uriListPayload);
+            transfer.setData('text/plain', dragUrl);
+            transfer.setData('URL', dragUrl);
+            transfer.setData('text/html', `<img src="${dragUrl}" alt="${fileName}">`);
+            transfer.setData('DownloadURL', `${mimeType}:${fileName}:${dragUrl}`);
+        });
+    }
+
     function getCivitaiMediaUrl(image) {
         const candidates = [
             image?.json_metadata?.civitai?.url,
@@ -3155,6 +3926,47 @@ document.addEventListener('DOMContentLoaded', () => {
             return null;
         }
         return variants[getActiveVariantIndex(image)] || null;
+    }
+    function resolveVariantDisplayFileName(image) {
+        const activeVariant = getActiveVariant(image);
+        const fallbackName = image?.original_file_name
+            || image?.file_name
+            || image?.file_path
+            || image?.file_hash
+            || 'Untitled';
+
+        const preferredName = activeVariant?.original_file_name
+            || activeVariant?.file_name
+            || fallbackName;
+        const normalizedPreferred = String(preferredName || '').trim();
+        if (!activeVariant || !normalizedPreferred) {
+            return normalizedPreferred || 'Untitled';
+        }
+
+        const variantMime = String(activeVariant?.mimetype || '').trim().toLowerCase();
+        const variantNameOrPath = String(activeVariant?.file_name || activeVariant?.file_path || '').trim().toLowerCase();
+        const variantLooksImage = variantMime.startsWith('image/')
+            || /\.(avif|bmp|gif|jpe?g|png|tiff?|webp)(?:$|[?#])/.test(variantNameOrPath);
+        const preferredLooksVideo = /\.(mp4|webm|mov|mkv)(?:$|[?#])/.test(normalizedPreferred.toLowerCase());
+        if (!variantLooksImage || !preferredLooksVideo) {
+            return normalizedPreferred;
+        }
+
+        const civitaiImageId = extractCivitaiImageIdFromImage(image);
+        const extFromVariant = variantNameOrPath.match(/\.(avif|bmp|gif|jpe?g|png|tiff?|webp)(?:$|[?#])/);
+        let imageExtension = extFromVariant ? `.${extFromVariant[1]}` : '';
+        if (!imageExtension) {
+            if (variantMime.includes('webp')) imageExtension = '.webp';
+            else if (variantMime.includes('png')) imageExtension = '.png';
+            else if (variantMime.includes('gif')) imageExtension = '.gif';
+            else imageExtension = '.jpg';
+        }
+
+        if (civitaiImageId) {
+            return `${civitaiImageId}${imageExtension}`;
+        }
+
+        return normalizedPreferred;
     }
 
     function syncClientImageVariantState(image) {
@@ -4205,7 +5017,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function pickCaption(image) {
-        return image.file_name || image.file_path || image.file_hash || 'Untitled';
+        const activeVariant = getActiveVariant(image);
+        return resolveVariantDisplayFileName(image);
     }
 
     function renderMetaItem(label, value, options = {}) {
@@ -5789,6 +6602,28 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    function getVariantFilenameDebug(image) {
+        const activeVariant = getActiveVariant(image);
+        const rawPreferredFileName = activeVariant?.original_file_name
+            || activeVariant?.file_name
+            || image?.original_file_name
+            || image?.file_name
+            || image?.file_path
+            || image?.file_hash
+            || 'Untitled';
+        const resolvedDisplayFileName = resolveVariantDisplayFileName(image);
+        return {
+            active_variant_key: image?.active_variant_key || null,
+            active_variant_label: activeVariant?.variant_label || image?.variant_label || null,
+            active_variant_file_name: activeVariant?.file_name || null,
+            active_variant_original_file_name: activeVariant?.original_file_name || null,
+            image_file_name: image?.file_name || null,
+            image_original_file_name: image?.original_file_name || null,
+            raw_preferred_file_name: rawPreferredFileName,
+            resolved_display_file_name: resolvedDisplayFileName,
+        };
+    }
+
     function getAvailableDetailTabIds() {
         return DETAIL_TAB_IDS.filter((tabId) => detailPanelByTabId.has(tabId));
     }
@@ -5979,6 +6814,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 sendToPerceptualLabBtn.removeAttribute('data-href');
                 sendToPerceptualLabBtn.title = 'Open the Perceptual Analyzer Lab for this item';
             }
+            if (sendToModelLabBtn) {
+                sendToModelLabBtn.classList.add('hidden');
+                sendToModelLabBtn.disabled = true;
+                sendToModelLabBtn.removeAttribute('data-href');
+                sendToModelLabBtn.title = 'Open the Model Reference Lab for this item';
+            }
             repairImageBtn.disabled = true;
             if (rescanImageBtn) {
                 rescanImageBtn.disabled = true;
@@ -5986,6 +6827,9 @@ document.addEventListener('DOMContentLoaded', () => {
             deleteImageFileBtn.disabled = true;
             currentDebugImage = null;
             debugBadge.classList.add('hidden');
+            if (detailGeneration instanceof HTMLElement) {
+                detailGeneration.innerHTML = '';
+            }
             postSelectedImageTagsToTree(null);
             return;
         }
@@ -6000,6 +6844,7 @@ document.addEventListener('DOMContentLoaded', () => {
         currentDebugImage = image;
         const generationLabDestination = getGenerationLabDestination(image);
         const perceptualLabDestination = getPerceptualLabDestination(image);
+        const modelLabDestination = getModelLabDestination(image);
         if (sendToGenerationLabBtn) {
             if (generationLabDestination) {
                 sendToGenerationLabBtn.classList.remove('hidden');
@@ -6024,6 +6869,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 sendToPerceptualLabBtn.disabled = true;
                 sendToPerceptualLabBtn.removeAttribute('data-href');
                 sendToPerceptualLabBtn.title = 'Open the Perceptual Analyzer Lab for this item';
+            }
+        }
+        if (sendToModelLabBtn) {
+            if (modelLabDestination) {
+                sendToModelLabBtn.classList.remove('hidden');
+                sendToModelLabBtn.disabled = false;
+                sendToModelLabBtn.dataset.href = modelLabDestination.href;
+                sendToModelLabBtn.title = modelLabDestination.title;
+            } else {
+                sendToModelLabBtn.classList.add('hidden');
+                sendToModelLabBtn.disabled = true;
+                sendToModelLabBtn.removeAttribute('data-href');
+                sendToModelLabBtn.title = 'Open the Model Reference Lab for this item';
             }
         }
         repairImageBtn.disabled = false;
@@ -6083,8 +6941,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const artistValues = getDistinctGroupValues(detailEditTargets, (entry) => entry.artist_name, { sort: true });
         const artistProfileValues = getDistinctGroupValues(detailEditTargets, (entry) => deriveArtistProfileUrl(entry), { sort: true });
         const sourceUrlValues = getDistinctGroupValues(detailEditTargets, (entry) => entry.source_url, { sort: true });
-        detailImage.alt = safeText(image.file_name, 'Selected image');
-        detailTitle.textContent = safeText(image.file_name, image.file_hash || 'Untitled');
+        const activeVariant = getActiveVariant(image);
+        const displayFileName = resolveVariantDisplayFileName(image);
+        detailImage.alt = safeText(displayFileName, 'Selected image');
+        detailTitle.textContent = safeText(displayFileName, image.file_hash || 'Untitled');
         renderDetailSubtitle(image);
 
         detailMeta.innerHTML = '';
@@ -6189,12 +7049,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         detailExif.textContent = JSON.stringify(image.exif_data || {}, null, 2);
         detailCivitai.textContent = JSON.stringify(image.civitai_data || image.civitai || {}, null, 2);
+        void renderDetailGenerationPanel(image);
         renderImageCollections(image);
 
         setDebugBadge({
             key: image.__key,
             file_hash: image.file_hash,
             file_path: image.file_path,
+            ...getVariantFilenameDebug(image),
             url: imageUrl,
             status: imageUrl ? 'loading' : 'missing-url',
             ...getImageLayoutDebug(videoMode ? detailVideo : detailImage),
@@ -6302,6 +7164,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 img.loading = 'lazy';
                 img.alt = safeText(caption);
                 img.src = mediaUrl;
+                wireImageDragPayload(img, () => image);
                 mediaNode = img;
             }
 
@@ -6510,6 +7373,37 @@ document.addEventListener('DOMContentLoaded', () => {
         return {
             href: `/perceptual-lab?${params.toString()}`,
             title: `Open Perceptual Analyzer Lab for local image ${fileHash}`,
+        };
+    }
+
+    function getModelLabDestination(image) {
+        if (!image || typeof image !== 'object') {
+            return null;
+        }
+
+        const civitaiImageId = extractCivitaiImageIdFromImage(image);
+        const fileHash = getEditableFileHash(image);
+        if (!civitaiImageId && !fileHash) {
+            return null;
+        }
+
+        const params = new URLSearchParams();
+        if (civitaiImageId) {
+            params.set('civitai', civitaiImageId);
+        }
+        if (fileHash) {
+            params.set('fileHash', fileHash);
+            // Keep legacy alias for routes/pages that still read `hash`.
+            params.set('hash', fileHash);
+        }
+        params.set('source', 'gallery');
+        return {
+            href: `/model-lab?${params.toString()}`,
+            title: civitaiImageId && fileHash
+                ? `Open Model Reference Lab for CivitAI image ${civitaiImageId} and local image ${fileHash}`
+                : civitaiImageId
+                    ? `Open Model Reference Lab for CivitAI image ${civitaiImageId}`
+                    : `Open Model Reference Lab for local image ${fileHash}`,
         };
     }
 
@@ -6996,6 +7890,7 @@ document.addEventListener('DOMContentLoaded', () => {
             key: currentDebugImage.__key,
             file_hash: currentDebugImage.file_hash,
             file_path: currentDebugImage.file_path,
+            ...getVariantFilenameDebug(currentDebugImage),
             url: detailImage.currentSrc || getImageUrl(currentDebugImage),
             status: 'loaded',
             natural_size: `${detailImage.naturalWidth}x${detailImage.naturalHeight}`,
@@ -7009,6 +7904,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         openFullscreenPreviewFromImage(image);
     });
+    wireImageDragPayload(detailImage, () => getSelectedImage());
+    wireImageDragPayload(fullscreenImage, () => {
+        const fullscreenImageItem = state.fullscreenSelectedKey
+            ? getImageByKey(state.fullscreenSelectedKey)
+            : null;
+        return fullscreenImageItem || getSelectedImage();
+    });
     detailImage.addEventListener('error', () => {
         if (!currentDebugImage) {
             return;
@@ -7017,6 +7919,7 @@ document.addEventListener('DOMContentLoaded', () => {
             key: currentDebugImage.__key,
             file_hash: currentDebugImage.file_hash,
             file_path: currentDebugImage.file_path,
+            ...getVariantFilenameDebug(currentDebugImage),
             url: detailImage.currentSrc || getImageUrl(currentDebugImage),
             status: 'error-loading-image',
             ...getImageLayoutDebug(),
@@ -7041,6 +7944,7 @@ document.addEventListener('DOMContentLoaded', () => {
             key: currentDebugImage.__key,
             file_hash: currentDebugImage.file_hash,
             file_path: currentDebugImage.file_path,
+            ...getVariantFilenameDebug(currentDebugImage),
             url: detailVideo.currentSrc || getImageUrl(currentDebugImage),
             status: 'video-loadedmetadata',
             video_natural: `${detailVideo.videoWidth}x${detailVideo.videoHeight}`,
@@ -7066,6 +7970,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 key: currentDebugImage.__key,
                 file_hash: currentDebugImage.file_hash,
                 file_path: currentDebugImage.file_path,
+                ...getVariantFilenameDebug(currentDebugImage),
                 url: failingUrl,
                 status: 'video-fallback-to-image',
                 ...getImageLayoutDebug(detailImage),
@@ -7076,6 +7981,7 @@ document.addEventListener('DOMContentLoaded', () => {
             key: currentDebugImage.__key,
             file_hash: currentDebugImage.file_hash,
             file_path: currentDebugImage.file_path,
+            ...getVariantFilenameDebug(currentDebugImage),
             url: failingUrl || getImageUrl(currentDebugImage),
             status: 'video-error',
             ...getImageLayoutDebug(detailVideo),
@@ -7430,6 +8336,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (!response.ok) {
                             throw new Error(result.detail || `HTTP ${response.status}`);
                         }
+                        const targetHash = String(result.file_hash || getEditableFileHash(image) || '').trim();
+                        if (targetHash) {
+                            state.generationPrototypeCache.delete(targetHash);
+                            state.generationPrototypeInflight.delete(targetHash);
+                        }
                         successes.push({ image, result });
                     } catch (error) {
                         failures.push({ image, message: error.message });
@@ -7480,6 +8391,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const href = String(sendToPerceptualLabBtn.dataset.href || '').trim();
             if (!href) {
                 showToast('No Perceptual Analyzer Lab destination is available for this item.', 'warn');
+                return;
+            }
+            window.open(href, '_blank', 'noopener');
+        });
+    }
+    if (sendToModelLabBtn) {
+        sendToModelLabBtn.addEventListener('click', () => {
+            const href = String(sendToModelLabBtn.dataset.href || '').trim();
+            if (!href) {
+                showToast('No Model Reference Lab destination is available for this item.', 'warn');
                 return;
             }
             window.open(href, '_blank', 'noopener');

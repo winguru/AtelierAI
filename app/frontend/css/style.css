@@ -1804,6 +1804,90 @@ h1 {
     overflow: auto;
 }
 
+.detail-generation {
+    display: grid;
+    gap: 0.52rem;
+    margin-top: 0.45rem;
+}
+
+.generation-process-folder,
+.generation-step-folder {
+    border: 1px solid #d8c2ac;
+    border-radius: 10px;
+    background: #fff8ed;
+    overflow: hidden;
+}
+
+.generation-process-folder > summary,
+.generation-step-folder > summary {
+    cursor: pointer;
+    padding: 0.5rem 0.62rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #5b3b25;
+    background: #f6e8d2;
+}
+
+.generation-step-folder > summary {
+    background: #f9efe0;
+    font-weight: 600;
+    font-size: 0.8rem;
+}
+
+.generation-process-body,
+.generation-step-body {
+    display: grid;
+    gap: 0.48rem;
+    padding: 0.54rem 0.62rem;
+}
+
+.generation-param-grid {
+    display: grid;
+    gap: 0.4rem;
+}
+
+.generation-param-row {
+    display: grid;
+    gap: 0.18rem;
+    padding: 0.42rem 0.5rem;
+    border: 1px solid #e1cfbb;
+    border-radius: 8px;
+    background: #fffaf3;
+}
+
+.generation-param-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #7c5d46;
+}
+
+.generation-param-value {
+    color: #2f2117;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.generation-param-pre {
+    margin: 0;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.74rem;
+}
+
+.generation-raw-title {
+    margin: 0.18rem 0 0;
+    font-size: 0.74rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #7c5d46;
+}
+
+.generation-raw-json {
+    max-height: 180px;
+}
+
 .btn {
     border: 0;
     border-radius: 10px;

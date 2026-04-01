@@ -710,6 +710,19 @@ class GenerationProvenanceRecord(Base):
     )
 
 
+class GenerationTemplate(Base):
+    __tablename__ = "generation_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    workflow_json = Column(JSON, nullable=False)
+    mappings_json = Column(JSON, nullable=False)
+    default_tokens_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_version"
     version_num = Column(String, primary_key=True)

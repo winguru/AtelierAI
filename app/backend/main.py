@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, Query, Response, Request, status
+from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, Query, Response, Request, status, Body
 from typing import Any, Callable, List, Optional, Literal
 from contextlib import asynccontextmanager
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import requests
 from PIL import Image
@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session, joinedload
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import atelierai.config as app_config
@@ -42,6 +43,9 @@ IMAGE_RESOURCES_PATH = str(getattr(app_config, "IMAGE_RESOURCES_PATH", "image_re
 CURRENT_SCHEMA_VERSION = str(getattr(app_config, "CURRENT_SCHEMA_VERSION", "1.0"))
 DATABASE_URL = str(getattr(app_config, "DATABASE_URL", "sqlite:///image_db.sqlite"))
 ALLOW_SCHEMA_RESET = bool(getattr(app_config, "ALLOW_SCHEMA_RESET", False))
+ATELIER_COMFYUI_BASE_URL = str(getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "")).strip()
+ATELIER_COMFYUI_MODEL_CATALOG_URL = str(getattr(app_config, "ATELIER_COMFYUI_MODEL_CATALOG_URL", "")).strip()
+ATELIER_COMFY_MATCH_THRESHOLD = float(getattr(app_config, "ATELIER_COMFY_MATCH_THRESHOLD", 0.95))
 
 # Use absolute imports for consistency with our project structure
 from database import (
@@ -66,6 +70,7 @@ from models import (
     Tool,
     License,
     Artist,
+    GenerationTemplate,
     SchemaVersion,
 )  # Import the specific classes we need
 
@@ -117,6 +122,12 @@ from schemas import (
     TaxonomyBootstrapImportRequest,
     TaxonomyTagAssociationRequest,
     TaxonomyTagDetailsUpdateRequest,
+    GenerationTemplateImportRequest,
+    GenerationTemplateUpdateRequest,
+    GenerationTemplateResolveRequest,
+    A1111BridgeAnalyzeRequest,
+    A1111BridgeSaveRequest,
+    ComfyGenerateCompareRequest,
 )
 
 try:
@@ -136,6 +147,10 @@ _CIVITAI_SOURCE_VARIANT_DIRNAME = "civitai_source_variants"
 _CIVITAI_COLLECTION_HEAD_PROBE_SIZE = 50
 _CIVITAI_COLLECTION_FULL_VERIFY_MAX_AGE_SECONDS = 24 * 60 * 60
 _VIDEO_FILE_SUFFIXES = {".mp4", ".webm", ".mov", ".mkv"}
+_A1111_NEGATIVE_PROMPT_RE = re.compile(r"^\s*negative\s+prompt\s*:\s*", re.IGNORECASE)
+_A1111_KV_SPLIT_RE = re.compile(r",\s*(?=[A-Za-z][A-Za-z0-9 _/\-]*\s*:)")
+_A1111_SIZE_RE = re.compile(r"^\s*(\d{2,6})\s*[xX]\s*(\d{2,6})\s*$")
+_A1111_LORA_TAG_RE = re.compile(r"<\s*lora\s*:\s*([^:>]+?)(?:\s*:\s*([-+]?\d*\.?\d+))?\s*>", re.IGNORECASE)
 
 
 @dataclass
@@ -1415,12 +1430,21 @@ def _preserve_civitai_source_variant(
         if not variant_path.exists() or actual_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns:
             shutil.copy2(actual_path, variant_path)
         variant_file_hash = _sha256_file(variant_path)
+        variant_original_file_name = _build_civitai_original_filename(
+            prepared.image_id,
+            None,
+            str(prepared.effective_image_url or prepared.image_url or prepared.source_url or ""),
+            actual_mime_type or prepared.mime_type,
+        )
+        if Path(variant_original_file_name).suffix.lower() in _VIDEO_FILE_SUFFIXES:
+            variant_original_file_name = f"{prepared.image_id}{_guess_suffix(actual_mime_type)}"
         variant_metadata = {
             "image_id": prepared.image_id,
             "image_db_id": image_db_id,
             "declared_mimetype": prepared.mime_type,
             "actual_mimetype": image.mimetype,
             "declared_filename": prepared.original_filename,
+            "original_variant_file_name": variant_original_file_name,
             "library_file_path": str(image.file_path),
             "library_file_hash": image.file_hash,
             "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
@@ -1452,19 +1476,36 @@ def _preserve_civitai_source_variant(
                         if chunk:
                             handle.write(chunk)
 
+                _, detected_preview_mime = _detect_downloaded_media(temp_preview_path)
+                resolved_preview_mime = _normalize_mime_type(detected_preview_mime or preview_mime_type)
+                resolved_preview_extension = _guess_suffix(resolved_preview_mime)
+                if resolved_preview_extension and resolved_preview_extension != temp_preview_path.suffix.lower():
+                    temp_with_resolved_extension = temp_preview_path.with_suffix(resolved_preview_extension)
+                    temp_preview_path.rename(temp_with_resolved_extension)
+                    temp_preview_path = temp_with_resolved_extension
+
                 variant_file_hash = _sha256_file(temp_preview_path)
-                variant_path = variant_root / f"{variant_file_hash}{preview_extension}"
+                variant_path = variant_root / f"{variant_file_hash}{temp_preview_path.suffix.lower()}"
                 if variant_path.exists():
                     temp_preview_path.unlink(missing_ok=True)
                 else:
                     temp_preview_path.rename(variant_path)
 
+                variant_original_file_name = _build_civitai_original_filename(
+                    prepared.image_id,
+                    None,
+                    str(prepared.preview_image_url or prepared.image_url or prepared.source_url or ""),
+                    resolved_preview_mime,
+                )
+                if Path(variant_original_file_name).suffix.lower() in _VIDEO_FILE_SUFFIXES:
+                    variant_original_file_name = f"{prepared.image_id}{_guess_suffix(resolved_preview_mime)}"
                 variant_metadata = {
                     "image_id": prepared.image_id,
                     "image_db_id": image_db_id,
                     "declared_mimetype": prepared.mime_type,
-                    "actual_mimetype": preview_mime_type,
+                    "actual_mimetype": resolved_preview_mime,
                     "declared_filename": prepared.original_filename,
+                    "original_variant_file_name": variant_original_file_name,
                     "library_file_path": str(image.file_path),
                     "library_file_hash": image.file_hash,
                     "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
@@ -1524,12 +1565,21 @@ def _persist_mismatch_static_variant(
         shutil.copy2(mismatch_path, variant_path)
 
     variant_file_hash = _sha256_file(variant_path)
+    variant_original_file_name = _build_civitai_original_filename(
+        prepared.image_id,
+        None,
+        str(prepared.mismatch_source_url or prepared.image_url or prepared.source_url or ""),
+        detected_mime,
+    )
+    if Path(variant_original_file_name).suffix.lower() in _VIDEO_FILE_SUFFIXES:
+        variant_original_file_name = f"{prepared.image_id}{_guess_suffix(detected_mime)}"
     variant_metadata = {
         "image_id": prepared.image_id,
         "image_db_id": image_db_id,
         "declared_mimetype": prepared.mime_type,
         "actual_mimetype": detected_mime or "image/unknown",
         "declared_filename": prepared.original_filename,
+        "original_variant_file_name": variant_original_file_name,
         "library_file_path": str(image.file_path),
         "library_file_hash": image.file_hash,
         "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
@@ -3504,6 +3554,80 @@ def _normalize_civitai_resource_preview(resource: dict) -> dict:
     )
 
 
+def _build_civitai_image_data_resource_previews(image_data: dict) -> list[dict]:
+    resources: list[dict] = []
+
+    models = image_data.get("models") if isinstance(image_data, dict) else []
+    if not isinstance(models, list):
+        models = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        model_id = _first_meaningful_civitai_value(item.get("modelId"), item.get("id"))
+        resources.append(
+            _build_generation_resource_preview(
+                "checkpoint",
+                str(item.get("name") or item.get("modelName") or "").strip() or None,
+                version_name=str(item.get("version") or item.get("versionName") or "").strip() or None,
+                base_model_name=str(item.get("baseModel") or "").strip() or None,
+                civitai_model_id=model_id,
+                civitai_model_version_id=item.get("modelVersionId"),
+                source_identifier=str(model_id or "").strip() or None,
+                is_primary=True,
+                raw_resource_json=item,
+            )
+        )
+
+    primary_model_name = str(image_data.get("model") or "").strip() if isinstance(image_data, dict) else ""
+    if primary_model_name:
+        primary_model_id = _first_meaningful_civitai_value(
+            image_data.get("modelId"),
+            image_data.get("model_id"),
+        )
+        resources.append(
+            _build_generation_resource_preview(
+                "checkpoint",
+                primary_model_name,
+                version_name=str(image_data.get("modelVersion") or image_data.get("model_version") or "").strip() or None,
+                base_model_name=str(image_data.get("baseModel") or "").strip() or None,
+                civitai_model_id=primary_model_id,
+                civitai_model_version_id=image_data.get("modelVersionId") or image_data.get("model_version_id"),
+                source_identifier=str(primary_model_id or "").strip() or None,
+                is_primary=True,
+                raw_resource_json={
+                    "model": image_data.get("model"),
+                    "modelVersion": image_data.get("modelVersion") or image_data.get("model_version"),
+                },
+            )
+        )
+
+    loras = image_data.get("loras") if isinstance(image_data, dict) else []
+    if not isinstance(loras, list):
+        loras = []
+    for item in loras:
+        if not isinstance(item, dict):
+            continue
+        model_id = _first_meaningful_civitai_value(item.get("modelId"), item.get("id"))
+        resources.append(
+            _build_generation_resource_preview(
+                "lora",
+                str(item.get("name") or item.get("modelName") or "").strip() or None,
+                version_name=str(item.get("version") or item.get("versionName") or "").strip() or None,
+                base_model_name=str(item.get("baseModel") or "").strip() or None,
+                strength_model=item.get("strength"),
+                strength_clip=item.get("clipWeight"),
+                strength_text_encoder=item.get("textEncoderWeight"),
+                civitai_model_id=model_id,
+                civitai_model_version_id=item.get("modelVersionId"),
+                source_identifier=str(model_id or "").strip() or None,
+                is_primary=False,
+                raw_resource_json=item,
+            )
+        )
+
+    return _dedupe_resource_previews(resources)
+
+
 def _build_civitai_normalized_preview(
     image_id: int,
     basic_info: dict,
@@ -3572,8 +3696,10 @@ def _build_civitai_normalized_preview(
         )
 
     raw_stage_resources = [_normalize_civitai_resource_preview(item) for item in raw_resources if isinstance(item, dict)]
+    if not raw_stage_resources:
+        raw_stage_resources = _build_civitai_image_data_resource_previews(image_data)
     compatibility_json = {"draft": image_data.get("draft")} if image_data.get("draft") is not None else None
-    has_generation_payload = bool(meta or raw_resources or positive_prompt or negative_prompt)
+    has_generation_payload = bool(meta or raw_resources or raw_stage_resources or positive_prompt or negative_prompt)
     normalized_seed = _first_meaningful_civitai_value(meta.get("seed"), image_data.get("seed"))
     stages = _build_comfy_workflow_stages(
         comfy_prompt_graph,
@@ -3699,6 +3825,106 @@ def _build_civitai_normalized_preview(
     }
 
 
+def _build_local_fallback_normalized_preview(
+    image: ImageModel,
+    merged_payload: dict,
+    exif_payload: dict,
+) -> list[dict]:
+    def _pick_value(*candidates: Any) -> Any:
+        for candidate in candidates:
+            if candidate not in (None, ""):
+                return candidate
+        return None
+
+    def _read_exif(*keys: str) -> Any:
+        if not isinstance(exif_payload, dict):
+            return None
+        lowered = {str(key).strip().lower(): value for key, value in exif_payload.items()}
+        for key in keys:
+            value = lowered.get(str(key).strip().lower())
+            if value not in (None, ""):
+                return value
+        return None
+
+    image_data = _dict_payload(merged_payload.get("civitai_data"))
+    if not image_data:
+        image_data = _dict_payload(_dict_payload(merged_payload.get("civitai")).get("image"))
+    image_data = dict(image_data)
+
+    image_data.setdefault("prompt", _pick_value(_read_exif("Prompt", "prompt"), merged_payload.get("prompt")))
+    image_data.setdefault(
+        "negative_prompt",
+        _pick_value(_read_exif("Negative prompt", "NegativePrompt", "negative prompt"), merged_payload.get("negative_prompt")),
+    )
+    image_data.setdefault("sampler", _read_exif("Sampler", "sampler"))
+    image_data.setdefault("steps", _pick_value(_read_exif("Steps", "steps"), merged_payload.get("steps")))
+    image_data.setdefault("cfg_scale", _pick_value(_read_exif("CFG scale", "cfg scale", "cfg"), merged_payload.get("cfg_scale")))
+    image_data.setdefault("seed", _pick_value(_read_exif("Seed", "seed"), merged_payload.get("seed")))
+    image_data.setdefault("clip_skip", _pick_value(_read_exif("Clip skip", "clip skip"), merged_payload.get("clip_skip")))
+    image_data.setdefault("model", _pick_value(_read_exif("Model", "model"), merged_payload.get("model")))
+    image_data.setdefault(
+        "model_version",
+        _pick_value(
+            _read_exif("Model version", "model version"),
+            merged_payload.get("model_version"),
+            merged_payload.get("modelVersion"),
+        ),
+    )
+    image_data.setdefault("baseModel", _pick_value(_read_exif("Base model", "base model"), merged_payload.get("base_model")))
+
+    generation_data = _dict_payload(merged_payload.get("raw_generation_data"))
+    generation_data = dict(generation_data)
+    meta = _dict_payload(generation_data.get("meta"))
+    meta = dict(meta)
+    if image_data.get("prompt") and not meta.get("prompt"):
+        meta["prompt"] = image_data.get("prompt")
+    if image_data.get("negative_prompt") and not meta.get("negativePrompt"):
+        meta["negativePrompt"] = image_data.get("negative_prompt")
+    if image_data.get("steps") is not None and meta.get("steps") in (None, ""):
+        meta["steps"] = image_data.get("steps")
+    if image_data.get("cfg_scale") is not None and meta.get("cfgScale") in (None, ""):
+        meta["cfgScale"] = image_data.get("cfg_scale")
+    if image_data.get("seed") is not None and meta.get("seed") in (None, ""):
+        meta["seed"] = image_data.get("seed")
+    if image_data.get("sampler") and not meta.get("sampler"):
+        meta["sampler"] = image_data.get("sampler")
+    generation_data["meta"] = meta
+
+    if not isinstance(generation_data.get("resources"), list):
+        generation_data["resources"] = []
+
+    basic_info = _dict_payload(merged_payload.get("raw_basic_info"))
+    if not basic_info:
+        basic_info = {
+            "id": image.id,
+            "mimeType": image.mimetype,
+            "width": image.width,
+            "height": image.height,
+            "url": image.source_url,
+        }
+
+    normalized = _build_civitai_normalized_preview(
+        image.id,
+        basic_info,
+        generation_data,
+        image_data,
+    )
+    processes = _list_payload(normalized.get("processes") if isinstance(normalized, dict) else [])
+
+    for process in processes:
+        if not isinstance(process, dict):
+            continue
+        process["source_type"] = "local_metadata"
+        process["source_label"] = "prototype_local_fallback"
+        provenance_records = _list_payload(process.get("provenance_records"))
+        for record in provenance_records:
+            if isinstance(record, dict):
+                record["source_type"] = "local_metadata"
+                record["source_label"] = "sidecar/json_metadata/exif"
+
+    return processes
+
+
 def _build_civitai_validation_payload(basic_info: dict, generation_data: dict, normalized: dict) -> dict:
     warnings: list[str] = []
     errors: list[str] = []
@@ -3740,6 +3966,8 @@ def _build_local_generation_validation_payload(
     sidecar_payload: dict,
     merged_payload: dict,
     serialized_processes: list[dict],
+    *,
+    used_fallback_preview: bool,
 ) -> dict:
     warnings: list[str] = []
     errors: list[str] = []
@@ -3748,8 +3976,10 @@ def _build_local_generation_validation_payload(
     source_url = str(image.source_url or "").strip()
     source_variant = sidecar_payload.get("civitai_source_variant") or db_json.get("civitai_source_variant")
 
-    if not serialized_processes:
+    if not serialized_processes and not used_fallback_preview:
         warnings.append("No normalized generation process records have been stored for this image yet.")
+    if used_fallback_preview:
+        warnings.append("No persisted normalized generation process records exist; showing a metadata-derived preview.")
     if not sidecar_payload and not db_json and not exif_payload:
         errors.append("No sidecar JSON, json_metadata, or EXIF payload is available for this image.")
     if source_url and "civitai.com/images/" in source_url and not isinstance(sidecar_payload.get("civitai") or db_json.get("civitai"), dict):
@@ -3906,11 +4136,22 @@ def _build_generation_prototype_local_payload(image: ImageModel) -> dict:
         merged_payload={**db_payload, **sidecar_payload},
     )
     serialized_processes = [_serialize_generation_process(item) for item in image.generation_processes]
+    used_fallback_preview = False
+    if not serialized_processes:
+        fallback_processes = _build_local_fallback_normalized_preview(
+            image,
+            merged_payload,
+            _dict_payload(image.exif_data),
+        )
+        if fallback_processes:
+            serialized_processes = fallback_processes
+            used_fallback_preview = True
     validation = _build_local_generation_validation_payload(
         image,
         sidecar_payload,
         merged_payload,
         serialized_processes,
+        used_fallback_preview=used_fallback_preview,
     )
     return {
         "ok": validation.get("status") != "error",
@@ -3927,12 +4168,1603 @@ def _build_generation_prototype_local_payload(image: ImageModel) -> dict:
             "sidecar": sidecar_payload,
             "json_metadata": image.json_metadata,
             "exif_data": image.exif_data,
+            "fallback_normalized_preview_used": used_fallback_preview,
         },
         "normalized": {
             "processes": serialized_processes,
         },
         "validation": validation,
         "error": None,
+    }
+
+
+def _parse_json_container(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if not ((text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]"))):
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _collect_nested_comfy_candidates(value: Any, *, max_depth: int = 3) -> list[Any]:
+    candidates: list[Any] = []
+    visited: set[int] = set()
+
+    interesting_keys = (
+        "workflow",
+        "Workflow",
+        "prompt",
+        "Prompt",
+        "comfy",
+        "Comfy",
+        "comfyui",
+        "ComfyUI",
+        "ui",
+        "graph",
+    )
+
+    def walk(node: Any, depth: int) -> None:
+        if depth < 0:
+            return
+        node_id = id(node)
+        if node_id in visited:
+            return
+        visited.add(node_id)
+
+        parsed = _parse_json_container(node)
+        if parsed is not None and parsed is not node:
+            candidates.append(parsed)
+            walk(parsed, depth - 1)
+            return
+
+        if isinstance(node, dict):
+            candidates.append(node)
+            for key in interesting_keys:
+                if key in node:
+                    candidates.append(node.get(key))
+                    walk(node.get(key), depth - 1)
+            for nested in node.values():
+                if isinstance(nested, (dict, list, str)):
+                    walk(nested, depth - 1)
+            return
+
+        if isinstance(node, list):
+            candidates.append(node)
+            for nested in node:
+                if isinstance(nested, (dict, list, str)):
+                    walk(nested, depth - 1)
+
+    walk(value, max_depth)
+    return [item for item in candidates if item is not None]
+
+
+def _looks_like_comfy_workflow_ui(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return False
+    if "links" in payload and isinstance(payload.get("links"), list):
+        return True
+    if payload.get("last_node_id") is not None:
+        return True
+    if payload.get("version") is not None:
+        return True
+    return False
+
+
+def _normalize_comfy_workflow_ui_graph(payload: Any) -> tuple[Optional[dict], list[str]]:
+    warnings: list[str] = []
+    if not isinstance(payload, dict):
+        return None, warnings
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return None, warnings
+
+    # Detach from source structures so we can safely enforce Comfy workspace defaults.
+    try:
+        normalized: dict[str, Any] = json.loads(json.dumps(payload))
+    except (TypeError, ValueError):
+        normalized = dict(payload)
+
+    normalized_nodes = normalized.get("nodes")
+    if not isinstance(normalized_nodes, list):
+        normalized_nodes = []
+    for index, node in enumerate(normalized_nodes):
+        if not isinstance(node, dict):
+            continue
+        node.setdefault("flags", {})
+        node.setdefault("mode", 0)
+        node.setdefault("order", index)
+        node.setdefault("properties", {})
+
+    normalized["nodes"] = normalized_nodes
+    normalized.setdefault("id", "00000000-0000-0000-0000-000000000000")
+    normalized.setdefault("revision", 0)
+    normalized.setdefault("groups", [])
+    normalized.setdefault("config", {})
+    normalized.setdefault("extra", {})
+    normalized.setdefault("version", 0.4)
+
+    links = normalized.get("links")
+    if not isinstance(links, list):
+        normalized["links"] = []
+        links = normalized["links"]
+
+    if normalized.get("last_node_id") is None:
+        numeric_node_ids = [
+            int(node.get("id"))
+            for node in normalized_nodes
+            if isinstance(node, dict) and _coerce_optional_int(node.get("id")) is not None
+        ]
+        if numeric_node_ids:
+            normalized["last_node_id"] = max(numeric_node_ids)
+            warnings.append("Comfy workflow missing last_node_id; inferred from node ids.")
+
+    if normalized.get("last_link_id") is None:
+        numeric_link_ids: list[int] = []
+        for link in links:
+            if isinstance(link, (list, tuple)) and link:
+                first = _coerce_optional_int(link[0])
+                if first is not None:
+                    numeric_link_ids.append(first)
+        if numeric_link_ids:
+            normalized["last_link_id"] = max(numeric_link_ids)
+            warnings.append("Comfy workflow missing last_link_id; inferred from link ids.")
+
+    return normalized, warnings
+
+
+def _extract_comfy_workflow_ui_graph(workflow_payload: Any, meta: dict) -> Optional[dict]:
+    comfy_payload = meta.get("comfy") if isinstance(meta.get("comfy"), dict) else None
+    candidates: list[Any] = []
+    if comfy_payload:
+        candidates.extend([
+            comfy_payload.get("workflow"),
+            comfy_payload.get("ui"),
+            comfy_payload,
+        ])
+    candidates.extend([
+        workflow_payload,
+        workflow_payload.get("workflow") if isinstance(workflow_payload, dict) else None,
+        workflow_payload.get("ui") if isinstance(workflow_payload, dict) else None,
+    ])
+    candidates.extend(_collect_nested_comfy_candidates(workflow_payload, max_depth=3))
+    candidates.extend(_collect_nested_comfy_candidates(meta, max_depth=3))
+
+    for candidate in candidates:
+        parsed = _parse_json_container(candidate)
+        candidate_value = parsed if parsed is not None else candidate
+        if _looks_like_comfy_workflow_ui(candidate_value):
+            return candidate_value
+    return None
+
+
+def _extract_comfy_graphs_from_generation_payload(generation_payload: dict) -> tuple[Optional[dict], Optional[dict], list[str]]:
+    warnings: list[str] = []
+    mode = str(generation_payload.get("mode") or "inspection").strip().lower()
+
+    if mode == "civitai":
+        raw = _dict_payload(generation_payload.get("raw"))
+        generation_data = _dict_payload(raw.get("generation_data"))
+        meta = _dict_payload(generation_data.get("meta"))
+        image_data = _dict_payload(raw.get("image_data"))
+        workflow_payload = _resolve_civitai_workflow_payload(meta, image_data)
+        prompt_graph = _extract_comfy_prompt_graph(workflow_payload, meta)
+        workflow_ui = _extract_comfy_workflow_ui_graph(workflow_payload, meta)
+        return (prompt_graph or None, workflow_ui, warnings)
+
+    processes = _list_payload(_dict_payload(generation_payload.get("normalized")).get("processes"))
+    raw = _dict_payload(generation_payload.get("raw"))
+    merged = _dict_payload(raw.get("merged"))
+    civitai_merged = _dict_payload(merged.get("civitai"))
+
+    candidates: list[Any] = []
+    for process in processes:
+        if not isinstance(process, dict):
+            continue
+        candidates.append(process.get("workflow_json"))
+        raw_payload = _dict_payload(process.get("raw_payload_json"))
+        generation_data = _dict_payload(raw_payload.get("generation_data"))
+        meta = _dict_payload(generation_data.get("meta"))
+        candidates.extend([
+            raw_payload.get("workflow"),
+            raw_payload.get("prompt"),
+            generation_data.get("workflow"),
+            meta.get("workflow"),
+            meta.get("comfy"),
+        ])
+
+    raw_db = _dict_payload(raw.get("db"))
+    raw_sidecar = _dict_payload(raw.get("sidecar"))
+    raw_json_metadata = _dict_payload(raw.get("json_metadata"))
+    raw_exif = _dict_payload(raw.get("exif_data"))
+
+    candidates.extend([
+        merged.get("workflow"),
+        merged.get("prompt"),
+        merged.get("Prompt"),
+        merged.get("UserComment"),
+        merged.get("comfy"),
+        civitai_merged.get("workflow"),
+        _dict_payload(civitai_merged.get("meta")).get("comfy"),
+        raw_db,
+        raw_sidecar,
+        raw_json_metadata,
+        raw_exif,
+    ])
+    candidates.extend(_collect_nested_comfy_candidates(merged, max_depth=4))
+    candidates.extend(_collect_nested_comfy_candidates(raw_db, max_depth=4))
+    candidates.extend(_collect_nested_comfy_candidates(raw_sidecar, max_depth=4))
+    candidates.extend(_collect_nested_comfy_candidates(raw_json_metadata, max_depth=4))
+    candidates.extend(_collect_nested_comfy_candidates(raw_exif, max_depth=4))
+
+    prompt_graph: Optional[dict] = None
+    workflow_ui: Optional[dict] = None
+    for candidate in candidates:
+        parsed = _parse_json_container(candidate)
+        candidate_value = parsed if parsed is not None else candidate
+        if prompt_graph is None:
+            resolved_prompt = _extract_comfy_prompt_graph(candidate_value, {})
+            if resolved_prompt:
+                prompt_graph = resolved_prompt
+        if workflow_ui is None:
+            resolved_ui = _extract_comfy_workflow_ui_graph(candidate_value, {})
+            if resolved_ui:
+                workflow_ui = resolved_ui
+        if prompt_graph is not None and workflow_ui is not None:
+            break
+
+    return (prompt_graph, workflow_ui, warnings)
+
+
+def _build_fallback_comfy_prompt_graph_from_generation_payload(
+    generation_payload: dict,
+    *,
+    local_catalog: Optional[dict] = None,
+) -> tuple[Optional[dict], list[str]]:
+    warnings: list[str] = []
+    normalized = _dict_payload(generation_payload.get("normalized"))
+    processes = _list_payload(normalized.get("processes"))
+    if not processes or not isinstance(processes[0], dict):
+        return None, ["No normalized process rows were available to synthesize a Comfy prompt graph."]
+
+    process = processes[0]
+    stages = _list_payload(process.get("stages"))
+    stage = stages[0] if stages and isinstance(stages[0], dict) else {}
+
+    resources = _list_payload(stage.get("resources")) + _list_payload(process.get("resources"))
+    resources = [item for item in resources if isinstance(item, dict)]
+    checkpoint = next((item for item in resources if str(item.get("resource_type") or "").strip().lower() == "checkpoint"), None)
+    loras = [
+        item
+        for item in resources
+        if str(item.get("resource_type") or "").strip().lower() == "lora"
+    ]
+    vae_resource = next((item for item in resources if str(item.get("resource_type") or "").strip().lower() == "vae"), None)
+
+    stage_prompts = _list_payload(stage.get("prompts")) + _list_payload(process.get("prompts"))
+    positive_prompt = ""
+    negative_prompt = ""
+    for prompt in stage_prompts:
+        if not isinstance(prompt, dict):
+            continue
+        role = str(prompt.get("prompt_role") or "").strip().lower()
+        text_value = str(prompt.get("prompt_text") or "").strip()
+        if role == "positive" and text_value and not positive_prompt:
+            positive_prompt = text_value
+        elif role == "negative" and text_value and not negative_prompt:
+            negative_prompt = text_value
+
+    prompt_lora_names: list[str] = []
+    if positive_prompt:
+        for match in re.finditer(r"<lora:([^:>]+)(?::[^>]+)?>", positive_prompt, flags=re.IGNORECASE):
+            candidate = str(match.group(1) or "").strip()
+            if not candidate:
+                continue
+            if "." not in candidate:
+                candidate = f"{candidate}.safetensors"
+            prompt_lora_names.append(candidate)
+
+    raw_payload = _dict_payload(generation_payload.get("raw"))
+    merged_payload = _dict_payload(raw_payload.get("merged"))
+    exif_candidates = [
+        _dict_payload(raw_payload.get("exif_data_fresh")),
+        _dict_payload(raw_payload.get("exif_data")),
+        _dict_payload(merged_payload.get("exif_data_fresh")),
+        _dict_payload(merged_payload.get("exif_data")),
+        _dict_payload(_dict_payload(raw_payload.get("sidecar")).get("exif_data")),
+        _dict_payload(_dict_payload(raw_payload.get("db")).get("exif_data")),
+    ]
+
+    def first_exif_value(*keys: str) -> Any:
+        for exif_candidate in exif_candidates:
+            if not isinstance(exif_candidate, dict):
+                continue
+            lowered = {str(k).strip().lower(): v for k, v in exif_candidate.items()}
+            for key in keys:
+                value = lowered.get(str(key).strip().lower())
+                if value not in (None, ""):
+                    return value
+        return None
+
+    width = _coerce_optional_int(stage.get("width"))
+    height = _coerce_optional_int(stage.get("height"))
+    if width is None:
+        width = _coerce_optional_int(first_exif_value("Width", "ImageWidth"))
+    if height is None:
+        height = _coerce_optional_int(first_exif_value("Height", "ImageHeight"))
+    size_value = str(first_exif_value("Size") or "").strip()
+    if size_value and (width is None or height is None):
+        size_match = re.match(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$", size_value)
+        if size_match:
+            width = width or int(size_match.group(1))
+            height = height or int(size_match.group(2))
+    width = width or 1024
+    height = height or 1024
+
+    seed_value = _coerce_optional_int(stage.get("seed")) or 0
+    steps_value = _coerce_optional_int(stage.get("steps")) or 24
+    cfg_value = _coerce_optional_float(stage.get("cfg_scale")) or 7.0
+    def normalize_sampler_name(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return "euler"
+        sampler_map = {
+            "euler a": "euler",
+            "euler_ancestral": "euler",
+            "euler ancestral": "euler",
+            "dpm++ 2m": "dpmpp_2m",
+            "dpm++ 2m karras": "dpmpp_2m",
+            "dpmpp 2m": "dpmpp_2m",
+            "dpmpp 2m karras": "dpmpp_2m",
+        }
+        return sampler_map.get(text, text)
+
+    def normalize_scheduler_name(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return "normal"
+        scheduler_map = {
+            "automatic": "normal",
+            "auto": "normal",
+            "karras": "karras",
+            "normal": "normal",
+            "simple": "simple",
+            "sgm_uniform": "sgm_uniform",
+            "ddim": "ddim_uniform",
+            "ddim uniform": "ddim_uniform",
+            "beta": "beta",
+            "beta57": "beta57",
+            "exponential": "exponential",
+            "linear_quadratic": "linear_quadratic",
+            "kl_optimal": "kl_optimal",
+            "bong_tangent": "bong_tangent",
+        }
+        return scheduler_map.get(text, "normal")
+
+    def looks_like_model_filename(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        if re.fullmatch(r"\d+", lowered):
+            return False
+        if any(token in lowered for token in (".safetensors", ".ckpt", ".pt", ".pth", "/", "\\")):
+            return True
+        return False
+
+    sampler_name = normalize_sampler_name(stage.get("sampler_name") or first_exif_value("Sampler"))
+    scheduler_name = normalize_scheduler_name(stage.get("scheduler_name") or first_exif_value("Scheduler", "Schedule type"))
+
+    catalog_entries = [
+        item for item in _list_payload(_dict_payload(local_catalog).get("entries")) if isinstance(item, dict)
+    ]
+
+    def _catalog_source_identifier(entry: dict) -> Optional[str]:
+        source_identifier = str(entry.get("source_identifier") or "").strip()
+        if not source_identifier:
+            return None
+        return source_identifier.replace("\\", "/")
+
+    def basename_only(value: Any) -> str:
+        text = str(value or "").strip().replace("\\", "/")
+        if not text:
+            return ""
+        return text.rsplit("/", 1)[-1].strip()
+
+    def resolve_catalog_identifier(
+        *,
+        resource_type: str,
+        version_id: Optional[int],
+        model_id: Optional[int],
+        name_candidates: list[Any],
+    ) -> Optional[str]:
+        if not catalog_entries:
+            return None
+
+        type_key = str(resource_type or "").strip().lower()
+        normalized_candidates = {
+            str(model_reference_service.normalize_name_key(candidate) or "").strip().lower()
+            for candidate in name_candidates
+            if str(candidate or "").strip()
+        }
+        normalized_candidates = {item for item in normalized_candidates if item}
+
+        compact_candidates = {
+            re.sub(r"[^a-z0-9]+", "", candidate.lower())
+            for candidate in normalized_candidates
+            if candidate
+        }
+        compact_candidates = {item for item in compact_candidates if item}
+
+        compatible_entries = [
+            entry
+            for entry in catalog_entries
+            if model_reference_service._types_match(type_key, str(entry.get("resource_type") or "other"))
+        ]
+
+        if version_id is not None:
+            for entry in compatible_entries:
+                if _coerce_optional_int(entry.get("civitai_model_version_id")) == version_id:
+                    resolved = _catalog_source_identifier(entry)
+                    if resolved:
+                        return resolved
+
+        if model_id is not None:
+            for entry in compatible_entries:
+                if _coerce_optional_int(entry.get("civitai_model_id")) == model_id:
+                    resolved = _catalog_source_identifier(entry)
+                    if resolved:
+                        return resolved
+
+        if normalized_candidates:
+            for entry in compatible_entries:
+                entry_name = str(entry.get("normalized_name") or "").strip().lower()
+                if entry_name and entry_name in normalized_candidates:
+                    resolved = _catalog_source_identifier(entry)
+                    if resolved:
+                        return resolved
+
+        if compact_candidates:
+            for entry in compatible_entries:
+                entry_candidates = {
+                    str(entry.get("normalized_name") or "").strip().lower(),
+                    str(model_reference_service.normalize_name_key(entry.get("display_name")) or "").strip().lower(),
+                    str(model_reference_service.normalize_name_key(entry.get("source_identifier")) or "").strip().lower(),
+                }
+                entry_candidates = {item for item in entry_candidates if item}
+                entry_compact_candidates = {
+                    re.sub(r"[^a-z0-9]+", "", item.lower())
+                    for item in entry_candidates
+                    if item
+                }
+                entry_compact_candidates = {item for item in entry_compact_candidates if item}
+                if compact_candidates & entry_compact_candidates:
+                    resolved = _catalog_source_identifier(entry)
+                    if resolved:
+                        return resolved
+        return None
+
+    def resolve_identifier(resource: Optional[dict], fallback: str) -> str:
+        if not isinstance(resource, dict):
+            return fallback
+        # Prefer concrete filenames/paths over opaque numeric identifiers.
+        preferred_candidates = [
+            resource.get("source_identifier"),
+            resource.get("display_name"),
+            resource.get("normalized_name"),
+            resource.get("version_name"),
+        ]
+        for candidate in preferred_candidates:
+            if looks_like_model_filename(candidate):
+                return str(candidate).strip()
+        for key in ("display_name", "normalized_name", "version_name", "source_identifier"):
+            value = str(resource.get(key) or "").strip()
+            if value and not re.fullmatch(r"\d+", value):
+                return value if "." in value else f"{value}.safetensors"
+        return fallback
+
+    checkpoint_name = resolve_identifier(checkpoint, "MISSING_CHECKPOINT.safetensors")
+    exif_model = str(first_exif_value("Model") or "").strip()
+    if exif_model:
+        checkpoint_name = exif_model if "." in exif_model else f"{exif_model}.safetensors"
+
+    checkpoint_catalog_identifier = resolve_catalog_identifier(
+        resource_type="checkpoint",
+        version_id=_coerce_optional_int(_dict_payload(checkpoint).get("civitai_model_version_id")),
+        model_id=_coerce_optional_int(_dict_payload(checkpoint).get("civitai_model_id")),
+        name_candidates=[
+            checkpoint_name,
+            exif_model,
+            _dict_payload(checkpoint).get("display_name"),
+            _dict_payload(checkpoint).get("version_name"),
+            _dict_payload(checkpoint).get("source_identifier"),
+        ],
+    )
+    if checkpoint_catalog_identifier:
+        checkpoint_name = checkpoint_catalog_identifier
+    else:
+        # Fallback stays filename-only so users can resolve manually in ComfyUI.
+        checkpoint_name = basename_only(checkpoint_name) or checkpoint_name
+
+    if re.fullmatch(r"\d+", checkpoint_name):
+        checkpoint_name = f"{checkpoint_name}.safetensors"
+    if not checkpoint:
+        warnings.append("No checkpoint reference was extracted; using placeholder checkpoint in fallback prompt graph.")
+
+    node_counter = 1
+    nodes: dict[str, Any] = {}
+
+    checkpoint_node_id = str(node_counter)
+    nodes[checkpoint_node_id] = {
+        "class_type": "CheckpointLoaderSimple",
+        "inputs": {
+            "ckpt_name": checkpoint_name,
+        },
+    }
+    node_counter += 1
+
+    current_model_ref = [checkpoint_node_id, 0]
+    current_clip_ref = [checkpoint_node_id, 1]
+    for index, lora in enumerate(loras):
+        lora_node_id = str(node_counter)
+        node_counter += 1
+        lora_name = resolve_identifier(lora, "MISSING_LORA.safetensors")
+        if index < len(prompt_lora_names):
+            lora_name = prompt_lora_names[index]
+
+        lora_catalog_identifier = resolve_catalog_identifier(
+            resource_type="lora",
+            version_id=_coerce_optional_int(_dict_payload(lora).get("civitai_model_version_id")),
+            model_id=_coerce_optional_int(_dict_payload(lora).get("civitai_model_id")),
+            name_candidates=[
+                lora_name,
+                _dict_payload(lora).get("display_name"),
+                _dict_payload(lora).get("version_name"),
+                _dict_payload(lora).get("source_identifier"),
+                prompt_lora_names[index] if index < len(prompt_lora_names) else None,
+            ],
+        )
+        if lora_catalog_identifier:
+            lora_name = lora_catalog_identifier
+        else:
+            # Fallback stays filename-only so users can resolve manually in ComfyUI.
+            lora_name = basename_only(lora_name) or lora_name
+
+        if re.fullmatch(r"\d+", str(lora_name)):
+            lora_name = f"{lora_name}.safetensors"
+        strength_model = _coerce_optional_float(lora.get("strength_model"))
+        strength_clip = _coerce_optional_float(lora.get("strength_clip"))
+        nodes[lora_node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": lora_name,
+                "strength_model": strength_model if strength_model is not None else 1.0,
+                "strength_clip": strength_clip if strength_clip is not None else 1.0,
+                "model": current_model_ref,
+                "clip": current_clip_ref,
+            },
+        }
+        current_model_ref = [lora_node_id, 0]
+        current_clip_ref = [lora_node_id, 1]
+
+    positive_node_id = str(node_counter)
+    nodes[positive_node_id] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+            "text": positive_prompt,
+            "clip": current_clip_ref,
+        },
+    }
+    node_counter += 1
+
+    negative_node_id = str(node_counter)
+    nodes[negative_node_id] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+            "text": negative_prompt,
+            "clip": current_clip_ref,
+        },
+    }
+    node_counter += 1
+
+    latent_node_id = str(node_counter)
+    nodes[latent_node_id] = {
+        "class_type": "EmptyLatentImage",
+        "inputs": {
+            "width": width,
+            "height": height,
+            "batch_size": 1,
+        },
+    }
+    node_counter += 1
+
+    sampler_node_id = str(node_counter)
+    nodes[sampler_node_id] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "seed": seed_value,
+            "steps": steps_value,
+            "cfg": cfg_value,
+            "sampler_name": sampler_name,
+            "scheduler": scheduler_name,
+            "denoise": 1.0,
+            "model": current_model_ref,
+            "positive": [positive_node_id, 0],
+            "negative": [negative_node_id, 0],
+            "latent_image": [latent_node_id, 0],
+        },
+    }
+    node_counter += 1
+
+    vae_ref = [checkpoint_node_id, 2]
+    if vae_resource:
+        vae_node_id = str(node_counter)
+        node_counter += 1
+        vae_name = resolve_identifier(vae_resource, "MISSING_VAE.safetensors")
+        nodes[vae_node_id] = {
+            "class_type": "VAELoader",
+            "inputs": {
+                "vae_name": vae_name,
+            },
+        }
+        vae_ref = [vae_node_id, 0]
+
+    decode_node_id = str(node_counter)
+    nodes[decode_node_id] = {
+        "class_type": "VAEDecode",
+        "inputs": {
+            "samples": [sampler_node_id, 0],
+            "vae": vae_ref,
+        },
+    }
+    node_counter += 1
+
+    save_node_id = str(node_counter)
+    nodes[save_node_id] = {
+        "class_type": "SaveImage",
+        "inputs": {
+            "filename_prefix": "AtelierAI",
+            "images": [decode_node_id, 0],
+        },
+    }
+
+    warnings.append("Comfy prompt graph was synthesized from normalized generation fields because no embedded prompt graph was found.")
+    return nodes, warnings
+
+
+def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> tuple[Optional[dict], list[str]]:
+    warnings: list[str] = []
+    if not isinstance(prompt_graph, dict) or not prompt_graph:
+        return None, warnings
+
+    normalized_node_ids: list[int] = []
+    for raw_node_id in prompt_graph.keys():
+        coerced = _coerce_optional_int(raw_node_id)
+        if coerced is not None:
+            normalized_node_ids.append(coerced)
+    if not normalized_node_ids:
+        return None, ["Prompt graph node ids were not numeric; could not synthesize Comfy workflow UI graph."]
+
+    sorted_node_ids = sorted(set(normalized_node_ids))
+    node_id_to_col: dict[int, int] = {node_id: index for index, node_id in enumerate(sorted_node_ids)}
+
+    links: list[list[Any]] = []
+    next_link_id = 1
+    outgoing_by_node_slot: dict[tuple[int, int], list[int]] = {}
+
+    workflow_nodes: list[dict[str, Any]] = []
+    for order_index, node_id in enumerate(sorted_node_ids):
+        node_payload = _dict_payload(prompt_graph.get(str(node_id)) or prompt_graph.get(node_id))
+        class_type = str(node_payload.get("class_type") or node_payload.get("type") or "UnknownNode").strip() or "UnknownNode"
+        raw_inputs = _dict_payload(node_payload.get("inputs"))
+
+        input_ports: list[dict[str, Any]] = []
+        literal_inputs: dict[str, Any] = {}
+
+        for input_name, input_value in raw_inputs.items():
+            input_name_text = str(input_name)
+            if isinstance(input_value, (list, tuple)) and len(input_value) >= 2:
+                source_node_id = _coerce_optional_int(input_value[0])
+                source_slot = _coerce_optional_int(input_value[1]) or 0
+                if source_node_id is None:
+                    literal_inputs[input_name_text] = input_value
+                    continue
+
+                link_id = next_link_id
+                next_link_id += 1
+                target_input_index = len(input_ports)
+                input_ports.append(
+                    {
+                        "name": input_name_text,
+                        "type": "*",
+                        "link": link_id,
+                    }
+                )
+                links.append([
+                    link_id,
+                    source_node_id,
+                    source_slot,
+                    node_id,
+                    target_input_index,
+                    "*",
+                ])
+                outgoing_by_node_slot.setdefault((source_node_id, source_slot), []).append(link_id)
+            else:
+                literal_inputs[input_name_text] = input_value
+
+        class_key = class_type.lower()
+        if class_key == "checkpointloadersimple":
+            widget_values = [literal_inputs.get("ckpt_name", "")]
+        elif class_key == "loraloader":
+            widget_values = [
+                literal_inputs.get("lora_name", ""),
+                _coerce_optional_float(literal_inputs.get("strength_model")) if literal_inputs.get("strength_model") is not None else 1.0,
+                _coerce_optional_float(literal_inputs.get("strength_clip")) if literal_inputs.get("strength_clip") is not None else 1.0,
+            ]
+        elif class_key == "cliptextencode":
+            widget_values = [literal_inputs.get("text", "")]
+        elif class_key == "emptylatentimage":
+            widget_values = [
+                _coerce_optional_int(literal_inputs.get("width")) or 1024,
+                _coerce_optional_int(literal_inputs.get("height")) or 1024,
+                _coerce_optional_int(literal_inputs.get("batch_size")) or 1,
+            ]
+        elif class_key == "ksampler":
+            sampler = str(literal_inputs.get("sampler_name") or "euler").strip().lower()
+            scheduler = str(literal_inputs.get("scheduler") or "normal").strip().lower()
+            widget_values = [
+                _coerce_optional_int(literal_inputs.get("seed")) or 0,
+                "randomize",
+                _coerce_optional_int(literal_inputs.get("steps")) or 24,
+                _coerce_optional_float(literal_inputs.get("cfg")) or 7.0,
+                sampler,
+                scheduler,
+                _coerce_optional_float(literal_inputs.get("denoise")) if literal_inputs.get("denoise") is not None else 1.0,
+            ]
+        elif class_key == "saveimage":
+            widget_values = [literal_inputs.get("filename_prefix", "AtelierAI")]
+        elif class_key == "vaeloader":
+            widget_values = [literal_inputs.get("vae_name", "")]
+        else:
+            widget_values = list(literal_inputs.values())
+
+        inferred_size = [270, 120]
+        if class_type.lower() == "cliptextencode":
+            inferred_size = [400, 200]
+        elif class_type.lower() == "ksampler":
+            inferred_size = [270, 262]
+        elif class_type.lower() == "emptylatentimage":
+            inferred_size = [270, 106]
+
+        workflow_nodes.append(
+            {
+                "id": node_id,
+                "type": class_type,
+                "pos": [100 + (node_id_to_col[node_id] * 360), 130],
+                "size": inferred_size,
+                "flags": {},
+                "order": order_index,
+                "mode": 0,
+                "inputs": input_ports,
+                "outputs": [],
+                "properties": {
+                    "Node name for S&R": class_type,
+                },
+                "widgets_values": widget_values,
+            }
+        )
+
+    # Fill outputs after all links are known.
+    for node in workflow_nodes:
+        node_id = _coerce_optional_int(node.get("id"))
+        if node_id is None:
+            continue
+        output_ports: list[dict[str, Any]] = []
+        slot_indices = sorted(
+            {slot for (source_id, slot), _ in outgoing_by_node_slot.items() if source_id == node_id}
+        )
+        for slot_index in slot_indices:
+            output_ports.append(
+                {
+                    "name": f"OUT_{slot_index}",
+                    "type": "*",
+                    "links": outgoing_by_node_slot.get((node_id, slot_index), []),
+                }
+            )
+        node["outputs"] = output_ports
+
+    workflow_payload = {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "revision": 0,
+        "last_node_id": max(sorted_node_ids),
+        "last_link_id": next_link_id - 1,
+        "nodes": workflow_nodes,
+        "links": links,
+        "groups": [],
+        "config": {},
+        "extra": {
+            "source": "atelierai_prompt_graph_fallback",
+        },
+        "version": 0.4,
+    }
+    warnings.append("Comfy workflow UI graph was synthesized from prompt graph because no embedded workflow UI graph was found.")
+    return workflow_payload, warnings
+
+
+def _build_comfy_reference_validation(generation_payload: dict, local_catalog: dict) -> dict:
+    references = model_reference_service.extract_references_from_generation_payload(generation_payload)
+    matched_references = model_reference_service.apply_local_catalog_matches(references, local_catalog)
+
+    available_count = 0
+    missing_count = 0
+    enriched_references: list[dict] = []
+    for reference in matched_references:
+        local_matches = _list_payload(reference.get("local_matches"))
+        first_match = local_matches[0] if local_matches and isinstance(local_matches[0], dict) else {}
+        local_installed = bool(reference.get("local_installed"))
+        if local_installed:
+            available_count += 1
+        else:
+            missing_count += 1
+        enriched_references.append(
+            {
+                **reference,
+                "availability": "available" if local_installed else "missing",
+                "resolved_model_path": first_match.get("source_identifier"),
+                "resolved_match_basis": first_match.get("match_basis"),
+                "local_match_count": len(local_matches),
+            }
+        )
+
+    summary = {
+        **model_reference_service._summarize_references(enriched_references, local_catalog),
+        "available_reference_count": available_count,
+        "missing_reference_count": missing_count,
+    }
+    validation = model_reference_service._build_validation(enriched_references, local_catalog, catalog_expected=True)
+
+    return {
+        "references": enriched_references,
+        "summary": summary,
+        "validation": validation,
+        "local_catalog": {
+            "configured": bool(local_catalog.get("configured")),
+            "entry_count": len(_list_payload(local_catalog.get("entries"))),
+            "sources": _dict_payload(local_catalog.get("sources")),
+            "error": local_catalog.get("error"),
+        },
+    }
+
+
+def _build_generation_comfy_workspace_export_payload(generation_payload: dict, *, local_catalog: dict) -> dict:
+    prompt_graph, workflow_ui, extraction_warnings = _extract_comfy_graphs_from_generation_payload(generation_payload)
+    workflow_ui, workflow_normalization_warnings = _normalize_comfy_workflow_ui_graph(workflow_ui)
+    extraction_warnings.extend(workflow_normalization_warnings)
+    synthesized_prompt_graph = False
+    if not prompt_graph:
+        prompt_graph, fallback_warnings = _build_fallback_comfy_prompt_graph_from_generation_payload(
+            generation_payload,
+            local_catalog=local_catalog,
+        )
+        extraction_warnings.extend(fallback_warnings)
+        synthesized_prompt_graph = bool(prompt_graph)
+
+    synthesized_workflow_ui_graph = False
+    if not workflow_ui and prompt_graph:
+        workflow_ui, workflow_fallback_warnings = _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph)
+        extraction_warnings.extend(workflow_fallback_warnings)
+        workflow_ui, workflow_normalization_warnings = _normalize_comfy_workflow_ui_graph(workflow_ui)
+        extraction_warnings.extend(workflow_normalization_warnings)
+        synthesized_workflow_ui_graph = bool(workflow_ui)
+
+    model_validation = _build_comfy_reference_validation(generation_payload, local_catalog)
+    summary = _dict_payload(model_validation.get("summary"))
+
+    warnings = list(extraction_warnings)
+    errors: list[str] = []
+    if not prompt_graph:
+        errors.append("Unable to build a Comfy prompt API graph from available generation data.")
+    if not workflow_ui:
+        warnings.append("No Comfy UI workflow graph was found; export still includes prompt API graph.")
+    if int(summary.get("missing_reference_count") or 0) > 0:
+        warnings.append("Some referenced models are missing from the configured LoRA Manager catalog.")
+    if local_catalog.get("error"):
+        warnings.append(str(local_catalog.get("error")))
+
+    validation = _summarize_validation(warnings, errors)
+
+    mode = str(generation_payload.get("mode") or "inspection")
+    target = _dict_payload(generation_payload.get("target"))
+    target_key = str(target.get("file_hash") or target.get("image_id") or target.get("image_db_id") or "unknown")
+
+    workspace_bundle = {
+        "schema": "atelierai.comfy_workspace_bundle.v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": {
+            "mode": mode,
+            "target": target,
+        },
+        "comfy_prompt_api": prompt_graph,
+        "comfy_workflow_ui": workflow_ui,
+        "synthesized_prompt_graph": synthesized_prompt_graph,
+        "synthesized_workflow_ui_graph": synthesized_workflow_ui_graph,
+    }
+
+    return {
+        "ok": validation.get("status") != "error",
+        "mode": mode,
+        "target": target,
+        "overview": {
+            "target_key": target_key,
+            "prompt_graph_available": bool(prompt_graph),
+            "workflow_ui_available": bool(workflow_ui),
+            "synthesized_prompt_graph": synthesized_prompt_graph,
+            "synthesized_workflow_ui_graph": synthesized_workflow_ui_graph,
+            "reference_count": summary.get("reference_count", 0),
+            "available_reference_count": summary.get("available_reference_count", 0),
+            "missing_reference_count": summary.get("missing_reference_count", 0),
+        },
+        "workspace_bundle": workspace_bundle,
+        "model_validation": model_validation,
+        "validation": validation,
+        "raw": {
+            "source_inspection": generation_payload,
+            "local_catalog_fetch": {
+                "sources": _dict_payload(local_catalog.get("sources")),
+                "error": local_catalog.get("error"),
+                "raw_compacted": bool(local_catalog.get("raw_compacted", True)),
+                "raw": _dict_payload(local_catalog.get("raw")),
+            },
+        },
+        "error": None,
+    }
+
+
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_\.\-\[\]]+)\s*\}\}")
+
+
+def _clone_json_value(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _serialize_generation_template(template: GenerationTemplate, *, include_workflow: bool) -> dict[str, Any]:
+    workflow_json = _dict_payload(template.workflow_json)
+    return {
+        "id": template.id,
+        "name": str(template.name or ""),
+        "description": template.description,
+        "mapping_count": len(_list_payload(template.mappings_json)),
+        "default_token_count": len(_dict_payload(template.default_tokens_json)),
+        "node_count": len(_list_payload(workflow_json.get("nodes"))),
+        "created_at": _isoformat_or_none(template.created_at),
+        "updated_at": _isoformat_or_none(template.updated_at),
+        "mappings": _list_payload(template.mappings_json),
+        "default_tokens": _dict_payload(template.default_tokens_json),
+        "workflow_json": workflow_json if include_workflow else None,
+    }
+
+
+def _template_parse_selector_value(raw_value: str) -> Any:
+    value = raw_value.strip().strip('"').strip("'")
+    if re.fullmatch(r"-?\d+", value):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _tokenize_template_path(path: str) -> list[tuple[str, Any]]:
+    text = str(path or "").strip()
+    if not text:
+        raise ValueError("Template target path is empty.")
+
+    operations: list[tuple[str, Any]] = []
+    segments = [segment for segment in text.split(".") if segment]
+    if not segments:
+        raise ValueError("Template target path is invalid.")
+
+    for segment in segments:
+        key_match = re.match(r"^([A-Za-z_][A-Za-z0-9_\-]*)(.*)$", segment)
+        if not key_match:
+            raise ValueError(f"Invalid template path segment: {segment}")
+        key = key_match.group(1)
+        suffix = key_match.group(2)
+        operations.append(("key", key))
+
+        while suffix:
+            if not suffix.startswith("["):
+                raise ValueError(f"Invalid bracket selector in segment: {segment}")
+            closing_index = suffix.find("]")
+            if closing_index <= 1:
+                raise ValueError(f"Malformed selector in segment: {segment}")
+            selector_text = suffix[1:closing_index].strip()
+            suffix = suffix[closing_index + 1 :]
+            if not selector_text:
+                raise ValueError(f"Empty selector in segment: {segment}")
+
+            if re.fullmatch(r"-?\d+", selector_text):
+                operations.append(("index", int(selector_text)))
+                continue
+
+            if "=" in selector_text:
+                selector_key, selector_value = selector_text.split("=", 1)
+                selector_key = selector_key.strip()
+                if not selector_key:
+                    raise ValueError(f"Invalid keyed selector in segment: {segment}")
+                operations.append(("filter", (selector_key, _template_parse_selector_value(selector_value))))
+                continue
+
+            raise ValueError(f"Unsupported selector '{selector_text}' in segment: {segment}")
+
+    return operations
+
+
+def _select_template_list_index(items: Any, selector: tuple[str, Any], *, path: str) -> int:
+    if not isinstance(items, list):
+        raise ValueError(f"Path '{path}' expected a list for selector [{selector[0]}={selector[1]}].")
+    key, expected = selector
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get(key)
+        if candidate == expected or str(candidate) == str(expected):
+            return index
+    raise ValueError(f"Path '{path}' could not find selector [{key}={expected}] in target list.")
+
+
+def _read_template_path_value(payload: Any, path: str) -> Any:
+    operations = _tokenize_template_path(path)
+    current = payload
+    for operation, operand in operations:
+        if operation == "key":
+            if not isinstance(current, dict) or operand not in current:
+                raise ValueError(f"Path '{path}' missing key '{operand}'.")
+            current = current[operand]
+            continue
+        if operation == "index":
+            if not isinstance(current, list) or operand < 0 or operand >= len(current):
+                raise ValueError(f"Path '{path}' has invalid list index [{operand}].")
+            current = current[operand]
+            continue
+        if operation == "filter":
+            index = _select_template_list_index(current, operand, path=path)
+            current = current[index]
+            continue
+    return current
+
+
+def _write_template_path_value(payload: Any, path: str, value: Any) -> None:
+    operations = _tokenize_template_path(path)
+    if not operations:
+        raise ValueError("Template path is empty.")
+
+    current = payload
+    for operation, operand in operations[:-1]:
+        if operation == "key":
+            if not isinstance(current, dict) or operand not in current:
+                raise ValueError(f"Path '{path}' missing key '{operand}'.")
+            current = current[operand]
+            continue
+        if operation == "index":
+            if not isinstance(current, list) or operand < 0 or operand >= len(current):
+                raise ValueError(f"Path '{path}' has invalid list index [{operand}].")
+            current = current[operand]
+            continue
+        if operation == "filter":
+            index = _select_template_list_index(current, operand, path=path)
+            current = current[index]
+            continue
+
+    final_operation, final_operand = operations[-1]
+    if final_operation == "key":
+        if not isinstance(current, dict) or final_operand not in current:
+            raise ValueError(f"Path '{path}' missing terminal key '{final_operand}'.")
+        current[final_operand] = value
+        return
+    if final_operation == "index":
+        if not isinstance(current, list) or final_operand < 0 or final_operand >= len(current):
+            raise ValueError(f"Path '{path}' has invalid terminal list index [{final_operand}].")
+        current[final_operand] = value
+        return
+    if final_operation == "filter":
+        index = _select_template_list_index(current, final_operand, path=path)
+        current[index] = value
+        return
+
+    raise ValueError(f"Unsupported terminal operation in path '{path}'.")
+
+
+def _coerce_template_value(value: Any, value_type: str, *, token: str) -> Any:
+    normalized_type = str(value_type or "auto").strip().lower() or "auto"
+    if normalized_type == "auto":
+        return value
+    if normalized_type == "string":
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=True)
+        return "" if value is None else str(value)
+    if normalized_type == "integer":
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Token '{token}' cannot be coerced to integer.") from exc
+    if normalized_type == "number":
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Token '{token}' cannot be coerced to number.") from exc
+    if normalized_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text_value = str(value or "").strip().lower()
+        if text_value in {"true", "1", "yes", "on"}:
+            return True
+        if text_value in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError(f"Token '{token}' cannot be coerced to boolean.")
+    if normalized_type == "json":
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            parsed = _parse_json_container(value)
+            if parsed is not None:
+                return parsed
+        raise ValueError(f"Token '{token}' cannot be coerced to JSON object/list.")
+    raise ValueError(f"Unsupported value_type '{value_type}' for token '{token}'.")
+
+
+def _replace_template_placeholders_in_string(text: str, token_values: dict[str, Any], unresolved: set[str]) -> Any:
+    full_match = _TEMPLATE_PLACEHOLDER_RE.fullmatch(text)
+    if full_match:
+        token = full_match.group(1).strip()
+        if token in token_values:
+            return token_values[token]
+        unresolved.add(token)
+        return text
+
+    def replacer(match: re.Match[str]) -> str:
+        token = match.group(1).strip()
+        if token not in token_values:
+            unresolved.add(token)
+            return match.group(0)
+        replacement_value = token_values[token]
+        if replacement_value is None:
+            return ""
+        if isinstance(replacement_value, (dict, list)):
+            return json.dumps(replacement_value, ensure_ascii=True)
+        return str(replacement_value)
+
+    return _TEMPLATE_PLACEHOLDER_RE.sub(replacer, text)
+
+
+def _replace_template_placeholders(value: Any, token_values: dict[str, Any], unresolved: set[str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _replace_template_placeholders(item, token_values, unresolved)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_replace_template_placeholders(item, token_values, unresolved) for item in value]
+    if isinstance(value, str):
+        return _replace_template_placeholders_in_string(value, token_values, unresolved)
+    return value
+
+
+def _build_generation_template_token_values(generation_payload: dict, local_catalog: dict) -> dict[str, Any]:
+    token_values: dict[str, Any] = {}
+
+    mode = str(generation_payload.get("mode") or "unknown")
+    token_values["source.mode"] = mode
+
+    target = _dict_payload(generation_payload.get("target"))
+    if target.get("file_hash"):
+        token_values["target.file_hash"] = str(target.get("file_hash"))
+    if target.get("image_id") is not None:
+        token_values["target.image_id"] = target.get("image_id")
+    if target.get("source_url"):
+        token_values["target.source_url"] = str(target.get("source_url"))
+
+    normalized = _dict_payload(generation_payload.get("normalized"))
+    processes = _list_payload(normalized.get("processes"))
+    process = next((item for item in processes if isinstance(item, dict) and item.get("is_preferred")), None)
+    if process is None and processes:
+        process = processes[0] if isinstance(processes[0], dict) else None
+    process = _dict_payload(process)
+
+    stages = _list_payload(process.get("stages"))
+    stage = next((item for item in stages if isinstance(item, dict) and str(item.get("stage_role") or "").lower() in {"base", "primary"}), None)
+    if stage is None and stages:
+        stage = stages[0] if isinstance(stages[0], dict) else None
+    stage = _dict_payload(stage)
+
+    process_prompts = _list_payload(process.get("prompts"))
+    stage_prompts = _list_payload(stage.get("prompts"))
+    all_prompts = [item for item in [*stage_prompts, *process_prompts] if isinstance(item, dict)]
+    for prompt_role, token_name in (("positive", "prompt.positive"), ("negative", "prompt.negative")):
+        prompt_value = next(
+            (
+                str(item.get("prompt_text") or "").strip()
+                for item in all_prompts
+                if str(item.get("prompt_role") or "").strip().lower() == prompt_role and str(item.get("prompt_text") or "").strip()
+            ),
+            "",
+        )
+        if prompt_value:
+            token_values[token_name] = prompt_value
+
+    if stage.get("seed") not in (None, ""):
+        token_values["sampler.seed"] = stage.get("seed")
+    if stage.get("steps") not in (None, ""):
+        token_values["sampler.steps"] = stage.get("steps")
+    if stage.get("cfg_scale") not in (None, ""):
+        token_values["sampler.cfg"] = stage.get("cfg_scale")
+    if stage.get("sampler_name"):
+        token_values["sampler.name"] = str(stage.get("sampler_name"))
+    if stage.get("scheduler_name"):
+        token_values["sampler.scheduler"] = str(stage.get("scheduler_name"))
+    if stage.get("denoise_strength") not in (None, ""):
+        token_values["sampler.denoise"] = stage.get("denoise_strength")
+
+    if stage.get("width") not in (None, ""):
+        token_values["image.width"] = stage.get("width")
+    if stage.get("height") not in (None, ""):
+        token_values["image.height"] = stage.get("height")
+
+    process_resources = _list_payload(process.get("resources"))
+    stage_resources: list[dict[str, Any]] = []
+    for stage_item in stages:
+        if isinstance(stage_item, dict):
+            stage_resources.extend(
+                [resource for resource in _list_payload(stage_item.get("resources")) if isinstance(resource, dict)]
+            )
+    all_resources = [resource for resource in [*stage_resources, *process_resources] if isinstance(resource, dict)]
+
+    def pick_resource(resource_type: str) -> Optional[dict[str, Any]]:
+        typed = [
+            resource
+            for resource in all_resources
+            if str(resource.get("resource_type") or "").strip().lower() == resource_type
+        ]
+        if not typed:
+            return None
+        primary = next((resource for resource in typed if bool(resource.get("is_primary"))), None)
+        return primary or typed[0]
+
+    checkpoint_resource = pick_resource("checkpoint")
+    if checkpoint_resource:
+        checkpoint_name = str(
+            checkpoint_resource.get("display_name")
+            or checkpoint_resource.get("version_name")
+            or checkpoint_resource.get("source_identifier")
+            or ""
+        ).strip()
+        checkpoint_path = str(checkpoint_resource.get("source_identifier") or "").strip()
+        if checkpoint_name:
+            token_values["model.checkpoint_name"] = checkpoint_name
+        if checkpoint_path:
+            token_values["model.checkpoint_path"] = checkpoint_path
+
+    lora_resources = [
+        resource
+        for resource in all_resources
+        if str(resource.get("resource_type") or "").strip().lower() == "lora"
+    ]
+    if lora_resources:
+        lora_names = [
+            str(
+                resource.get("display_name")
+                or resource.get("version_name")
+                or resource.get("source_identifier")
+                or ""
+            ).strip()
+            for resource in lora_resources
+        ]
+        lora_paths = [str(resource.get("source_identifier") or "").strip() for resource in lora_resources]
+        lora_model_strengths = [
+            resource.get("weight")
+            if resource.get("weight") not in (None, "")
+            else resource.get("strength")
+            for resource in lora_resources
+        ]
+        lora_clip_strengths = [
+            resource.get("clip_weight")
+            if resource.get("clip_weight") not in (None, "")
+            else resource.get("clipStrength")
+            for resource in lora_resources
+        ]
+        lora_names = [value for value in lora_names if value]
+        lora_paths = [value for value in lora_paths if value]
+        lora_model_strengths = [value for value in lora_model_strengths if value not in (None, "")]
+        lora_clip_strengths = [value for value in lora_clip_strengths if value not in (None, "")]
+        if lora_names:
+            token_values["model.lora_names"] = lora_names
+            token_values["model.lora_name"] = lora_names[0]
+        if lora_paths:
+            token_values["model.lora_paths"] = lora_paths
+            token_values["model.lora_path"] = lora_paths[0]
+        if lora_model_strengths:
+            token_values["model.lora_model_strengths"] = lora_model_strengths
+            token_values["model.lora_model_strength"] = lora_model_strengths[0]
+        if lora_clip_strengths:
+            token_values["model.lora_clip_strengths"] = lora_clip_strengths
+            token_values["model.lora_clip_strength"] = lora_clip_strengths[0]
+
+    if bool(local_catalog.get("configured")):
+        references = model_reference_service.extract_references_from_generation_payload(generation_payload)
+        matched = model_reference_service.apply_local_catalog_matches(references, local_catalog)
+        checkpoint_match = next(
+            (
+                reference
+                for reference in matched
+                if str(reference.get("resource_type") or "").strip().lower() == "checkpoint"
+                and _list_payload(reference.get("local_matches"))
+            ),
+            None,
+        )
+        if checkpoint_match:
+            first_match = _dict_payload(_list_payload(checkpoint_match.get("local_matches"))[0])
+            match_path = str(first_match.get("source_identifier") or "").strip()
+            if match_path:
+                token_values["model.checkpoint_path"] = match_path
+
+        lora_match_paths: list[str] = []
+        for reference in matched:
+            if str(reference.get("resource_type") or "").strip().lower() != "lora":
+                continue
+            local_matches = _list_payload(reference.get("local_matches"))
+            first_match = _dict_payload(local_matches[0]) if local_matches else {}
+            match_path = str(first_match.get("source_identifier") or "").strip()
+            if match_path:
+                lora_match_paths.append(match_path)
+        if lora_match_paths:
+            token_values["model.lora_paths"] = lora_match_paths
+            token_values["model.lora_path"] = lora_match_paths[0]
+
+    return token_values
+
+
+def _build_generation_template_step_token_groups(generation_payload: dict) -> list[dict[str, Any]]:
+    normalized = _dict_payload(generation_payload.get("normalized"))
+    processes = _list_payload(normalized.get("processes"))
+    process = next((item for item in processes if isinstance(item, dict) and item.get("is_preferred")), None)
+    if process is None and processes:
+        process = processes[0] if isinstance(processes[0], dict) else None
+    process = _dict_payload(process)
+
+    stages = [item for item in _list_payload(process.get("stages")) if isinstance(item, dict)]
+    step_groups: list[dict[str, Any]] = []
+
+    for step_index, stage in enumerate(stages):
+        step_tokens: dict[str, Any] = {}
+        token_prefix = f"step.{step_index}"
+
+        stage_role = str(stage.get("stage_role") or "").strip()
+        if stage_role:
+            step_tokens[f"{token_prefix}.stage_role"] = stage_role
+
+        for source_key, token_key in (
+            ("seed", "sampler.seed"),
+            ("steps", "sampler.steps"),
+            ("cfg_scale", "sampler.cfg"),
+            ("sampler_name", "sampler.name"),
+            ("scheduler_name", "sampler.scheduler"),
+            ("denoise_strength", "sampler.denoise"),
+            ("width", "image.width"),
+            ("height", "image.height"),
+        ):
+            value = stage.get(source_key)
+            if value not in (None, ""):
+                step_tokens[f"{token_prefix}.{token_key}"] = value
+
+        stage_prompts = [item for item in _list_payload(stage.get("prompts")) if isinstance(item, dict)]
+        for prompt_role in ("positive", "negative"):
+            prompt_text = next(
+                (
+                    str(item.get("prompt_text") or "").strip()
+                    for item in stage_prompts
+                    if str(item.get("prompt_role") or "").strip().lower() == prompt_role
+                    and str(item.get("prompt_text") or "").strip()
+                ),
+                "",
+            )
+            if prompt_text:
+                step_tokens[f"{token_prefix}.prompt.{prompt_role}"] = prompt_text
+
+        stage_resources = [item for item in _list_payload(stage.get("resources")) if isinstance(item, dict)]
+        checkpoint_resources = [
+            item
+            for item in stage_resources
+            if str(item.get("resource_type") or "").strip().lower() == "checkpoint"
+        ]
+        if checkpoint_resources:
+            checkpoint = checkpoint_resources[0]
+            checkpoint_name = str(
+                checkpoint.get("display_name")
+                or checkpoint.get("version_name")
+                or checkpoint.get("source_identifier")
+                or ""
+            ).strip()
+            checkpoint_path = str(checkpoint.get("source_identifier") or "").strip()
+            if checkpoint_name:
+                step_tokens[f"{token_prefix}.model.checkpoint_name"] = checkpoint_name
+            if checkpoint_path:
+                step_tokens[f"{token_prefix}.model.checkpoint_path"] = checkpoint_path
+
+        lora_resources = [
+            item
+            for item in stage_resources
+            if str(item.get("resource_type") or "").strip().lower() == "lora"
+        ]
+        lora_groups: list[dict[str, Any]] = []
+        for lora_index, lora in enumerate(lora_resources):
+            lora_prefix = f"{token_prefix}.model.lora.{lora_index}"
+            lora_name = str(
+                lora.get("display_name")
+                or lora.get("version_name")
+                or lora.get("source_identifier")
+                or ""
+            ).strip()
+            lora_path = str(lora.get("source_identifier") or "").strip()
+            lora_model_strength = (
+                lora.get("weight")
+                if lora.get("weight") not in (None, "")
+                else lora.get("strength")
+            )
+            lora_clip_strength = (
+                lora.get("clip_weight")
+                if lora.get("clip_weight") not in (None, "")
+                else lora.get("clipStrength")
+            )
+            if lora_name:
+                step_tokens[f"{lora_prefix}.name"] = lora_name
+            if lora_path:
+                step_tokens[f"{lora_prefix}.path"] = lora_path
+            if lora_model_strength not in (None, ""):
+                step_tokens[f"{lora_prefix}.model_strength"] = lora_model_strength
+                step_tokens[f"{lora_prefix}.strength"] = lora_model_strength
+            if lora_clip_strength not in (None, ""):
+                step_tokens[f"{lora_prefix}.clip_strength"] = lora_clip_strength
+
+            lora_groups.append(
+                {
+                    "index": lora_index,
+                    "name": lora_name or None,
+                    "path": lora_path or None,
+                    "model_strength": lora_model_strength,
+                    "clip_strength": lora_clip_strength,
+                }
+            )
+
+        step_groups.append(
+            {
+                "step_index": step_index,
+                "stage_role": stage_role or None,
+                "lora_count": len(lora_groups),
+                "loras": lora_groups,
+                "tokens": step_tokens,
+            }
+        )
+
+    return step_groups
+
+
+def _build_generation_template_token_preview(generation_payload: dict, local_catalog: dict) -> dict[str, Any]:
+    global_tokens = _build_generation_template_token_values(generation_payload, local_catalog)
+    step_groups = _build_generation_template_step_token_groups(generation_payload)
+    flattened_step_tokens: dict[str, Any] = {}
+    for group in step_groups:
+        for key, value in _dict_payload(group.get("tokens")).items():
+            flattened_step_tokens[str(key)] = value
+
+    combined_tokens = {**global_tokens, **flattened_step_tokens}
+    return {
+        "tokens": combined_tokens,
+        "global_tokens": global_tokens,
+        "step_groups": step_groups,
+    }
+
+
+def _resolve_generation_template_workflow(
+    template: GenerationTemplate,
+    generation_payload: dict,
+    *,
+    token_overrides: dict[str, Any],
+    local_catalog: dict,
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    workflow_json = _dict_payload(_clone_json_value(template.workflow_json))
+    if not workflow_json:
+        raise HTTPException(status_code=422, detail="Template has no workflow JSON payload.")
+
+    template_defaults = _dict_payload(template.default_tokens_json)
+    derived_tokens = _build_generation_template_token_values(generation_payload, local_catalog)
+    resolved_tokens: dict[str, Any] = {**template_defaults, **derived_tokens, **_dict_payload(token_overrides)}
+
+    mappings = [item for item in _list_payload(template.mappings_json) if isinstance(item, dict)]
+    for mapping in mappings:
+        token_name = str(mapping.get("token") or "").strip()
+        target_path = str(mapping.get("target_path") or "").strip()
+        required = bool(mapping.get("required", True))
+        value_type = str(mapping.get("value_type") or "auto").strip() or "auto"
+        default_value = mapping.get("default_value")
+
+        if not token_name or not target_path:
+            warnings.append("Skipped template mapping with missing token or target_path.")
+            continue
+
+        has_value = token_name in resolved_tokens and resolved_tokens.get(token_name) is not None
+        if not has_value and default_value is not None:
+            resolved_tokens[token_name] = default_value
+            has_value = True
+
+        if not has_value:
+            message = f"Template token '{token_name}' has no resolved value for path '{target_path}'."
+            if required:
+                errors.append(message)
+            else:
+                warnings.append(message)
+            continue
+
+        try:
+            coerced_value = _coerce_template_value(resolved_tokens.get(token_name), value_type, token=token_name)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+
+        try:
+            _write_template_path_value(workflow_json, target_path, coerced_value)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+
+    unresolved_placeholders: set[str] = set()
+    workflow_json = _replace_template_placeholders(workflow_json, resolved_tokens, unresolved_placeholders)
+    if unresolved_placeholders:
+        warnings.append(
+            "Unresolved placeholder tokens remain in workflow JSON: "
+            + ", ".join(sorted(unresolved_placeholders))
+        )
+
+    extracted_tokens: dict[str, Any] = {}
+    for mapping in mappings:
+        token_name = str(mapping.get("token") or "").strip()
+        target_path = str(mapping.get("target_path") or "").strip()
+        if not token_name or not target_path:
+            continue
+        try:
+            extracted_tokens[token_name] = _read_template_path_value(workflow_json, target_path)
+        except ValueError:
+            continue
+
+    validation = _summarize_validation(warnings, errors)
+    return {
+        "ok": validation.get("status") != "error",
+        "template": _serialize_generation_template(template, include_workflow=False),
+        "source": {
+            "mode": generation_payload.get("mode"),
+            "target": _dict_payload(generation_payload.get("target")),
+        },
+        "resolved_tokens": resolved_tokens,
+        "applied_mapping_values": extracted_tokens,
+        "resolved_workflow_json": workflow_json,
+        "validation": validation,
     }
 
 
@@ -6121,6 +7953,7 @@ def _build_local_image_variant(image: ImageModel, merged_payload: dict[str, Any]
         "variant_role": variant_role,
         "variant_sort_index": _variant_sort_index_for_image(image, 100),
         "file_name": merged_payload.get("file_name"),
+        "original_file_name": merged_payload.get("original_file_name") or merged_payload.get("file_name"),
         "file_hash": image.file_hash,
         "file_size": merged_payload.get("file_size"),
         "width": merged_payload.get("width"),
@@ -6201,6 +8034,7 @@ def _build_civitai_video_variant(
         "variant_role": "source_video",
         "variant_sort_index": 0,
         "file_name": file_name,
+        "original_file_name": file_name,
         "file_hash": None,
         "file_size": file_size,
         "width": width,
@@ -6239,6 +8073,15 @@ def _build_static_resource_variant(
         return None
 
     file_name = Path(relative_path).name
+    original_file_name = str(variant_metadata.get("original_variant_file_name") or "").strip() or None
+    if not original_file_name:
+        declared_filename = str(variant_metadata.get("declared_filename") or "").strip()
+        if declared_filename:
+            original_file_name = Path(declared_filename).name
+    if not original_file_name:
+        variant_file_path = str(variant_metadata.get("variant_file_path") or "").strip()
+        if variant_file_path:
+            original_file_name = Path(variant_file_path).name
     resource_path = Path(IMAGE_RESOURCES_PATH) / relative_path
     resources_root = Path(IMAGE_RESOURCES_PATH)
     metadata_mime = _normalize_mime_type(variant_metadata.get("actual_mimetype") or variant_metadata.get("declared_mimetype"))
@@ -6300,6 +8143,28 @@ def _build_static_resource_variant(
             else:
                 file_name = f"{Path(file_name).stem}{canonical_suffix}"
 
+    # Legacy records may preserve the primary video filename as the variant
+    # original name even when this archived variant is static image media.
+    # For image variants, normalize to an image-like original filename.
+    if mimetype.startswith("image/"):
+        original_suffix = Path(str(original_file_name or "")).suffix.lower()
+        if original_suffix in _VIDEO_FILE_SUFFIXES:
+            source_candidates = [
+                variant_metadata.get("source_url"),
+                variant_metadata.get("expected_source_url"),
+                image.source_url,
+            ]
+            civitai_image_id: Optional[int] = None
+            for source_candidate in source_candidates:
+                candidate_id = extract_civitai_image_id(str(source_candidate or "").strip())
+                if candidate_id is not None:
+                    civitai_image_id = int(candidate_id)
+                    break
+            if civitai_image_id is not None:
+                original_file_name = f"{civitai_image_id}{_guess_suffix(mimetype)}"
+            else:
+                original_file_name = f"{Path(file_name).stem}{_guess_suffix(mimetype)}"
+
     display_url = f"/image_resources/{_encode_relative_static_path(relative_path)}"
 
     return {
@@ -6308,6 +8173,7 @@ def _build_static_resource_variant(
         "variant_role": variant_role,
         "variant_sort_index": variant_sort_index,
         "file_name": file_name,
+        "original_file_name": original_file_name or file_name,
         "file_hash": file_hash,
         "file_size": file_size,
         "width": None,
@@ -6440,6 +8306,7 @@ def _merge_display_item_variant(base_payload: dict[str, Any], variant: dict[str,
     display_item = dict(base_payload)
     for field_name in (
         "file_name",
+        "original_file_name",
         "file_hash",
         "file_size",
         "width",
@@ -6708,6 +8575,8 @@ def _archive_static_civitai_source_variant(
         "image_id": civitai_image_id,
         "declared_mimetype": declared_mime_type,
         "actual_mimetype": image.mimetype,
+        "declared_filename": image.file_name,
+        "original_variant_file_name": image.file_name,
         "library_file_path": str(image.file_path),
         "library_file_hash": image.file_hash,
         "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
@@ -7962,6 +9831,16 @@ app = FastAPI(title="AtelierAI API", version="0.1.0", lifespan=lifespan)
 # Compress larger JSON responses (e.g., taxonomy tree state payloads).
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
+# Allow local cross-origin fetches so dragging gallery images into external local
+# tools (e.g. ComfyUI running on a different localhost port) can resolve URLs.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "HEAD", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 # Mount the static files directory
 # This will serve files from the 'frontend' directory under the '/frontend/' URL path
 app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
@@ -8041,6 +9920,1737 @@ def get_local_generation_prototype(file_hash: str, db: Session = Depends(get_db)
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found.")
     return _build_generation_prototype_local_payload(image)
+
+
+@app.get("/generation-prototype/civitai/{image_id}/comfy-workspace", response_model=dict)
+def get_civitai_generation_comfy_workspace(
+    image_id: int,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+):
+    local_catalog = model_reference_service.fetch_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
+    )
+    generation_payload = _build_generation_prototype_civitai_payload(image_id)
+    return _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=local_catalog,
+    )
+
+
+def _extract_required_comfy_raw_payload(export_payload: dict, *, payload_kind: str) -> dict:
+    workspace_bundle = _dict_payload(export_payload.get("workspace_bundle"))
+    validation = _dict_payload(export_payload.get("validation"))
+    warnings = [str(item) for item in _list_payload(validation.get("warnings")) if str(item).strip()]
+    errors = [str(item) for item in _list_payload(validation.get("errors")) if str(item).strip()]
+
+    if payload_kind == "workflow":
+        key = "comfy_workflow_ui"
+        label = "Comfy workspace workflow"
+    elif payload_kind == "prompt":
+        key = "comfy_prompt_api"
+        label = "Comfy API prompt"
+    else:
+        raise HTTPException(status_code=500, detail=f"Unsupported raw payload kind: {payload_kind}")
+
+    raw_payload = workspace_bundle.get(key)
+    if isinstance(raw_payload, dict):
+        return raw_payload
+
+    details: list[str] = [f"{label} JSON is not available for this image."]
+    details.extend(errors)
+    if warnings:
+        details.append("Warnings: " + " | ".join(warnings))
+    raise HTTPException(status_code=422, detail=" ".join(details).strip())
+
+
+def _inject_fresh_local_exif_metadata_for_comfy(
+    generation_payload: dict,
+    image: ImageModel,
+    db: Session,
+) -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    try:
+        image_path = _resolve_image_library_path(image)
+    except Exception as exc:
+        return generation_payload, [f"Could not resolve image path for fresh EXIF refresh: {exc}"]
+
+    if not image_path.exists() or not image_path.is_file():
+        return generation_payload, ["Local image file is unavailable for fresh EXIF refresh."]
+
+    try:
+        processor = ImageProcessor(str(image_path), db, IMAGE_LIBRARY_PATH)
+    except Exception as exc:
+        return generation_payload, [f"Fresh EXIF refresh failed: {exc}"]
+
+    fresh_exif = _dict_payload(processor.exif_data)
+    if not fresh_exif:
+        return generation_payload, ["Fresh EXIF refresh did not yield any metadata fields."]
+
+    raw = _dict_payload(generation_payload.get("raw"))
+    merged = _dict_payload(raw.get("merged"))
+    sidecar = _dict_payload(raw.get("sidecar"))
+    db_payload = _dict_payload(raw.get("db"))
+
+    raw["exif_data_fresh"] = fresh_exif
+    merged["exif_data_fresh"] = fresh_exif
+
+    if not isinstance(sidecar.get("exif_data"), dict) or not sidecar.get("exif_data"):
+        sidecar["exif_data"] = fresh_exif
+    if not isinstance(db_payload.get("exif_data"), dict) or not db_payload.get("exif_data"):
+        db_payload["exif_data"] = fresh_exif
+
+    raw["merged"] = merged
+    raw["sidecar"] = sidecar
+    raw["db"] = db_payload
+    generation_payload["raw"] = raw
+    warnings.append("Included fresh EXIF metadata from the local media file for Comfy graph extraction.")
+    return generation_payload, warnings
+
+
+@app.get("/generation-prototype/civitai/{image_id}/comfy-workflow-raw", response_model=dict)
+def get_civitai_generation_comfy_workflow_raw(
+    image_id: int,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+):
+    local_catalog = model_reference_service.fetch_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
+    )
+    generation_payload = _build_generation_prototype_civitai_payload(image_id)
+    export_payload = _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=local_catalog,
+    )
+    return _extract_required_comfy_raw_payload(export_payload, payload_kind="workflow")
+
+
+@app.get("/generation-prototype/civitai/{image_id}/comfy-prompt-raw", response_model=dict)
+def get_civitai_generation_comfy_prompt_raw(
+    image_id: int,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+):
+    local_catalog = model_reference_service.fetch_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
+    )
+    generation_payload = _build_generation_prototype_civitai_payload(image_id)
+    export_payload = _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=local_catalog,
+    )
+    return _extract_required_comfy_raw_payload(export_payload, payload_kind="prompt")
+
+
+@app.get("/images/{file_hash}/generation-prototype/comfy-workspace", response_model=dict)
+def get_local_generation_comfy_workspace(
+    file_hash: str,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    image = (
+        db.query(ImageModel)
+        .filter(ImageModel.file_hash == file_hash)
+        .filter(_active_image_filter())
+        .first()
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+    local_catalog = model_reference_service.fetch_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
+    )
+    generation_payload = _build_generation_prototype_local_payload(image)
+    generation_payload, refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    export_payload = _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=local_catalog,
+    )
+    if refresh_warnings:
+        validation = _dict_payload(export_payload.get("validation"))
+        warnings = [str(item) for item in _list_payload(validation.get("warnings")) if str(item).strip()]
+        warnings.extend(refresh_warnings)
+        validation["warnings"] = warnings
+        validation.setdefault("errors", _list_payload(validation.get("errors")))
+        validation["status"] = _summarize_validation(warnings, _list_payload(validation.get("errors"))).get("status")
+        export_payload["validation"] = validation
+    return export_payload
+
+
+@app.get("/images/{file_hash}/generation-prototype/comfy-workflow-raw", response_model=dict)
+def get_local_generation_comfy_workflow_raw(
+    file_hash: str,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    image = (
+        db.query(ImageModel)
+        .filter(ImageModel.file_hash == file_hash)
+        .filter(_active_image_filter())
+        .first()
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    local_catalog = model_reference_service.fetch_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
+    )
+    generation_payload = _build_generation_prototype_local_payload(image)
+    generation_payload, _ = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    export_payload = _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=local_catalog,
+    )
+    return _extract_required_comfy_raw_payload(export_payload, payload_kind="workflow")
+
+
+@app.get("/images/{file_hash}/generation-prototype/comfy-prompt-raw", response_model=dict)
+def get_local_generation_comfy_prompt_raw(
+    file_hash: str,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    image = (
+        db.query(ImageModel)
+        .filter(ImageModel.file_hash == file_hash)
+        .filter(_active_image_filter())
+        .first()
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    local_catalog = model_reference_service.fetch_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
+    )
+    generation_payload = _build_generation_prototype_local_payload(image)
+    generation_payload, _ = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    export_payload = _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=local_catalog,
+    )
+    return _extract_required_comfy_raw_payload(export_payload, payload_kind="prompt")
+
+
+def _coerce_a1111_parameter_value(key: str, value: Any) -> Any:
+    key_normalized = str(key or "").strip().lower().replace("_", " ")
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    if key_normalized == "size":
+        size_match = _A1111_SIZE_RE.match(text)
+        if size_match:
+            return f"{int(size_match.group(1))}x{int(size_match.group(2))}"
+        return text
+
+    if key_normalized in {"steps", "seed", "clip skip", "eta", "batch size", "batch count"}:
+        try:
+            return int(float(text))
+        except ValueError:
+            return text
+
+    if key_normalized in {
+        "cfg scale",
+        "denoising strength",
+        "hires upscale",
+        "ensd",
+        "variation seed strength",
+    }:
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+    return text
+
+
+def _extract_a1111_user_comment_candidates(generation_payload: dict) -> list[dict[str, str]]:
+    raw = _dict_payload(generation_payload.get("raw"))
+    merged = _dict_payload(raw.get("merged"))
+
+    candidates: list[tuple[str, Any]] = [
+        ("raw.merged.UserComment", merged.get("UserComment")),
+        ("raw.merged.user_comment", merged.get("user_comment")),
+        ("raw.merged.parameters", merged.get("parameters")),
+        ("raw.merged.Parameters", merged.get("Parameters")),
+        ("raw.exif_data.UserComment", _dict_payload(raw.get("exif_data")).get("UserComment")),
+        ("raw.exif_data.user_comment", _dict_payload(raw.get("exif_data")).get("user_comment")),
+        ("raw.exif_data.parameters", _dict_payload(raw.get("exif_data")).get("parameters")),
+        ("raw.exif_data_fresh.UserComment", _dict_payload(raw.get("exif_data_fresh")).get("UserComment")),
+        ("raw.exif_data_fresh.user_comment", _dict_payload(raw.get("exif_data_fresh")).get("user_comment")),
+        ("raw.exif_data_fresh.parameters", _dict_payload(raw.get("exif_data_fresh")).get("parameters")),
+        ("raw.sidecar.exif_data.UserComment", _dict_payload(_dict_payload(raw.get("sidecar")).get("exif_data")).get("UserComment")),
+        ("raw.sidecar.exif_data.user_comment", _dict_payload(_dict_payload(raw.get("sidecar")).get("exif_data")).get("user_comment")),
+        ("raw.sidecar.exif_data.parameters", _dict_payload(_dict_payload(raw.get("sidecar")).get("exif_data")).get("parameters")),
+        ("raw.db.exif_data.UserComment", _dict_payload(_dict_payload(raw.get("db")).get("exif_data")).get("UserComment")),
+        ("raw.db.exif_data.user_comment", _dict_payload(_dict_payload(raw.get("db")).get("exif_data")).get("user_comment")),
+        ("raw.db.exif_data.parameters", _dict_payload(_dict_payload(raw.get("db")).get("exif_data")).get("parameters")),
+    ]
+
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for source, value in candidates:
+        if value is None:
+            continue
+        text = str(value).replace("\r\n", "\n").strip().strip("\x00").strip()
+        if not text:
+            continue
+        dedupe_key = text.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized.append({"source": source, "text": text})
+    return normalized
+
+
+def _looks_like_a1111_user_comment(text: str) -> bool:
+    sample = str(text or "").strip().lower()
+    if not sample:
+        return False
+    return (
+        "negative prompt:" in sample
+        or "steps:" in sample
+        or "cfg scale:" in sample
+        or "sampler:" in sample
+    )
+
+
+def _parse_a1111_user_comment(text: str) -> dict[str, Any]:
+    raw_text = str(text or "").replace("\r\n", "\n").strip().strip("\x00").strip()
+    if not raw_text:
+        return {
+            "raw_text": "",
+            "positive_prompt": "",
+            "negative_prompt": "",
+            "parameters": {},
+            "lora_tags": [],
+            "warnings": ["A1111 metadata text was empty."],
+        }
+
+    lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
+    positive_lines: list[str] = []
+    negative_prompt = ""
+    metadata_lines: list[str] = []
+
+    negative_index = next((index for index, line in enumerate(lines) if _A1111_NEGATIVE_PROMPT_RE.match(line)), -1)
+    if negative_index >= 0:
+        positive_lines = lines[:negative_index]
+        negative_line = lines[negative_index]
+        negative_prompt = _A1111_NEGATIVE_PROMPT_RE.sub("", negative_line).strip()
+        metadata_lines = lines[negative_index + 1:]
+    else:
+        metadata_start = next((index for index, line in enumerate(lines) if line.lower().startswith("steps:")), -1)
+        if metadata_start >= 0:
+            positive_lines = lines[:metadata_start]
+            metadata_lines = lines[metadata_start:]
+        else:
+            positive_lines = lines
+
+    positive_prompt = "\n".join(positive_lines).strip()
+    metadata_blob = ", ".join(metadata_lines).strip(" ,")
+    if not metadata_blob and positive_prompt.lower().startswith("steps:"):
+        metadata_blob = positive_prompt
+        positive_prompt = ""
+
+    parameter_pairs: dict[str, Any] = {}
+    if metadata_blob:
+        segments = [segment.strip() for segment in _A1111_KV_SPLIT_RE.split(metadata_blob) if segment.strip()]
+        for segment in segments:
+            if ":" not in segment:
+                continue
+            key, value = segment.split(":", 1)
+            key = str(key).strip()
+            if not key:
+                continue
+            coerced = _coerce_a1111_parameter_value(key, value)
+            if coerced is None:
+                continue
+            parameter_pairs[key] = coerced
+
+    if not negative_prompt:
+        for key in ("Negative prompt", "negative prompt", "Negative Prompt"):
+            if key in parameter_pairs:
+                negative_prompt = str(parameter_pairs.get(key) or "").strip()
+                break
+
+    parsed_size = _A1111_SIZE_RE.match(str(parameter_pairs.get("Size") or ""))
+    width = int(parsed_size.group(1)) if parsed_size else None
+    height = int(parsed_size.group(2)) if parsed_size else None
+
+    lora_tags: list[dict[str, Any]] = []
+    for match in _A1111_LORA_TAG_RE.finditer(positive_prompt):
+        lora_name = str(match.group(1) or "").strip()
+        if not lora_name:
+            continue
+        weight_value = match.group(2)
+        weight = None
+        if weight_value not in (None, ""):
+            try:
+                weight = float(weight_value)
+            except ValueError:
+                weight = None
+        lora_tags.append({
+            "name": lora_name,
+            "weight": weight,
+        })
+
+    warnings: list[str] = []
+    if not _looks_like_a1111_user_comment(raw_text):
+        warnings.append("Metadata text did not match common A1111 parameter patterns.")
+    if not positive_prompt:
+        warnings.append("Positive prompt could not be confidently extracted.")
+    if not parameter_pairs:
+        warnings.append("No key/value parameter fields were detected in metadata text.")
+
+    return {
+        "raw_text": raw_text,
+        "positive_prompt": positive_prompt,
+        "negative_prompt": negative_prompt,
+        "parameters": parameter_pairs,
+        "lora_tags": lora_tags,
+        "parsed_fields": {
+            "sampler": parameter_pairs.get("Sampler") or parameter_pairs.get("sampler"),
+            "scheduler": parameter_pairs.get("Schedule type") or parameter_pairs.get("Scheduler") or parameter_pairs.get("scheduler"),
+            "seed": parameter_pairs.get("Seed") or parameter_pairs.get("seed"),
+            "steps": parameter_pairs.get("Steps") or parameter_pairs.get("steps"),
+            "cfg_scale": parameter_pairs.get("CFG scale") or parameter_pairs.get("Cfg scale") or parameter_pairs.get("cfg scale"),
+            "model": parameter_pairs.get("Model") or parameter_pairs.get("model"),
+            "model_hash": parameter_pairs.get("Model hash") or parameter_pairs.get("model hash"),
+            "width": width,
+            "height": height,
+            "denoising_strength": parameter_pairs.get("Denoising strength") or parameter_pairs.get("denoising strength"),
+            "clip_skip": parameter_pairs.get("Clip skip") or parameter_pairs.get("clip skip"),
+        },
+        "warnings": warnings,
+    }
+
+
+def _normalize_scalar_for_lookup(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        return text.casefold()
+    return None
+
+
+def _flatten_json_scalars(value: Any, *, prefix: str = "", output: Optional[dict[str, Any]] = None, depth: int = 0, max_depth: int = 20) -> dict[str, Any]:
+    if output is None:
+        output = {}
+    if depth > max_depth:
+        return output
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            nested_key = str(key)
+            path = f"{prefix}.{nested_key}" if prefix else nested_key
+            _flatten_json_scalars(nested, prefix=path, output=output, depth=depth + 1, max_depth=max_depth)
+        return output
+
+    if isinstance(value, list):
+        for index, nested in enumerate(value):
+            path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            _flatten_json_scalars(nested, prefix=path, output=output, depth=depth + 1, max_depth=max_depth)
+        return output
+
+    output[prefix or "$"] = value
+    return output
+
+
+def _build_scalar_lookup(flattened: dict[str, Any]) -> dict[str, list[str]]:
+    lookup: dict[str, list[str]] = {}
+    for path, value in flattened.items():
+        normalized = _normalize_scalar_for_lookup(value)
+        if normalized is None:
+            continue
+        lookup.setdefault(normalized, []).append(path)
+    return lookup
+
+
+def _compare_json_scalar_structures(left: Any, right: Any, *, sample_limit: int = 25) -> dict[str, Any]:
+    left_flat = _flatten_json_scalars(left)
+    right_flat = _flatten_json_scalars(right)
+
+    left_paths = set(left_flat.keys())
+    right_paths = set(right_flat.keys())
+    shared_paths = left_paths & right_paths
+
+    matches = 0
+    mismatches: list[dict[str, Any]] = []
+    for path in sorted(shared_paths):
+        if left_flat.get(path) == right_flat.get(path):
+            matches += 1
+            continue
+        if len(mismatches) < sample_limit:
+            mismatches.append({
+                "path": path,
+                "left": left_flat.get(path),
+                "right": right_flat.get(path),
+            })
+
+    left_only_samples = sorted(left_paths - right_paths)[:sample_limit]
+    right_only_samples = sorted(right_paths - left_paths)[:sample_limit]
+    mismatch_count = max(len(shared_paths) - matches, 0)
+    shared_total = len(shared_paths)
+    similarity_score = (matches / shared_total) if shared_total else 0.0
+
+    return {
+        "left_scalar_count": len(left_flat),
+        "right_scalar_count": len(right_flat),
+        "shared_path_count": shared_total,
+        "matching_value_count": matches,
+        "mismatch_count": mismatch_count,
+        "left_only_count": max(len(left_paths - right_paths), 0),
+        "right_only_count": max(len(right_paths - left_paths), 0),
+        "similarity_score": round(similarity_score, 6),
+        "left_only_path_samples": left_only_samples,
+        "right_only_path_samples": right_only_samples,
+        "mismatch_samples": mismatches,
+    }
+
+
+def _build_a1111_field_alignment(parsed_fields: dict[str, Any], workflow_payload: Any, *, sample_limit: int = 10) -> dict[str, Any]:
+    flattened = _flatten_json_scalars(workflow_payload)
+    lookup = _build_scalar_lookup(flattened)
+
+    alignments: dict[str, Any] = {}
+    matched_fields = 0
+    candidate_fields = 0
+
+    for field_name, field_value in parsed_fields.items():
+        if field_value in (None, ""):
+            continue
+        candidate_fields += 1
+        normalized = _normalize_scalar_for_lookup(field_value)
+        matched_paths = lookup.get(normalized, []) if normalized is not None else []
+        if matched_paths:
+            matched_fields += 1
+        alignments[field_name] = {
+            "value": field_value,
+            "match_count": len(matched_paths),
+            "path_samples": matched_paths[:sample_limit],
+        }
+
+    score = (matched_fields / candidate_fields) if candidate_fields else 0.0
+    return {
+        "candidate_field_count": candidate_fields,
+        "matched_field_count": matched_fields,
+        "alignment_score": round(score, 6),
+        "fields": alignments,
+    }
+
+
+def _empty_local_catalog_payload() -> dict[str, Any]:
+    return {
+        "configured": False,
+        "sources": {},
+        "entries": [],
+        "error": None,
+        "raw": None,
+        "raw_compacted": True,
+    }
+
+
+def _sanitize_export_filename(raw_name: str, *, default_stem: str) -> str:
+    name = str(raw_name or "").strip()
+    if not name:
+        name = default_stem
+    name = Path(name).name
+    if not name:
+        name = default_stem
+
+    if not name.lower().endswith(".json"):
+        name = f"{name}.json"
+
+    stem = Path(name).stem
+    suffix = Path(name).suffix or ".json"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    if not stem:
+        stem = default_stem
+    return f"{stem}{suffix}"
+
+
+def _a1111_bridge_export_dir() -> Path:
+    app_root = Path(__file__).resolve().parent.parent
+    export_dir = app_root / "data" / "a1111_bridge_exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    return export_dir
+
+
+_A1111_PROCESS_CORE_FIELDS: tuple[str, ...] = (
+    "sampler",
+    "steps",
+    "cfg_scale",
+    "seed",
+    "width",
+    "height",
+    "model",
+    "model_hash",
+    "denoising_strength",
+    "clip_skip",
+)
+
+
+def _is_missing_process_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
+    export_dir = _a1111_bridge_export_dir()
+    files = sorted(export_dir.glob("*.json"))
+
+    records: list[dict[str, Any]] = []
+    load_errors: list[dict[str, Any]] = []
+    unique_fingerprints: set[str] = set()
+
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = _dict_payload(json.load(handle))
+        except Exception as exc:
+            load_errors.append({
+                "file_name": path.name,
+                "error": str(exc),
+            })
+            continue
+
+        analysis = _dict_payload(payload.get("analysis"))
+        if not analysis:
+            load_errors.append({
+                "file_name": path.name,
+                "error": "Missing analysis object.",
+            })
+            continue
+
+        user_comment = _dict_payload(analysis.get("user_comment"))
+        parsed = _dict_payload(user_comment.get("parsed"))
+        parsed_fields = _dict_payload(parsed.get("parsed_fields"))
+        parameters = _dict_payload(parsed.get("parameters"))
+        warnings = [str(item) for item in _list_payload(parsed.get("warnings")) if str(item).strip()]
+        validation = _dict_payload(analysis.get("validation"))
+        target = _dict_payload(analysis.get("target"))
+        raw_text = str(parsed.get("raw_text") or "")
+
+        fingerprint_payload = {
+            "target_file_hash": target.get("file_hash"),
+            "raw_text": raw_text,
+            "parsed_fields": parsed_fields,
+            "parameters": parameters,
+        }
+        fingerprint = hashlib.sha1(
+            json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()
+        unique_fingerprints.add(fingerprint)
+
+        records.append({
+            "file_name": path.name,
+            "saved_at": payload.get("saved_at"),
+            "analysis_ok": bool(analysis.get("ok")),
+            "validation_status": str(validation.get("status") or "missing"),
+            "target_file_hash": str(target.get("file_hash") or "").strip() or None,
+            "parsed_fields": parsed_fields,
+            "parameters": parameters,
+            "raw_text": raw_text,
+            "positive_prompt": str(parsed.get("positive_prompt") or ""),
+            "negative_prompt": str(parsed.get("negative_prompt") or ""),
+            "warnings": warnings,
+            "lora_tags": _list_payload(parsed.get("lora_tags")),
+            "fingerprint": fingerprint,
+        })
+
+    unique_count = len(unique_fingerprints)
+    record_count = len(records)
+
+    coverage_present = {field: 0 for field in _A1111_PROCESS_CORE_FIELDS}
+    coverage_missing = {field: 0 for field in _A1111_PROCESS_CORE_FIELDS}
+    validation_status_counts: dict[str, int] = {}
+
+    signal_counts = {
+        "img2img_or_inpaint_detected": 0,
+        "hires_fix_detected": 0,
+        "adetailer_detected": 0,
+        "lora_detected": 0,
+        "civitai_resources_detected": 0,
+        "truncated_positive_prompt": 0,
+        "missing_seed": 0,
+        "missing_model_identity": 0,
+    }
+
+    records_with_all_core_fields = 0
+
+    for record in records:
+        parsed_fields = _dict_payload(record.get("parsed_fields"))
+        parameters = _dict_payload(record.get("parameters"))
+        raw_text = str(record.get("raw_text") or "")
+        positive_prompt = str(record.get("positive_prompt") or "")
+        lora_tags = _list_payload(record.get("lora_tags"))
+
+        missing_any = False
+        for field in _A1111_PROCESS_CORE_FIELDS:
+            value = parsed_fields.get(field)
+            if _is_missing_process_value(value):
+                coverage_missing[field] += 1
+                missing_any = True
+            else:
+                coverage_present[field] += 1
+        if not missing_any:
+            records_with_all_core_fields += 1
+
+        denoising = _to_float(parsed_fields.get("denoising_strength"))
+        if denoising is not None and 0.0 < denoising < 1.0:
+            signal_counts["img2img_or_inpaint_detected"] += 1
+
+        if any(str(key).lower().startswith("hires") for key in parameters.keys()):
+            signal_counts["hires_fix_detected"] += 1
+
+        if any(str(key).lower().startswith("adetailer") for key in parameters.keys()):
+            signal_counts["adetailer_detected"] += 1
+
+        has_lora_hashes = any(str(key).lower() == "lora hashes" for key in parameters.keys())
+        if has_lora_hashes or bool(lora_tags):
+            signal_counts["lora_detected"] += 1
+
+        civitai_resources = any(str(key).lower() == "civitai resources" for key in parameters.keys())
+        if civitai_resources:
+            signal_counts["civitai_resources_detected"] += 1
+
+        if not positive_prompt.strip() and "negative prompt" in raw_text.lower():
+            signal_counts["truncated_positive_prompt"] += 1
+
+        if _is_missing_process_value(parsed_fields.get("seed")):
+            signal_counts["missing_seed"] += 1
+
+        if _is_missing_process_value(parsed_fields.get("model")) or _is_missing_process_value(parsed_fields.get("model_hash")):
+            signal_counts["missing_model_identity"] += 1
+
+        status_name = str(record.get("validation_status") or "missing")
+        validation_status_counts[status_name] = validation_status_counts.get(status_name, 0) + 1
+
+    def _pct(value: int, total: int) -> float:
+        if total <= 0:
+            return 0.0
+        return round((value / total) * 100.0, 2)
+
+    field_coverage: dict[str, Any] = {}
+    for field in _A1111_PROCESS_CORE_FIELDS:
+        present = coverage_present[field]
+        missing = coverage_missing[field]
+        field_coverage[field] = {
+            "present": present,
+            "missing": missing,
+            "coverage_percent": _pct(present, record_count),
+        }
+
+    core_fields_present_total = sum(coverage_present.values())
+    max_core_slots = record_count * len(_A1111_PROCESS_CORE_FIELDS)
+    core_coverage_percent = _pct(core_fields_present_total, max_core_slots)
+    all_fields_records_percent = _pct(records_with_all_core_fields, record_count)
+
+    # Readiness heuristic for whether process inference is reliable enough for automation.
+    sample_size_sufficient = unique_count >= 40
+    core_coverage_sufficient = core_coverage_percent >= 85.0
+    seed_coverage_sufficient = field_coverage["seed"]["coverage_percent"] >= 85.0
+    model_coverage_sufficient = (
+        field_coverage["model"]["coverage_percent"] >= 85.0
+        and field_coverage["model_hash"]["coverage_percent"] >= 85.0
+    )
+    reliable_for_process_inference = all([
+        sample_size_sufficient,
+        core_coverage_sufficient,
+        seed_coverage_sufficient,
+        model_coverage_sufficient,
+    ])
+
+    confidence_label = "low"
+    if reliable_for_process_inference:
+        confidence_label = "high"
+    elif unique_count >= 15 and core_coverage_percent >= 75.0:
+        confidence_label = "moderate"
+
+    return {
+        "ok": True,
+        "mode": "a1111_bridge_dataset_quality",
+        "paths": {
+            "export_dir_absolute": str(export_dir),
+            "export_dir_relative": str(export_dir.relative_to(Path(__file__).resolve().parent.parent)),
+        },
+        "summary": {
+            "file_count": len(files),
+            "loaded_record_count": record_count,
+            "unique_record_count": unique_count,
+            "duplicate_count_estimate": max(0, record_count - unique_count),
+            "load_error_count": len(load_errors),
+            "analysis_ok_count": sum(1 for item in records if item.get("analysis_ok")),
+            "parse_present_count": sum(1 for item in records if _dict_payload(item.get("parsed_fields"))),
+            "validation_status_counts": validation_status_counts,
+        },
+        "coverage": {
+            "core_fields": field_coverage,
+            "core_fields_aggregate_coverage_percent": core_coverage_percent,
+            "records_with_all_core_fields": records_with_all_core_fields,
+            "records_with_all_core_fields_percent": all_fields_records_percent,
+        },
+        "signals": {
+            "img2img_or_inpaint_detected": {
+                "count": signal_counts["img2img_or_inpaint_detected"],
+                "percent": _pct(signal_counts["img2img_or_inpaint_detected"], record_count),
+            },
+            "hires_fix_detected": {
+                "count": signal_counts["hires_fix_detected"],
+                "percent": _pct(signal_counts["hires_fix_detected"], record_count),
+            },
+            "adetailer_detected": {
+                "count": signal_counts["adetailer_detected"],
+                "percent": _pct(signal_counts["adetailer_detected"], record_count),
+            },
+            "lora_detected": {
+                "count": signal_counts["lora_detected"],
+                "percent": _pct(signal_counts["lora_detected"], record_count),
+            },
+            "civitai_resources_detected": {
+                "count": signal_counts["civitai_resources_detected"],
+                "percent": _pct(signal_counts["civitai_resources_detected"], record_count),
+            },
+        },
+        "quality_issues": {
+            "truncated_positive_prompt": {
+                "count": signal_counts["truncated_positive_prompt"],
+                "percent": _pct(signal_counts["truncated_positive_prompt"], record_count),
+            },
+            "missing_seed": {
+                "count": signal_counts["missing_seed"],
+                "percent": _pct(signal_counts["missing_seed"], record_count),
+            },
+            "missing_model_identity": {
+                "count": signal_counts["missing_model_identity"],
+                "percent": _pct(signal_counts["missing_model_identity"], record_count),
+            },
+        },
+        "inference_readiness": {
+            "reliable_for_process_inference": reliable_for_process_inference,
+            "confidence": confidence_label,
+            "gates": {
+                "sample_size_sufficient": sample_size_sufficient,
+                "core_coverage_sufficient": core_coverage_sufficient,
+                "seed_coverage_sufficient": seed_coverage_sufficient,
+                "model_coverage_sufficient": model_coverage_sufficient,
+            },
+            "recommended_min_samples_basic": 50,
+            "recommended_min_samples_full": 100,
+            "recommended_batches_min": 3,
+        },
+        "load_errors": load_errors,
+    }
+
+
+@app.post("/generation-prototype/a1111-bridge/analyze", response_model=dict)
+def analyze_a1111_bridge(
+    request: A1111BridgeAnalyzeRequest,
+    db: Session = Depends(get_db),
+):
+    file_hash = str(request.file_hash or "").strip()
+    if not file_hash:
+        raise HTTPException(status_code=422, detail="file_hash is required.")
+
+    image = (
+        db.query(ImageModel)
+        .filter(ImageModel.file_hash == file_hash)
+        .filter(_active_image_filter())
+        .first()
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    generation_payload = _build_generation_prototype_local_payload(image)
+    generation_payload, exif_refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+
+    user_comment_candidates = _extract_a1111_user_comment_candidates(generation_payload)
+    preferred_candidate = next(
+        (
+            candidate
+            for candidate in user_comment_candidates
+            if _looks_like_a1111_user_comment(str(candidate.get("text") or ""))
+        ),
+        user_comment_candidates[0] if user_comment_candidates else None,
+    )
+
+    parse_payload = _parse_a1111_user_comment(str(preferred_candidate.get("text") or "")) if preferred_candidate else {
+        "raw_text": "",
+        "positive_prompt": "",
+        "negative_prompt": "",
+        "parameters": {},
+        "lora_tags": [],
+        "parsed_fields": {},
+        "warnings": ["No A1111 user_comment/parameters metadata was found in local payloads."],
+    }
+
+    comfy_export = _build_generation_comfy_workspace_export_payload(
+        generation_payload,
+        local_catalog=_empty_local_catalog_payload(),
+    )
+    workspace_bundle = _dict_payload(comfy_export.get("workspace_bundle"))
+    inferred_workflow = _dict_payload(workspace_bundle.get("comfy_workflow_ui"))
+    inferred_prompt_api = _dict_payload(workspace_bundle.get("comfy_prompt_api"))
+
+    provided_workflow_json = _dict_payload(request.comfy_workflow_json)
+    provided_workflow_supplied = request.comfy_workflow_json is not None
+
+    comparison: dict[str, Any] = {
+        "provided_workflow_supplied": provided_workflow_supplied,
+        "inferred_workflow_available": bool(inferred_workflow),
+        "structural": None,
+        "field_alignment": None,
+    }
+    if provided_workflow_supplied and provided_workflow_json:
+        comparison["structural"] = _compare_json_scalar_structures(inferred_workflow, provided_workflow_json)
+        comparison["field_alignment"] = _build_a1111_field_alignment(
+            _dict_payload(parse_payload.get("parsed_fields")),
+            provided_workflow_json,
+        )
+
+    warnings = [
+        *[str(item) for item in exif_refresh_warnings if str(item).strip()],
+        *[str(item) for item in _list_payload(parse_payload.get("warnings")) if str(item).strip()],
+    ]
+    if provided_workflow_supplied and not provided_workflow_json:
+        warnings.append("Provided comfy_workflow_json was empty; structural comparison was skipped.")
+    if not inferred_workflow:
+        warnings.append("No inferred Comfy workflow was available from the local generation payload.")
+
+    validation = _summarize_validation(warnings, [])
+    response_payload: dict[str, Any] = {
+        "ok": validation.get("status") != "error",
+        "mode": "a1111_bridge",
+        "target": {
+            "file_hash": image.file_hash,
+            "image_db_id": image.id,
+            "source_url": image.source_url,
+        },
+        "user_comment": {
+            "source": preferred_candidate.get("source") if preferred_candidate else None,
+            "candidate_count": len(user_comment_candidates),
+            "candidates": user_comment_candidates,
+            "parsed": parse_payload,
+        },
+        "comfy": {
+            "inferred_workflow_ui": inferred_workflow,
+            "inferred_prompt_api": inferred_prompt_api,
+            "workspace_summary": _dict_payload(comfy_export.get("overview")),
+            "workspace_validation": _dict_payload(comfy_export.get("validation")),
+            "provided_workflow_ui": provided_workflow_json if provided_workflow_supplied else None,
+        },
+        "comparison": comparison,
+        "validation": validation,
+    }
+    if request.include_generation_payload:
+        response_payload["generation_payload"] = generation_payload
+    return response_payload
+
+
+@app.post("/generation-prototype/a1111-bridge/save-analysis", response_model=dict)
+def save_a1111_bridge_analysis(payload: A1111BridgeSaveRequest):
+    analysis_payload = _dict_payload(payload.analysis_payload)
+    if not analysis_payload:
+        raise HTTPException(status_code=422, detail="analysis_payload must be a JSON object.")
+
+    target = _dict_payload(analysis_payload.get("target"))
+    file_hash = str(target.get("file_hash") or "").strip()
+    hash_token = re.sub(r"[^a-fA-F0-9]+", "", file_hash)[:12] or "unknown"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    default_stem = f"a1111_bridge_{hash_token}_{stamp}"
+
+    resolved_file_name = _sanitize_export_filename(str(payload.file_name or ""), default_stem=default_stem)
+    export_dir = _a1111_bridge_export_dir()
+    export_path = export_dir / resolved_file_name
+
+    sequence = 1
+    while export_path.exists():
+        candidate_name = _sanitize_export_filename(
+            f"{Path(resolved_file_name).stem}_{sequence}.json",
+            default_stem=default_stem,
+        )
+        export_path = export_dir / candidate_name
+        sequence += 1
+
+    wrapped_payload = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "analysis": analysis_payload,
+    }
+    with open(export_path, "w", encoding="utf-8") as handle:
+        json.dump(wrapped_payload, handle, indent=2, ensure_ascii=False, default=str)
+
+    return {
+        "ok": True,
+        "saved": {
+            "file_name": export_path.name,
+            "absolute_path": str(export_path),
+            "relative_path": str(export_path.relative_to(Path(__file__).resolve().parent.parent)),
+        },
+        "target": {
+            "file_hash": file_hash or None,
+        },
+    }
+
+
+@app.get("/generation-prototype/a1111-bridge/dataset-quality", response_model=dict)
+def get_a1111_bridge_dataset_quality_report():
+    return _build_a1111_bridge_dataset_quality_report()
+
+
+def _resolve_comfyui_base_url() -> str:
+    base = str(getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "") or "").strip()
+    if not base:
+        base = str(getattr(app_config, "ATELIER_COMFYUI_MODEL_CATALOG_URL", "") or "").strip()
+    return base.rstrip("/")
+
+
+def _build_prompt_node_class_map(prompt_graph: dict[str, Any]) -> dict[str, str]:
+    node_class_map: dict[str, str] = {}
+    for node_id, node in _dict_payload(prompt_graph).items():
+        node_dict = _dict_payload(node)
+        class_type = str(node_dict.get("class_type") or "").strip()
+        if class_type:
+            node_class_map[str(node_id)] = class_type
+    return node_class_map
+
+
+def _collect_comfy_history_images(
+    history_entry: dict[str, Any],
+    node_class_map: Optional[dict[str, str]] = None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    outputs = _dict_payload(history_entry.get("outputs"))
+    class_lookup = node_class_map or {}
+    for node_id, output in outputs.items():
+        node_key = str(node_id)
+        output_dict = _dict_payload(output)
+        images = _list_payload(output_dict.get("images"))
+        for index, image_item in enumerate(images):
+            image_meta = _dict_payload(image_item)
+            filename = str(image_meta.get("filename") or "").strip()
+            if not filename:
+                continue
+            subfolder = str(image_meta.get("subfolder") or "")
+            image_type = str(image_meta.get("type") or "output")
+            results.append({
+                "node_id": node_key,
+                "node_class_type": str(class_lookup.get(node_key) or ""),
+                "index": index,
+                "filename": filename,
+                "subfolder": subfolder,
+                "type": image_type,
+            })
+    return results
+
+
+def _history_has_output_images(history_entry: dict[str, Any]) -> bool:
+    return bool(_collect_comfy_history_images(history_entry))
+
+
+def _build_comfy_view_url(base_url: str, image_meta: dict[str, Any]) -> str:
+    query = urlencode({
+        "filename": str(image_meta.get("filename") or ""),
+        "subfolder": str(image_meta.get("subfolder") or ""),
+        "type": str(image_meta.get("type") or "output"),
+    })
+    return f"{base_url}/view?{query}"
+
+
+def _to_data_url(image_bytes: bytes, mime_type: str) -> str:
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _apply_comfy_filename_prefix_cache_bust(prompt_graph: dict[str, Any], suffix: str) -> tuple[dict[str, Any], int]:
+    """Clone a prompt graph and make SaveImage filename_prefix unique to avoid output filename collisions."""
+    cloned = _clone_json_value(prompt_graph)
+    if not isinstance(cloned, dict):
+        return {}, 0
+
+    mutated = 0
+    for node in cloned.values():
+        node_dict = _dict_payload(node)
+        class_type = str(node_dict.get("class_type") or "").strip().lower()
+        if class_type != "saveimage":
+            continue
+        inputs = node_dict.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+
+        original_prefix = str(inputs.get("filename_prefix") or "ComfyUI")
+        inputs["filename_prefix"] = f"{original_prefix}_{suffix}"
+        mutated += 1
+
+    return cloned, mutated
+
+
+@app.post("/generation-prototype/comfy/generate-and-compare", response_model=dict)
+def generate_and_compare_comfy_workspace(
+    payload: ComfyGenerateCompareRequest,
+    db: Session = Depends(get_db),
+):
+    _assert_imagehash_available()
+
+    base_url = _resolve_comfyui_base_url()
+    if not base_url:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "ComfyUI base URL is not configured. Set ATELIER_COMFYUI_BASE_URL "
+                "(preferred) or ATELIER_COMFYUI_MODEL_CATALOG_URL."
+            ),
+        )
+
+    workflow_json = _dict_payload(payload.workflow_json)
+    if not workflow_json:
+        raise HTTPException(status_code=422, detail="workflow_json must be a JSON object.")
+
+    prompt_graph = _extract_comfy_prompt_graph(workflow_json, {})
+    if not prompt_graph and _looks_like_comfy_prompt_graph(workflow_json):
+        prompt_graph = workflow_json
+    if not prompt_graph:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Could not extract a Comfy prompt graph from workflow_json. "
+                "Provide a Comfy API prompt JSON object (the graph submitted to /prompt)."
+            ),
+        )
+
+    submitted_prompt_graph = prompt_graph
+    active_prompt_node_class_map = _build_prompt_node_class_map(submitted_prompt_graph)
+    cache_bust_seed_count = 0
+    used_cache_bust_retry = False
+    cache_bust_filename_prefix_count = 0
+    used_filename_prefix_retry = False
+    include_all_workspace_images = bool(payload.include_all_workspace_images)
+    close_enough_similarity_threshold = max(0.0, min(1.0, ATELIER_COMFY_MATCH_THRESHOLD))
+
+    reference_file_hash = str(payload.reference_file_hash or "").strip()
+    if not reference_file_hash:
+        raise HTTPException(status_code=422, detail="reference_file_hash is required.")
+    reference_image = _get_image_or_404(db, reference_file_hash)
+    reference_path = _resolve_image_library_path(reference_image)
+    if not reference_path.exists() or not reference_path.is_file():
+        raise HTTPException(status_code=404, detail="Reference image file not found on disk.")
+
+    try:
+        with Image.open(reference_path) as reference_handle:
+            reference_hash = imagehash.phash(reference_handle.convert("RGB"), 8)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to open reference image for hashing: {exc}")
+
+    timeout_seconds = int(payload.timeout_seconds or 120)
+    poll_interval_seconds = float(payload.poll_interval_seconds or 1.25)
+
+    def _submit_and_wait(graph_to_submit: dict[str, Any]) -> tuple[dict[str, Any], str, dict[str, Any], str]:
+        submit_url = f"{base_url}/prompt"
+        try:
+            submit_response = requests.post(
+                submit_url,
+                json={"prompt": graph_to_submit},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Unable to reach ComfyUI submit endpoint: {exc}")
+
+        submit_payload_local = _dict_payload(submit_response.json() if submit_response.content else {})
+        if not submit_response.ok:
+            raise HTTPException(
+                status_code=502,
+                detail=str(submit_payload_local.get("error") or submit_payload_local.get("detail") or f"ComfyUI prompt submit failed with HTTP {submit_response.status_code}."),
+            )
+
+        prompt_id_local = str(submit_payload_local.get("prompt_id") or "").strip()
+        if not prompt_id_local:
+            raise HTTPException(status_code=502, detail="ComfyUI did not return a prompt_id.")
+
+        history_entry_local: dict[str, Any] = {}
+        poll_started = time.monotonic()
+        status_value_local = "queued"
+        while (time.monotonic() - poll_started) < timeout_seconds:
+            history_url = f"{base_url}/history/{quote(prompt_id_local, safe='')}"
+            try:
+                history_response = requests.get(history_url, timeout=20)
+            except requests.RequestException:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            history_payload = _dict_payload(history_response.json() if history_response.content else {})
+            entry = _dict_payload(history_payload.get(prompt_id_local))
+            if not entry:
+                time.sleep(poll_interval_seconds)
+                continue
+
+            history_entry_local = entry
+            status_obj = _dict_payload(entry.get("status"))
+            status_value_local = str(status_obj.get("status_str") or status_value_local or "queued")
+            if bool(status_obj.get("completed")):
+                break
+            if status_value_local.lower() in {"error", "failed"}:
+                break
+            time.sleep(poll_interval_seconds)
+
+        if not history_entry_local:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Timed out waiting for ComfyUI completion for prompt_id {prompt_id_local}.",
+            )
+
+        # Comfy can report completion slightly before outputs are fully visible in history.
+        # Give it a short grace window to avoid false "0 output" responses.
+        if not _history_has_output_images(history_entry_local):
+            output_wait_deadline = time.monotonic() + 8.0
+            while time.monotonic() < output_wait_deadline:
+                history_url = f"{base_url}/history/{quote(prompt_id_local, safe='')}"
+                try:
+                    history_response = requests.get(history_url, timeout=20)
+                except requests.RequestException:
+                    time.sleep(max(0.25, min(1.0, poll_interval_seconds)))
+                    continue
+
+                history_payload = _dict_payload(history_response.json() if history_response.content else {})
+                entry = _dict_payload(history_payload.get(prompt_id_local))
+                if entry:
+                    history_entry_local = entry
+                    if _history_has_output_images(history_entry_local):
+                        break
+                time.sleep(max(0.25, min(1.0, poll_interval_seconds)))
+
+        return submit_payload_local, prompt_id_local, history_entry_local, status_value_local
+
+    submit_payload, prompt_id, history_entry, status_value = _submit_and_wait(submitted_prompt_graph)
+    generated_items = _collect_comfy_history_images(history_entry, active_prompt_node_class_map)
+
+    if not generated_items:
+        status_obj = _dict_payload(history_entry.get("status"))
+        status_text = str(status_obj.get("status_str") or status_value or "unknown")
+        status_messages = _list_payload(status_obj.get("messages"))
+
+        has_execution_cached = any(
+            isinstance(message, list)
+            and len(message) >= 1
+            and str(message[0]).strip().lower() == "execution_cached"
+            for message in status_messages
+        )
+        if has_execution_cached:
+            retry_suffix = f"run_{int(time.time() * 1000)}"
+            retry_graph, retry_prefix_count = _apply_comfy_filename_prefix_cache_bust(prompt_graph, retry_suffix)
+            if retry_graph and retry_prefix_count > 0:
+                submit_payload, prompt_id, history_entry, status_value = _submit_and_wait(retry_graph)
+                active_prompt_node_class_map = _build_prompt_node_class_map(retry_graph)
+                generated_items = _collect_comfy_history_images(history_entry, active_prompt_node_class_map)
+                cache_bust_filename_prefix_count = retry_prefix_count
+                used_filename_prefix_retry = True
+                cache_bust_seed_count = 0
+                used_cache_bust_retry = True
+
+        if not generated_items:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "ComfyUI run produced zero image outputs. "
+                    f"status={status_text}. Ensure your prompt graph includes SaveImage output nodes. "
+                    f"prompt_id={prompt_id}. messages={status_messages}"
+                ),
+            )
+
+    selected_items = list(generated_items)
+    if not include_all_workspace_images:
+        save_image_items = [
+            item for item in selected_items
+            if str(item.get("node_class_type") or "").strip().lower() == "saveimage"
+        ]
+        if save_image_items:
+            selected_items = save_image_items
+
+    results: list[dict[str, Any]] = []
+    fetch_errors: list[dict[str, Any]] = []
+
+    for item in selected_items:
+        view_url = _build_comfy_view_url(base_url, item)
+        try:
+            image_response = requests.get(view_url, timeout=45)
+        except requests.RequestException as exc:
+            fetch_errors.append({
+                "node_id": item.get("node_id"),
+                "filename": item.get("filename"),
+                "error": str(exc),
+            })
+            continue
+
+        if not image_response.ok:
+            fetch_errors.append({
+                "node_id": item.get("node_id"),
+                "filename": item.get("filename"),
+                "error": f"HTTP {image_response.status_code}",
+            })
+            continue
+
+        mime_type = str(image_response.headers.get("Content-Type") or "image/png").split(";")[0].strip() or "image/png"
+        image_bytes = image_response.content
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as generated_handle:
+                generated_hash = imagehash.phash(generated_handle.convert("RGB"), 8)
+        except OSError as exc:
+            fetch_errors.append({
+                "node_id": item.get("node_id"),
+                "filename": item.get("filename"),
+                "error": f"Could not decode generated image: {exc}",
+            })
+            continue
+
+        distance = int(reference_hash - generated_hash)
+        similarity = max(0.0, min(1.0, 1.0 - (distance / 64.0)))
+        results.append({
+            "node_id": item.get("node_id"),
+            "node_class_type": item.get("node_class_type"),
+            "index": item.get("index"),
+            "filename": item.get("filename"),
+            "subfolder": item.get("subfolder"),
+            "type": item.get("type"),
+            "mime_type": mime_type,
+            "byte_size": len(image_bytes),
+            "view_url": view_url,
+            "image_data_url": _to_data_url(image_bytes, mime_type),
+            "phash": {
+                "reference": str(reference_hash),
+                "generated": str(generated_hash),
+                "distance": distance,
+                "similarity": round(similarity, 6),
+                "close_enough": similarity >= close_enough_similarity_threshold,
+            },
+        })
+
+    results.sort(key=lambda item: (int(_dict_payload(item.get("phash")).get("distance") or 9999), str(item.get("filename") or "")))
+    if not include_all_workspace_images and len(results) > 1:
+        results = [results[0]]
+    best_match = results[0] if results else None
+    best_similarity_raw = _dict_payload(best_match.get("phash")).get("similarity") if isinstance(best_match, dict) else None
+    try:
+        best_similarity = float(best_similarity_raw) if best_similarity_raw is not None else None
+    except (TypeError, ValueError):
+        best_similarity = None
+    is_close_enough = bool(best_similarity is not None and best_similarity >= close_enough_similarity_threshold)
+
+    status_obj = _dict_payload(history_entry.get("status"))
+    completed = bool(status_obj.get("completed"))
+    status_text = str(status_obj.get("status_str") or status_value or "unknown")
+
+    return {
+        "ok": completed and bool(results),
+        "comfy": {
+            "base_url": base_url,
+            "prompt_id": prompt_id,
+            "cache_bust_seed_count": cache_bust_seed_count,
+            "used_cache_bust_retry": used_cache_bust_retry,
+            "cache_bust_filename_prefix_count": cache_bust_filename_prefix_count,
+            "used_filename_prefix_retry": used_filename_prefix_retry,
+            "submit": submit_payload,
+            "status": {
+                "completed": completed,
+                "status_str": status_text,
+                "messages": _list_payload(status_obj.get("messages")),
+            },
+        },
+        "reference": {
+            "file_hash": reference_image.file_hash,
+            "file_name": reference_image.file_name,
+            "mimetype": reference_image.mimetype,
+            "image_url": f"/image_library/{_normalize_media_url_path(str(reference_image.file_path))}",
+            "phash": str(reference_hash),
+        },
+        "generated": {
+            "count": len(results),
+            "outputs": results,
+            "best_match": best_match,
+            "best_similarity": round(best_similarity, 6) if best_similarity is not None else None,
+            "close_enough": is_close_enough,
+            "close_enough_threshold": close_enough_similarity_threshold,
+            "fetch_errors": fetch_errors,
+            "selection": {
+                "include_all_workspace_images": include_all_workspace_images,
+                "total_workspace_outputs": len(generated_items),
+                "selected_output_count": len(selected_items),
+                "save_image_output_count": sum(
+                    1
+                    for item in generated_items
+                    if str(item.get("node_class_type") or "").strip().lower() == "saveimage"
+                ),
+                "policy": "all" if include_all_workspace_images else "best_save_image",
+            },
+        },
+        "history": {
+            "outputs": _dict_payload(history_entry.get("outputs")),
+        },
+    }
+
+
+@app.post("/generation-templates/import-workspace", response_model=dict)
+def import_generation_template_workspace(payload: GenerationTemplateImportRequest, db: Session = Depends(get_db)):
+    template_name = str(payload.name or "").strip()
+    if not template_name:
+        raise HTTPException(status_code=422, detail="Template name is required.")
+
+    existing = db.query(GenerationTemplate).filter(GenerationTemplate.name == template_name).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="A generation template with that name already exists.")
+
+    workflow_json = _dict_payload(payload.workflow_json)
+    if not workflow_json:
+        raise HTTPException(status_code=422, detail="workflow_json must be a JSON object.")
+    nodes = workflow_json.get("nodes")
+    if not isinstance(nodes, list):
+        raise HTTPException(status_code=422, detail="workflow_json must include a ComfyUI nodes array.")
+
+    for item in payload.mappings:
+        token_name = str(item.token or "").strip()
+        target_path = str(item.target_path or "").strip()
+        if not token_name:
+            raise HTTPException(status_code=422, detail="Template mapping token cannot be empty.")
+        if not target_path:
+            raise HTTPException(status_code=422, detail="Template mapping target_path cannot be empty.")
+        try:
+            _tokenize_template_path(target_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    now = datetime.now(timezone.utc)
+    template = GenerationTemplate(
+        name=template_name,
+        description=str(payload.description or "").strip() or None,
+        workflow_json=_clone_json_value(workflow_json),
+        mappings_json=[item.model_dump() for item in payload.mappings],
+        default_tokens_json=_clone_json_value(_dict_payload(payload.default_tokens)),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(template)
+    db.commit()
+    db.refresh(template)
+
+    return {
+        "ok": True,
+        "template": _serialize_generation_template(template, include_workflow=False),
+    }
+
+
+@app.get("/generation-templates", response_model=dict)
+def list_generation_templates(
+    include_workflow: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = (
+        db.query(GenerationTemplate)
+        .order_by(GenerationTemplate.updated_at.desc(), GenerationTemplate.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    templates = query.all()
+    total_count = db.query(func.count(GenerationTemplate.id)).scalar() or 0
+    return {
+        "ok": True,
+        "templates": [
+            _serialize_generation_template(template, include_workflow=include_workflow)
+            for template in templates
+        ],
+        "count": len(templates),
+        "total_count": int(total_count),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def _resolve_template_local_catalog(
+    *,
+    catalog_url: Optional[str],
+    checkpoints_url: Optional[str],
+    loras_url: Optional[str],
+    include_full_catalog_raw: bool,
+) -> dict[str, Any]:
+    local_catalog = {
+        "configured": False,
+        "sources": {},
+        "entries": [],
+        "error": None,
+        "raw": {},
+        "raw_compacted": True,
+    }
+    if any(str(value or "").strip() for value in (catalog_url, checkpoints_url, loras_url)):
+        local_catalog = model_reference_service.fetch_local_catalog(
+            catalog_url=catalog_url,
+            checkpoints_url=checkpoints_url,
+            loras_url=loras_url,
+            include_full_raw=include_full_catalog_raw,
+        )
+    return local_catalog
+
+
+@app.get("/generation-templates/token-preview", response_model=dict)
+def preview_generation_template_tokens(
+    source_mode: Literal["local", "civitai"] = Query(...),
+    file_hash: Optional[str] = Query(default=None),
+    image_id: Optional[int] = Query(default=None),
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    source_request = GenerationTemplateResolveRequest(
+        source_mode=source_mode,
+        file_hash=file_hash,
+        image_id=image_id,
+    )
+    generation_payload = _resolve_generation_payload_for_template_request(source_request, db)
+    local_catalog = _resolve_template_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_catalog_raw=include_full_catalog_raw,
+    )
+    preview = _build_generation_template_token_preview(generation_payload, local_catalog)
+    tokens = _dict_payload(preview.get("tokens"))
+    global_tokens = _dict_payload(preview.get("global_tokens"))
+    step_groups = _list_payload(preview.get("step_groups"))
+    return {
+        "ok": True,
+        "source": {
+            "mode": generation_payload.get("mode"),
+            "target": _dict_payload(generation_payload.get("target")),
+        },
+        "token_count": len(tokens),
+        "global_token_count": len(global_tokens),
+        "step_count": len(step_groups),
+        "tokens": tokens,
+        "global_tokens": global_tokens,
+        "step_groups": step_groups,
+        "catalog": {
+            "configured": bool(local_catalog.get("configured")),
+            "sources": _dict_payload(local_catalog.get("sources")),
+            "error": local_catalog.get("error"),
+            "entry_count": len(_list_payload(local_catalog.get("entries"))),
+        },
+    }
+
+
+@app.get("/generation-templates/{template_id}", response_model=dict)
+def get_generation_template(
+    template_id: int,
+    include_workflow: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    if template is None:
+        raise HTTPException(status_code=404, detail="Generation template not found.")
+    return {
+        "ok": True,
+        "template": _serialize_generation_template(template, include_workflow=include_workflow),
+    }
+
+
+@app.put("/generation-templates/{template_id}", response_model=dict)
+def update_generation_template(
+    template_id: int,
+    payload: GenerationTemplateUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    if template is None:
+        raise HTTPException(status_code=404, detail="Generation template not found.")
+
+    if payload.name is not None:
+        next_name = str(payload.name or "").strip()
+        if not next_name:
+            raise HTTPException(status_code=422, detail="Template name cannot be empty.")
+        existing = (
+            db.query(GenerationTemplate)
+            .filter(GenerationTemplate.name == next_name)
+            .filter(GenerationTemplate.id != template_id)
+            .first()
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="A generation template with that name already exists.")
+        template.name = next_name
+
+    if payload.description is not None:
+        template.description = str(payload.description or "").strip() or None
+
+    if payload.workflow_json is not None:
+        workflow_json = _dict_payload(payload.workflow_json)
+        if not workflow_json:
+            raise HTTPException(status_code=422, detail="workflow_json must be a JSON object.")
+        nodes = workflow_json.get("nodes")
+        if not isinstance(nodes, list):
+            raise HTTPException(status_code=422, detail="workflow_json must include a ComfyUI nodes array.")
+        template.workflow_json = _clone_json_value(workflow_json)
+
+    if payload.mappings is not None:
+        for item in payload.mappings:
+            token_name = str(item.token or "").strip()
+            target_path = str(item.target_path or "").strip()
+            if not token_name:
+                raise HTTPException(status_code=422, detail="Template mapping token cannot be empty.")
+            if not target_path:
+                raise HTTPException(status_code=422, detail="Template mapping target_path cannot be empty.")
+            try:
+                _tokenize_template_path(target_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+        template.mappings_json = [item.model_dump() for item in payload.mappings]
+
+    if payload.default_tokens is not None:
+        template.default_tokens_json = _clone_json_value(_dict_payload(payload.default_tokens))
+
+    template.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(template)
+    return {
+        "ok": True,
+        "template": _serialize_generation_template(template, include_workflow=False),
+    }
+
+
+@app.delete("/generation-templates/{template_id}", response_model=dict)
+def delete_generation_template(template_id: int, db: Session = Depends(get_db)):
+    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    if template is None:
+        raise HTTPException(status_code=404, detail="Generation template not found.")
+    template_snapshot = _serialize_generation_template(template, include_workflow=False)
+    db.delete(template)
+    db.commit()
+    return {
+        "ok": True,
+        "deleted": template_snapshot,
+    }
+
+
+def _resolve_generation_payload_for_template_request(request: GenerationTemplateResolveRequest, db: Session) -> dict[str, Any]:
+    if request.source_mode == "local":
+        file_hash = str(request.file_hash or "").strip()
+        if not file_hash:
+            raise HTTPException(status_code=422, detail="file_hash is required when source_mode=local.")
+        image = (
+            db.query(ImageModel)
+            .filter(ImageModel.file_hash == file_hash)
+            .filter(_active_image_filter())
+            .first()
+        )
+        if image is None:
+            raise HTTPException(status_code=404, detail="Image not found.")
+        return _build_generation_prototype_local_payload(image)
+
+    if request.source_mode == "civitai":
+        if request.image_id is None:
+            raise HTTPException(status_code=422, detail="image_id is required when source_mode=civitai.")
+        return _build_generation_prototype_civitai_payload(int(request.image_id))
+
+    raise HTTPException(status_code=422, detail="Unsupported source_mode.")
+
+
+@app.post("/generation-templates/{template_id}/resolve", response_model=dict)
+def resolve_generation_template(
+    template_id: int,
+    request: GenerationTemplateResolveRequest,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    if template is None:
+        raise HTTPException(status_code=404, detail="Generation template not found.")
+
+    generation_payload = _resolve_generation_payload_for_template_request(request, db)
+
+    local_catalog = _resolve_template_local_catalog(
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_catalog_raw=include_full_catalog_raw,
+    )
+
+    resolved_payload = _resolve_generation_template_workflow(
+        template,
+        generation_payload,
+        token_overrides=_dict_payload(request.token_overrides),
+        local_catalog=local_catalog,
+    )
+    if request.include_generation_payload:
+        resolved_payload["generation_payload"] = generation_payload
+
+    return {
+        **resolved_payload,
+        "catalog": {
+            "configured": bool(local_catalog.get("configured")),
+            "sources": _dict_payload(local_catalog.get("sources")),
+            "error": local_catalog.get("error"),
+            "entry_count": len(_list_payload(local_catalog.get("entries"))),
+        },
+    }
 
 
 @app.get("/images/{file_hash}/perceptual-lab/analyze", response_model=dict)
@@ -8283,11 +11893,13 @@ def get_civitai_model_prototype(
     catalog_url: Optional[str] = Query(default=None),
     checkpoints_url: Optional[str] = Query(default=None),
     loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
 ):
     local_catalog = model_reference_service.fetch_local_catalog(
         catalog_url=catalog_url,
         checkpoints_url=checkpoints_url,
         loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
     )
     generation_payload = _build_generation_prototype_civitai_payload(image_id)
     return model_reference_service.build_item_payload(
@@ -8302,6 +11914,7 @@ def get_local_model_prototype(
     catalog_url: Optional[str] = Query(default=None),
     checkpoints_url: Optional[str] = Query(default=None),
     loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     image = (
@@ -8316,6 +11929,7 @@ def get_local_model_prototype(
         catalog_url=catalog_url,
         checkpoints_url=checkpoints_url,
         loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
     )
     generation_payload = _build_generation_prototype_local_payload(image)
     return model_reference_service.build_item_payload(
@@ -8330,18 +11944,83 @@ def get_model_catalog_prototype(
     catalog_url: Optional[str] = Query(default=None),
     checkpoints_url: Optional[str] = Query(default=None),
     loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
     local_catalog = model_reference_service.fetch_local_catalog(
         catalog_url=catalog_url,
         checkpoints_url=checkpoints_url,
         loras_url=loras_url,
+        include_full_raw=include_full_catalog_raw,
     )
     return model_reference_service.build_library_catalog_payload(
         db,
         image_limit=image_limit,
         local_catalog=local_catalog,
     )
+
+
+@app.get("/model-prototype/local-match-preview", response_model=dict)
+def get_model_prototype_local_match_preview(
+    display_name: str = Query(..., min_length=1),
+    resource_type: Optional[str] = Query(default=None),
+    file_path: Optional[str] = Query(default=None),
+    file_name: Optional[str] = Query(default=None),
+    model_name: Optional[str] = Query(default=None),
+    version_name: Optional[str] = Query(default=None),
+    civitai_model_id: Optional[int] = Query(default=None),
+    civitai_model_version_id: Optional[int] = Query(default=None),
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    checkpoints_metadata_url: Optional[str] = Query(default=None),
+    loras_metadata_url: Optional[str] = Query(default=None),
+):
+    payload = model_reference_service.fetch_local_model_preview(
+        search_name=display_name,
+        resource_type=resource_type,
+        file_path=file_path,
+        file_name=file_name,
+        model_name=model_name,
+        version_name=version_name,
+        civitai_model_id=civitai_model_id,
+        civitai_model_version_id=civitai_model_version_id,
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        checkpoints_metadata_url=checkpoints_metadata_url,
+        loras_metadata_url=loras_metadata_url,
+    )
+    if not payload.get("ok"):
+        detail = str(payload.get("error") or "No preview metadata found.")
+        if "configured" in detail.lower():
+            raise HTTPException(status_code=400, detail=detail)
+        if "could not fetch preview data" in detail.lower():
+            raise HTTPException(status_code=502, detail=detail)
+        raise HTTPException(status_code=404, detail=detail)
+    return payload
+
+
+@app.post("/model-prototype/local-model-download", response_model=dict)
+def trigger_model_prototype_local_model_download(payload: dict = Body(...)):
+    request_payload = payload if isinstance(payload, dict) else {}
+    result = model_reference_service.download_local_model(
+        civitai_model_id=request_payload.get("civitai_model_id"),
+        civitai_model_version_id=request_payload.get("civitai_model_version_id"),
+        resource_type=request_payload.get("resource_type"),
+        relative_path=str(request_payload.get("relative_path") or ""),
+        use_default_paths=bool(request_payload.get("use_default_paths", False)),
+        download_id=request_payload.get("download_id"),
+        catalog_url=request_payload.get("catalog_url"),
+        checkpoints_url=request_payload.get("checkpoints_url"),
+        loras_url=request_payload.get("loras_url"),
+    )
+    if not result.get("ok"):
+        detail = str(result.get("error") or "Could not start local model download.")
+        if "could not start lora manager download" in detail.lower():
+            raise HTTPException(status_code=502, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
+    return result
 
 
 @app.post("/tasks/{task_id}/retry_failed", response_model=dict, status_code=status.HTTP_202_ACCEPTED)

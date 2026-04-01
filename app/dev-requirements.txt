@@ -2,3 +2,4 @@ mcp
 lancedb
 openai
 voyageai
+pytest

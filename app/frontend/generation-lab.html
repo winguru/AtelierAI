@@ -33,6 +33,12 @@
           <input id="civitai-id" name="civitai-id" type="number" min="1" placeholder="105135032">
           <button type="submit">Inspect</button>
         </div>
+        <div class="control-row control-row-preview">
+          <button id="civitai-preview-btn" type="button">Preview</button>
+        </div>
+        <div id="civitai-preview-panel" class="control-preview-panel is-empty" aria-live="polite">
+          <p class="control-preview-empty">Preview not loaded.</p>
+        </div>
         <p class="control-help">Fetches raw API payloads plus a normalized prototype preview. Known missing IDs should return a structured 404 report instead of crashing the page.</p>
       </form>
 
@@ -43,7 +49,38 @@
           <input id="local-hash" name="local-hash" type="text" placeholder="Paste an existing file hash">
           <button type="submit">Inspect</button>
         </div>
+        <div class="control-row control-row-preview">
+          <button id="local-preview-btn" type="button">Preview</button>
+        </div>
+        <div id="local-preview-panel" class="control-preview-panel is-empty" aria-live="polite">
+          <p class="control-preview-empty">Preview not loaded.</p>
+        </div>
         <p class="control-help">Loads stored DB fields, sidecar JSON, EXIF payloads, and any normalized generation rows already persisted for that image.</p>
+      </form>
+
+      <form id="catalog-form" class="control-card control-card-wide">
+        <h2>Comfy Export Validation</h2>
+        <label for="catalog-url">ComfyUI LoRA Manager BASE URL</label>
+        <div class="control-row">
+          <input id="catalog-url" name="catalog-url" type="url" placeholder="Optional: http://localhost:8188">
+          <button type="submit">Apply</button>
+        </div>
+        <details id="catalog-advanced-overrides" class="control-advanced">
+          <summary>Advanced endpoint overrides</summary>
+          <label for="checkpoints-url">Checkpoint list URL</label>
+          <div class="control-row">
+            <input id="checkpoints-url" name="checkpoints-url" type="url" placeholder="Optional override: exact checkpoint endpoint">
+          </div>
+          <label for="loras-url">LoRA list URL</label>
+          <div class="control-row">
+            <input id="loras-url" name="loras-url" type="url" placeholder="Optional override: exact LoRA endpoint">
+          </div>
+        </details>
+        <label class="toggle-wrap" for="include-full-catalog-raw">
+          <input id="include-full-catalog-raw" name="include-full-catalog-raw" type="checkbox">
+          <span>Include full catalog raw payload in exports</span>
+        </label>
+        <p class="control-help"><code>ATELIER_COMFYUI_MODEL_CATALOG_URL</code> can be provided as a BASE URL. Optional endpoint overrides can target custom LoRA Manager routes directly.</p>
       </form>
     </section>
 
@@ -60,7 +97,254 @@
       <div class="export-actions">
         <button id="copy-export-btn" type="button" disabled>Copy JSON</button>
         <button id="download-export-btn" type="button" disabled>Download JSON</button>
+        <button id="copy-comfy-export-btn" type="button" disabled>Copy Comfy Workspace JSON</button>
+        <button id="download-comfy-export-btn" type="button" disabled>Download Comfy Workspace JSON</button>
+        <button id="copy-comfy-api-export-btn" type="button" disabled>Copy Comfy API Prompt JSON</button>
+        <button id="download-comfy-api-export-btn" type="button" disabled>Download Comfy API Prompt JSON</button>
       </div>
+    </section>
+
+    <section id="template-lab-section" class="template-lab" aria-label="Generation template studio">
+      <article class="control-card template-card">
+        <h2>Template Studio</h2>
+        <p class="control-help">Import Comfy workspace JSON, map template tokens to node paths, preview discovered tokens from the active inspection target, then resolve and download an applied workflow.</p>
+
+        <div class="template-controls-grid">
+          <label for="template-select">Saved templates</label>
+          <div class="control-row">
+            <select id="template-select" name="template-select">
+              <option value="">Create new template</option>
+            </select>
+            <button id="template-refresh-btn" type="button">Refresh</button>
+          </div>
+
+          <label for="template-name">Template name</label>
+          <input id="template-name" name="template-name" type="text" placeholder="Flux checkpoint+LoRA injection template">
+
+          <label for="template-description">Description</label>
+          <textarea id="template-description" name="template-description" rows="2" placeholder="Optional notes for this template"></textarea>
+
+          <label for="template-workflow-file">Workspace JSON file</label>
+          <div class="control-row">
+            <input id="template-workflow-file" name="template-workflow-file" type="file" accept="application/json,.json">
+            <button id="template-load-file-btn" type="button">Load File</button>
+          </div>
+
+          <label for="template-workflow-json">Workspace JSON</label>
+          <textarea id="template-workflow-json" name="template-workflow-json" rows="8" placeholder='{"nodes": []}'></textarea>
+
+          <div class="template-mappings-header">
+            <label>Mappings</label>
+            <div class="template-inline-actions">
+              <button id="template-add-mapping-btn" type="button">Add Mapping</button>
+            </div>
+          </div>
+          <div class="template-mappings-wrap">
+            <table class="template-mappings-table">
+              <thead>
+                <tr>
+                  <th scope="col">Token</th>
+                  <th scope="col">Target Path</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Required</th>
+                  <th scope="col">Default</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="template-mappings-body"></tbody>
+            </table>
+          </div>
+
+          <div class="template-assist-grid">
+            <section class="template-assist-card">
+              <h3>Token Picker</h3>
+              <p class="control-help">Pick standard tokens or discovered step/LoRA tokens and apply them to the active mapping row.</p>
+              <label for="template-token-picker">Available tokens</label>
+              <div class="control-row">
+                <select id="template-token-picker" name="template-token-picker"></select>
+                <button id="template-apply-token-btn" type="button">Apply Token</button>
+              </div>
+              <div class="template-inline-actions">
+                <button id="template-guess-path-btn" type="button">Best Guess Path</button>
+              </div>
+            </section>
+
+            <section class="template-assist-card">
+              <h3>Field Path Explorer</h3>
+              <p class="control-help">Filter candidate node parameter paths from imported workflow JSON and click to map on the active row.</p>
+              <label for="template-field-filter">Search field paths</label>
+              <input id="template-field-filter" name="template-field-filter" type="text" placeholder="prompt, sampler, seed, lora, checkpoint">
+              <div id="template-field-candidates" class="template-field-candidates" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <label for="template-default-tokens">Default tokens JSON</label>
+          <textarea id="template-default-tokens" name="template-default-tokens" rows="5" placeholder='{"sampler.steps": 30}'></textarea>
+
+          <label for="template-token-overrides">Resolve token overrides JSON</label>
+          <textarea id="template-token-overrides" name="template-token-overrides" rows="4" placeholder='{"sampler.seed": 12345}'></textarea>
+
+          <div class="template-actions">
+            <button id="template-import-btn" type="button">Import As New</button>
+            <button id="template-save-btn" type="button">Save Changes</button>
+            <button id="template-delete-btn" type="button">Delete Template</button>
+            <button id="template-discover-btn" type="button">Discover Tokens</button>
+            <button id="template-resolve-btn" type="button">Resolve Template</button>
+            <button id="template-download-resolved-btn" type="button" disabled>Download Resolved Workflow</button>
+          </div>
+        </div>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Discovered Tokens</h3>
+            <pre id="template-discovered-tokens" class="json-panel">{}</pre>
+          </div>
+          <div>
+            <h3>Resolve Result</h3>
+            <pre id="template-resolve-result" class="json-panel">{}</pre>
+          </div>
+        </section>
+      </article>
+    </section>
+
+    <section id="a1111-bridge-section" class="template-lab" aria-label="A1111 to Comfy bridge lab">
+      <article class="control-card template-card">
+        <h2>A1111 Bridge</h2>
+        <p class="control-help">Parse local A1111 user_comment metadata, infer a Comfy candidate workspace from stored generation payloads, and optionally compare against an exported Comfy workflow JSON.</p>
+
+        <div class="bridge-controls-grid">
+          <label for="bridge-file-hash">Local file hash</label>
+          <div class="control-row">
+            <input id="bridge-file-hash" name="bridge-file-hash" type="text" placeholder="Paste a local file hash">
+            <button id="bridge-use-local-hash-btn" type="button">Use Local Input</button>
+          </div>
+
+          <label for="bridge-workflow-json">Comfy workflow JSON (optional)</label>
+          <textarea id="bridge-workflow-json" name="bridge-workflow-json" rows="8" placeholder='{"nodes": []}'></textarea>
+
+          <label class="toggle-wrap" for="bridge-include-generation-payload">
+            <input id="bridge-include-generation-payload" name="bridge-include-generation-payload" type="checkbox">
+            <span>Include full generation payload in analysis response</span>
+          </label>
+
+          <div class="template-actions">
+            <button id="bridge-analyze-btn" type="button">Analyze A1111 Bridge</button>
+            <button id="bridge-download-btn" type="button" disabled>Download Comparison JSON</button>
+            <button id="bridge-save-btn" type="button" disabled>Save to AtelierAI Folder</button>
+            <button id="bridge-clear-btn" type="button">Clear Results</button>
+          </div>
+
+          <section id="bridge-dataset-quality" class="bridge-dataset-card" aria-live="polite">
+            <div class="bridge-dataset-head">
+              <h3>Bridge Dataset Readiness</h3>
+              <div class="template-inline-actions">
+                <button id="bridge-dataset-refresh-btn" type="button">Refresh</button>
+                <button id="bridge-dataset-run-analyze-btn" type="button">Run Analyze</button>
+                <button id="bridge-dataset-download-btn" type="button">Download Quality JSON</button>
+                <button id="bridge-dataset-copy-path-btn" type="button">Copy Export Path</button>
+              </div>
+            </div>
+            <p id="bridge-dataset-summary" class="control-help">Checks sample size and field quality for reliable A1111 process inference.</p>
+            <div class="overview-grid bridge-dataset-grid">
+              <article class="overview-card bridge-dataset-metric">
+                <span class="overview-label">Inference Readiness</span>
+                <strong id="bridge-dataset-readiness" class="badge badge-neutral">Unknown</strong>
+              </article>
+              <article class="overview-card bridge-dataset-metric">
+                <span class="overview-label">Confidence</span>
+                <strong id="bridge-dataset-confidence" class="overview-value">Unknown</strong>
+              </article>
+              <article class="overview-card bridge-dataset-metric">
+                <span class="overview-label">Unique Samples</span>
+                <strong id="bridge-dataset-samples" class="overview-value">0</strong>
+              </article>
+              <article class="overview-card bridge-dataset-metric">
+                <span class="overview-label">Core Coverage</span>
+                <strong id="bridge-dataset-core-coverage" class="overview-value">0%</strong>
+              </article>
+              <article class="overview-card bridge-dataset-metric">
+                <span class="overview-label">Missing Seed</span>
+                <strong id="bridge-dataset-missing-seed" class="overview-value">0%</strong>
+              </article>
+              <article class="overview-card bridge-dataset-metric">
+                <span class="overview-label">Missing Model Identity</span>
+                <strong id="bridge-dataset-missing-model" class="overview-value">0%</strong>
+              </article>
+            </div>
+          </section>
+        </div>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Parsed A1111 Metadata</h3>
+            <pre id="bridge-parse-result" class="json-panel">{}</pre>
+          </div>
+          <div>
+            <h3>Comfy Comparison</h3>
+            <pre id="bridge-compare-result" class="json-panel">{}</pre>
+          </div>
+        </section>
+      </article>
+    </section>
+
+    <section id="generate-image-section" class="template-lab" aria-label="Generate image with ComfyUI">
+      <article class="control-card template-card">
+        <h2>Generate Image</h2>
+        <p class="control-help">Upload or paste a Comfy prompt/workflow JSON payload, submit to ComfyUI, wait for completion, and compare generated outputs against a reference local gallery image using perceptual hash similarity.</p>
+
+        <div class="bridge-controls-grid">
+          <label for="generate-workflow-file">Comfy JSON file</label>
+          <div class="control-row">
+            <input id="generate-workflow-file" name="generate-workflow-file" type="file" accept="application/json,.json">
+            <button id="generate-load-file-btn" type="button">Load File</button>
+          </div>
+
+          <label for="generate-workflow-json">Comfy workflow / prompt JSON</label>
+          <textarea id="generate-workflow-json" name="generate-workflow-json" rows="9" placeholder='{"prompt": {...}}'></textarea>
+
+          <label for="generate-reference-file-hash">Reference local file hash</label>
+          <div class="control-row">
+            <input id="generate-reference-file-hash" name="generate-reference-file-hash" type="text" placeholder="Paste a local file hash">
+            <button id="generate-use-local-hash-btn" type="button">Use Local Input</button>
+          </div>
+
+          <label class="toggle-wrap" for="generate-include-all-images">
+            <input id="generate-include-all-images" name="generate-include-all-images" type="checkbox">
+            <span>Return all workspace images (include preview/intermediate outputs)</span>
+          </label>
+
+          <div class="template-actions">
+            <button id="generate-run-btn" type="button">Generate via ComfyUI</button>
+          </div>
+
+          <section id="generate-status-panel" class="status-panel is-idle" aria-live="polite">
+            <strong id="generate-status-title">Ready</strong>
+            <span id="generate-status-message">Provide Comfy JSON and a reference file hash to run generation.</span>
+          </section>
+        </div>
+
+        <section class="template-output-grid generate-output-grid">
+          <div>
+            <h3>Reference Image</h3>
+            <div id="generate-reference-panel" class="control-preview-panel is-empty">
+              <p class="control-preview-empty">Reference image appears after a successful generation run.</p>
+            </div>
+          </div>
+          <div>
+            <h3>Generated Outputs</h3>
+            <div id="generate-results-grid" class="generate-results-grid">
+              <p class="control-preview-empty">No generated outputs yet.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Generation Response</h3>
+            <pre id="generate-response-json" class="json-panel">{}</pre>
+          </div>
+        </section>
+      </article>
     </section>
 
     <section id="inspection-panels" class="inspection-panels" aria-label="Inspection output">

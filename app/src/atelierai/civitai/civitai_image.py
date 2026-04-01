@@ -2,7 +2,7 @@
 """CivitaiImage class for consistent image data handling and URL construction."""
 
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from .console_utils import ConsoleFormatter
 
 
@@ -230,21 +230,71 @@ class CivitaiImage:
         if not isinstance(resources, list):
             resources = []
 
+        def first_meta_value(*keys: str, default: Any = None) -> Any:
+            for key in keys:
+                value = meta.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    if not cleaned:
+                        continue
+                    return cleaned
+                return value
+            return default
+
+        def to_int(value: Any, default: int = 0) -> int:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(float(value.strip()))
+                except ValueError:
+                    return default
+            return default
+
+        def to_float(value: Any, default: float = 0.0) -> float:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return float(int(value))
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    return default
+            return default
+
         # Extract generation parameters from meta
-        self.base_model = meta.get("baseModel", "Unknown")
-        self.sampler = meta.get("sampler", "Unknown")
-        self.steps = meta.get("steps", 0)
-        self.cfg_scale = meta.get("cfgScale", 0)
-        self.seed = meta.get("seed", 0)
-        self.width = meta.get("width", 0)
-        self.height = meta.get("height", 0)
-        self.prompt = meta.get("prompt", "")
-        self.negative_prompt = meta.get("negativePrompt", "")
-        self.process = meta.get("process", "unknown")
-        self.engine = meta.get("engine", "unknown")
-        self.clip_skip = meta.get("clipSkip")
-        self.workflow = meta.get("workflow")
-        self.draft = meta.get("draft")
+        self.base_model = first_meta_value("baseModel", "base_model", default="Unknown")
+        self.sampler = first_meta_value("sampler", "samplerName", "sampler_name", default="Unknown")
+        self.steps = to_int(first_meta_value("steps", "numSteps", "step_count", default=0), default=0)
+        self.cfg_scale = to_float(
+            first_meta_value("cfgScale", "cfg_scale", "cfg", "guidanceScale", "guidance", default=0),
+            default=0,
+        )
+        self.seed = first_meta_value("seed", "seedValue", "seed_value", default=0)
+        self.width = to_int(first_meta_value("width", "imageWidth", "image_width", default=0), default=0)
+        self.height = to_int(first_meta_value("height", "imageHeight", "image_height", default=0), default=0)
+        self.prompt = str(
+            first_meta_value("prompt", "Prompt", "positivePrompt", "positive_prompt", default="")
+        )
+        self.negative_prompt = str(
+            first_meta_value("negativePrompt", "negative_prompt", "negative", default="")
+        )
+        self.process = str(first_meta_value("process", "generationProcess", default="unknown"))
+        self.engine = str(first_meta_value("engine", "software", "tool", default="unknown"))
+        self.clip_skip = first_meta_value("clipSkip", "clip_skip")
+        self.workflow = first_meta_value("workflow", "Workflow")
+        self.draft = first_meta_value("draft", "isDraft")
 
         # Process resources
         self._process_resources(resources)

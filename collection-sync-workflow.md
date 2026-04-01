@@ -54,6 +54,7 @@ This document defines the implementation-aligned workflow for syncing CivitAI co
 	- Run library ingest and hash dedupe.
 	- Ensure CivitAI source attribution and metadata persistence.
 	- Preserve source variants (video source, archived static/source mismatch variants).
+	- Preserve variant provenance filenames in metadata (for example `original_variant_file_name`) while keeping on-disk `variant_file_path` canonical and hash-based.
 	- Write/refresh sidecar metadata.
 6. Handle remote unavailable items:
 	- Record structured unavailable detail entries.
@@ -88,6 +89,7 @@ This document defines the implementation-aligned workflow for syncing CivitAI co
 4. Offsite-only resource references (for example remote source-video URLs) must not become standalone gallery items.
 5. Declared-size mismatches from CivitAI metadata are warning-tolerant when transport/media validation succeeds.
 6. Variant payloads should represent distinct assets and preserve provenance (local library asset vs source variants).
+7. For archived/static source variants, keep canonical hash-based paths on disk, but preserve original variant filenames in metadata so UI can display the source-facing filename independently of storage naming.
 
 ## Decision table: Existing local item status
 
@@ -113,10 +115,37 @@ This document defines the implementation-aligned workflow for syncing CivitAI co
 | Condition | Validation signal | Action | Variant expectation |
 | --- | --- | --- | --- |
 | Declared video, served video | MIME/magic bytes confirm video | Keep downloaded video as library asset | Local asset is video; optional remote source variant when distinct |
-| Declared video, served image | MIME/magic bytes detect static content | Preserve static artifact as archived static source, continue validated video strategy when possible | Local asset plus archived static/source variant metadata |
+| Declared video, served image | MIME/magic bytes detect static content | Preserve static artifact as archived static source, continue validated video strategy when possible | Local asset plus archived static/source variant metadata, with hash-based variant path and preserved original variant filename metadata |
 | Existing local video plus remote video source | Variant builder dedupe path | Do not duplicate equivalent remote video variant metadata | Single canonical video representation for duplicated source |
 | Remote-only source URL reference with no local media artifact | Variant payload evaluation | Keep reference in metadata only, not as standalone item | No offsite-only gallery item is created |
 | Declared-size mismatch only | Declared vs actual size differs, transport/media valid | Warn but do not hard-fail import | Import can succeed with warning semantics |
+
+## Variant filename policy (recent)
+
+1. Canonical storage name: archived/static source variants under `image_resources/civitai_source_variants` are stored by hash-based filename for dedupe/stability.
+2. Display/origin name: preserve the source-facing variant filename in metadata (for example `original_variant_file_name`, surfaced as `original_file_name` in API variant payloads).
+3. UI expectation: details/captions should prefer the active variant display/origin filename while keeping hash path and hash value visible for diagnostics.
+4. Legacy safety: when historic metadata incorrectly carries a primary video filename for an image variant, normalize the displayed original name from variant context (for example CivitAI image id + image extension).
+
+## Appendix: Variant filename fields
+
+| Layer | Field | Role | Notes |
+| --- | --- | --- | --- |
+| Variant metadata (sidecar/JSON) | `variant_file_path` | Canonical storage-relative path | Hash-based filename under variant storage roots.
+| Variant metadata (sidecar/JSON) | `variant_file_hash` | Canonical content identity | Stable identifier used for dedupe/diagnostics.
+| Variant metadata (sidecar/JSON) | `original_variant_file_name` | Preserved source-facing filename | Kept independent from canonical storage naming.
+| Variant metadata (sidecar/JSON) | `declared_filename` | Upstream-declared filename hint | May differ from downloaded artifact and preserved original.
+| API variant payload | `file_path` | Exposed canonical variant path | Mirrors canonical `variant_file_path`.
+| API variant payload | `file_hash` | Exposed canonical variant hash | Mirrors canonical `variant_file_hash`.
+| API variant payload | `original_file_name` | Exposed display/origin filename | UI should prefer this for human-readable variant naming.
+
+### Field mapping rules
+
+1. Never derive canonical storage paths from source-facing names; canonical path/hash remain content-addressed.
+2. Preserve source-facing filenames in `original_variant_file_name` whenever source data provides one.
+3. Surface source-facing names to clients as `original_file_name` in each variant payload.
+4. Treat `declared_filename` as an upstream hint only; do not let it overwrite canonical path/hash identity.
+5. When legacy metadata is inconsistent, keep canonical path/hash unchanged and normalize only display/origin filename fields.
 
 ## Legacy 22-step mapping
 

@@ -5,8 +5,10 @@
   const localInput = document.getElementById('local-hash');
   const catalogForm = document.getElementById('catalog-form');
   const catalogUrlInput = document.getElementById('catalog-url');
+  const catalogAdvancedOverrides = document.getElementById('catalog-advanced-overrides');
   const checkpointsUrlInput = document.getElementById('checkpoints-url');
   const lorasUrlInput = document.getElementById('loras-url');
+  const includeFullCatalogRawInput = document.getElementById('include-full-catalog-raw');
   const includeCatalogInput = document.getElementById('include-catalog');
   const imageLimitInput = document.getElementById('image-limit');
   const statusPanel = document.getElementById('status-panel');
@@ -18,14 +20,20 @@
   const copyExportButton = document.getElementById('copy-export-btn');
   const downloadExportButton = document.getElementById('download-export-btn');
   const inspectionPanels = document.getElementById('inspection-panels');
+  const openGenerationLabLink = document.getElementById('open-generation-lab-link');
   const themeToggle = document.getElementById('theme-toggle');
   const preferences = window.AtelierPreferences || null;
   const uiKit = window.AtelierUi || null;
+  const CATALOG_SETTINGS_STORAGE_KEY = 'atelierai.modelLab.catalogSettings.v1';
 
   const state = {
     activeTabId: 'catalog',
     currentPayloads: [],
   };
+  const localMatchPreviewCache = new Map();
+  let localMatchPreviewCard = null;
+  let localMatchPreviewHideTimer = null;
+  let localMatchPreviewAnchor = null;
 
   if (
     !civitaiForm
@@ -36,6 +44,7 @@
     || !catalogUrlInput
     || !checkpointsUrlInput
     || !lorasUrlInput
+    || !includeFullCatalogRawInput
     || !includeCatalogInput
     || !imageLimitInput
     || !exportPanel
@@ -67,19 +76,127 @@
       catalogUrl: catalogUrlInput.value.trim(),
       checkpointsUrl: checkpointsUrlInput.value.trim(),
       lorasUrl: lorasUrlInput.value.trim(),
+      includeFullCatalogRaw: includeFullCatalogRawInput.checked,
       includeCatalog: includeCatalogInput.checked,
       imageLimit: imageLimitInput.value.trim() || '250',
     };
   }
 
+  function getPersistedCatalogSettings() {
+    try {
+      const raw = window.localStorage.getItem(CATALOG_SETTINGS_STORAGE_KEY);
+      if (!raw) {
+        return null;
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') {
+        return null;
+      }
+      return {
+        catalogUrl: String(parsed.catalogUrl || ''),
+        checkpointsUrl: String(parsed.checkpointsUrl || ''),
+        lorasUrl: String(parsed.lorasUrl || ''),
+        includeFullCatalogRaw: Boolean(parsed.includeFullCatalogRaw),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function persistCatalogSettings() {
+    const formState = getFormState();
+    const payload = {
+      catalogUrl: formState.catalogUrl,
+      checkpointsUrl: formState.checkpointsUrl,
+      lorasUrl: formState.lorasUrl,
+      includeFullCatalogRaw: formState.includeFullCatalogRaw,
+    };
+    try {
+      window.localStorage.setItem(CATALOG_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore storage failures (private mode/quota) and continue.
+    }
+  }
+
+  function buildGenerationLabHref(nextState) {
+    const target = new URL('/generation-lab', window.location.origin);
+    if (nextState.civitaiId) {
+      target.searchParams.set('civitai', nextState.civitaiId);
+    }
+    if (nextState.fileHash) {
+      target.searchParams.set('fileHash', nextState.fileHash);
+    }
+    return `${target.pathname}${target.search}`;
+  }
+
+  function updateGenerationLabLink(nextState) {
+    if (!openGenerationLabLink) {
+      return;
+    }
+    openGenerationLabLink.setAttribute('href', buildGenerationLabHref(nextState || getFormState()));
+  }
+
   function setFormState(nextState) {
-    civitaiInput.value = String(nextState.civitaiId || '');
-    localInput.value = String(nextState.fileHash || '');
-    catalogUrlInput.value = String(nextState.catalogUrl || '');
-    checkpointsUrlInput.value = String(nextState.checkpointsUrl || '');
-    lorasUrlInput.value = String(nextState.lorasUrl || '');
-    includeCatalogInput.checked = Boolean(nextState.includeCatalog);
-    imageLimitInput.value = String(nextState.imageLimit || '250');
+    if (nextState.civitaiId !== undefined) {
+      civitaiInput.value = String(nextState.civitaiId || '');
+    }
+    if (nextState.fileHash !== undefined) {
+      localInput.value = String(nextState.fileHash || '');
+    }
+    if (nextState.catalogUrl !== undefined) {
+      catalogUrlInput.value = String(nextState.catalogUrl || '');
+    }
+    if (nextState.checkpointsUrl !== undefined) {
+      checkpointsUrlInput.value = String(nextState.checkpointsUrl || '');
+    }
+    if (nextState.lorasUrl !== undefined) {
+      lorasUrlInput.value = String(nextState.lorasUrl || '');
+    }
+    if (nextState.includeFullCatalogRaw !== undefined) {
+      includeFullCatalogRawInput.checked = Boolean(nextState.includeFullCatalogRaw);
+    }
+    if (nextState.includeCatalog !== undefined) {
+      includeCatalogInput.checked = Boolean(nextState.includeCatalog);
+    }
+    if (nextState.imageLimit !== undefined) {
+      imageLimitInput.value = String(nextState.imageLimit || '250');
+    }
+    if (catalogAdvancedOverrides instanceof HTMLDetailsElement) {
+      const hasOverrides = Boolean(
+        String(checkpointsUrlInput.value || '').trim() || String(lorasUrlInput.value || '').trim(),
+      );
+      catalogAdvancedOverrides.open = hasOverrides;
+    }
+    updateGenerationLabLink(nextState);
+  }
+
+  function maybeHydrateCatalogSourcesFromPayloads(payloads) {
+    const formState = getFormState();
+    const hasManualValues = Boolean(formState.catalogUrl || formState.checkpointsUrl || formState.lorasUrl);
+    if (hasManualValues) {
+      return;
+    }
+
+    if (!Array.isArray(payloads) || !payloads.length) {
+      return;
+    }
+
+    const firstSources = payloads
+      .map((payload) => payload?.normalized?.local_catalog?.sources || payload?.raw?.local_catalog_fetch?.sources)
+      .find((sources) => sources && typeof sources === 'object');
+    if (!firstSources) {
+      return;
+    }
+
+    const nextState = {
+      ...formState,
+      catalogUrl: String(firstSources.catalog_url || formState.catalogUrl || ''),
+      checkpointsUrl: String(firstSources.checkpoints_url || formState.checkpointsUrl || ''),
+      lorasUrl: String(firstSources.loras_url || formState.lorasUrl || ''),
+    };
+
+    setFormState(nextState);
+    persistCatalogSettings();
   }
 
   function syncUrlState(nextState) {
@@ -97,12 +214,18 @@
     setOrDelete('checkpointsUrl', nextState.checkpointsUrl);
     setOrDelete('lorasUrl', nextState.lorasUrl);
     setOrDelete('imageLimit', nextState.imageLimit);
+    if (nextState.includeFullCatalogRaw) {
+      nextUrl.searchParams.set('includeFullCatalogRaw', '1');
+    } else {
+      nextUrl.searchParams.delete('includeFullCatalogRaw');
+    }
     if (nextState.includeCatalog) {
       nextUrl.searchParams.set('includeCatalog', '1');
     } else {
       nextUrl.searchParams.delete('includeCatalog');
     }
     window.history.replaceState({}, '', nextUrl);
+    persistCatalogSettings();
   }
 
   function buildQueryString(config) {
@@ -115,6 +238,9 @@
     }
     if (config.lorasUrl) {
       params.set('loras_url', config.lorasUrl);
+    }
+    if (config.includeFullCatalogRaw) {
+      params.set('include_full_catalog_raw', 'true');
     }
     return params.toString();
   }
@@ -307,9 +433,513 @@
     container.append(field);
   }
 
+  function buildCivitaiModelUrl(modelId, versionId) {
+    const model = Number(modelId);
+    if (!Number.isFinite(model) || model <= 0) {
+      return null;
+    }
+    const version = Number(versionId);
+    if (Number.isFinite(version) && version > 0) {
+      return `https://civitai.com/models/${model}?modelVersionId=${version}`;
+    }
+    return `https://civitai.com/models/${model}`;
+  }
+
+  function appendReferenceLinkListField(container, label, links) {
+    if (!Array.isArray(links) || !links.length) {
+      return;
+    }
+    const field = document.createElement('div');
+    field.className = 'reference-field';
+    const heading = document.createElement('span');
+    heading.textContent = label;
+    field.append(heading);
+
+    const list = document.createElement('ul');
+    list.className = 'reference-list';
+    links.forEach((item) => {
+      if (!item || typeof item !== 'object') {
+        return;
+      }
+      const url = String(item.url || '').trim();
+      if (!url) {
+        return;
+      }
+      const row = document.createElement('li');
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+      anchor.className = 'local-match-preview-link';
+      anchor.textContent = String(item.label || url);
+      row.append(anchor);
+      list.append(row);
+    });
+
+    if (!list.childElementCount) {
+      return;
+    }
+    field.append(list);
+    container.append(field);
+  }
+
+  function appendSingleReferenceLinkField(container, label, link) {
+    if (!link || typeof link !== 'object') {
+      return;
+    }
+    const url = String(link.url || '').trim();
+    if (!url) {
+      return;
+    }
+    const field = document.createElement('div');
+    field.className = 'reference-field';
+    const heading = document.createElement('span');
+    heading.textContent = label;
+    field.append(heading);
+
+    const row = document.createElement('div');
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    anchor.className = 'local-match-preview-link';
+    anchor.textContent = String(link.label || url);
+    row.append(anchor);
+    field.append(row);
+    container.append(field);
+  }
+
+  function buildLocalMatchPreviewRequest(match) {
+    const params = new URLSearchParams();
+    params.set('display_name', String(match?.display_name || '').trim());
+    if (match?.resource_type) {
+      params.set('resource_type', String(match.resource_type));
+    }
+    const matchFilePath = String(match?.file_path || '').trim();
+    if (matchFilePath) {
+      params.set('file_path', matchFilePath);
+    }
+    const matchFileName = String(match?.file_name || '').trim();
+    if (matchFileName) {
+      params.set('file_name', matchFileName);
+    }
+    const matchModelName = String(match?.model_name || '').trim();
+    if (matchModelName) {
+      params.set('model_name', matchModelName);
+    }
+    const matchVersionName = String(match?.version_name || '').trim();
+    if (matchVersionName) {
+      params.set('version_name', matchVersionName);
+    }
+    if (match?.civitai_model_id !== null && match?.civitai_model_id !== undefined && match?.civitai_model_id !== '') {
+      params.set('civitai_model_id', String(match.civitai_model_id));
+    }
+    if (match?.civitai_model_version_id !== null && match?.civitai_model_version_id !== undefined && match?.civitai_model_version_id !== '') {
+      params.set('civitai_model_version_id', String(match.civitai_model_version_id));
+    }
+    const formState = getFormState();
+    if (formState.catalogUrl) {
+      params.set('catalog_url', formState.catalogUrl);
+    }
+    if (formState.checkpointsUrl) {
+      params.set('checkpoints_url', formState.checkpointsUrl);
+    }
+    if (formState.lorasUrl) {
+      params.set('loras_url', formState.lorasUrl);
+    }
+    return `/model-prototype/local-match-preview?${params.toString()}`;
+  }
+
+  function buildFallbackLocalMatchPreviewPayload(match) {
+    const civitaiModelId = match?.civitai_model_id;
+    const civitaiVersionId = match?.civitai_model_version_id;
+    const civitaiUrl = String(match?.civitai_url || '').trim() || buildCivitaiModelUrl(civitaiModelId, civitaiVersionId) || null;
+    return {
+      preview: {
+        display_name: String(match?.display_name || '').trim() || 'Local model',
+        version_name: String(match?.version_name || '').trim() || null,
+        model_name: String(match?.model_name || '').trim() || null,
+        file_name: String(match?.file_name || '').trim() || null,
+        model_type: String(match?.resource_type || '').trim() || null,
+        civitai_model_id: civitaiModelId ?? null,
+        civitai_model_version_id: civitaiVersionId ?? null,
+        civitai_url: civitaiUrl,
+        description: 'Preview metadata unavailable from local catalog; showing local match details.',
+      },
+    };
+  }
+
+  async function requestLocalModelDownload(reference) {
+    if (!reference || typeof reference !== 'object') {
+      throw new Error('Missing reference payload.');
+    }
+    const modelId = Number(reference.civitai_model_id);
+    const versionId = Number(reference.civitai_model_version_id);
+    if (!Number.isFinite(modelId) || modelId <= 0 || !Number.isFinite(versionId) || versionId <= 0) {
+      throw new Error('Missing CivitAI model/version ID for download.');
+    }
+
+    const formState = getFormState();
+    const payload = {
+      civitai_model_id: modelId,
+      civitai_model_version_id: versionId,
+      resource_type: String(reference.resource_type || '').trim() || null,
+      relative_path: '',
+      use_default_paths: false,
+      download_id: String(Date.now()),
+    };
+    if (formState.catalogUrl) {
+      payload.catalog_url = formState.catalogUrl;
+    }
+    if (formState.checkpointsUrl) {
+      payload.checkpoints_url = formState.checkpointsUrl;
+    }
+    if (formState.lorasUrl) {
+      payload.loras_url = formState.lorasUrl;
+    }
+
+    const response = await fetch('/model-prototype/local-model-download', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = body && typeof body === 'object' && body.detail
+        ? String(body.detail)
+        : `Download request failed with HTTP ${response.status}.`;
+      throw new Error(detail);
+    }
+    return body;
+  }
+
+  function createPreviewLine(label, value) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+    const row = document.createElement('div');
+    row.className = 'local-match-preview-line';
+    const key = document.createElement('span');
+    key.className = 'local-match-preview-key';
+    key.textContent = `${label}:`;
+    const val = document.createElement('strong');
+    val.className = 'local-match-preview-value';
+    val.textContent = String(value);
+    row.append(key, val);
+    return row;
+  }
+
+  function ensureLocalMatchPreviewCard() {
+    if (localMatchPreviewCard instanceof HTMLElement) {
+      return localMatchPreviewCard;
+    }
+    const card = document.createElement('div');
+    card.className = 'local-match-preview local-match-preview-floating';
+    card.hidden = true;
+    card.addEventListener('mouseenter', () => {
+      if (localMatchPreviewHideTimer) {
+        window.clearTimeout(localMatchPreviewHideTimer);
+        localMatchPreviewHideTimer = null;
+      }
+    });
+    card.addEventListener('mouseleave', () => {
+      hideLocalMatchPreviewCard();
+    });
+    document.body.append(card);
+    localMatchPreviewCard = card;
+    return card;
+  }
+
+  function clearLocalMatchPreviewCard() {
+    const card = ensureLocalMatchPreviewCard();
+    card.innerHTML = '';
+    card.classList.remove('is-loading', 'is-error', 'is-visible');
+    card.hidden = true;
+    card.dataset.previewRequestKey = '';
+    localMatchPreviewAnchor = null;
+  }
+
+  function hideLocalMatchPreviewCard(delayMs = 120) {
+    if (localMatchPreviewHideTimer) {
+      window.clearTimeout(localMatchPreviewHideTimer);
+      localMatchPreviewHideTimer = null;
+    }
+    localMatchPreviewHideTimer = window.setTimeout(() => {
+      clearLocalMatchPreviewCard();
+    }, delayMs);
+  }
+
+  function positionLocalMatchPreviewCard(card, anchorElement) {
+    if (!(card instanceof HTMLElement) || !(anchorElement instanceof HTMLElement)) {
+      return;
+    }
+    const anchorRect = anchorElement.getBoundingClientRect();
+    const margin = 12;
+    const desiredWidth = Math.min(480, Math.max(260, Math.round(window.innerWidth * 0.72)));
+    card.style.width = `${desiredWidth}px`;
+
+    const cardRect = card.getBoundingClientRect();
+    const maxLeft = Math.max(margin, window.innerWidth - cardRect.width - margin);
+    let left = Math.min(Math.max(margin, anchorRect.left), maxLeft);
+    let top = anchorRect.bottom + 8;
+    if (top + cardRect.height > window.innerHeight - margin) {
+      top = Math.max(margin, anchorRect.top - cardRect.height - 8);
+    }
+
+    card.style.left = `${Math.round(left)}px`;
+    card.style.top = `${Math.round(top)}px`;
+  }
+
+  function showLocalMatchPreviewCard(match, anchorElement) {
+    const card = ensureLocalMatchPreviewCard();
+    if (localMatchPreviewHideTimer) {
+      window.clearTimeout(localMatchPreviewHideTimer);
+      localMatchPreviewHideTimer = null;
+    }
+    localMatchPreviewAnchor = anchorElement instanceof HTMLElement ? anchorElement : null;
+    card.hidden = false;
+    card.classList.add('is-visible');
+    positionLocalMatchPreviewCard(card, anchorElement);
+    loadLocalMatchPreview(match, card);
+  }
+
+  function renderLocalMatchPreview(previewNode, payload) {
+    previewNode.innerHTML = '';
+    const preview = payload?.preview;
+    if (!preview || typeof preview !== 'object') {
+      previewNode.classList.remove('is-loading');
+      previewNode.classList.add('is-error');
+      previewNode.textContent = 'No preview metadata found.';
+      return;
+    }
+
+    previewNode.classList.remove('is-loading', 'is-error');
+    const title = document.createElement('div');
+    title.className = 'local-match-preview-title';
+    title.textContent = preview.model_name || preview.display_name || 'Local model preview';
+    previewNode.append(title);
+
+    if (preview.preview_image_url) {
+      const image = document.createElement('img');
+      image.className = 'local-match-preview-image';
+      image.src = String(preview.preview_image_url);
+      image.alt = String(preview.display_name || preview.model_name || 'Model preview image');
+      image.loading = 'lazy';
+      previewNode.append(image);
+    }
+
+    const infoRows = [
+      createPreviewLine('Version', preview.version_name),
+      createPreviewLine('File', preview.file_name),
+      createPreviewLine('Type', preview.model_type),
+      createPreviewLine('Creator', preview.creator_username),
+      createPreviewLine('Base model', preview.base_model),
+      createPreviewLine('Model ID', preview.civitai_model_id),
+      createPreviewLine('Version ID', preview.civitai_model_version_id),
+    ].filter(Boolean);
+    infoRows.forEach((row) => previewNode.append(row));
+
+    if (preview.civitai_url) {
+      const link = document.createElement('a');
+      link.className = 'local-match-preview-link';
+      link.href = String(preview.civitai_url);
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = 'Open on CivitAI';
+      previewNode.append(link);
+    }
+
+    if (preview.description) {
+      const desc = document.createElement('p');
+      desc.className = 'local-match-preview-description';
+      desc.textContent = String(preview.description).slice(0, 280);
+      previewNode.append(desc);
+    }
+  }
+
+  async function loadLocalMatchPreview(match, previewNode) {
+    const displayName = String(match?.display_name || '').trim();
+    if (!displayName) {
+      previewNode.classList.remove('is-loading');
+      previewNode.classList.add('is-error');
+      previewNode.textContent = 'Missing model name.';
+      return;
+    }
+    const cacheKey = `${String(match?.resource_type || '')}::${displayName}::${buildLocalMatchPreviewRequest(match)}`;
+    previewNode.dataset.previewRequestKey = cacheKey;
+    if (localMatchPreviewCache.has(cacheKey)) {
+      if (previewNode.dataset.previewRequestKey === cacheKey) {
+        renderLocalMatchPreview(previewNode, localMatchPreviewCache.get(cacheKey));
+        if (localMatchPreviewAnchor) {
+          positionLocalMatchPreviewCard(previewNode, localMatchPreviewAnchor);
+        }
+      }
+      return;
+    }
+
+    previewNode.classList.add('is-loading');
+    previewNode.classList.remove('is-error');
+    previewNode.textContent = 'Loading preview...';
+
+    try {
+      const response = await fetch(buildLocalMatchPreviewRequest(match));
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const fallbackPayload = buildFallbackLocalMatchPreviewPayload(match);
+        localMatchPreviewCache.set(cacheKey, fallbackPayload);
+        if (previewNode.dataset.previewRequestKey === cacheKey) {
+          renderLocalMatchPreview(previewNode, fallbackPayload);
+          if (localMatchPreviewAnchor) {
+            positionLocalMatchPreviewCard(previewNode, localMatchPreviewAnchor);
+          }
+        }
+        return;
+      }
+      localMatchPreviewCache.set(cacheKey, payload || {});
+      if (previewNode.dataset.previewRequestKey === cacheKey) {
+        renderLocalMatchPreview(previewNode, payload || {});
+        if (localMatchPreviewAnchor) {
+          positionLocalMatchPreviewCard(previewNode, localMatchPreviewAnchor);
+        }
+      }
+    } catch (error) {
+      if (previewNode.dataset.previewRequestKey !== cacheKey) {
+        return;
+      }
+      previewNode.classList.remove('is-loading');
+      previewNode.classList.add('is-error');
+      previewNode.textContent = error instanceof Error ? error.message : 'Preview request failed.';
+    }
+  }
+
+  function appendLocalMatchesField(container, matches) {
+    if (!Array.isArray(matches) || !matches.length) {
+      return;
+    }
+
+    const toNumericId = (value) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+    const referenceCard = container.closest('.reference-card');
+    const referenceModelId = toNumericId(referenceCard?.dataset?.referenceModelId);
+    const referenceVersionId = toNumericId(referenceCard?.dataset?.referenceVersionId);
+    const hasAuthoritativeReferenceIds = referenceModelId !== null && referenceVersionId !== null;
+
+    const normalizeBasis = (value) => String(value || '').trim().toLowerCase();
+
+    const exactMatches = [];
+    const similarMatches = [];
+    const otherMatches = [];
+
+    matches.forEach((match) => {
+      if (!match || typeof match !== 'object') {
+        return;
+      }
+      const matchModelId = toNumericId(match.civitai_model_id);
+      const matchVersionId = toNumericId(match.civitai_model_version_id);
+      const matchBasis = normalizeBasis(match.match_basis);
+      const isExact = (
+        referenceModelId !== null
+        && referenceVersionId !== null
+        && matchModelId === referenceModelId
+        && matchVersionId === referenceVersionId
+      );
+      const isSimilar = (
+        !isExact
+        && referenceModelId !== null
+        && matchModelId === referenceModelId
+      );
+
+      let fallbackExact = false;
+      let fallbackSimilar = false;
+      if (!hasAuthoritativeReferenceIds) {
+        if (matchBasis === 'civitai_model_version_id') {
+          fallbackExact = true;
+        } else if (matchBasis === 'civitai_model_id') {
+          fallbackSimilar = true;
+        } else if (matchBasis === 'hash') {
+          // Hash-only correlation is the strongest available fallback when IDs are absent.
+          fallbackExact = true;
+        } else if (matchBasis === 'normalized_name' || matchBasis === 'name_fuzzy') {
+          fallbackSimilar = true;
+        }
+      }
+
+      if (isExact || fallbackExact) {
+        exactMatches.push(match);
+      } else if (isSimilar || fallbackSimilar) {
+        similarMatches.push(match);
+      } else {
+        otherMatches.push(match);
+      }
+    });
+
+    const field = document.createElement('div');
+    field.className = 'reference-field';
+    const heading = document.createElement('span');
+    heading.textContent = 'Local Matches';
+    field.append(heading);
+
+    const grouped = [
+      { title: hasAuthoritativeReferenceIds ? 'Exact Matches' : 'Exact Matches (best guess)', items: exactMatches },
+      { title: hasAuthoritativeReferenceIds ? 'Similar Matches' : 'Similar Matches (best guess)', items: similarMatches },
+      { title: 'Other Matches', items: otherMatches },
+    ];
+
+    grouped.forEach((group) => {
+      if (!group.items.length) {
+        return;
+      }
+
+      const groupLabel = document.createElement('div');
+      groupLabel.className = 'local-match-group-label';
+      groupLabel.textContent = group.title;
+      field.append(groupLabel);
+
+      const list = document.createElement('ul');
+      list.className = 'reference-list local-match-list';
+      group.items.slice(0, 5).forEach((match) => {
+        const row = document.createElement('li');
+        row.className = 'local-match-item';
+
+        const nameButton = document.createElement('button');
+        nameButton.type = 'button';
+        nameButton.className = 'local-match-name';
+        nameButton.textContent = String(match?.display_name || 'Unnamed match');
+
+        const basis = document.createElement('span');
+        basis.className = 'local-match-basis';
+        basis.textContent = ` (${String(match?.match_basis || 'unknown')})`;
+
+        nameButton.addEventListener('mouseenter', () => showLocalMatchPreviewCard(match, nameButton));
+        nameButton.addEventListener('focus', () => showLocalMatchPreviewCard(match, nameButton));
+        nameButton.addEventListener('mouseleave', () => hideLocalMatchPreviewCard());
+        nameButton.addEventListener('blur', () => hideLocalMatchPreviewCard());
+
+        row.append(nameButton, basis);
+        list.append(row);
+      });
+
+      field.append(list);
+    });
+
+    container.append(field);
+  }
+
   function createReferenceCard(reference) {
     const card = document.createElement('article');
     card.className = 'reference-card';
+    if (reference && typeof reference === 'object') {
+      if (reference.civitai_model_id !== null && reference.civitai_model_id !== undefined && reference.civitai_model_id !== '') {
+        card.dataset.referenceModelId = String(reference.civitai_model_id);
+      }
+      if (reference.civitai_model_version_id !== null && reference.civitai_model_version_id !== undefined && reference.civitai_model_version_id !== '') {
+        card.dataset.referenceVersionId = String(reference.civitai_model_version_id);
+      }
+    }
 
     const heading = document.createElement('div');
     heading.className = 'reference-card-heading';
@@ -350,11 +980,77 @@
     const fields = document.createElement('div');
     fields.className = 'reference-fields';
     appendReferenceField(fields, 'Usage Count', reference.observation_count);
-    appendReferenceField(fields, 'Targets', (reference.targets || []).map((item) => item.target_label || item.target_key).slice(0, 4), true);
+    const primaryCivitaiModelUrl = String(reference?.civitai_url || '').trim()
+      || buildCivitaiModelUrl(reference?.civitai_model_id, reference?.civitai_model_version_id)
+      || (() => {
+        const firstMatchWithUrl = (reference.local_matches || []).find((match) => {
+          const matchUrl = String(match?.civitai_url || '').trim()
+            || buildCivitaiModelUrl(match?.civitai_model_id, match?.civitai_model_version_id);
+          return Boolean(matchUrl);
+        });
+        if (!firstMatchWithUrl) {
+          return '';
+        }
+        return String(firstMatchWithUrl.civitai_url || '').trim()
+          || buildCivitaiModelUrl(firstMatchWithUrl.civitai_model_id, firstMatchWithUrl.civitai_model_version_id)
+          || '';
+      })();
+    appendSingleReferenceLinkField(fields, 'CIVITAI MODEL SOURCE', {
+      label: primaryCivitaiModelUrl,
+      url: primaryCivitaiModelUrl,
+    });
     appendReferenceField(fields, 'Hashes', reference.hashes, true);
     appendReferenceField(fields, 'CivitAI Model ID', reference.civitai_model_id);
     appendReferenceField(fields, 'CivitAI Version ID', reference.civitai_model_version_id);
-    appendReferenceField(fields, 'Local Matches', (reference.local_matches || []).map((item) => `${item.display_name} (${item.match_basis})`).slice(0, 5), true);
+
+    const canDownloadMissingLocal = !reference.local_installed
+      && Number.isFinite(Number(reference.civitai_model_id))
+      && Number(reference.civitai_model_id) > 0
+      && Number.isFinite(Number(reference.civitai_model_version_id))
+      && Number(reference.civitai_model_version_id) > 0;
+    if (canDownloadMissingLocal) {
+      const downloadField = document.createElement('div');
+      downloadField.className = 'reference-field reference-download-field';
+
+      const heading = document.createElement('span');
+      heading.textContent = 'Local Model Download';
+      downloadField.append(heading);
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'reference-download-button';
+      button.textContent = 'Download via LoRA Manager';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = 'Queueing download...';
+        try {
+          const result = await requestLocalModelDownload(reference);
+          const queuedId = String(result?.request?.download_id || '').trim();
+          setStatus(
+            'is-success',
+            'Download queued',
+            queuedId
+              ? `LoRA Manager accepted the download request (id ${queuedId}).`
+              : 'LoRA Manager accepted the download request.',
+          );
+          button.textContent = 'Download requested';
+        } catch (error) {
+          setStatus('is-error', 'Download failed', error instanceof Error ? error.message : String(error));
+          button.disabled = false;
+          button.textContent = originalText || 'Download via LoRA Manager';
+        }
+      });
+
+      const note = document.createElement('small');
+      note.className = 'reference-download-note';
+      note.textContent = 'Only shown for references missing from local catalog with CivitAI model/version IDs.';
+
+      downloadField.append(button, note);
+      fields.append(downloadField);
+    }
+
+    appendLocalMatchesField(fields, reference.local_matches || []);
 
     card.append(heading, fields);
     return card;
@@ -483,6 +1179,7 @@
   }
 
   function renderInspectionPanels(payloads) {
+    clearLocalMatchPreviewCard();
     inspectionPanels.innerHTML = '';
     if (!Array.isArray(payloads) || !payloads.length) {
       state.currentPayloads = [];
@@ -544,6 +1241,20 @@
     updateExportPanel();
   }
 
+  window.addEventListener('scroll', () => {
+    if (!localMatchPreviewCard || localMatchPreviewCard.hidden || !localMatchPreviewAnchor) {
+      return;
+    }
+    positionLocalMatchPreviewCard(localMatchPreviewCard, localMatchPreviewAnchor);
+  }, true);
+
+  window.addEventListener('resize', () => {
+    if (!localMatchPreviewCard || localMatchPreviewCard.hidden || !localMatchPreviewAnchor) {
+      return;
+    }
+    positionLocalMatchPreviewCard(localMatchPreviewCard, localMatchPreviewAnchor);
+  });
+
   async function runInspectionSequence(formState) {
     const configQuery = buildQueryString(formState);
     const withQuery = (baseUrl) => (configQuery ? `${baseUrl}?${configQuery}` : baseUrl);
@@ -574,6 +1285,9 @@
       if (formState.imageLimit) {
         catalogParams.set('image_limit', formState.imageLimit);
       }
+      if (formState.includeFullCatalogRaw) {
+        catalogParams.set('include_full_catalog_raw', 'true');
+      }
       targets.push({
         descriptor: 'known model catalog',
         url: `/model-prototype/catalog?${catalogParams.toString()}`,
@@ -590,6 +1304,7 @@
     try {
       const payloads = await Promise.all(targets.map((target) => fetchPayload(target.url)));
       renderInspectionPanels(payloads);
+      maybeHydrateCatalogSourcesFromPayloads(payloads);
       const statuses = payloads.map((payload) => String(payload?.validation?.status || 'ok'));
       const hasError = statuses.includes('error');
       const hasWarning = statuses.includes('warning');
@@ -612,6 +1327,7 @@
       return;
     }
     syncUrlState(formState);
+    updateGenerationLabLink(formState);
     runInspectionSequence(formState);
   });
 
@@ -623,6 +1339,7 @@
       return;
     }
     syncUrlState(formState);
+    updateGenerationLabLink(formState);
     runInspectionSequence(formState);
   });
 
@@ -632,7 +1349,22 @@
     formState.includeCatalog = true;
     includeCatalogInput.checked = true;
     syncUrlState(formState);
+    updateGenerationLabLink(formState);
     runInspectionSequence(formState);
+  });
+
+  civitaiInput.addEventListener('input', () => {
+    updateGenerationLabLink(getFormState());
+  });
+
+  localInput.addEventListener('input', () => {
+    updateGenerationLabLink(getFormState());
+  });
+
+  [catalogUrlInput, checkpointsUrlInput, lorasUrlInput, includeFullCatalogRawInput].forEach((element) => {
+    element.addEventListener('change', () => {
+      persistCatalogSettings();
+    });
   });
 
   copyExportButton.addEventListener('click', async () => {
@@ -652,17 +1384,45 @@
   });
 
   const params = new URLSearchParams(window.location.search);
+  const persistedCatalogSettings = getPersistedCatalogSettings();
+  const sourceQuery = String(params.get('source') || '').trim().toLowerCase();
+  const cameFromGallery = sourceQuery === 'gallery';
+  const catalogUrlQuery = params.get('catalogUrl');
+  const checkpointsUrlQuery = params.get('checkpointsUrl');
+  const lorasUrlQuery = params.get('lorasUrl');
+  const includeFullCatalogRawQuery = params.get('includeFullCatalogRaw');
+
+  const catalogUrlInitial = catalogUrlQuery ?? persistedCatalogSettings?.catalogUrl ?? '';
+  const checkpointsUrlInitial = checkpointsUrlQuery ?? persistedCatalogSettings?.checkpointsUrl ?? '';
+  const lorasUrlInitial = lorasUrlQuery ?? persistedCatalogSettings?.lorasUrl ?? '';
+  const includeFullCatalogRawInitial = includeFullCatalogRawQuery !== null
+    ? includeFullCatalogRawQuery === '1' || includeFullCatalogRawQuery === 'true'
+    : Boolean(persistedCatalogSettings?.includeFullCatalogRaw);
+
   const initialState = {
-    civitaiId: params.get('civitai') || '',
-    fileHash: params.get('fileHash') || '',
-    catalogUrl: params.get('catalogUrl') || '',
-    checkpointsUrl: params.get('checkpointsUrl') || '',
-    lorasUrl: params.get('lorasUrl') || '',
+    civitaiId: params.get('civitai') || params.get('civitaiId') || '',
+    fileHash: params.get('fileHash') || params.get('hash') || '',
+    catalogUrl: catalogUrlInitial,
+    checkpointsUrl: checkpointsUrlInitial,
+    lorasUrl: lorasUrlInitial,
+    includeFullCatalogRaw: includeFullCatalogRawInitial,
     includeCatalog: params.get('includeCatalog') === '1',
     imageLimit: params.get('imageLimit') || '250',
   };
   setFormState(initialState);
+  persistCatalogSettings();
+
+  if (
+    cameFromGallery
+    && catalogAdvancedOverrides instanceof HTMLDetailsElement
+    && !checkpointsUrlQuery
+    && !lorasUrlQuery
+  ) {
+    catalogAdvancedOverrides.open = false;
+  }
+
   updateExportPanel();
+  updateGenerationLabLink(initialState);
   if (initialState.civitaiId || initialState.fileHash || initialState.includeCatalog) {
     runInspectionSequence(initialState);
   }

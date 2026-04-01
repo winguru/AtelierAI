@@ -6,6 +6,10 @@ from typing import Any, List, Optional
 
 _PROMPT_DIRECTIVE_RE = re.compile(r"<[^>]*>")
 _PROMPT_STRENGTH_SUFFIX_RE = re.compile(r"\s*:\s*-?\d+\.\d+\s*$")
+_ESCAPED_OPEN_PAREN_SENTINEL = "__ATELIER_ESCAPED_OPEN_PAREN__"
+_ESCAPED_CLOSE_PAREN_SENTINEL = "__ATELIER_ESCAPED_CLOSE_PAREN__"
+_ESCAPED_OPEN_BRACKET_SENTINEL = "__ATELIER_ESCAPED_OPEN_BRACKET__"
+_ESCAPED_CLOSE_BRACKET_SENTINEL = "__ATELIER_ESCAPED_CLOSE_BRACKET__"
 
 
 PHRASE_STOP_WORDS = frozenset(
@@ -120,11 +124,16 @@ def normalize_phrase_breaks(prompt: str) -> str:
     """Treat structural prompt delimiters as comma-like separators.
 
     Parentheses and square brackets are used by many prompt syntaxes to adjust
-    emphasis. For phrase parsing we strip those delimiter characters and treat
-    each boundary as a natural split point.
+    emphasis. For phrase parsing we strip unescaped delimiter characters and
+    treat each boundary as a natural split point, while preserving escaped
+    literal delimiters such as ``\(``, ``\)``, ``\[``, and ``\]``.
     """
     normalized = str(prompt or "")
     normalized = normalized.replace("\\n", "\n")
+    normalized = re.sub(r"\\+\(", _ESCAPED_OPEN_PAREN_SENTINEL, normalized)
+    normalized = re.sub(r"\\+\)", _ESCAPED_CLOSE_PAREN_SENTINEL, normalized)
+    normalized = re.sub(r"\\+\[", _ESCAPED_OPEN_BRACKET_SENTINEL, normalized)
+    normalized = re.sub(r"\\+\]", _ESCAPED_CLOSE_BRACKET_SENTINEL, normalized)
     normalized = re.sub(r"(?i)<\s*break\s*>", ",", normalized)
     normalized = _PROMPT_DIRECTIVE_RE.sub(",", normalized)
     normalized = re.sub(r"(?i)(?<!\w)break(?!\w)", ",", normalized)
@@ -132,6 +141,10 @@ def normalize_phrase_breaks(prompt: str) -> str:
     normalized = re.sub(r"\s*[\r\n]+\s*", ",", normalized)
     normalized = re.sub(r"\s*,\s*", ",", normalized)
     normalized = re.sub(r",{2,}", ",", normalized)
+    normalized = normalized.replace(_ESCAPED_OPEN_PAREN_SENTINEL, "(")
+    normalized = normalized.replace(_ESCAPED_CLOSE_PAREN_SENTINEL, ")")
+    normalized = normalized.replace(_ESCAPED_OPEN_BRACKET_SENTINEL, "[")
+    normalized = normalized.replace(_ESCAPED_CLOSE_BRACKET_SENTINEL, "]")
     return normalized.strip(" ,")
 
 

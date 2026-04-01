@@ -40,6 +40,31 @@ ATELIER_DISABLE_ACCESS_LOG=1 ./start.sh
 
 These can also be provided through your `.env` if that is how you manage local runtime settings.
 
+## Running tests
+
+From the app directory:
+
+```bash
+cd app
+../.venv/bin/python -m pytest -q tests/test_a1111_bridge_regression.py
+```
+
+This regression suite covers the A1111 Bridge fallback Comfy workflow synthesis path, including the non-numeric link-source case that previously raised `UnboundLocalError`.
+
+## Generation Lab Comfy Exports
+
+AtelierAI supports Comfy-compatible generation exports from Generation Lab in both UI-friendly and integration-friendly forms.
+
+- End-user guide (Generation Lab workflow, button behavior, compare-mode caveats):
+	- `app/docs/features/GENERATION_LAB_COMFY_EXPORTS.md`
+- Developer API guide (raw + wrapped endpoint contracts and query params):
+	- `app/docs/api/ATELIER_GENERATION_LAB_API.md`
+
+Highlights:
+- Generation Lab can export import-ready Comfy workflow JSON and Comfy API prompt JSON.
+- Backend supports wrapped inspection exports and dedicated raw JSON endpoints for external integrations.
+- Local model availability validation can be sourced from ComfyUI LoRA Manager endpoints.
+
 ## CivitAI getInfinite crawler
 
 Use `scripts/crawl_getinfinite.py` to iterate `image.getInfinite` pages and save raw page responses as formatted JSON.

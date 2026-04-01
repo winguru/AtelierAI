@@ -21,7 +21,7 @@
           <input id="theme-toggle" type="checkbox">
           <span>Dark mode</span>
         </label>
-        <a class="lab-link" href="/generation-lab">Open generation lab</a>
+        <a id="open-generation-lab-link" class="lab-link" href="/generation-lab">Open generation lab</a>
       </div>
     </header>
 
@@ -48,18 +48,25 @@
 
       <form id="catalog-form" class="control-card control-card-wide">
         <h2>Local Catalog</h2>
-        <label for="catalog-url">Unified catalog URL</label>
+        <label for="catalog-url">ComfyUI LoRA Manager BASE URL</label>
         <div class="stacked-control-row">
-          <input id="catalog-url" name="catalog-url" type="url" placeholder="Optional: exact ComfyUI or LoRA Manager catalog endpoint">
+          <input id="catalog-url" name="catalog-url" type="url" placeholder="Optional: http://localhost:8188">
         </div>
-        <label for="checkpoints-url">Checkpoint list URL</label>
-        <div class="stacked-control-row">
-          <input id="checkpoints-url" name="checkpoints-url" type="url" placeholder="Optional: exact checkpoint endpoint">
-        </div>
-        <label for="loras-url">LoRA list URL</label>
-        <div class="stacked-control-row">
-          <input id="loras-url" name="loras-url" type="url" placeholder="Optional: exact LoRA endpoint">
-        </div>
+        <details id="catalog-advanced-overrides" class="catalog-advanced-overrides">
+          <summary>Advanced endpoint overrides</summary>
+          <label for="checkpoints-url">Checkpoint list URL</label>
+          <div class="stacked-control-row">
+            <input id="checkpoints-url" name="checkpoints-url" type="url" placeholder="Optional override: exact checkpoint endpoint">
+          </div>
+          <label for="loras-url">LoRA list URL</label>
+          <div class="stacked-control-row">
+            <input id="loras-url" name="loras-url" type="url" placeholder="Optional override: exact LoRA endpoint">
+          </div>
+          <label class="checkbox-row" for="include-full-catalog-raw">
+            <input id="include-full-catalog-raw" name="include-full-catalog-raw" type="checkbox">
+            <span>Include full local catalog raw payloads in debug output</span>
+          </label>
+        </details>
         <div class="catalog-actions-row">
           <label class="checkbox-row" for="include-catalog">
             <input id="include-catalog" name="include-catalog" type="checkbox">
@@ -71,7 +78,7 @@
           </label>
           <button id="catalog-submit-btn" type="submit">Load Catalog</button>
         </div>
-        <p class="control-help">If you leave the URLs blank, the backend will fall back to env vars: <code>ATELIER_COMFYUI_MODEL_CATALOG_URL</code>, <code>ATELIER_COMFYUI_CHECKPOINTS_URL</code>, and <code>ATELIER_COMFYUI_LORAS_URL</code>.</p>
+        <p class="control-help"><code>ATELIER_COMFYUI_MODEL_CATALOG_URL</code> is treated as a BASE URL (for example, <code>http://localhost:8188</code>). Any URI path beyond host:port is ignored, port defaults to <code>8188</code>, and standard LoRA Manager endpoints are derived automatically: <code>/api/lm/checkpoints/list</code> and <code>/api/lm/loras/list</code>. You can still override with <code>ATELIER_COMFYUI_CHECKPOINTS_URL</code> and <code>ATELIER_COMFYUI_LORAS_URL</code>.</p>
       </form>
     </section>
 

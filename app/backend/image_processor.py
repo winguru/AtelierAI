@@ -36,6 +36,8 @@ UUID_RE = re.compile(
 UUID_ANYWHERE_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
 )
+_GENERATION_KEY_VALUE_RE = re.compile(r"([A-Za-z][A-Za-z0-9 _/\-]*?):\s*([^,]+)(?:,|$)")
+_GENERATION_SIZE_RE = re.compile(r"^\s*(\d+)\s*x\s*(\d+)\s*$", flags=re.IGNORECASE)
 
 _EXIFTOOL_CHECKED = False
 _EXIFTOOL_AVAILABLE = False
@@ -728,6 +730,26 @@ class ImageProcessor:
             if isinstance(k, str)
         }
 
+        # Some encoders vary separators/casing (e.g. negative_prompt vs Negative Prompt).
+        def normalize_info_key(key: str) -> str:
+            return re.sub(r"[\s_\-]+", " ", str(key or "").strip().lower())
+
+        info_lookup_normalized: dict[str, Any] = {}
+        for key, value in info_lookup.items():
+            normalized_key = normalize_info_key(key)
+            if normalized_key and normalized_key not in info_lookup_normalized:
+                info_lookup_normalized[normalized_key] = value
+
+        def get_info_value(*keys: str) -> Any:
+            for candidate in keys:
+                direct = info_lookup.get(candidate)
+                if direct is not None:
+                    return direct
+                normalized = info_lookup_normalized.get(normalize_info_key(candidate))
+                if normalized is not None:
+                    return normalized
+            return None
+
         if exif_tags is not None:
             for key, value in info_lookup.items():
                 exif_tags[f"info:{key}"] = self._to_json_safe(value)
@@ -743,27 +765,178 @@ class ImageProcessor:
             ("source", "Source"),
             ("generation time", "Generation Time"),
         ):
-            value = info_lookup.get(source_key)
+            value = get_info_value(source_key)
             if isinstance(value, str):
                 cleaned = value.strip()
                 if cleaned:
                     exif_data[target_key] = cleaned
+
+        # Preserve already-structured generation fields from text chunks.
+        for source_key, target_key in (
+            ("negative prompt", "NegativePrompt"),
+            ("negative_prompt", "NegativePrompt"),
+            ("negativeprompt", "NegativePrompt"),
+            ("sampler", "Sampler"),
+            ("steps", "Steps"),
+            ("cfg scale", "CFG scale"),
+            ("cfg_scale", "CFG scale"),
+            ("seed", "Seed"),
+            ("model", "Model"),
+            ("model hash", "Model hash"),
+            ("clip skip", "Clip skip"),
+            ("denoising strength", "Denoising strength"),
+            ("hires upscaler", "Hires upscaler"),
+            ("hires steps", "Hires steps"),
+            ("scheduler", "Scheduler"),
+            ("vae", "VAE"),
+        ):
+            value = get_info_value(source_key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    exif_data[target_key] = cleaned
+            elif isinstance(value, (int, float)):
+                exif_data[target_key] = value
 
         # Canonicalize free-form generation payload under UserComment only.
         # Some images expose this under comment/comments text chunks.
         user_comment = exif_data.get("UserComment")
         if not isinstance(user_comment, str) or not user_comment.strip():
             for key in ("comment", "comments"):
-                value = info_lookup.get(key)
+                value = get_info_value(key)
                 if isinstance(value, str):
                     cleaned = value.strip()
                     if cleaned:
                         exif_data["UserComment"] = cleaned
                         break
 
+        # Parse common A1111-style parameter blobs into structured scalar fields.
+        generation_payload_candidates: list[str] = []
+        for key in ("parameters", "UserComment", "Prompt", "prompt"):
+            value = exif_data.get(key)
+            if isinstance(value, str) and value.strip():
+                generation_payload_candidates.append(value)
+
+        for key in ("parameters", "comment", "comments", "prompt"):
+            value = get_info_value(key)
+            if isinstance(value, str) and value.strip():
+                generation_payload_candidates.append(value)
+
+        for payload in generation_payload_candidates:
+            parsed_fields = self._parse_generation_parameters(payload)
+            if not parsed_fields:
+                continue
+
+            for field_key, field_value in parsed_fields.items():
+                if exif_data.get(field_key) in (None, "", 0):
+                    exif_data[field_key] = field_value
+            break
+
         # Avoid duplicate payload copies once UserComment is present.
         exif_data.pop("comment", None)
         exif_data.pop("comments", None)
+
+    @staticmethod
+    def _parse_generation_parameters(payload: str) -> dict[str, Any]:
+        """Extract structured generation fields from text payloads.
+
+        Supports common Stable Diffusion parameter blocks such as:
+        "...\nNegative prompt: ...\nSteps: 30, Sampler: Euler a, CFG scale: 7".
+        """
+        if not isinstance(payload, str):
+            return {}
+
+        text = payload.strip()
+        if not text:
+            return {}
+
+        lowered = text.lower()
+        if "steps:" not in lowered and "negative prompt:" not in lowered:
+            return {}
+
+        parsed: dict[str, Any] = {}
+
+        # Isolate positive and negative prompt segments when present.
+        negative_idx = lowered.find("negative prompt:")
+        if negative_idx >= 0:
+            prompt_text = text[:negative_idx].strip()
+            if prompt_text:
+                parsed["Prompt"] = prompt_text
+
+            negative_body = text[negative_idx + len("negative prompt:") :]
+            steps_idx_in_negative = negative_body.lower().find("steps:")
+            if steps_idx_in_negative >= 0:
+                negative_text = negative_body[:steps_idx_in_negative].strip().strip(",")
+            else:
+                negative_text = negative_body.strip().strip(",")
+            if negative_text:
+                parsed["NegativePrompt"] = negative_text
+
+        # Usually the scalar fields are on the final line containing `Steps:`.
+        metadata_line = ""
+        for line in reversed(text.splitlines()):
+            if "steps:" in line.lower():
+                metadata_line = line.strip()
+                break
+
+        if not metadata_line:
+            return parsed
+
+        normalized_key_map = {
+            "steps": "Steps",
+            "sampler": "Sampler",
+            "cfg scale": "CFG scale",
+            "cfg": "CFG scale",
+            "seed": "Seed",
+            "size": "Size",
+            "model": "Model",
+            "model hash": "Model hash",
+            "clip skip": "Clip skip",
+            "denoising strength": "Denoising strength",
+            "denoise": "Denoising strength",
+            "hires upscaler": "Hires upscaler",
+            "hires steps": "Hires steps",
+            "upscaler": "Upscaler",
+            "scheduler": "Scheduler",
+            "vae": "VAE",
+            "rng": "RNG",
+        }
+
+        for key, raw_value in _GENERATION_KEY_VALUE_RE.findall(metadata_line):
+            normalized_key = re.sub(r"[\s_\-]+", " ", key.strip().lower())
+            canonical_key = normalized_key_map.get(normalized_key)
+            if not canonical_key:
+                continue
+
+            value = str(raw_value or "").strip()
+            if not value:
+                continue
+
+            if canonical_key in {"Steps", "Clip skip", "Hires steps"}:
+                try:
+                    parsed[canonical_key] = int(float(value))
+                    continue
+                except ValueError:
+                    pass
+
+            if canonical_key in {"CFG scale", "Denoising strength"}:
+                try:
+                    parsed[canonical_key] = float(value)
+                    continue
+                except ValueError:
+                    pass
+
+            if canonical_key == "Size":
+                size_match = _GENERATION_SIZE_RE.match(value)
+                if size_match:
+                    parsed["Width"] = int(size_match.group(1))
+                    parsed["Height"] = int(size_match.group(2))
+                parsed[canonical_key] = value
+                continue
+
+            parsed[canonical_key] = value
+
+        return parsed
 
     @staticmethod
     def _looks_like_comfyui_workflow_tag(workflow_value: str) -> bool:

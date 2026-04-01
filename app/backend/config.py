@@ -2,8 +2,25 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from a .env file if it exists
-load_dotenv()
+# Load environment variables from known .env locations so launch cwd does not matter.
+_CONFIG_DIR = Path(__file__).resolve().parent
+_DOTENV_CANDIDATES = [
+    _CONFIG_DIR.parent / ".env",        # app/.env
+    _CONFIG_DIR.parent.parent / ".env", # repo-root/.env
+    _CONFIG_DIR.parent / ".vscode" / ".env",        # app/.vscode/.env
+    _CONFIG_DIR.parent.parent / ".vscode" / ".env", # repo-root/.vscode/.env
+    Path.cwd() / ".env",                # current working directory
+    Path.cwd() / ".vscode" / ".env",   # cwd/.vscode/.env
+]
+
+_seen_dotenv_paths: set[Path] = set()
+for _dotenv_path in _DOTENV_CANDIDATES:
+    _resolved = _dotenv_path.resolve()
+    if _resolved in _seen_dotenv_paths:
+        continue
+    _seen_dotenv_paths.add(_resolved)
+    if _resolved.exists() and _resolved.is_file():
+        load_dotenv(dotenv_path=_resolved, override=False)
 
 # --- Database Configuration ---
 # Get the database URL from an environment variable or use a default
@@ -17,6 +34,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse an environment variable into a float, with fallback."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except (TypeError, ValueError):
+        return default
 
 # --- File System Configuration ---
 # This is the path inside the Docker container where images are stored.
@@ -67,3 +95,7 @@ CIVITAI_SESSION_CACHE = os.getenv("CIVITAI_SESSION_CACHE", ".civitai_session")
 # Session cookie for CivitAI API authentication
 # Can be set in .env file or via scripts/setup_session_token.py
 CIVITAI_SESSION_COOKIE = os.getenv("CIVITAI_SESSION_COOKIE", "")
+
+# --- ComfyUI Configuration ---
+ATELIER_COMFYUI_BASE_URL = os.getenv("ATELIER_COMFYUI_BASE_URL", "").strip()
+ATELIER_COMFY_MATCH_THRESHOLD = max(0.0, min(1.0, _env_float("ATELIER_COMFY_MATCH_THRESHOLD", 0.95)))

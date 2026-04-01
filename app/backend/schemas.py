@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ScanRequest(BaseModel):
@@ -106,3 +106,54 @@ class TaxonomyTagDetailsUpdateRequest(BaseModel):
     aliases: Optional[list[str]] = None
     implies: Optional[list[str]] = None
     examples: Optional[list[str]] = None
+
+
+class GenerationTemplatePathMapping(BaseModel):
+    token: str
+    target_path: str
+    required: bool = True
+    value_type: Literal["auto", "string", "integer", "number", "boolean", "json"] = "auto"
+    default_value: Optional[Any] = None
+
+
+class GenerationTemplateImportRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    workflow_json: dict[str, Any]
+    mappings: list[GenerationTemplatePathMapping] = Field(default_factory=list)
+    default_tokens: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenerationTemplateResolveRequest(BaseModel):
+    source_mode: Literal["local", "civitai"]
+    file_hash: Optional[str] = None
+    image_id: Optional[int] = None
+    token_overrides: dict[str, Any] = Field(default_factory=dict)
+    include_generation_payload: bool = False
+
+
+class GenerationTemplateUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    workflow_json: Optional[dict[str, Any]] = None
+    mappings: Optional[list[GenerationTemplatePathMapping]] = None
+    default_tokens: Optional[dict[str, Any]] = None
+
+
+class A1111BridgeAnalyzeRequest(BaseModel):
+    file_hash: str
+    comfy_workflow_json: Optional[dict[str, Any]] = None
+    include_generation_payload: bool = False
+
+
+class A1111BridgeSaveRequest(BaseModel):
+    analysis_payload: dict[str, Any]
+    file_name: Optional[str] = None
+
+
+class ComfyGenerateCompareRequest(BaseModel):
+    workflow_json: dict[str, Any]
+    reference_file_hash: str
+    include_all_workspace_images: bool = False
+    timeout_seconds: Optional[int] = Field(default=120, ge=10, le=600)
+    poll_interval_seconds: Optional[float] = Field(default=1.25, ge=0.2, le=10.0)

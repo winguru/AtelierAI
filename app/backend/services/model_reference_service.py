@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -14,6 +15,13 @@ from models import GenerationProcess, GenerationStage, ImageModel
 
 _HEX_HASH_RE = re.compile(r"\b[a-f0-9]{8,64}\b", flags=re.IGNORECASE)
 
+
+DEFAULT_COMFYUI_BASE_URL = "http://localhost:8188"
+DEFAULT_COMFYUI_CHECKPOINTS_URL = f"{DEFAULT_COMFYUI_BASE_URL}/api/lm/checkpoints/list"
+DEFAULT_COMFYUI_LORAS_URL = f"{DEFAULT_COMFYUI_BASE_URL}/api/lm/loras/list"
+DEFAULT_COMFYUI_CHECKPOINTS_METADATA_URL = f"{DEFAULT_COMFYUI_BASE_URL}/api/lm/checkpoints/metadata"
+DEFAULT_COMFYUI_LORAS_METADATA_URL = f"{DEFAULT_COMFYUI_BASE_URL}/api/lm/loras/metadata"
+DEFAULT_COMFYUI_DOWNLOAD_MODEL_URL = f"{DEFAULT_COMFYUI_BASE_URL}/api/lm/download-model"
 
 class ModelReferenceService:
     """Aggregates model references from media metadata and optional local catalogs."""
@@ -55,11 +63,116 @@ class ModelReferenceService:
         stem = re.sub(r"\s+", " ", stem.replace("_", " ")).strip().lower()
         return stem or None
 
+    def _model_folder_segment_for_type(self, resource_type: str) -> str:
+        normalized = self.normalize_resource_type(resource_type)
+        mapping = {
+            "checkpoint": "checkpoints",
+            "lora": "loras",
+            "vae": "vae",
+            "upscaler": "upscale_models",
+            "textualinversion": "embeddings",
+        }
+        return mapping.get(normalized, "")
+
+    def _derive_catalog_source_identifier(self, entry: dict[str, Any], resource_type: str) -> Optional[str]:
+        if not isinstance(entry, dict):
+            return None
+
+        def _clean_text(value: Any) -> str:
+            return str(value or "").strip().replace("\\", "/")
+
+        folder = _clean_text(entry.get("folder"))
+        file_path = _clean_text(entry.get("file_path"))
+        file_name = _clean_text(entry.get("file_name") or entry.get("filename"))
+
+        candidates = [
+            entry.get("source_identifier"),
+            entry.get("relative_path"),
+            entry.get("model_path"),
+            entry.get("path"),
+            entry.get("file_path"),
+            entry.get("filename"),
+            entry.get("file_name"),
+        ]
+
+        model_segment = self._model_folder_segment_for_type(resource_type)
+        for candidate in candidates:
+            raw = _clean_text(candidate)
+            if not raw:
+                continue
+
+            if model_segment:
+                marker = f"/models/{model_segment}/"
+                lowered = raw.lower()
+                marker_index = lowered.find(marker)
+                if marker_index >= 0:
+                    suffix = raw[marker_index + len(marker):].strip("/")
+                    if suffix:
+                        return suffix
+
+            if raw.startswith("/"):
+                base = raw.rsplit("/", 1)[-1]
+                if folder and base:
+                    return f"{folder}/{base}"
+                if base:
+                    return base
+
+            if "/" in raw:
+                return raw.strip("/")
+
+            if folder:
+                return f"{folder}/{raw}"
+            return raw
+
+        if file_path:
+            basename = file_path.rsplit("/", 1)[-1]
+            if basename:
+                if folder:
+                    return f"{folder}/{basename}"
+                return basename
+
+        if file_name:
+            if folder:
+                return f"{folder}/{file_name}"
+            return file_name
+
+        return None
+
     def _list_payload(self, value: Any) -> list[Any]:
         return value if isinstance(value, list) else []
 
     def _dict_payload(self, value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
+
+    def _file_basename(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip().replace("\\", "/")
+        if not text:
+            return None
+        return text.rsplit("/", 1)[-1].strip() or None
+
+    def _compose_catalog_display_name(
+        self,
+        *,
+        model_name: Any,
+        version_name: Any,
+        file_name: Any,
+        fallback: Any,
+    ) -> Optional[str]:
+        model_text = str(model_name or "").strip()
+        version_text = str(version_name or "").strip()
+        file_text = str(file_name or "").strip()
+        fallback_text = self.normalize_display_name(fallback)
+
+        if model_text and version_text:
+            base = f"{model_text} ({version_text})"
+        else:
+            base = model_text or version_text or (fallback_text or "")
+
+        if not base:
+            return None
+        if file_text:
+            return f"{base} - {file_text}"
+        return base
 
     def _coerce_optional_int(self, value: Any) -> Optional[int]:
         if value is None or value == "":
@@ -205,7 +318,7 @@ class ModelReferenceService:
             warnings.append("No model references were extracted from the selected source.")
         if catalog_expected:
             if not local_catalog.get("configured"):
-                warnings.append("No ComfyUI model catalog endpoint is configured yet. Provide exact API URLs or set env vars first.")
+                warnings.append("No ComfyUI LoRA Manager base URL or API endpoint overrides are configured yet.")
             elif local_catalog.get("error"):
                 warnings.append(str(local_catalog.get("error")))
             elif not local_catalog.get("entries"):
@@ -338,43 +451,90 @@ class ModelReferenceService:
         return references
 
     def _normalize_catalog_entry(self, entry: dict[str, Any], default_type: Optional[str] = None) -> Optional[dict[str, Any]]:
+        civitai_payload = entry.get("civitai") if isinstance(entry.get("civitai"), dict) else {}
+        model_payload = entry.get("model") if isinstance(entry.get("model"), dict) else {}
         resource_type = self.normalize_resource_type(
             entry.get("resource_type")
             or entry.get("type")
             or entry.get("modelType")
+            or entry.get("sub_type")
             or default_type
         )
-        display_name = (
-            entry.get("display_name")
-            or entry.get("name")
+        file_path = entry.get("file_path") or entry.get("path")
+        file_name = (
+            entry.get("file_name")
+            or entry.get("filename")
+            or self._file_basename(file_path)
+        )
+        model_name = (
+            model_payload.get("name")
+            or entry.get("model_name")
             or entry.get("modelName")
             or entry.get("title")
-            or entry.get("filename")
-            or entry.get("file_name")
-            or entry.get("path")
         )
-        normalized_name = self.normalize_name_key(display_name)
+        version_name = (
+            entry.get("version_name")
+            or entry.get("versionName")
+            or entry.get("name")
+        )
+        display_name = self._compose_catalog_display_name(
+            model_name=model_name,
+            version_name=version_name,
+            file_name=file_name,
+            fallback=(
+                entry.get("display_name")
+                or entry.get("name")
+                or entry.get("modelName")
+                or entry.get("title")
+                or entry.get("filename")
+                or entry.get("file_name")
+                or entry.get("path")
+            ),
+        )
+        normalized_name = self.normalize_name_key(version_name or model_name or display_name)
         if not normalized_name:
             return None
         hashes = sorted(self._extract_hashes(entry))
+        civitai_model_id = self._coerce_optional_int(civitai_payload.get("modelId"))
+        civitai_version_id = self._coerce_optional_int(
+            civitai_payload.get("modelVersionId")
+            or civitai_payload.get("versionId")
+            or civitai_payload.get("id")
+        )
+
+        # LoRA Manager APIs often provide authoritative IDs under entry.civitai,
+        # where modelId is the base model and id is the model version.
         model_id = self._coerce_optional_int(
-            entry.get("civitai_model_id")
+            civitai_model_id
+            or entry.get("civitai_model_id")
             or entry.get("modelId")
             or entry.get("civitaiModelId")
         )
         version_id = self._coerce_optional_int(
-            entry.get("civitai_model_version_id")
+            civitai_version_id
+            or entry.get("civitai_model_version_id")
             or entry.get("modelVersionId")
             or entry.get("civitaiModelVersionId")
         )
-        source_identifier = str(entry.get("source_identifier") or entry.get("path") or entry.get("filename") or "").strip() or None
+
+        civitai_url = None
+        if model_id is not None:
+            civitai_url = f"https://civitai.com/models/{int(model_id)}"
+            if version_id is not None:
+                civitai_url = f"{civitai_url}?modelVersionId={int(version_id)}"
+
+        source_identifier = self._derive_catalog_source_identifier(entry, resource_type)
         return {
             "resource_type": resource_type,
-            "display_name": self.normalize_display_name(display_name),
+            "display_name": display_name,
             "normalized_name": normalized_name,
-            "version_name": entry.get("version_name") or entry.get("versionName"),
+            "version_name": version_name,
+            "model_name": model_name,
+            "file_name": file_name,
+            "file_path": str(file_path).strip() if file_path else None,
             "civitai_model_id": model_id,
             "civitai_model_version_id": version_id,
+            "civitai_url": civitai_url,
             "source_identifier": source_identifier,
             "hashes": hashes,
             "raw_entry": entry,
@@ -405,6 +565,55 @@ class ModelReferenceService:
                 entries.extend(self._entries_from_catalog_payload(value, default_type=key_type))
         return entries
 
+    def _compact_catalog_payload(self, payload: Any, *, sample_limit: int = 5) -> Any:
+        if isinstance(payload, dict):
+            compact: dict[str, Any] = {}
+            passthrough_keys = {
+                "total",
+                "page",
+                "page_size",
+                "total_pages",
+                "fetched_pages",
+                "fetched_item_count",
+            }
+            for key in passthrough_keys:
+                if key in payload:
+                    compact[key] = payload.get(key)
+
+            items = payload.get("items")
+            if isinstance(items, list):
+                compact["returned_items"] = len(items)
+                compact["sample_items"] = [
+                    {
+                        "model_name": item.get("model_name") if isinstance(item, dict) else None,
+                        "file_name": item.get("file_name") if isinstance(item, dict) else None,
+                        "base_model": item.get("base_model") if isinstance(item, dict) else None,
+                        "sub_type": item.get("sub_type") if isinstance(item, dict) else None,
+                        "resource_type": item.get("resource_type") if isinstance(item, dict) else None,
+                        "civitai": item.get("civitai") if isinstance(item, dict) else None,
+                    }
+                    for item in items[: max(0, int(sample_limit))]
+                ]
+
+            if compact:
+                return compact
+            return {"type": "object", "keys": sorted(payload.keys())}
+
+        if isinstance(payload, list):
+            return {
+                "type": "list",
+                "count": len(payload),
+                "sample": payload[: max(0, int(sample_limit))],
+            }
+
+        return payload
+
+    def _compact_catalog_raw(self, raw_payloads: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key, payload in (raw_payloads or {}).items():
+            compact[str(key)] = self._compact_catalog_payload(payload)
+        return compact
+
     def _dedupe_catalog_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for entry in entries:
@@ -423,6 +632,393 @@ class ModelReferenceService:
         result.sort(key=lambda item: (str(item.get("resource_type") or ""), str(item.get("display_name") or item.get("normalized_name") or "")))
         return result
 
+    def _resolve_local_catalog_sources(
+        self,
+        *,
+        catalog_url: Optional[str] = None,
+        checkpoints_url: Optional[str] = None,
+        loras_url: Optional[str] = None,
+        checkpoints_metadata_url: Optional[str] = None,
+        loras_metadata_url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        resolved_catalog_url = self._normalize_comfyui_base_url(catalog_url or os.getenv("ATELIER_COMFYUI_MODEL_CATALOG_URL"))
+        resolved_checkpoints_url = str(checkpoints_url or os.getenv("ATELIER_COMFYUI_CHECKPOINTS_URL") or "").strip() or None
+        resolved_loras_url = str(loras_url or os.getenv("ATELIER_COMFYUI_LORAS_URL") or "").strip() or None
+        resolved_checkpoints_metadata_url = str(
+            checkpoints_metadata_url or os.getenv("ATELIER_COMFYUI_CHECKPOINTS_METADATA_URL") or ""
+        ).strip() or None
+        resolved_loras_metadata_url = str(
+            loras_metadata_url or os.getenv("ATELIER_COMFYUI_LORAS_METADATA_URL") or ""
+        ).strip() or None
+        resolved_download_model_url = str(os.getenv("ATELIER_COMFYUI_DOWNLOAD_MODEL_URL") or "").strip() or None
+
+        if resolved_catalog_url:
+            if not resolved_checkpoints_url:
+                resolved_checkpoints_url = f"{resolved_catalog_url}/api/lm/checkpoints/list"
+            if not resolved_loras_url:
+                resolved_loras_url = f"{resolved_catalog_url}/api/lm/loras/list"
+            if not resolved_checkpoints_metadata_url:
+                resolved_checkpoints_metadata_url = f"{resolved_catalog_url}/api/lm/checkpoints/metadata"
+            if not resolved_loras_metadata_url:
+                resolved_loras_metadata_url = f"{resolved_catalog_url}/api/lm/loras/metadata"
+            if not resolved_download_model_url:
+                resolved_download_model_url = f"{resolved_catalog_url}/api/lm/download-model"
+        elif not resolved_checkpoints_url and not resolved_loras_url:
+            resolved_catalog_url = DEFAULT_COMFYUI_BASE_URL
+            resolved_checkpoints_url = DEFAULT_COMFYUI_CHECKPOINTS_URL
+            resolved_loras_url = DEFAULT_COMFYUI_LORAS_URL
+            if not resolved_checkpoints_metadata_url:
+                resolved_checkpoints_metadata_url = DEFAULT_COMFYUI_CHECKPOINTS_METADATA_URL
+            if not resolved_loras_metadata_url:
+                resolved_loras_metadata_url = DEFAULT_COMFYUI_LORAS_METADATA_URL
+            if not resolved_download_model_url:
+                resolved_download_model_url = DEFAULT_COMFYUI_DOWNLOAD_MODEL_URL
+
+        return {
+            "configured": bool(resolved_catalog_url or resolved_checkpoints_url or resolved_loras_url),
+            "catalog_url": resolved_catalog_url,
+            "checkpoints_url": resolved_checkpoints_url,
+            "loras_url": resolved_loras_url,
+            "checkpoints_metadata_url": resolved_checkpoints_metadata_url,
+            "loras_metadata_url": resolved_loras_metadata_url,
+            "download_model_url": resolved_download_model_url,
+        }
+
+    def _default_model_root_for_type(self, resource_type: Optional[str]) -> Optional[str]:
+        normalized = self.normalize_resource_type(resource_type or "")
+        mapping = {
+            "lora": "/workspace/ComfyUI/models/loras",
+            "checkpoint": "/workspace/ComfyUI/models/checkpoints",
+            "model": "/workspace/ComfyUI/models/checkpoints",
+            "vae": "/workspace/ComfyUI/models/vae",
+            "upscaler": "/workspace/ComfyUI/models/upscale_models",
+            "textualinversion": "/workspace/ComfyUI/models/embeddings",
+        }
+        return mapping.get(normalized)
+
+    def download_local_model(
+        self,
+        *,
+        civitai_model_id: Any,
+        civitai_model_version_id: Any,
+        resource_type: Optional[str] = None,
+        relative_path: str = "",
+        use_default_paths: bool = False,
+        download_id: Optional[str] = None,
+        catalog_url: Optional[str] = None,
+        checkpoints_url: Optional[str] = None,
+        loras_url: Optional[str] = None,
+        timeout_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        model_id = self._coerce_optional_int(civitai_model_id)
+        version_id = self._coerce_optional_int(civitai_model_version_id)
+        if model_id is None or version_id is None:
+            return {
+                "ok": False,
+                "error": "Both CivitAI model and version IDs are required to download a local model.",
+                "request": None,
+            }
+
+        sources = self._resolve_local_catalog_sources(
+            catalog_url=catalog_url,
+            checkpoints_url=checkpoints_url,
+            loras_url=loras_url,
+        )
+        endpoint_url = str(sources.get("download_model_url") or "").strip()
+        if not endpoint_url:
+            return {
+                "ok": False,
+                "error": "No LoRA Manager download-model endpoint is configured.",
+                "request": None,
+                "sources": sources,
+            }
+
+        resolved_model_root = self._default_model_root_for_type(resource_type)
+        if not resolved_model_root:
+            return {
+                "ok": False,
+                "error": "Could not determine target model_root for this resource type.",
+                "request": None,
+                "sources": sources,
+            }
+
+        request_payload = {
+            "model_id": str(int(model_id)),
+            "model_version_id": int(version_id),
+            "model_root": resolved_model_root,
+            "relative_path": str(relative_path or ""),
+            "use_default_paths": bool(use_default_paths),
+            "download_id": str(download_id or int(time.time() * 1000)),
+        }
+
+        try:
+            with requests.Session() as session:
+                response = session.post(
+                    endpoint_url,
+                    json=request_payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout_seconds,
+                )
+                response.raise_for_status()
+                response_payload = response.json() if response.content else {"success": True}
+        except (requests.RequestException, ValueError) as exc:
+            return {
+                "ok": False,
+                "error": f"Could not start LoRA Manager download: {exc}",
+                "request": request_payload,
+                "endpoint_url": endpoint_url,
+                "sources": sources,
+            }
+
+        return {
+            "ok": True,
+            "endpoint_url": endpoint_url,
+            "sources": sources,
+            "request": request_payload,
+            "result": response_payload,
+            "error": None,
+        }
+
+    def _strip_html_text(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        plain = re.sub(r"<[^>]+>", " ", text)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        return plain or None
+
+    def fetch_local_model_preview(
+        self,
+        *,
+        search_name: str,
+        resource_type: Optional[str] = None,
+        file_path: Optional[str] = None,
+        file_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        version_name: Optional[str] = None,
+        civitai_model_id: Optional[int] = None,
+        civitai_model_version_id: Optional[int] = None,
+        catalog_url: Optional[str] = None,
+        checkpoints_url: Optional[str] = None,
+        loras_url: Optional[str] = None,
+        checkpoints_metadata_url: Optional[str] = None,
+        loras_metadata_url: Optional[str] = None,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        normalized_search = str(search_name or "").strip()
+        if not normalized_search:
+            return {
+                "ok": False,
+                "error": "Search name is required.",
+                "configured": False,
+                "sources": {},
+                "preview": None,
+            }
+
+        sources = self._resolve_local_catalog_sources(
+            catalog_url=catalog_url,
+            checkpoints_url=checkpoints_url,
+            loras_url=loras_url,
+            checkpoints_metadata_url=checkpoints_metadata_url,
+            loras_metadata_url=loras_metadata_url,
+        )
+        configured = bool(sources.get("configured"))
+        if not configured:
+            return {
+                "ok": False,
+                "error": "No LoRA Manager catalog URL is configured.",
+                "configured": False,
+                "sources": sources,
+                "preview": None,
+            }
+
+        normalized_type = self.normalize_resource_type(resource_type or "")
+        normalized_file_path = str(file_path or "").strip()
+        normalized_file_name = self._file_basename(file_name)
+        normalized_model_name = str(model_name or "").strip()
+        normalized_version_name = str(version_name or "").strip()
+        requested_model_id = self._coerce_optional_int(civitai_model_id)
+        requested_version_id = self._coerce_optional_int(civitai_model_version_id)
+
+        search_candidates = [
+            normalized_file_name,
+            normalized_version_name,
+            normalized_model_name,
+            normalized_search,
+        ]
+        effective_search_name = next((item for item in search_candidates if str(item or "").strip()), normalized_search)
+        effective_search_key = self.normalize_name_key(effective_search_name) or self.normalize_name_key(normalized_search)
+
+        def _build_preview(metadata: dict[str, Any], endpoint_type: str) -> dict[str, Any]:
+            normalized_entry = self._normalize_catalog_entry(metadata, default_type=endpoint_type) or {}
+            image_items = metadata.get("images") if isinstance(metadata.get("images"), list) else []
+            first_image = image_items[0] if image_items and isinstance(image_items[0], dict) else {}
+            creator_payload = metadata.get("creator") if isinstance(metadata.get("creator"), dict) else {}
+            model_payload = metadata.get("model") if isinstance(metadata.get("model"), dict) else {}
+
+            return {
+                "display_name": normalized_entry.get("display_name") or metadata.get("name") or metadata.get("model_name"),
+                "version_name": metadata.get("name") or metadata.get("version_name") or normalized_entry.get("version_name"),
+                "model_name": model_payload.get("name") or metadata.get("model_name") or normalized_entry.get("model_name"),
+                "file_name": normalized_entry.get("file_name") or metadata.get("file_name") or self._file_basename(metadata.get("file_path") or metadata.get("path")),
+                "file_path": normalized_entry.get("file_path") or metadata.get("file_path") or metadata.get("path"),
+                "model_type": model_payload.get("type") or metadata.get("modelType") or normalized_entry.get("resource_type"),
+                "creator_username": creator_payload.get("username"),
+                "creator_image": creator_payload.get("image"),
+                "civitai_model_id": normalized_entry.get("civitai_model_id") or self._coerce_optional_int(metadata.get("modelId")),
+                "civitai_model_version_id": normalized_entry.get("civitai_model_version_id") or self._coerce_optional_int(metadata.get("id") or metadata.get("modelVersionId")),
+                "civitai_url": normalized_entry.get("civitai_url"),
+                "base_model": metadata.get("baseModel") or metadata.get("base_model"),
+                "description": self._strip_html_text(metadata.get("description")),
+                "preview_image_url": first_image.get("url"),
+                "preview_image_width": first_image.get("width"),
+                "preview_image_height": first_image.get("height"),
+            }
+
+        metadata_endpoint_url: Optional[str] = None
+        metadata_endpoint_type: Optional[str] = None
+        if normalized_file_path and normalized_type in {"checkpoint", "model"} and sources.get("checkpoints_metadata_url"):
+            metadata_endpoint_url = str(sources.get("checkpoints_metadata_url") or "").strip()
+            metadata_endpoint_type = "checkpoint"
+        elif normalized_file_path and normalized_type == "lora" and sources.get("loras_metadata_url"):
+            metadata_endpoint_url = str(sources.get("loras_metadata_url") or "").strip()
+            metadata_endpoint_type = "lora"
+
+        if metadata_endpoint_url and metadata_endpoint_type:
+            try:
+                with requests.Session() as session:
+                    response = session.get(
+                        metadata_endpoint_url,
+                        params={"file_path": normalized_file_path},
+                        timeout=timeout_seconds,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                payload = {
+                    "success": False,
+                    "metadata": None,
+                    "_metadata_fetch_error": str(exc),
+                }
+
+            metadata = payload.get("metadata") if isinstance(payload, dict) and isinstance(payload.get("metadata"), dict) else None
+            if isinstance(metadata, dict):
+                return {
+                    "ok": True,
+                    "configured": configured,
+                    "sources": sources,
+                    "endpoint_type": metadata_endpoint_type,
+                    "endpoint_url": metadata_endpoint_url,
+                    "query": {"file_path": normalized_file_path},
+                    "preview": _build_preview(metadata, metadata_endpoint_type),
+                    "raw": {
+                        "success": payload.get("success") if isinstance(payload, dict) else None,
+                    },
+                    "error": None,
+                }
+
+        endpoint_candidates: list[tuple[str, Optional[str]]] = []
+        if normalized_type in {"checkpoint", "model"}:
+            endpoint_candidates.append(("checkpoint", sources.get("checkpoints_url")))
+        elif normalized_type == "lora":
+            endpoint_candidates.append(("lora", sources.get("loras_url")))
+        else:
+            endpoint_candidates.extend([
+                ("checkpoint", sources.get("checkpoints_url")),
+                ("lora", sources.get("loras_url")),
+            ])
+
+        query_params = {
+            "page": 1,
+            "page_size": 100,
+            "sort_by": "date:desc",
+            "folder": "",
+            "search": effective_search_name,
+            "fuzzy": "true",
+            "search_filename": "true",
+            "search_modelname": "true",
+            "search_tags": "true",
+            "search_creator": "false",
+            "recursive": "true",
+            "tag_logic": "any",
+        }
+
+        with requests.Session() as session:
+            for endpoint_type, endpoint_url in endpoint_candidates:
+                if not endpoint_url:
+                    continue
+                try:
+                    response = session.get(endpoint_url, params=query_params, timeout=timeout_seconds)
+                    response.raise_for_status()
+                    payload = response.json()
+                except (requests.RequestException, ValueError) as exc:
+                    return {
+                        "ok": False,
+                        "error": f"Could not fetch preview data from local catalog endpoint: {exc}",
+                        "configured": configured,
+                        "sources": sources,
+                        "endpoint_type": endpoint_type,
+                        "endpoint_url": endpoint_url,
+                        "query": query_params,
+                        "preview": None,
+                    }
+
+                metadata = payload.get("metadata") if isinstance(payload, dict) and isinstance(payload.get("metadata"), dict) else None
+                if metadata is None and isinstance(payload, dict):
+                    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                    if items:
+                        exact_name = effective_search_key
+                        ranked = sorted(
+                            [item for item in items if isinstance(item, dict)],
+                            key=lambda item: (
+                                0 if (
+                                    requested_version_id is not None
+                                    and self._coerce_optional_int(
+                                        (item.get("civitai") or {}).get("id") if isinstance(item.get("civitai"), dict) else item.get("id")
+                                    ) == requested_version_id
+                                ) else 1,
+                                0 if (
+                                    requested_model_id is not None
+                                    and self._coerce_optional_int(
+                                        (item.get("civitai") or {}).get("modelId") if isinstance(item.get("civitai"), dict) else item.get("modelId")
+                                    ) == requested_model_id
+                                ) else 1,
+                                0 if self.normalize_name_key(item.get("file_name") or item.get("filename")) == exact_name else 1,
+                                0 if self.normalize_name_key(item.get("name") or "") == exact_name else 1,
+                                0 if self.normalize_name_key(item.get("model_name") or "") == exact_name else 1,
+                            ),
+                        )
+                        if ranked:
+                            metadata = ranked[0]
+
+                if not isinstance(metadata, dict):
+                    continue
+
+                preview = _build_preview(metadata, endpoint_type)
+
+                return {
+                    "ok": True,
+                    "configured": configured,
+                    "sources": sources,
+                    "endpoint_type": endpoint_type,
+                    "endpoint_url": endpoint_url,
+                    "query": query_params,
+                    "preview": preview,
+                    "raw": {
+                        "success": payload.get("success") if isinstance(payload, dict) else None,
+                    },
+                    "error": None,
+                }
+
+        return {
+            "ok": False,
+            "configured": configured,
+            "sources": sources,
+            "query": query_params,
+            "preview": None,
+            "error": "No preview metadata found for the selected local match.",
+        }
+
     def fetch_local_catalog(
         self,
         *,
@@ -430,12 +1026,17 @@ class ModelReferenceService:
         checkpoints_url: Optional[str] = None,
         loras_url: Optional[str] = None,
         timeout_seconds: float = 5.0,
+        include_full_raw: bool = False,
     ) -> dict[str, Any]:
-        resolved_catalog_url = str(catalog_url or os.getenv("ATELIER_COMFYUI_MODEL_CATALOG_URL") or "").strip() or None
-        resolved_checkpoints_url = str(checkpoints_url or os.getenv("ATELIER_COMFYUI_CHECKPOINTS_URL") or "").strip() or None
-        resolved_loras_url = str(loras_url or os.getenv("ATELIER_COMFYUI_LORAS_URL") or "").strip() or None
-
-        configured = bool(resolved_catalog_url or resolved_checkpoints_url or resolved_loras_url)
+        sources = self._resolve_local_catalog_sources(
+            catalog_url=catalog_url,
+            checkpoints_url=checkpoints_url,
+            loras_url=loras_url,
+        )
+        configured = bool(sources.get("configured"))
+        resolved_catalog_url = sources.get("catalog_url")
+        resolved_checkpoints_url = sources.get("checkpoints_url")
+        resolved_loras_url = sources.get("loras_url")
         result = {
             "configured": configured,
             "sources": {
@@ -445,6 +1046,7 @@ class ModelReferenceService:
             },
             "entries": [],
             "raw": {},
+            "raw_compacted": not bool(include_full_raw),
             "error": None,
         }
         if not configured:
@@ -453,32 +1055,122 @@ class ModelReferenceService:
         entries: list[dict[str, Any]] = []
         try:
             session = requests.Session()
-            if resolved_catalog_url:
-                response = session.get(resolved_catalog_url, timeout=timeout_seconds)
-                response.raise_for_status()
-                payload = response.json()
-                result["raw"]["catalog"] = payload
-                entries.extend(self._entries_from_catalog_payload(payload))
-            else:
-                if resolved_checkpoints_url:
-                    response = session.get(resolved_checkpoints_url, timeout=timeout_seconds)
-                    response.raise_for_status()
-                    payload = response.json()
-                    result["raw"]["checkpoints"] = payload
-                    entries.extend(self._entries_from_catalog_payload(payload, default_type="checkpoint"))
-                if resolved_loras_url:
-                    response = session.get(resolved_loras_url, timeout=timeout_seconds)
-                    response.raise_for_status()
-                    payload = response.json()
-                    result["raw"]["loras"] = payload
-                    entries.extend(self._entries_from_catalog_payload(payload, default_type="lora"))
+            if resolved_checkpoints_url:
+                payload = self._fetch_paginated_catalog_payload(
+                    session,
+                    resolved_checkpoints_url,
+                    timeout_seconds=timeout_seconds,
+                )
+                result["raw"]["checkpoints"] = payload
+                entries.extend(self._entries_from_catalog_payload(payload, default_type="checkpoint"))
+            if resolved_loras_url:
+                payload = self._fetch_paginated_catalog_payload(
+                    session,
+                    resolved_loras_url,
+                    timeout_seconds=timeout_seconds,
+                )
+                result["raw"]["loras"] = payload
+                entries.extend(self._entries_from_catalog_payload(payload, default_type="lora"))
         except (requests.RequestException, ValueError) as exc:
             result["error"] = f"Could not fetch the configured local model catalog: {exc}"
             result["entries"] = []
             return result
 
         result["entries"] = self._dedupe_catalog_entries(entries)
+        if not include_full_raw:
+            result["raw"] = self._compact_catalog_raw(result.get("raw") or {})
         return result
+
+    def _fetch_paginated_catalog_payload(
+        self,
+        session: requests.Session,
+        url: str,
+        *,
+        timeout_seconds: float,
+        page_size: int = 200,
+        max_pages: int = 200,
+    ) -> Any:
+        response = session.get(url, timeout=timeout_seconds)
+        response.raise_for_status()
+        first_payload = response.json()
+
+        if not isinstance(first_payload, dict):
+            return first_payload
+
+        first_items = first_payload.get("items")
+        if not isinstance(first_items, list):
+            return first_payload
+
+        total_pages = self._coerce_optional_int(first_payload.get("total_pages")) or 1
+        if total_pages <= 1:
+            return first_payload
+
+        merged_items = list(first_items)
+        fetched_pages = 1
+
+        for page in range(2, min(total_pages, max_pages) + 1):
+            page_response = session.get(
+                url,
+                params={"page": page, "page_size": page_size},
+                timeout=timeout_seconds,
+            )
+            page_response.raise_for_status()
+            page_payload = page_response.json()
+            if not isinstance(page_payload, dict):
+                break
+
+            reported_page = self._coerce_optional_int(page_payload.get("page"))
+            if reported_page is not None and reported_page != page:
+                # Endpoint ignored pagination parameters; avoid appending duplicate first-page results.
+                break
+
+            page_items = page_payload.get("items")
+            if not isinstance(page_items, list) or not page_items:
+                break
+
+            merged_items.extend(page_items)
+            fetched_pages += 1
+
+            reported_total_pages = self._coerce_optional_int(page_payload.get("total_pages"))
+            if reported_total_pages is not None:
+                total_pages = min(total_pages, reported_total_pages)
+
+        merged_payload = dict(first_payload)
+        merged_payload["items"] = merged_items
+        merged_payload["fetched_pages"] = fetched_pages
+        merged_payload["fetched_item_count"] = len(merged_items)
+        return merged_payload
+
+    def _normalize_comfyui_base_url(self, value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        if "://" not in text:
+            text = f"http://{text}"
+
+        parsed = urlparse(text)
+        scheme = parsed.scheme.lower() if parsed.scheme else "http"
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+
+        host_port = parsed.netloc.strip()
+        if not host_port:
+            host_port = parsed.path.split("/", 1)[0].strip()
+        if not host_port:
+            return None
+
+        if host_port.startswith("["):
+            if "]" in host_port:
+                suffix = host_port.split("]", 1)[1]
+                if not suffix.startswith(":"):
+                    host_port = f"{host_port}:8188"
+            else:
+                host_port = f"{host_port}:8188"
+        elif ":" not in host_port:
+            host_port = f"{host_port}:8188"
+
+        return f"{scheme}://{host_port}"
 
     def _types_match(self, reference_type: str, catalog_type: str) -> bool:
         left = self.normalize_resource_type(reference_type)
@@ -487,6 +1179,27 @@ class ModelReferenceService:
             return True
         if {left, right} <= {"checkpoint", "model"}:
             return True
+        return False
+
+    def _compact_name_key(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        return re.sub(r"[^a-z0-9]+", "", text)
+
+    def _hashes_overlap(self, left_hashes: set[str], right_hashes: set[str]) -> bool:
+        if not left_hashes or not right_hashes:
+            return False
+        for left in left_hashes:
+            left_text = str(left or "").strip().lower()
+            if len(left_text) < 8:
+                continue
+            for right in right_hashes:
+                right_text = str(right or "").strip().lower()
+                if len(right_text) < 8:
+                    continue
+                if left_text == right_text or left_text.startswith(right_text) or right_text.startswith(left_text):
+                    return True
         return False
 
     def apply_local_catalog_matches(self, references: list[dict[str, Any]], local_catalog: dict[str, Any]) -> list[dict[str, Any]]:
@@ -499,6 +1212,18 @@ class ModelReferenceService:
             matches: list[dict[str, Any]] = []
             reference_hashes = {str(item).lower() for item in reference.get("hashes") or []}
             reference_name = str(reference.get("normalized_name") or "").strip().lower()
+            reference_name_candidates = {
+                str(reference.get("normalized_name") or "").strip().lower(),
+                str(self.normalize_name_key(reference.get("display_name")) or "").strip().lower(),
+                str(self.normalize_name_key(reference.get("version_name")) or "").strip().lower(),
+                str(self.normalize_name_key(reference.get("source_identifier")) or "").strip().lower(),
+            }
+            reference_name_candidates = {name for name in reference_name_candidates if name}
+            reference_compact_candidates = {
+                self._compact_name_key(name)
+                for name in reference_name_candidates
+                if self._compact_name_key(name)
+            }
             reference_model_id = reference.get("civitai_model_id")
             reference_version_id = reference.get("civitai_model_version_id")
             reference_type = str(reference.get("resource_type") or "other")
@@ -510,22 +1235,45 @@ class ModelReferenceService:
                     continue
                 basis: Optional[str] = None
                 entry_hashes = {str(item).lower() for item in entry.get("hashes") or []}
-                if reference_hashes and entry_hashes and reference_hashes & entry_hashes:
-                    basis = "hash"
-                elif reference_version_id is not None and entry.get("civitai_model_version_id") == reference_version_id:
+                if reference_version_id is not None and entry.get("civitai_model_version_id") == reference_version_id:
                     basis = "civitai_model_version_id"
                 elif reference_model_id is not None and entry.get("civitai_model_id") == reference_model_id:
                     basis = "civitai_model_id"
+                elif self._hashes_overlap(reference_hashes, entry_hashes):
+                    basis = "hash"
                 elif reference_name and reference_name == str(entry.get("normalized_name") or "").strip().lower():
                     basis = "normalized_name"
+                else:
+                    entry_name_candidates = {
+                        str(entry.get("normalized_name") or "").strip().lower(),
+                        str(self.normalize_name_key(entry.get("display_name")) or "").strip().lower(),
+                        str(self.normalize_name_key(entry.get("source_identifier")) or "").strip().lower(),
+                    }
+                    entry_name_candidates = {name for name in entry_name_candidates if name}
+                    entry_compact_candidates = {
+                        self._compact_name_key(name)
+                        for name in entry_name_candidates
+                        if self._compact_name_key(name)
+                    }
+                    if reference_compact_candidates and entry_compact_candidates:
+                        if reference_compact_candidates & entry_compact_candidates:
+                            basis = "name_fuzzy"
                 if basis is None:
                     continue
                 matches.append(
                     {
                         "display_name": entry.get("display_name") or entry.get("normalized_name"),
+                        "version_name": entry.get("version_name"),
+                        "model_name": entry.get("model_name"),
+                        "file_name": entry.get("file_name"),
+                        "file_path": entry.get("file_path"),
                         "resource_type": entry_type,
                         "match_basis": basis,
                         "source_identifier": entry.get("source_identifier"),
+                        "model_path": entry.get("source_identifier"),
+                        "civitai_model_id": entry.get("civitai_model_id"),
+                        "civitai_model_version_id": entry.get("civitai_model_version_id"),
+                        "civitai_url": entry.get("civitai_url"),
                         "hashes": entry.get("hashes") or [],
                     }
                 )
@@ -536,7 +1284,7 @@ class ModelReferenceService:
         return matched_references
 
     def build_item_payload(self, source_payload: dict[str, Any], *, local_catalog: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        local_catalog = local_catalog or {"configured": False, "entries": [], "raw": {}, "error": None}
+        local_catalog = local_catalog or {"configured": False, "entries": [], "raw": {}, "raw_compacted": True, "error": None}
         extracted_references = self.extract_references_from_generation_payload(source_payload)
         references = self.apply_local_catalog_matches(extracted_references, local_catalog)
         summary = self._summarize_references(references, local_catalog)
@@ -566,6 +1314,7 @@ class ModelReferenceService:
                 "local_catalog_fetch": {
                     "sources": self._dict_payload(local_catalog.get("sources")),
                     "error": local_catalog.get("error"),
+                    "raw_compacted": bool(local_catalog.get("raw_compacted", True)),
                     "raw": self._dict_payload(local_catalog.get("raw")),
                 },
             },
@@ -612,7 +1361,7 @@ class ModelReferenceService:
         image_limit: int = 250,
         local_catalog: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        local_catalog = local_catalog or {"configured": False, "entries": [], "raw": {}, "error": None}
+        local_catalog = local_catalog or {"configured": False, "entries": [], "raw": {}, "raw_compacted": True, "error": None}
         images = (
             db.query(ImageModel)
             .options(
@@ -698,6 +1447,7 @@ class ModelReferenceService:
                 "local_catalog_fetch": {
                     "sources": self._dict_payload(local_catalog.get("sources")),
                     "error": local_catalog.get("error"),
+                    "raw_compacted": bool(local_catalog.get("raw_compacted", True)),
                     "raw": self._dict_payload(local_catalog.get("raw")),
                 },
             },

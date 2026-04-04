@@ -313,8 +313,18 @@
             <span>Return all workspace images (include preview/intermediate outputs)</span>
           </label>
 
+          <label for="generate-threshold-override">Match threshold override (0.0 - 1.0, optional)</label>
+          <input id="generate-threshold-override" name="generate-threshold-override" type="number" min="0" max="1" step="0.01" placeholder="Leave blank to use default threshold">
+
+          <label for="generate-tweak-label">Tweak label (optional)</label>
+          <input id="generate-tweak-label" name="generate-tweak-label" type="text" placeholder="e.g. cfg 7.0 to 6.5">
+
+          <label for="generate-tweaked-parameters">Tweaked parameters JSON (optional)</label>
+          <textarea id="generate-tweaked-parameters" name="generate-tweaked-parameters" rows="3" placeholder='{"sampler.cfg": 6.5}'></textarea>
+
           <div class="template-actions">
             <button id="generate-run-btn" type="button">Generate via ComfyUI</button>
+            <button id="generate-attempts-refresh-btn" type="button">Refresh Attempt History</button>
           </div>
 
           <section id="generate-status-panel" class="status-panel is-idle" aria-live="polite">
@@ -344,6 +354,92 @@
             <pre id="generate-response-json" class="json-panel">{}</pre>
           </div>
         </section>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Generation Attempt History</h3>
+            <div id="generate-attempts-panel" class="generate-attempts-panel">
+              <p class="control-preview-empty">No attempts recorded yet for this reference hash.</p>
+            </div>
+          </div>
+        </section>
+      </article>
+    </section>
+
+    <section id="parity-workbench-section" class="template-lab" aria-label="Image parity workbench">
+      <article class="control-card template-card">
+        <h2>Parity Workbench</h2>
+        <p class="control-help">Audit extracted generation metadata, normalize A1111 fields for ComfyUI, and identify missing/conflicting parameters before running generation attempts.</p>
+
+        <div class="bridge-controls-grid">
+          <label for="parity-file-hash">Reference local file hash</label>
+          <div class="parity-hash-picker-summary">
+            <div id="parity-selected-image-panel" class="control-preview-panel is-empty" aria-live="polite">
+              <p class="control-preview-empty">No active image selected yet.</p>
+            </div>
+            <div class="parity-hash-picker-controls">
+              <div class="control-row">
+                <input id="parity-file-hash" name="parity-file-hash" type="text" placeholder="No hash selected yet" readonly>
+                <button id="parity-open-picker-btn" type="button">Search Gallery Image</button>
+              </div>
+              <div class="template-actions">
+                <button id="parity-use-local-hash-btn" type="button">Use Current Local Hash</button>
+              </div>
+            </div>
+          </div>
+          <p class="control-help">Search by full or partial hash, filename, collection, source, or metadata terms. Selecting a result sets the active image and copies its hash.</p>
+
+          <label for="parity-workflow-json">Comfy workflow JSON (optional, used now for alignment checks)</label>
+          <textarea id="parity-workflow-json" name="parity-workflow-json" rows="6" placeholder='{"nodes": []}'></textarea>
+          <p class="control-help">Provide this to compare extracted fields against workflow values and surface conflicts early.</p>
+
+          <label class="control-checkbox" for="parity-include-non-prefix-hash-evidence">
+            <input id="parity-include-non-prefix-hash-evidence" name="parity-include-non-prefix-hash-evidence" type="checkbox">
+            Include non-prefix LoRA Manager model hash evidence (debug)
+          </label>
+
+          <div class="template-actions">
+            <button id="parity-audit-btn" type="button">Analyze Candidate</button>
+          </div>
+
+          <section id="parity-status-panel" class="status-panel is-idle" aria-live="polite">
+            <strong id="parity-status-title">Ready</strong>
+            <span id="parity-status-message">Enter a local file hash. Optionally add workflow JSON to enable field alignment diagnostics.</span>
+          </section>
+        </div>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Candidate Classification</h3>
+            <pre id="parity-classification-json" class="json-panel">{}</pre>
+          </div>
+          <div>
+            <h3>Missing & Conflicts</h3>
+            <pre id="parity-issues-json" class="json-panel">{}</pre>
+          </div>
+        </section>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Extracted Fields</h3>
+            <pre id="parity-extracted-json" class="json-panel">{}</pre>
+          </div>
+          <div>
+            <h3>Normalized Canonical Fields</h3>
+            <pre id="parity-normalized-json" class="json-panel">{}</pre>
+          </div>
+        </section>
+
+        <section class="template-output-grid">
+          <div>
+            <h3>Workflow Match Buckets</h3>
+            <pre id="parity-workflow-match-json" class="json-panel">{}</pre>
+          </div>
+          <div>
+            <h3>Model Hash Evidence</h3>
+            <pre id="parity-model-hash-evidence-json" class="json-panel">{}</pre>
+          </div>
+        </section>
       </article>
     </section>
 
@@ -362,6 +458,7 @@
   <script src="/frontend/js/shared/preferences.js" defer></script>
   <script src="/frontend/js/shared/folder-tabs.js" defer></script>
   <script src="/frontend/js/shared/ui-kit.js" defer></script>
+  <script src="/frontend/js/shared/image-hash-picker.js" defer></script>
   <script src="/frontend/js/generation-lab.js" defer></script>
 </body>
 </html>

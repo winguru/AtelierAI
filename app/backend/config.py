@@ -79,7 +79,7 @@ except OSError as e:
 
 
 # --- Schema Versioning ---
-CURRENT_SCHEMA_VERSION = "1.3"  # Increment this when you make schema changes
+CURRENT_SCHEMA_VERSION = "1.4"  # Increment this when you make schema changes
 ALLOW_SCHEMA_RESET = _env_bool("ALLOW_SCHEMA_RESET", default=False)
 
 # --- CivitAI Configuration ---

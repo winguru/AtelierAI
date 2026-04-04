@@ -52,6 +52,7 @@
   const templateLabSection = document.getElementById('template-lab-section');
   const a1111BridgeSection = document.getElementById('a1111-bridge-section');
   const generateImageSection = document.getElementById('generate-image-section');
+  const parityWorkbenchSection = document.getElementById('parity-workbench-section');
   const bridgeFileHashInput = document.getElementById('bridge-file-hash');
   const bridgeUseLocalHashButton = document.getElementById('bridge-use-local-hash-btn');
   const bridgeWorkflowJsonInput = document.getElementById('bridge-workflow-json');
@@ -78,18 +79,40 @@
   const generateWorkflowJsonInput = document.getElementById('generate-workflow-json');
   const generateReferenceFileHashInput = document.getElementById('generate-reference-file-hash');
   const generateIncludeAllImagesInput = document.getElementById('generate-include-all-images');
+  const generateThresholdOverrideInput = document.getElementById('generate-threshold-override');
+  const generateTweakLabelInput = document.getElementById('generate-tweak-label');
+  const generateTweakedParametersInput = document.getElementById('generate-tweaked-parameters');
   const generateUseLocalHashButton = document.getElementById('generate-use-local-hash-btn');
   const generateRunButton = document.getElementById('generate-run-btn');
+  const generateAttemptsRefreshButton = document.getElementById('generate-attempts-refresh-btn');
   const generateStatusTitle = document.getElementById('generate-status-title');
   const generateStatusMessage = document.getElementById('generate-status-message');
   const generateStatusPanel = document.getElementById('generate-status-panel');
   const generateReferencePanel = document.getElementById('generate-reference-panel');
   const generateResultsGrid = document.getElementById('generate-results-grid');
   const generateResponseJsonPanel = document.getElementById('generate-response-json');
+  const generateAttemptsPanel = document.getElementById('generate-attempts-panel');
+  const parityFileHashInput = document.getElementById('parity-file-hash');
+  const parityOpenPickerButton = document.getElementById('parity-open-picker-btn');
+  const parityUseLocalHashButton = document.getElementById('parity-use-local-hash-btn');
+  const paritySelectedImagePanel = document.getElementById('parity-selected-image-panel');
+  const parityWorkflowJsonInput = document.getElementById('parity-workflow-json');
+  const parityIncludeNonPrefixHashEvidenceInput = document.getElementById('parity-include-non-prefix-hash-evidence');
+  const parityAuditButton = document.getElementById('parity-audit-btn');
+  const parityStatusPanel = document.getElementById('parity-status-panel');
+  const parityStatusTitle = document.getElementById('parity-status-title');
+  const parityStatusMessage = document.getElementById('parity-status-message');
+  const parityClassificationPanel = document.getElementById('parity-classification-json');
+  const parityIssuesPanel = document.getElementById('parity-issues-json');
+  const parityExtractedPanel = document.getElementById('parity-extracted-json');
+  const parityNormalizedPanel = document.getElementById('parity-normalized-json');
+  const parityWorkflowMatchPanel = document.getElementById('parity-workflow-match-json');
+  const parityModelHashEvidencePanel = document.getElementById('parity-model-hash-evidence-json');
   const inspectionPanels = document.getElementById('inspection-panels');
   const themeToggle = document.getElementById('theme-toggle');
   const preferences = window.AtelierPreferences || null;
   const uiKit = window.AtelierUi || null;
+  const imageHashPickerApi = window.AtelierImageHashPicker || null;
   const CATALOG_SETTINGS_STORAGE_KEY = 'atelierai.generationLab.catalogSettings.v1';
   const MAX_INDEXED_LORA_TOKENS = 8;
   const STANDARD_TEMPLATE_TOKENS = [
@@ -223,7 +246,10 @@
     a1111BridgeAnalysis: null,
     bridgeDatasetQuality: null,
     generateImageResult: null,
+    generateAttempts: [],
+    paritySelectedImage: null,
   };
+  let parityImageHashPicker = null;
   let inspectionFolderWorkspace = null;
 
   if (
@@ -262,6 +288,9 @@
   }
   if (generateImageSection instanceof HTMLElement) {
     generateImageSection.hidden = true;
+  }
+  if (parityWorkbenchSection instanceof HTMLElement) {
+    parityWorkbenchSection.hidden = true;
   }
 
   function setFormValues({ civitaiId, fileHash, catalogUrl, checkpointsUrl, lorasUrl, includeFullCatalogRaw }) {
@@ -343,6 +372,23 @@
     return String(value || '').trim().toLowerCase();
   }
 
+  function encodeRelativeStaticPath(pathValue) {
+    return String(pathValue || '')
+      .split('/')
+      .filter((part) => part.length > 0)
+      .map((part) => encodeURIComponent(part))
+      .join('/');
+  }
+
+  function buildLibraryImageUrl(item) {
+    const relativePath = String(item?.file_path || '').trim();
+    if (!relativePath) {
+      return '';
+    }
+    const encoded = encodeRelativeStaticPath(relativePath);
+    return encoded ? `/image_library/${encoded}` : '';
+  }
+
   function isLikelyImageUrl(value) {
     const text = String(value || '').trim().toLowerCase();
     return Boolean(text) && /(https?:\/\/|^\/)/.test(text);
@@ -357,10 +403,14 @@
       item.display_url,
       item.poster_url,
       item.video_poster_url,
+      item.video_thumbnail_url,
       item.image_url,
     ];
     const found = candidates.find((candidate) => isLikelyImageUrl(candidate));
-    return String(found || '').trim();
+    if (found) {
+      return String(found || '').trim();
+    }
+    return buildLibraryImageUrl(item);
   }
 
   function setPreviewPanelState(panel, payload) {
@@ -556,6 +606,235 @@
     }
   }
 
+  function setParityStatus(state, title, message) {
+    if (parityStatusPanel instanceof HTMLElement) {
+      parityStatusPanel.className = `status-panel ${state}`;
+    }
+    if (parityStatusTitle instanceof HTMLElement) {
+      parityStatusTitle.textContent = title;
+    }
+    if (parityStatusMessage instanceof HTMLElement) {
+      parityStatusMessage.textContent = message;
+    }
+  }
+
+  function setParitySelectedImage(item) {
+    state.paritySelectedImage = item && typeof item === 'object' ? item : null;
+    if (!(paritySelectedImagePanel instanceof HTMLElement)) {
+      return;
+    }
+    if (!state.paritySelectedImage) {
+      setPreviewPanelState(paritySelectedImagePanel, {
+        details: 'No active image selected yet.',
+      });
+      return;
+    }
+    const previewUrl = resolveDisplayImageUrl(state.paritySelectedImage);
+    setPreviewPanelState(paritySelectedImagePanel, {
+      imageUrl: previewUrl,
+      sourceLabel: 'Active gallery image',
+      sourceUrl: state.paritySelectedImage?.source_url || '',
+      caption: state.paritySelectedImage?.file_name || state.paritySelectedImage?.original_file_name || state.paritySelectedImage?.file_hash || 'Selected image',
+      details: 'No displayable image URL found for this selected item.',
+    });
+  }
+
+  async function resolveGalleryItemByHash(fileHash) {
+    const hash = String(fileHash || '').trim();
+    if (!hash) {
+      return null;
+    }
+    const items = await fetchGalleryItems(hash, 30);
+    const normalized = normalizeKey(hash);
+    return items.find((item) => normalizeKey(item?.file_hash) === normalized) || items[0] || null;
+  }
+
+  function applyParitySelectedItem(item) {
+    if (!(parityFileHashInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const hash = String(item?.file_hash || '').trim();
+    if (!hash) {
+      return;
+    }
+    parityFileHashInput.value = hash;
+    setParitySelectedImage(item);
+    setParityStatus('is-success', 'Image selected', 'Selected gallery image is now active for parity audit.');
+  }
+
+  function ensureParityImageHashPicker() {
+    if (parityImageHashPicker || !imageHashPickerApi || typeof imageHashPickerApi.createImageHashPicker !== 'function') {
+      return parityImageHashPicker;
+    }
+    parityImageHashPicker = imageHashPickerApi.createImageHashPicker({
+      title: 'Select Reference Gallery Image',
+      maxResults: 36,
+      onSelect: (item) => {
+        applyParitySelectedItem(item);
+      },
+    });
+    return parityImageHashPicker;
+  }
+
+  function renderParityAudit(payload) {
+    const candidate = payload?.candidate || {};
+    const comparison = payload?.comparison || {};
+    const extracted = candidate?.parsed_fields || {};
+    const normalized = candidate?.canonical_fields || {};
+    const issues = {
+      missing_required_fields: Array.isArray(candidate?.missing_required_fields) ? candidate.missing_required_fields : [],
+      conflicts: Array.isArray(candidate?.conflicts) ? candidate.conflicts : [],
+      warnings: Array.isArray(candidate?.warnings) ? candidate.warnings : [],
+    };
+    const classification = {
+      classification: String(candidate?.classification || 'unknown'),
+      target: payload?.target || {},
+      mapping_notes: Array.isArray(candidate?.mapping_notes) ? candidate.mapping_notes : [],
+    };
+
+    const workflowSupplied = Boolean(comparison?.provided_workflow_supplied);
+    const semanticBuckets = comparison?.workflow_match_buckets_semantic;
+    let workflowMatchBuckets = null;
+
+    if (workflowSupplied
+      && semanticBuckets
+      && typeof semanticBuckets === 'object') {
+      workflowMatchBuckets = {
+        provided_workflow_supplied: true,
+        source: 'semantic',
+        ...semanticBuckets,
+      };
+    } else if (workflowSupplied) {
+      const fieldAlignmentFields = (comparison?.field_alignment && typeof comparison.field_alignment.fields === 'object')
+        ? comparison.field_alignment.fields
+        : {};
+      const matched = [];
+      const didNotMatch = [];
+      Object.entries(fieldAlignmentFields).forEach(([fieldName, info]) => {
+        const matchCount = Number(info?.match_count || 0);
+        const entry = {
+          field: String(fieldName || ''),
+          value: info?.value,
+          match_count: matchCount,
+          path_samples: Array.isArray(info?.path_samples) ? info.path_samples : [],
+        };
+        if (matchCount > 0) {
+          matched.push(entry);
+        } else {
+          didNotMatch.push(entry);
+        }
+      });
+
+      const structuralMismatches = Array.isArray(comparison?.structural?.mismatch_samples)
+        ? comparison.structural.mismatch_samples
+        : [];
+      const mismatchSamples = structuralMismatches.map((item) => ({
+        path: item?.path,
+        expected: item?.right,
+        actual: item?.left,
+      }));
+
+      workflowMatchBuckets = {
+        provided_workflow_supplied: true,
+        source: 'legacy_scalar_lookup',
+        counts: {
+          matched: matched.length,
+          mismatched: mismatchSamples.length,
+          did_not_match: didNotMatch.length,
+        },
+        matched,
+        mismatched: mismatchSamples,
+        did_not_match: didNotMatch,
+      };
+    } else {
+      workflowMatchBuckets = {
+        provided_workflow_supplied: false,
+        source: 'none',
+        message: 'No expected workflow JSON was provided, so match buckets are unavailable.',
+        counts: {
+          matched: 0,
+          mismatched: 0,
+          did_not_match: 0,
+        },
+        matched: [],
+        mismatched: [],
+        did_not_match: [],
+      };
+    }
+
+    if (parityClassificationPanel instanceof HTMLElement) {
+      parityClassificationPanel.textContent = stringifyJson(classification);
+    }
+    if (parityIssuesPanel instanceof HTMLElement) {
+      parityIssuesPanel.textContent = stringifyJson(issues);
+    }
+    if (parityExtractedPanel instanceof HTMLElement) {
+      parityExtractedPanel.textContent = stringifyJson(extracted);
+    }
+    if (parityNormalizedPanel instanceof HTMLElement) {
+      parityNormalizedPanel.textContent = stringifyJson(normalized);
+    }
+    if (parityWorkflowMatchPanel instanceof HTMLElement) {
+      parityWorkflowMatchPanel.textContent = stringifyJson(workflowMatchBuckets);
+    }
+    if (parityModelHashEvidencePanel instanceof HTMLElement) {
+      parityModelHashEvidencePanel.textContent = stringifyJson(comparison?.model_hash_evidence || null);
+    }
+  }
+
+  function buildParityAuditRequestPayload() {
+    if (!(parityFileHashInput instanceof HTMLInputElement)) {
+      throw new Error('Parity file hash input is unavailable.');
+    }
+    const fileHash = parityFileHashInput.value.trim();
+    if (!fileHash) {
+      throw new Error('Enter a local file hash to run parity audit.');
+    }
+    let comfyWorkflowJson = null;
+    if (parityWorkflowJsonInput instanceof HTMLTextAreaElement && parityWorkflowJsonInput.value.trim()) {
+      const parsed = parseJsonText(parityWorkflowJsonInput.value, {
+        fieldLabel: 'Parity workflow JSON',
+        fallbackValue: null,
+      });
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Parity workflow JSON must be an object.');
+      }
+      comfyWorkflowJson = parsed;
+    }
+
+    return {
+      file_hash: fileHash,
+      comfy_workflow_json: comfyWorkflowJson,
+      include_non_prefix_local_reference_hash_evidence: Boolean(
+        parityIncludeNonPrefixHashEvidenceInput instanceof HTMLInputElement
+          ? parityIncludeNonPrefixHashEvidenceInput.checked
+          : false
+      ),
+    };
+  }
+
+  async function runParityAuditFlow() {
+    const requestPayload = buildParityAuditRequestPayload();
+    setParityStatus(
+      'is-loading',
+      'Analyzing',
+      'Extracting fields and running parity audit. Workflow JSON is included for alignment checks when provided...'
+    );
+    const response = await fetch('/generation-prototype/parity-workbench/candidate-audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestPayload),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(payload?.detail || `Parity audit failed with HTTP ${response.status}.`));
+    }
+
+    renderParityAudit(payload);
+    const classification = String(payload?.candidate?.classification || 'unknown');
+    setParityStatus('is-success', 'Analysis complete', `Candidate classification: ${classification}.`);
+  }
+
   function renderGenerateReferencePanel(reference) {
     if (!(generateReferencePanel instanceof HTMLElement)) {
       return;
@@ -653,6 +932,78 @@
     renderGenerateOutputs(outputs, bestMatchFilename);
   }
 
+  function renderGenerateAttempts(attempts) {
+    state.generateAttempts = Array.isArray(attempts) ? attempts : [];
+    if (!(generateAttemptsPanel instanceof HTMLElement)) {
+      return;
+    }
+    generateAttemptsPanel.innerHTML = '';
+    if (!state.generateAttempts.length) {
+      const empty = document.createElement('p');
+      empty.className = 'control-preview-empty';
+      empty.textContent = 'No attempts recorded yet for this reference hash.';
+      generateAttemptsPanel.append(empty);
+      return;
+    }
+
+    state.generateAttempts.forEach((attempt) => {
+      const row = document.createElement('article');
+      row.className = 'generate-attempt-row';
+      if (Boolean(attempt?.fundamental_generation_issue)) {
+        row.classList.add('is-issue');
+      }
+
+      const similarity = Number(attempt?.best_similarity);
+      const threshold = Number(attempt?.threshold_used);
+      const similarityText = Number.isFinite(similarity)
+        ? `${Math.round(similarity * 10000) / 100}%`
+        : 'n/a';
+      const thresholdText = Number.isFinite(threshold)
+        ? `${Math.round(threshold * 10000) / 100}%`
+        : 'n/a';
+      const statusText = Boolean(attempt?.matched) ? 'Matched' : 'Not Matched';
+      const issueText = Boolean(attempt?.fundamental_generation_issue)
+        ? 'Fundamental Generation Issue'
+        : 'No Fundamental Issue';
+
+      const title = document.createElement('strong');
+      title.textContent = `Attempt #${String(attempt?.attempt_index || '?')} - ${statusText}`;
+      row.append(title);
+
+      const meta = document.createElement('div');
+      meta.className = 'generate-attempt-meta';
+      meta.innerHTML = [
+        `Similarity: ${similarityText}`,
+        `Threshold: ${thresholdText}`,
+        `Issue: ${issueText}`,
+        `Prompt ID: ${String(attempt?.comfy_prompt_id || 'n/a')}`,
+        `Tweak: ${String(attempt?.tweak_label || 'none')}`,
+      ].join('<br>');
+      row.append(meta);
+
+      generateAttemptsPanel.append(row);
+    });
+  }
+
+  async function loadGenerateAttempts(referenceFileHash) {
+    const hash = String(referenceFileHash || '').trim();
+    if (!hash) {
+      renderGenerateAttempts([]);
+      return;
+    }
+    const params = new URLSearchParams({
+      reference_file_hash: hash,
+      limit: '30',
+      offset: '0',
+    });
+    const response = await fetch(`/generation-prototype/comfy/attempts?${params.toString()}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(payload?.detail || `Attempt history request failed with HTTP ${response.status}.`));
+    }
+    renderGenerateAttempts(Array.isArray(payload?.attempts) ? payload.attempts : []);
+  }
+
   function buildGenerateImageRequestPayload() {
     if (!(generateWorkflowJsonInput instanceof HTMLTextAreaElement)) {
       throw new Error('Generate workflow JSON input is unavailable.');
@@ -674,10 +1025,32 @@
       throw new Error('Enter a reference local file hash before generating.');
     }
 
+    const thresholdOverride = generateThresholdOverrideInput instanceof HTMLInputElement
+      ? Number(generateThresholdOverrideInput.value)
+      : Number.NaN;
+    const tweakLabel = generateTweakLabelInput instanceof HTMLInputElement
+      ? generateTweakLabelInput.value.trim()
+      : '';
+    let tweakedParameters = {};
+    if (generateTweakedParametersInput instanceof HTMLTextAreaElement
+      && generateTweakedParametersInput.value.trim()) {
+      const parsedTweaks = parseJsonText(generateTweakedParametersInput.value, {
+        fieldLabel: 'Tweaked parameters JSON',
+        fallbackValue: {},
+      });
+      if (!parsedTweaks || typeof parsedTweaks !== 'object' || Array.isArray(parsedTweaks)) {
+        throw new Error('Tweaked parameters JSON must be an object.');
+      }
+      tweakedParameters = parsedTweaks;
+    }
+
     return {
       workflow_json: workflowJson,
       reference_file_hash: referenceFileHash,
       include_all_workspace_images: Boolean(generateIncludeAllImagesInput instanceof HTMLInputElement && generateIncludeAllImagesInput.checked),
+      match_threshold_override: Number.isFinite(thresholdOverride) ? Math.max(0, Math.min(1, thresholdOverride)) : null,
+      tweak_label: tweakLabel || null,
+      tweaked_parameters: tweakedParameters,
     };
   }
 
@@ -695,6 +1068,7 @@
     }
 
     renderGenerateImageResponse(payload);
+    await loadGenerateAttempts(String(requestPayload.reference_file_hash || ''));
     const outputCount = Number(payload?.generated?.count || 0);
     const bestSimilarity = Number(payload?.generated?.best_match?.phash?.similarity);
     const closeEnoughThreshold = Number(payload?.generated?.close_enough_threshold);
@@ -1967,6 +2341,23 @@
     };
   }
 
+  function createParityWorkbenchTabPanel() {
+    return () => {
+      if (parityWorkbenchSection instanceof HTMLElement) {
+        parityWorkbenchSection.hidden = false;
+        return parityWorkbenchSection;
+      }
+      const fallback = document.createElement('article');
+      fallback.className = 'result-card inspection-empty';
+      const title = document.createElement('h2');
+      title.textContent = 'Parity Workbench unavailable';
+      const text = document.createElement('p');
+      text.textContent = 'Parity Workbench panel was not found in the page markup.';
+      fallback.append(title, text);
+      return fallback;
+    };
+  }
+
   function buildInspectionTabs(civitaiPayload, localPayload) {
     const tabs = [];
 
@@ -2016,6 +2407,13 @@
       label: 'Generate Image',
       row: 2,
       render: createInspectionTabPanel('generate-image', createGenerateImageTabPanel()),
+    });
+
+    tabs.push({
+      id: 'parity-workbench',
+      label: 'Parity Workbench',
+      row: 2,
+      render: createInspectionTabPanel('parity-workbench', createParityWorkbenchTabPanel()),
     });
 
     return tabs;
@@ -3366,10 +3764,99 @@
     if (generateUseLocalHashButton instanceof HTMLButtonElement) {
       generateUseLocalHashButton.addEventListener('click', () => {
         generateReferenceFileHashInput.value = String(localInput?.value || '').trim();
+        loadGenerateAttempts(generateReferenceFileHashInput.value).catch(() => {
+          // Ignore history refresh failures on hash sync action.
+        });
+      });
+    }
+
+    if (generateAttemptsRefreshButton instanceof HTMLButtonElement) {
+      generateAttemptsRefreshButton.addEventListener('click', async () => {
+        try {
+          await loadGenerateAttempts(generateReferenceFileHashInput.value.trim());
+        } catch (error) {
+          setGenerateStatus('is-error', 'Attempt history failed', error instanceof Error ? error.message : String(error));
+        }
       });
     }
 
     attachJsonFileDrop(generateWorkflowJsonInput, { fieldLabel: 'Generate workflow JSON' });
+  }
+
+  function attachParityWorkbenchHandlers() {
+    if (!(parityAuditButton instanceof HTMLButtonElement)) {
+      return;
+    }
+
+    parityAuditButton.addEventListener('click', async () => {
+      parityAuditButton.disabled = true;
+      try {
+        await runParityAuditFlow();
+      } catch (error) {
+        setParityStatus('is-error', 'Analysis failed', error instanceof Error ? error.message : String(error));
+      } finally {
+        parityAuditButton.disabled = false;
+      }
+    });
+
+    if (parityUseLocalHashButton instanceof HTMLButtonElement
+      && parityFileHashInput instanceof HTMLInputElement) {
+      parityUseLocalHashButton.addEventListener('click', async () => {
+        const localHash = String(localInput?.value || '').trim();
+        if (!localHash) {
+          setParityStatus('is-warning', 'Missing local hash', 'Local Input is empty. Paste a hash manually or set Local Input first.');
+          return;
+        }
+        const picker = ensureParityImageHashPicker();
+        if (!picker) {
+          parityFileHashInput.value = localHash;
+          resolveGalleryItemByHash(localHash)
+            .then((item) => {
+              if (item) {
+                setParitySelectedImage(item);
+              }
+            })
+            .catch(() => {
+              // Ignore preview lookup failures when picker script is unavailable.
+            });
+          setParityStatus('is-success', 'Hash copied', 'Copied current Local Input hash into Parity Workbench.');
+          return;
+        }
+        try {
+          await picker.open({
+            initialQuery: localHash,
+            autoSelectHash: localHash,
+            selectedItem: state.paritySelectedImage,
+          });
+        } catch (error) {
+          setParityStatus('is-error', 'Gallery search failed', error instanceof Error ? error.message : String(error));
+        }
+      });
+    }
+
+    if (parityOpenPickerButton instanceof HTMLButtonElement) {
+      parityOpenPickerButton.addEventListener('click', async () => {
+        const picker = ensureParityImageHashPicker();
+        if (!picker) {
+          setParityStatus('is-error', 'Picker unavailable', 'Gallery picker script did not load.');
+          return;
+        }
+        const activeHash = String(parityFileHashInput?.value || '').trim();
+        try {
+          await picker.open({
+            initialQuery: activeHash,
+            autoSelectHash: activeHash,
+            selectedItem: state.paritySelectedImage,
+          });
+        } catch (error) {
+          setParityStatus('is-error', 'Gallery search failed', error instanceof Error ? error.message : String(error));
+        }
+      });
+    }
+
+    if (parityWorkflowJsonInput instanceof HTMLTextAreaElement) {
+      attachJsonFileDrop(parityWorkflowJsonInput, { fieldLabel: 'Parity workflow JSON' });
+    }
   }
 
   civitaiForm.addEventListener('submit', (event) => {
@@ -3500,6 +3987,25 @@
   }
   if (generateReferenceFileHashInput instanceof HTMLInputElement && fileHashQuery) {
     generateReferenceFileHashInput.value = String(fileHashQuery).trim();
+    loadGenerateAttempts(generateReferenceFileHashInput.value).catch(() => {
+      // Ignore initial attempt history loading failures.
+    });
+  }
+  if (parityFileHashInput instanceof HTMLInputElement && fileHashQuery) {
+    parityFileHashInput.value = String(fileHashQuery).trim();
+    resolveGalleryItemByHash(parityFileHashInput.value)
+      .then((item) => {
+        if (item) {
+          setParitySelectedImage(item);
+          const picker = ensureParityImageHashPicker();
+          if (picker) {
+            picker.setSelected(item);
+          }
+        }
+      })
+      .catch(() => {
+        setParitySelectedImage(null);
+      });
   }
   persistCatalogSettings();
 
@@ -3512,6 +4018,7 @@
   attachTemplateStudioHandlers();
   attachA1111BridgeHandlers();
   attachGenerateImageHandlers();
+  attachParityWorkbenchHandlers();
   attachJsonFileDrop(bridgeWorkflowJsonInput, { fieldLabel: 'Comfy workflow JSON' });
   loadBridgeDatasetQuality();
   renderTemplateTokenPicker();

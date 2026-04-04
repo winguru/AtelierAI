@@ -723,6 +723,32 @@ class GenerationTemplate(Base):
     updated_at = Column(DateTime)
 
 
+class GenerationMatchAttempt(Base):
+    __tablename__ = "generation_match_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    reference_file_hash = Column(String, nullable=False, index=True)
+    comfy_prompt_id = Column(String, nullable=True, index=True)
+    attempt_index = Column(Integer, nullable=False, default=1)
+    tweak_label = Column(String, nullable=True)
+    tweak_parameters_json = Column(JSON)
+    effective_parameters_json = Column(JSON)
+    generated_outputs_json = Column(JSON)
+    best_output_filename = Column(String, nullable=True)
+    best_phash_distance = Column(Integer, nullable=True)
+    best_similarity = Column(Float, nullable=True, index=True)
+    threshold_used = Column(Float, nullable=False, default=0.95)
+    is_matched = Column(Boolean, nullable=False, default=False, index=True)
+    is_fundamental_generation_issue = Column(Boolean, nullable=False, default=False, index=True)
+    notes = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_generation_match_attempt_ref_created", "reference_file_hash", "created_at"),
+    )
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_version"
     version_num = Column(String, primary_key=True)

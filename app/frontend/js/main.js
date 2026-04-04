@@ -37,6 +37,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'Generation Info',
         'Prompt',
         'A1111 Metadata',
+        'A1111 Hires Upscale',
+        'A1111 Regional Prompter',
+        'A1111 ADetailer',
         'ComfyUI Metadata',
         'Tags',
         'EXIF Data',
@@ -1219,10 +1222,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const collectionNames = getAdvancedFilterValues('collections')
             .map((value) => String(value || '').trim())
             .filter((value) => value.length > 0);
+
+        const a1111Hires = getDataExtractionMode('A1111 Hires Upscale');
+        const a1111RegionalPrompter = getDataExtractionMode('A1111 Regional Prompter');
+        const a1111Adetailer = getDataExtractionMode('A1111 ADetailer');
+
         const hasUnsupportedStructuredFilters = Boolean(state.treeTagFilter)
             || getAdvancedFilterValues('tags').length > 0;
         const hasSupportedStructuredFilters = Boolean(
-            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || visibilityActive
+            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || visibilityActive || a1111Hires || a1111RegionalPrompter || a1111Adetailer
         );
 
         if (!hasSupportedStructuredFilters || hasUnsupportedStructuredFilters) {
@@ -1239,6 +1247,9 @@ document.addEventListener('DOMContentLoaded', () => {
             nsfwSafety,
             artistNames,
             collectionNames,
+            a1111Hires: a1111Hires ? [a1111Hires] : null,
+            a1111RegionalPrompter: a1111RegionalPrompter ? [a1111RegionalPrompter] : null,
+            a1111Adetailer: a1111Adetailer ? [a1111Adetailer] : null,
             signature: JSON.stringify({
                 search: normalizedQuery,
                 generationSoftwares,
@@ -1249,8 +1260,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 artistNames,
                 collectionNames,
                 nsfwVisibility: visibilityMode,
+                a1111Hires,
+                a1111RegionalPrompter,
+                a1111Adetailer,
             }),
         };
+
     }
 
     function buildImagesRequestUrl(skip, limit) {
@@ -1273,6 +1288,15 @@ document.addEventListener('DOMContentLoaded', () => {
             config.nsfwSafety.forEach((value) => params.append('nsfw_safety', value));
             config.artistNames.forEach((value) => params.append('artist_name', value));
             config.collectionNames.forEach((value) => params.append('collection_name', value));
+            if (config.a1111Hires && config.a1111Hires.length) {
+                config.a1111Hires.forEach((value) => params.append('a1111_hires', value));
+            }
+            if (config.a1111RegionalPrompter && config.a1111RegionalPrompter.length) {
+                config.a1111RegionalPrompter.forEach((value) => params.append('a1111_regional_prompter', value));
+            }
+            if (config.a1111Adetailer && config.a1111Adetailer.length) {
+                config.a1111Adetailer.forEach((value) => params.append('a1111_adetailer', value));
+            }
         }
 
         return `/images/?${params.toString()}`;
@@ -1293,6 +1317,15 @@ document.addEventListener('DOMContentLoaded', () => {
             config.nsfwSafety.forEach((value) => params.append('nsfw_safety', value));
             config.artistNames.forEach((value) => params.append('artist_name', value));
             config.collectionNames.forEach((value) => params.append('collection_name', value));
+            if (config.a1111Hires && config.a1111Hires.length) {
+                config.a1111Hires.forEach((value) => params.append('a1111_hires', value));
+            }
+            if (config.a1111RegionalPrompter && config.a1111RegionalPrompter.length) {
+                config.a1111RegionalPrompter.forEach((value) => params.append('a1111_regional_prompter', value));
+            }
+            if (config.a1111Adetailer && config.a1111Adetailer.length) {
+                config.a1111Adetailer.forEach((value) => params.append('a1111_adetailer', value));
+            }
         }
 
         const queryString = params.toString();
@@ -3086,6 +3119,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const _NSFW_GRANULAR_RATINGS = new Set(['pg', 'pg13', 'r', 'x', 'xxx']);
     const _NSFW_SAFETY_CLASSES = new Set(['safe', 'mature', 'explicit']);
+    const _A1111_RP_DIRECTIVE_RE = /\b(ADDCOMM|ADDROW|ADDCOL)\b/i;
 
     function imageMatchesNsfwCategoryFilter(image, category, allowedValues) {
         const selections = getAdvancedFilterValueSet(category);
@@ -3218,6 +3252,62 @@ document.addEventListener('DOMContentLoaded', () => {
             return hasSteps && (hasCfg || hasSampler || hasSeed || hasNegativePrompt);
         };
 
+        const getA1111ParameterText = () => {
+            const candidateValues = [
+                exif?.parameters,
+                exif?.Parameters,
+                exif?.user_comment,
+                exif?.UserComment,
+            ];
+
+            for (const value of candidateValues) {
+                if (typeof value !== 'string') {
+                    continue;
+                }
+                const text = value.trim();
+                if (!text) {
+                    continue;
+                }
+                if (text.startsWith('{') || text.startsWith('[')) {
+                    continue;
+                }
+                return text.toLowerCase();
+            }
+            return '';
+        };
+
+        const getA1111FeatureFlags = () => {
+            if (!looksLikeA1111UserCommentPayload()) {
+                return {
+                    hiresUpscale: false,
+                    regionalPrompter: false,
+                    adetailer: false,
+                };
+            }
+
+            const text = getA1111ParameterText();
+            if (!text) {
+                return {
+                    hiresUpscale: false,
+                    regionalPrompter: false,
+                    adetailer: false,
+                };
+            }
+
+            const hiresUpscale = /\b(hires\s+upscaler|hires\s+steps|hires\s+upscale|hr\s+upscaler|hr\s+upscale|denoising\s+strength)\b/.test(text);
+            const regionalPrompter = /\b(rp\s+active|regional\s+prompt)\b/.test(text)
+                || _A1111_RP_DIRECTIVE_RE.test(String(exif?.user_comment || exif?.UserComment || ''));
+            const adetailer = /\badetailer\b/.test(text);
+
+            return {
+                hiresUpscale,
+                regionalPrompter,
+                adetailer,
+            };
+        };
+
+        const a1111Features = getA1111FeatureFlags();
+
         if (key === 'no nsfw rating') {
             const { granular } = getNsfwDisplayTokens(image, { includeUserOverrides: true });
             return !granular || !_NSFW_GRANULAR_RATINGS.has(normalizeDetailFilterValue(granular));
@@ -3243,6 +3333,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (key === 'no a1111 metadata') {
             return !looksLikeA1111UserCommentPayload();
+        }
+        if (key === 'no a1111 hires upscale') {
+            return !a1111Features.hiresUpscale;
+        }
+        if (key === 'no a1111 regional prompter') {
+            return !a1111Features.regionalPrompter;
+        }
+        if (key === 'no a1111 adetailer') {
+            return !a1111Features.adetailer;
         }
         if (key === 'no comfyui metadata') {
             return !hasExifValue('prompt', 'Prompt', 'workflow', 'Workflow');
@@ -4028,6 +4127,37 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
         return setImageVariantIndex(image, 0);
+    }
+
+    /**
+     * Update the variant badge and thumbnail on a single tile without a full
+     * gallery redraw.  This preserves video previews that are playing on other
+     * tiles.
+     */
+    function updateTileVariantBadge(image) {
+        if (!image?.__key) { return; }
+        const tile = galleryGrid.querySelector(`.tile[data-key="${CSS.escape(image.__key)}"]`);
+        if (!tile) { return; }
+
+        // Update variant badge text.
+        const variantCount = getVariantCount(image);
+        const badge = tile.querySelector('.tile-variant-badge');
+        if (variantCount > 1) {
+            if (badge) {
+                badge.textContent = `${getActiveVariantIndex(image) + 1}/${variantCount}`;
+            }
+            tile.classList.add('has-variant-badge');
+        } else {
+            if (badge) { badge.remove(); }
+            tile.classList.remove('has-variant-badge');
+        }
+
+        // Update thumbnail image to reflect the active variant.
+        const mediaUrl = getMediaUrlForDisplay(image);
+        const img = tile.querySelector(':scope > img');
+        if (img && img.src !== mediaUrl) {
+            img.src = mediaUrl;
+        }
     }
 
     function getMediaUrlForDisplay(image) {
@@ -7813,7 +7943,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const selectedImage = getImageByKey(key);
             if (selectedImage) {
                 activateDefaultVariant(selectedImage);
-                renderSelectionState({ force: true });
+                // Update variant badge in-place without full gallery redraw.
+                // setSingleSelectionAndRender already called renderSelectionState()
+                // which handles tile selection classes and showDetails().
+                updateTileVariantBadge(selectedImage);
             }
         }
     });

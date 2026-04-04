@@ -155,5 +155,15 @@ class ComfyGenerateCompareRequest(BaseModel):
     workflow_json: dict[str, Any]
     reference_file_hash: str
     include_all_workspace_images: bool = False
+    match_threshold_override: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    tweak_label: Optional[str] = None
+    tweaked_parameters: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: Optional[int] = Field(default=120, ge=10, le=600)
     poll_interval_seconds: Optional[float] = Field(default=1.25, ge=0.2, le=10.0)
+
+
+class ParityCandidateAuditRequest(BaseModel):
+    file_hash: str
+    comfy_workflow_json: Optional[dict[str, Any]] = None
+    include_generation_payload: bool = False
+    include_non_prefix_local_reference_hash_evidence: bool = False

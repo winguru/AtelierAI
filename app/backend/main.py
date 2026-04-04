@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import time
 import threading
+import unicodedata
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,6 +72,7 @@ from models import (
     License,
     Artist,
     GenerationTemplate,
+    GenerationMatchAttempt,
     SchemaVersion,
 )  # Import the specific classes we need
 
@@ -128,6 +130,7 @@ from schemas import (
     A1111BridgeAnalyzeRequest,
     A1111BridgeSaveRequest,
     ComfyGenerateCompareRequest,
+    ParityCandidateAuditRequest,
 )
 
 try:
@@ -151,6 +154,20 @@ _A1111_NEGATIVE_PROMPT_RE = re.compile(r"^\s*negative\s+prompt\s*:\s*", re.IGNOR
 _A1111_KV_SPLIT_RE = re.compile(r",\s*(?=[A-Za-z][A-Za-z0-9 _/\-]*\s*:)")
 _A1111_SIZE_RE = re.compile(r"^\s*(\d{2,6})\s*[xX]\s*(\d{2,6})\s*$")
 _A1111_LORA_TAG_RE = re.compile(r"<\s*lora\s*:\s*([^:>]+?)(?:\s*:\s*([-+]?\d*\.?\d+))?\s*>", re.IGNORECASE)
+_A1111_RP_DIRECTIVE_RE = re.compile(r"\b(ADDCOMM|ADDROW|ADDCOL)\b")
+_COMFY_RP_EMULATION_SUPPORTED = False
+_A1111_SAMPLER_TO_COMFY_ALIASES = {
+    "euler a": "euler_ancestral",
+    "euler": "euler",
+    "dpm++ 2m": "dpmpp_2m",
+    "dpm++ 2m karras": "dpmpp_2m",
+    "dpm++ sde": "dpmpp_sde",
+    "dpm++ sde karras": "dpmpp_sde",
+    "ddim": "ddim",
+    "uni_pc": "uni_pc",
+    "uni_pc_bh2": "uni_pc_bh2",
+    "heun": "heun",
+}
 
 
 @dataclass
@@ -460,6 +477,21 @@ def _filter_image_ids_by_nsfw_safety_classes(
     return image_query_service.filter_image_ids_by_nsfw_safety_classes(
         images_query,
         nsfw_safety_classes,
+    )
+
+
+def _filter_image_ids_by_a1111_features(
+    images_query,
+    *,
+    a1111_hires: Optional[list[str]] = None,
+    a1111_regional_prompter: Optional[list[str]] = None,
+    a1111_adetailer: Optional[list[str]] = None,
+) -> Optional[list[int]]:
+    return image_query_service.filter_image_ids_by_a1111_features(
+        images_query,
+        a1111_hires=a1111_hires,
+        a1111_regional_prompter=a1111_regional_prompter,
+        a1111_adetailer=a1111_adetailer,
     )
 
 
@@ -4474,6 +4506,14 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
                 candidate = f"{candidate}.safetensors"
             prompt_lora_names.append(candidate)
 
+    sanitized_positive_prompt, removed_rp_directives = _sanitize_a1111_positive_prompt_for_comfy(positive_prompt)
+    if removed_rp_directives:
+        warnings.append(
+            "Removed A1111 Regional Prompter directives from fallback Comfy positive prompt because RP emulation is not enabled: "
+            + ", ".join(removed_rp_directives)
+        )
+    positive_prompt = sanitized_positive_prompt
+
     raw_payload = _dict_payload(generation_payload.get("raw"))
     merged_payload = _dict_payload(raw_payload.get("merged"))
     exif_candidates = [
@@ -8396,6 +8436,9 @@ def _load_display_image_items(
     nsfw_safety: Optional[list[str]],
     artist_name: Optional[list[str]],
     collection_name: Optional[list[str]],
+    a1111_hires: Optional[list[str]] = None,
+    a1111_regional_prompter: Optional[list[str]] = None,
+    a1111_adetailer: Optional[list[str]] = None,
     group_variants: bool,
 ) -> list[dict[str, Any]]:
     display_cache_key = _build_search_cache_key(
@@ -8410,6 +8453,9 @@ def _load_display_image_items(
             "nsfw_safety": _normalize_cache_list(nsfw_safety),
             "artist_name": _normalize_cache_list(artist_name),
             "collection_name": _normalize_cache_list(collection_name),
+            "a1111_hires": _normalize_cache_list(a1111_hires),
+            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
+            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
             "group_variants": bool(group_variants),
         },
     )
@@ -8434,9 +8480,20 @@ def _load_display_image_items(
     generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
     nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
     nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
+    a1111_filtered_ids = _filter_image_ids_by_a1111_features(
+        images_query,
+        a1111_hires=a1111_hires,
+        a1111_regional_prompter=a1111_regional_prompter,
+        a1111_adetailer=a1111_adetailer,
+    )
 
     constrained_ids: Optional[set[int]] = None
-    for filtered_ids in (generation_filtered_ids, nsfw_filtered_ids, nsfw_safety_filtered_ids):
+    for filtered_ids in (
+        generation_filtered_ids,
+        nsfw_filtered_ids,
+        nsfw_safety_filtered_ids,
+        a1111_filtered_ids,
+    ):
         if filtered_ids is None:
             continue
         filtered_set = set(filtered_ids)
@@ -9749,8 +9806,28 @@ async def lifespan(app: FastAPI):
                     print(
                         f"⚠️ Schema version mismatch. Found {version_result}, expected {CURRENT_SCHEMA_VERSION}."
                     )
+                    # Non-destructive migration path for additive schema changes.
+                    migrated = False
+                    if str(version_result or "") == "1.3" and str(CURRENT_SCHEMA_VERSION) == "1.4":
+                        print("   Attempting in-place schema upgrade 1.3 -> 1.4...")
+                        try:
+                            Base.metadata.create_all(bind=engine, checkfirst=True)
+                            with SessionLocal() as db:
+                                db.query(SchemaVersion).delete()
+                                db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+                                db.commit()
+                            migrated = True
+                            print("✅ In-place schema upgrade complete.")
+                        except Exception as migrate_exc:
+                            print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
+
+                    if migrated:
+                        version_result = CURRENT_SCHEMA_VERSION
+
                     if db_file_path and os.path.exists(db_file_path):
-                        if ALLOW_SCHEMA_RESET:
+                        if version_result == CURRENT_SCHEMA_VERSION:
+                            print("✅ Database schema is up to date.")
+                        elif ALLOW_SCHEMA_RESET:
                             print("   Recreating database (ALLOW_SCHEMA_RESET=true)...")
                             os.remove(db_file_path)
                             db_exists = False
@@ -10235,6 +10312,244 @@ def _extract_a1111_user_comment_candidates(generation_payload: dict) -> list[dic
     return normalized
 
 
+def _a1111_candidate_source_priority(source: Any) -> int:
+    source_text = str(source or "").strip().lower()
+    if source_text.startswith("raw.exif_data_fresh"):
+        return 0
+    if source_text.startswith("raw.exif_data"):
+        return 1
+    if source_text.startswith("raw.sidecar.exif_data"):
+        return 2
+    if source_text.startswith("raw.db.exif_data"):
+        return 3
+    if source_text.startswith("raw.merged"):
+        return 4
+    return 5
+
+
+def _select_preferred_a1111_user_comment_candidate(candidates: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    valid_candidates = [item for item in candidates if isinstance(item, dict)]
+    if not valid_candidates:
+        return None
+
+    a1111_candidates = [
+        item
+        for item in valid_candidates
+        if _looks_like_a1111_user_comment(str(item.get("text") or ""))
+    ]
+    pool = a1111_candidates if a1111_candidates else valid_candidates
+    return min(
+        pool,
+        key=lambda item: (
+            _a1111_candidate_source_priority(item.get("source")),
+            -len(str(item.get("text") or "")),
+        ),
+    )
+
+
+def _build_authoritative_a1111_parse_payload(candidates: list[dict[str, Any]]) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+    preferred_candidate = _select_preferred_a1111_user_comment_candidate(candidates)
+    if not preferred_candidate:
+        return ({
+            "raw_text": "",
+            "positive_prompt": "",
+            "negative_prompt": "",
+            "parameters": {},
+            "lora_tags": [],
+            "parsed_fields": {},
+            "warnings": ["No A1111 user_comment/parameters metadata was found in local payloads."],
+        }, None)
+
+    parse_payload = _parse_a1111_user_comment(str(preferred_candidate.get("text") or ""))
+    hydrated_fields: list[str] = []
+    hydrated_sources: list[str] = []
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source") or "").strip()
+        if not source or source == str(preferred_candidate.get("source") or "").strip():
+            continue
+        candidate_text = str(candidate.get("text") or "").strip()
+        if not candidate_text or not _looks_like_a1111_user_comment(candidate_text):
+            continue
+
+        candidate_parse = _parse_a1111_user_comment(candidate_text)
+        candidate_fields = _dict_payload(candidate_parse.get("parsed_fields"))
+        parse_fields = _dict_payload(parse_payload.get("parsed_fields"))
+
+        source_hydrated = False
+        for key, value in candidate_fields.items():
+            if parse_fields.get(key) in (None, "") and value not in (None, ""):
+                parse_fields[key] = value
+                hydrated_fields.append(str(key))
+                source_hydrated = True
+
+        parse_payload["parsed_fields"] = parse_fields
+
+        if not str(parse_payload.get("negative_prompt") or "").strip() and str(candidate_parse.get("negative_prompt") or "").strip():
+            parse_payload["negative_prompt"] = str(candidate_parse.get("negative_prompt") or "").strip()
+            hydrated_fields.append("negative_prompt")
+            source_hydrated = True
+
+        if not str(parse_payload.get("positive_prompt") or "").strip() and str(candidate_parse.get("positive_prompt") or "").strip():
+            parse_payload["positive_prompt"] = str(candidate_parse.get("positive_prompt") or "").strip()
+            hydrated_fields.append("positive_prompt")
+            source_hydrated = True
+
+        parse_parameters = _dict_payload(parse_payload.get("parameters"))
+        candidate_parameters = _dict_payload(candidate_parse.get("parameters"))
+        for key, value in candidate_parameters.items():
+            if parse_parameters.get(key) in (None, "") and value not in (None, ""):
+                parse_parameters[key] = value
+                source_hydrated = True
+        parse_payload["parameters"] = parse_parameters
+
+        if source_hydrated:
+            hydrated_sources.append(source)
+
+    warnings = [str(item) for item in _list_payload(parse_payload.get("warnings")) if str(item).strip()]
+    if hydrated_fields:
+        warnings.append(
+            "Hydrated missing A1111 fields from secondary metadata sources: "
+            + ", ".join(sorted(set(hydrated_fields)))
+        )
+    parse_payload["warnings"] = warnings
+    parse_payload["source_authority"] = {
+        "preferred_source": preferred_candidate.get("source"),
+        "hydrated_sources": sorted(set(hydrated_sources)),
+        "hydrated_field_count": len(set(hydrated_fields)),
+    }
+    return parse_payload, preferred_candidate
+
+
+def _build_a1111_capability_signals(parse_payload: dict[str, Any]) -> dict[str, Any]:
+    parameters = {
+        str(key or "").strip().lower(): value
+        for key, value in _dict_payload(parse_payload.get("parameters")).items()
+    }
+    raw_text = str(parse_payload.get("raw_text") or "").lower()
+    positive_prompt = str(parse_payload.get("positive_prompt") or "")
+    rp_directives = sorted({str(match) for match in _A1111_RP_DIRECTIVE_RE.findall(positive_prompt)})
+
+    hires_detected = any(
+        key.startswith("hires ")
+        or key.startswith("hr ")
+        for key in parameters.keys()
+    )
+    adetailer_detected = any(
+        key.startswith("adetailer")
+        for key in parameters.keys()
+    )
+    rp_detected = any(
+        key.startswith("rp ")
+        or "regional prompt" in key
+        for key in parameters.keys()
+    ) or (
+        "rp active" in raw_text
+        or "regional prompt" in raw_text
+        or bool(rp_directives)
+    )
+
+    rp_supported = bool(_COMFY_RP_EMULATION_SUPPORTED)
+
+    unsupported_features: list[str] = []
+    if rp_detected and not rp_supported:
+        unsupported_features.append("regional_prompting_rp")
+
+    partial_features: list[str] = []
+    if hires_detected:
+        partial_features.append("hires_fix")
+    if adetailer_detected:
+        partial_features.append("adetailer")
+
+    known_additions = {
+        "hires_upscaler": {
+            "label": "Hires upscaler",
+            "detected": hires_detected,
+            "support_level": "partial",
+        },
+        "adetailer": {
+            "label": "ADetailer",
+            "detected": adetailer_detected,
+            "support_level": "partial",
+        },
+        "regional_prompter": {
+            "label": "Regional Prompter (RP)",
+            "detected": rp_detected,
+            "support_level": "supported" if rp_supported else "unsupported",
+            "directives": rp_directives,
+        },
+    }
+
+    detected_additions = [
+        {
+            "key": key,
+            "label": str(item.get("label") or key),
+            "support_level": str(item.get("support_level") or "unknown"),
+            **({"directives": item.get("directives")} if item.get("directives") else {}),
+        }
+        for key, item in known_additions.items()
+        if bool(item.get("detected"))
+    ]
+
+    other_markers = sorted(
+        {
+            key
+            for key in parameters.keys()
+            if key.startswith("script ")
+            or key.startswith("alwayson scripts")
+            or key.startswith("controlnet ")
+        }
+    )
+
+    return {
+        "hires_fix_detected": hires_detected,
+        "adetailer_detected": adetailer_detected,
+        "rp_detected": rp_detected,
+        "rp_directives": rp_directives,
+        "unsupported_features": unsupported_features,
+        "partially_supported_features": partial_features,
+        "known_additions": known_additions,
+        "detected_additions": detected_additions,
+        "other_addition_markers": other_markers,
+    }
+
+
+def _sanitize_a1111_positive_prompt_for_comfy(prompt_text: Any) -> tuple[str, list[str]]:
+    if _COMFY_RP_EMULATION_SUPPORTED:
+        return str(prompt_text or ""), []
+
+    text = str(prompt_text or "")
+    if not text.strip():
+        return "", []
+
+    directives_found = [str(match) for match in _A1111_RP_DIRECTIVE_RE.findall(text)]
+    if not directives_found:
+        return text, []
+
+    directives_set = {item.upper() for item in directives_found}
+    sanitized_lines: list[str] = []
+    for raw_line in text.split("\n"):
+        parts = [segment.strip() for segment in raw_line.split(",")]
+        kept_parts: list[str] = []
+        for part in parts:
+            if not part:
+                continue
+            token = part.strip().upper()
+            if token in directives_set and _A1111_RP_DIRECTIVE_RE.fullmatch(token):
+                continue
+            stripped_part = _A1111_RP_DIRECTIVE_RE.sub("", part).strip()
+            stripped_part = re.sub(r"\s{2,}", " ", stripped_part).strip(" ,")
+            if stripped_part:
+                kept_parts.append(stripped_part)
+        if kept_parts:
+            sanitized_lines.append(", ".join(kept_parts))
+
+    sanitized = "\n".join(sanitized_lines).strip()
+    return sanitized, sorted(directives_set)
+
+
 def _looks_like_a1111_user_comment(text: str) -> bool:
     sample = str(text or "").strip().lower()
     if not sample:
@@ -10477,6 +10792,856 @@ def _build_a1111_field_alignment(parsed_fields: dict[str, Any], workflow_payload
         "matched_field_count": matched_fields,
         "alignment_score": round(score, 6),
         "fields": alignments,
+    }
+
+
+def _normalize_sampler_name_for_comfy(value: Any) -> dict[str, Any]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {
+            "source": value,
+            "normalized": None,
+            "mapped": False,
+            "notes": ["Sampler is missing."],
+        }
+    key = raw.lower().strip()
+    mapped = _A1111_SAMPLER_TO_COMFY_ALIASES.get(key)
+    if mapped:
+        return {
+            "source": raw,
+            "normalized": mapped,
+            "mapped": mapped != raw,
+            "notes": [f"Mapped A1111 sampler '{raw}' to Comfy sampler '{mapped}'."],
+        }
+    return {
+        "source": raw,
+        "normalized": raw,
+        "mapped": False,
+        "notes": [f"No explicit sampler alias mapping for '{raw}'; using raw value."],
+    }
+
+
+def _normalize_scheduler_name_for_comfy(value: Any) -> Optional[str]:
+    text = str(value or "").strip().lower()
+    return text or None
+
+
+def _normalize_model_name_key(value: Any) -> Optional[str]:
+    normalized = str(model_reference_service.normalize_name_key(value) or "").strip().lower()
+    return normalized or None
+
+
+def _extract_hex_hash_tokens(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    text = str(value).strip().lower()
+    if not text:
+        return set()
+    return {
+        token
+        for token in re.findall(r"[0-9a-f]{8,64}", text)
+        if len(token) >= 8
+    }
+
+
+def _hash_token_sets_match(left_tokens: set[str], right_tokens: set[str]) -> bool:
+    if not left_tokens or not right_tokens:
+        return False
+    for left_token in left_tokens:
+        for right_token in right_tokens:
+            if left_token.startswith(right_token) or right_token.startswith(left_token):
+                return True
+    return False
+
+
+def _normalize_prompt_text_for_match(value: Any, *, strip_lora_tags: bool = False) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if strip_lora_tags:
+        # Some workflows store LoRA usage outside the prompt text while A1111 embeds <lora:...> inline.
+        text = re.sub(r"<\s*lora\s*:[^>]+>", " ", text, flags=re.IGNORECASE)
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\u200b", "").replace("\ufeff", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.casefold()
+
+
+def _find_first_text_diff(left: str, right: str) -> Optional[dict[str, Any]]:
+    if left == right:
+        return None
+    limit = min(len(left), len(right))
+    for index in range(limit):
+        if left[index] != right[index]:
+            return {
+                "index": index,
+                "left_char": left[index],
+                "right_char": right[index],
+                "left_char_code": ord(left[index]),
+                "right_char_code": ord(right[index]),
+            }
+    if len(left) != len(right):
+        return {
+            "index": limit,
+            "left_char": left[limit] if len(left) > limit else "",
+            "right_char": right[limit] if len(right) > limit else "",
+            "left_char_code": ord(left[limit]) if len(left) > limit else None,
+            "right_char_code": ord(right[limit]) if len(right) > limit else None,
+        }
+    return None
+
+
+def _build_prompt_mismatch_diagnostics(local_value: Any, parameter_scalars: list[tuple[str, Any]]) -> dict[str, Any]:
+    local_raw = str(local_value or "")
+    local_norm = _normalize_prompt_text_for_match(local_raw)
+    local_norm_lora = _normalize_prompt_text_for_match(local_raw, strip_lora_tags=True)
+    candidates: list[tuple[str, str, str]] = []
+    for path, expected_value in parameter_scalars:
+        if not isinstance(expected_value, str):
+            continue
+        expected_raw = str(expected_value)
+        if len(expected_raw.strip()) < 40:
+            continue
+        candidates.append((path, expected_raw, _normalize_prompt_text_for_match(expected_raw)))
+
+    if not candidates:
+        return {
+            "closest_path": None,
+            "raw_equal": False,
+            "normalized_equal": False,
+            "local_length": len(local_raw),
+            "expected_length": None,
+            "first_diff": None,
+        }
+
+    best_path, best_raw, best_norm = max(
+        candidates,
+        key=lambda item: (
+            2 if item[2] == local_norm else 0,
+            -abs(len(item[2]) - len(local_norm)),
+        ),
+    )
+    best_norm_lora = _normalize_prompt_text_for_match(best_raw, strip_lora_tags=True)
+    return {
+        "closest_path": best_path,
+        "raw_equal": local_raw == best_raw,
+        "normalized_equal": local_norm == best_norm,
+        "normalized_equal_lora_stripped": local_norm_lora == best_norm_lora,
+        "local_length": len(local_raw),
+        "expected_length": len(best_raw),
+        "first_diff": _find_first_text_diff(local_raw, best_raw),
+    }
+
+
+def _is_parameter_like_workflow_path(path: str) -> bool:
+    text = str(path or "")
+    if not text:
+        return False
+    lowered = text.lower()
+    excluded_markers = [
+        ".id",
+        ".order",
+        ".link",
+        ".links[",
+    ]
+    return not any(marker in lowered for marker in excluded_markers)
+
+
+def _field_value_matches_expected(field_name: str, local_value: Any, expected_value: Any) -> bool:
+    if _is_missing_process_value(local_value) or _is_missing_process_value(expected_value):
+        return False
+
+    if field_name == "sampler_name":
+        local_norm = _normalize_sampler_name_for_comfy(local_value).get("normalized")
+        expected_norm = _normalize_sampler_name_for_comfy(expected_value).get("normalized")
+        return bool(local_norm and expected_norm and str(local_norm).lower() == str(expected_norm).lower())
+
+    if field_name == "scheduler_name":
+        local_norm = _normalize_scheduler_name_for_comfy(local_value)
+        expected_norm = _normalize_scheduler_name_for_comfy(expected_value)
+        return bool(local_norm and expected_norm and local_norm == expected_norm)
+
+    if field_name == "model":
+        local_norm = _normalize_model_name_key(local_value)
+        expected_norm = _normalize_model_name_key(expected_value)
+        if not local_norm or not expected_norm:
+            return False
+        if local_norm == expected_norm:
+            return True
+        return local_norm in expected_norm or expected_norm in local_norm
+
+    if field_name == "model_hash":
+        local_tokens = _extract_hex_hash_tokens(local_value)
+        expected_tokens = _extract_hex_hash_tokens(expected_value)
+        return _hash_token_sets_match(local_tokens, expected_tokens)
+
+    if field_name in {"prompt_positive", "prompt_negative"}:
+        local_norm = _normalize_prompt_text_for_match(local_value)
+        expected_norm = _normalize_prompt_text_for_match(expected_value)
+        if local_norm and expected_norm and local_norm == expected_norm:
+            return True
+        local_norm_lora = _normalize_prompt_text_for_match(local_value, strip_lora_tags=True)
+        expected_norm_lora = _normalize_prompt_text_for_match(expected_value, strip_lora_tags=True)
+        return bool(local_norm_lora and expected_norm_lora and local_norm_lora == expected_norm_lora)
+
+    local_num = _to_float(local_value)
+    expected_num = _to_float(expected_value)
+    if local_num is not None and expected_num is not None:
+        return abs(local_num - expected_num) <= 1e-6
+
+    local_text = str(local_value or "").strip().casefold()
+    expected_text = str(expected_value or "").strip().casefold()
+    if not local_text or not expected_text:
+        return False
+    return local_text == expected_text
+
+
+def _extract_expected_workflow_parameters(workflow_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    nodes = workflow_payload.get("nodes")
+    if not isinstance(nodes, list):
+        return results
+
+    for idx, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or node.get("type") or "").strip()
+        class_key = class_type.lower()
+        widgets = node.get("widgets_values") if isinstance(node.get("widgets_values"), list) else []
+
+        def _add(field: str, widget_index: int, key_name: str) -> None:
+            if widget_index >= len(widgets):
+                return
+            value = widgets[widget_index]
+            if _is_missing_process_value(value):
+                return
+            results.append({
+                "field": field,
+                "expected_value": value,
+                "node_class": class_type or "unknown",
+                "path": f"nodes[{idx}].widgets_values[{widget_index}]",
+                "key": key_name,
+            })
+
+        if "ksampler" in class_key:
+            _add("sampler_name", 4, "sampler")
+            _add("scheduler_name", 5, "scheduler")
+            _add("denoise", 6, "denoise")
+        if "checkpointloader" in class_key:
+            _add("model", 0, "ckpt_name")
+        if class_key == "vaeloader":
+            _add("vae_name", 0, "vae_name")
+
+    return results
+
+
+def _build_semantic_workflow_match_buckets(
+    canonical_fields: dict[str, Any],
+    workflow_payload: dict[str, Any],
+    *,
+    model_hash_evidence: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    flattened = _flatten_json_scalars(workflow_payload)
+    parameter_scalars = [
+        (path, value)
+        for path, value in flattened.items()
+        if _is_parameter_like_workflow_path(path)
+    ]
+
+    local_fields = {
+        "prompt_positive": canonical_fields.get("prompt_positive"),
+        "prompt_negative": canonical_fields.get("prompt_negative"),
+        "sampler_name": canonical_fields.get("sampler_name"),
+        "scheduler_name": canonical_fields.get("scheduler_name"),
+        "seed": canonical_fields.get("seed"),
+        "steps": canonical_fields.get("steps"),
+        "cfg_scale": canonical_fields.get("cfg_scale"),
+        "width": canonical_fields.get("width"),
+        "height": canonical_fields.get("height"),
+        "denoise": canonical_fields.get("denoise"),
+        "clip_skip": canonical_fields.get("clip_skip"),
+        "model": canonical_fields.get("model"),
+        "model_hash": canonical_fields.get("model_hash"),
+    }
+
+    matched: list[dict[str, Any]] = []
+    did_not_match: list[dict[str, Any]] = []
+    matched_field_names: set[str] = set()
+    for field_name, local_value in local_fields.items():
+        if _is_missing_process_value(local_value):
+            continue
+        match_paths = [
+            path
+            for path, expected_value in parameter_scalars
+            if _field_value_matches_expected(field_name, local_value, expected_value)
+        ]
+        if match_paths:
+            matched_field_names.add(field_name)
+            matched.append({
+                "field": field_name,
+                "local_value": local_value,
+                "match_reason": "semantic_match",
+                "match_count": len(match_paths),
+                "path_samples": match_paths[:10],
+            })
+        elif field_name == "model_hash" and isinstance(model_hash_evidence, dict) and model_hash_evidence.get("confirmed_exact_match"):
+            matched_field_names.add(field_name)
+            evidence_sources = _list_payload(model_hash_evidence.get("sources"))
+            tier = str(model_hash_evidence.get("confirmation_tier") or "unknown")
+            cross_detail = model_hash_evidence.get("cross_source_detail")
+            matched.append({
+                "field": field_name,
+                "local_value": local_value,
+                "match_reason": f"validated_by_external_model_hash_evidence:{tier}",
+                "confirmation_tier": tier,
+                "match_count": max(1, len(evidence_sources)),
+                "path_samples": [
+                    str(item.get("source") or "external_model_hash")
+                    for item in evidence_sources[:10]
+                    if isinstance(item, dict)
+                ] or ["external_model_hash"],
+                "cross_source_detail": cross_detail,
+                "evidence": model_hash_evidence,
+            })
+        else:
+            mismatch_entry = {
+                "field": field_name,
+                "local_value": local_value,
+                "match_reason": "no_semantic_match_found",
+                "match_count": 0,
+                "path_samples": [],
+            }
+            if field_name in {"prompt_positive", "prompt_negative"}:
+                mismatch_entry["prompt_diagnostics"] = _build_prompt_mismatch_diagnostics(local_value, parameter_scalars)
+            did_not_match.append(mismatch_entry)
+
+    expected_params = _extract_expected_workflow_parameters(workflow_payload)
+    mismatched: list[dict[str, Any]] = []
+    unmatched_expected_parameters: list[dict[str, Any]] = []
+    for expected in expected_params:
+        field_name = str(expected.get("field") or "").strip()
+        expected_value = expected.get("expected_value")
+        local_value = local_fields.get(field_name)
+        if _is_missing_process_value(local_value):
+            unmatched_expected_parameters.append({
+                **expected,
+                "reason": "no_local_candidate_value",
+            })
+            continue
+        if _field_value_matches_expected(field_name, local_value, expected_value):
+            continue
+        mismatched.append({
+            "field": field_name,
+            "local_value": local_value,
+            "expected_value": expected_value,
+            "node_class": expected.get("node_class"),
+            "path": expected.get("path"),
+            "reason": "field_value_differs_from_expected_workflow",
+        })
+
+    return {
+        "counts": {
+            "matched": len(matched),
+            "mismatched": len(mismatched),
+            "did_not_match": len(did_not_match),
+            "unmatched_expected_parameters": len(unmatched_expected_parameters),
+        },
+        "matched": matched,
+        "mismatched": mismatched,
+        "did_not_match": did_not_match,
+        "unmatched_expected_parameters": unmatched_expected_parameters,
+        "expected_workflow_parameter_samples": expected_params[:25],
+    }
+
+
+def _build_parity_candidate_audit(
+    *,
+    file_hash: str,
+    parse_payload: dict[str, Any],
+    provided_workflow_json: dict[str, Any],
+    provided_workflow_supplied: bool,
+    model_hash_evidence: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    parsed_fields = _dict_payload(parse_payload.get("parsed_fields"))
+    positive_prompt = str(parse_payload.get("positive_prompt") or "").strip()
+    negative_prompt = str(parse_payload.get("negative_prompt") or "").strip()
+    lora_tags = _list_payload(parse_payload.get("lora_tags"))
+
+    sampler_info = _normalize_sampler_name_for_comfy(parsed_fields.get("sampler"))
+    canonical_fields = {
+        "prompt_positive": positive_prompt or None,
+        "prompt_negative": negative_prompt or None,
+        "sampler_name": sampler_info.get("normalized"),
+        "scheduler_name": parsed_fields.get("scheduler"),
+        "seed": parsed_fields.get("seed"),
+        "steps": parsed_fields.get("steps"),
+        "cfg_scale": parsed_fields.get("cfg_scale"),
+        "width": parsed_fields.get("width"),
+        "height": parsed_fields.get("height"),
+        "denoise": parsed_fields.get("denoising_strength"),
+        "clip_skip": parsed_fields.get("clip_skip"),
+        "model": parsed_fields.get("model"),
+        "model_hash": parsed_fields.get("model_hash"),
+        "lora_tags": lora_tags,
+    }
+
+    required_field_names = [
+        "prompt_positive",
+        "sampler_name",
+        "seed",
+        "steps",
+        "cfg_scale",
+        "width",
+        "height",
+        "model",
+    ]
+    missing_fields = [
+        field_name
+        for field_name in required_field_names
+        if _is_missing_process_value(canonical_fields.get(field_name))
+    ]
+
+    warnings = [str(item) for item in _list_payload(parse_payload.get("warnings")) if str(item).strip()]
+    capability_signals = _build_a1111_capability_signals(parse_payload)
+    mapping_notes = _list_payload(sampler_info.get("notes"))
+    conflicts: list[dict[str, Any]] = []
+
+    field_alignment = None
+    structural = None
+    semantic_workflow_match = None
+    if provided_workflow_supplied and provided_workflow_json:
+        field_alignment = _build_a1111_field_alignment(canonical_fields, provided_workflow_json)
+        structural = _compare_json_scalar_structures(parsed_fields, provided_workflow_json)
+        semantic_workflow_match = _build_semantic_workflow_match_buckets(
+            canonical_fields,
+            provided_workflow_json,
+            model_hash_evidence=model_hash_evidence,
+        )
+        alignment_score = float(field_alignment.get("alignment_score") or 0.0)
+        if alignment_score < 0.35:
+            conflicts.append({
+                "type": "low_alignment",
+                "message": "Parsed A1111 fields align weakly with provided workflow values.",
+                "alignment_score": alignment_score,
+            })
+
+    classification = "generatable_now"
+    if not positive_prompt and not parsed_fields:
+        classification = "non_generatable_missing_generation_data"
+    elif len(missing_fields) >= 4:
+        classification = "needs_manual_intervention"
+    elif len(missing_fields) > 0:
+        classification = "generatable_with_inference"
+
+    if _list_payload(capability_signals.get("unsupported_features")):
+        classification = "needs_manual_intervention"
+        conflicts.append({
+            "type": "unsupported_a1111_processing",
+            "message": "Detected A1111 processing that is not currently emulated in Comfy parity workflows.",
+            "unsupported_features": _list_payload(capability_signals.get("unsupported_features")),
+        })
+
+    return {
+        "ok": True,
+        "mode": "parity_candidate_audit",
+        "target": {
+            "file_hash": file_hash,
+        },
+        "candidate": {
+            "parsed_fields": parsed_fields,
+            "canonical_fields": canonical_fields,
+            "missing_required_fields": missing_fields,
+            "mapping_notes": mapping_notes,
+            "warnings": warnings,
+            "conflicts": conflicts,
+            "capability_signals": capability_signals,
+            "classification": classification,
+        },
+        "comparison": {
+            "provided_workflow_supplied": provided_workflow_supplied,
+            "field_alignment": field_alignment,
+            "structural": structural,
+            "workflow_match_buckets_semantic": semantic_workflow_match,
+            "model_hash_evidence": model_hash_evidence,
+        },
+    }
+
+
+def _build_model_hash_evidence_for_parity(
+    *,
+    image: ImageModel,
+    canonical_model: Any,
+    canonical_model_hash: Any,
+    include_non_prefix_local_reference_matches: bool = False,
+) -> dict[str, Any]:
+    local_hash_tokens = _extract_hex_hash_tokens(canonical_model_hash)
+    canonical_model_key = _normalize_model_name_key(canonical_model)
+    source_evidence: list[dict[str, Any]] = []
+
+    def _model_keys_compatible(left: Any, right: Any) -> bool:
+        left_key = _normalize_model_name_key(left)
+        right_key = _normalize_model_name_key(right)
+        if not left_key or not right_key:
+            return False
+        return (
+            left_key == right_key
+            or left_key in right_key
+            or right_key in left_key
+        )
+
+    civitai_image_id: Optional[int] = None
+    source_url = str(image.source_url or "").strip()
+    if source_url:
+        try:
+            url_type, parsed_id = _detect_civitai_url_type(source_url)
+            if url_type == "image":
+                civitai_image_id = int(parsed_id)
+        except Exception:
+            civitai_image_id = None
+
+    if civitai_image_id is not None:
+        try:
+            civitai_payload = _build_generation_prototype_civitai_payload(civitai_image_id)
+
+            raw_payload = _dict_payload(civitai_payload.get("raw"))
+            generation_data = _dict_payload(raw_payload.get("generation_data"))
+            meta_payload = _dict_payload(generation_data.get("meta"))
+
+            civitai_hash_tokens: set[str] = set()
+            civitai_model_name_candidates: set[str] = set()
+
+            civitai_hash_tokens.update(_extract_hex_hash_tokens(meta_payload.get("Model hash")))
+            civitai_hash_tokens.update(_extract_hex_hash_tokens(_dict_payload(meta_payload.get("hashes")).get("model")))
+
+            meta_model_name = str(meta_payload.get("Model") or "").strip()
+            if meta_model_name:
+                civitai_model_name_candidates.add(meta_model_name)
+
+            civitai_model_id_candidates: set[int] = set()
+            civitai_model_version_id_candidates: set[int] = set()
+
+            for resource in _list_payload(meta_payload.get("resources")):
+                if not isinstance(resource, dict):
+                    continue
+                resource_type = str(resource.get("type") or "").strip().lower()
+                if resource_type and resource_type not in {"model", "checkpoint"}:
+                    continue
+                civitai_hash_tokens.update(_extract_hex_hash_tokens(resource.get("hash")))
+                resource_name = str(resource.get("name") or "").strip()
+                if resource_name:
+                    civitai_model_name_candidates.add(resource_name)
+                rid = _coerce_optional_int(resource.get("modelId"))
+                if rid is not None:
+                    civitai_model_id_candidates.add(rid)
+                vid = _coerce_optional_int(resource.get("modelVersionId"))
+                if vid is not None:
+                    civitai_model_version_id_candidates.add(vid)
+
+            # Extract IDs from URN-style Model field (e.g. "urn:air:sdxl:checkpoint:civitai:1342490@2568276")
+            air_ids = _parse_civitai_air_identifier(meta_payload.get("Model"))
+            if air_ids:
+                if air_ids.get("civitai_model_id") is not None:
+                    civitai_model_id_candidates.add(air_ids["civitai_model_id"])
+                if air_ids.get("civitai_model_version_id") is not None:
+                    civitai_model_version_id_candidates.add(air_ids["civitai_model_version_id"])
+
+            # Extract IDs from civitaiResources entries (modelVersionId only)
+            for civ_res in _list_payload(meta_payload.get("civitaiResources")):
+                if not isinstance(civ_res, dict):
+                    continue
+                res_type = str(civ_res.get("type") or "").strip().lower()
+                if res_type and res_type not in {"model", "checkpoint", ""}:
+                    continue
+                cr_vid = _coerce_optional_int(civ_res.get("modelVersionId"))
+                if cr_vid is not None:
+                    civitai_model_version_id_candidates.add(cr_vid)
+
+            # Fallback: parse user-comment style metadata if direct meta extraction is sparse.
+            if not civitai_hash_tokens:
+                civitai_candidates = _extract_a1111_user_comment_candidates(civitai_payload)
+                civitai_preferred = next(
+                    (
+                        candidate
+                        for candidate in civitai_candidates
+                        if _looks_like_a1111_user_comment(str(candidate.get("text") or ""))
+                    ),
+                    civitai_candidates[0] if civitai_candidates else None,
+                )
+                civitai_parse = _parse_a1111_user_comment(str(civitai_preferred.get("text") or "")) if civitai_preferred else {}
+                civitai_fields = _dict_payload(civitai_parse.get("parsed_fields"))
+                civitai_hash_tokens.update(_extract_hex_hash_tokens(civitai_fields.get("model_hash")))
+                parsed_model_name = str(civitai_fields.get("model") or "").strip()
+                if parsed_model_name:
+                    civitai_model_name_candidates.add(parsed_model_name)
+
+            model_name_compatible = False
+            for candidate_name in civitai_model_name_candidates:
+                candidate_key = _normalize_model_name_key(candidate_name)
+                if not canonical_model_key or not candidate_key:
+                    continue
+                if (
+                    canonical_model_key == candidate_key
+                    or canonical_model_key in candidate_key
+                    or candidate_key in canonical_model_key
+                ):
+                    model_name_compatible = True
+                    break
+
+            source_evidence.append({
+                "source": "civitai_metadata",
+                "model": sorted(civitai_model_name_candidates)[0] if civitai_model_name_candidates else None,
+                "hash_tokens": sorted(civitai_hash_tokens),
+                "model_name_candidates": sorted(civitai_model_name_candidates),
+                "model_name_compatible": model_name_compatible,
+                "hash_prefix_match": _hash_token_sets_match(local_hash_tokens, civitai_hash_tokens),
+                "civitai_model_ids": sorted(civitai_model_id_candidates) if civitai_model_id_candidates else None,
+                "civitai_model_version_ids": sorted(civitai_model_version_id_candidates) if civitai_model_version_id_candidates else None,
+                "evidence_paths": [
+                    "raw.generation_data.meta.Model hash",
+                    "raw.generation_data.meta.hashes.model",
+                    "raw.generation_data.meta.resources[*].hash",
+                    "raw.generation_data.meta.resources[*].modelId",
+                    "raw.generation_data.meta.resources[*].modelVersionId",
+                    "raw.generation_data.meta.Model",
+                    "raw.generation_data.meta.civitaiResources[*].modelVersionId",
+                ],
+            })
+        except Exception as exc:
+            source_evidence.append({
+                "source": "civitai_metadata",
+                "error": str(exc),
+            })
+
+    try:
+        local_catalog = model_reference_service.fetch_local_catalog()
+        if isinstance(local_catalog, dict) and isinstance(local_catalog.get("entries"), list):
+            local_generation_payload = _build_generation_prototype_local_payload(image)
+            extracted_references = model_reference_service.extract_references_from_generation_payload(local_generation_payload)
+            matched_references = model_reference_service.apply_local_catalog_matches(extracted_references, local_catalog)
+
+            for reference in matched_references:
+                if not isinstance(reference, dict):
+                    continue
+                reference_type = str(reference.get("resource_type") or "").strip().lower()
+                if reference_type not in {"checkpoint", "model"}:
+                    continue
+                local_matches = _list_payload(reference.get("local_matches"))
+                if not local_matches:
+                    continue
+
+                reference_name_candidates = [
+                    reference.get("display_name"),
+                    reference.get("version_name"),
+                    reference.get("model_name"),
+                    reference.get("source_identifier"),
+                ]
+                reference_model_id = reference.get("civitai_model_id")
+                reference_version_id = reference.get("civitai_model_version_id")
+
+                for match in local_matches:
+                    if not isinstance(match, dict):
+                        continue
+                    match_hash_tokens = _extract_hex_hash_tokens(match.get("hashes"))
+                    if not match_hash_tokens:
+                        continue
+
+                    hash_prefix_match = _hash_token_sets_match(local_hash_tokens, match_hash_tokens)
+                    if not hash_prefix_match and not include_non_prefix_local_reference_matches:
+                        continue
+
+                    match_name_candidates = [
+                        match.get("display_name"),
+                        match.get("model_name"),
+                        match.get("version_name"),
+                        match.get("file_name"),
+                        match.get("source_identifier"),
+                    ]
+
+                    model_name_compatible = any(
+                        _model_keys_compatible(canonical_model_key, candidate)
+                        for candidate in [*match_name_candidates, *reference_name_candidates]
+                    )
+
+                    ids_compatible = False
+                    match_model_id = match.get("civitai_model_id")
+                    match_version_id = match.get("civitai_model_version_id")
+                    if reference_version_id is not None and match_version_id is not None:
+                        ids_compatible = int(reference_version_id) == int(match_version_id)
+                    elif reference_model_id is not None and match_model_id is not None:
+                        ids_compatible = int(reference_model_id) == int(match_model_id)
+
+                    source_evidence.append({
+                        "source": "local_reference_match",
+                        "resource_type": reference_type,
+                        "reference_display_name": reference.get("display_name"),
+                        "display_name": match.get("display_name"),
+                        "model_name": match.get("model_name"),
+                        "version_name": match.get("version_name"),
+                        "file_name": match.get("file_name"),
+                        "file_path": match.get("file_path"),
+                        "match_basis": match.get("match_basis"),
+                        "civitai_model_id": match_model_id,
+                        "civitai_model_version_id": match_version_id,
+                        "hash_tokens": sorted(match_hash_tokens),
+                        "model_name_compatible": bool(model_name_compatible or ids_compatible),
+                        "hash_prefix_match": hash_prefix_match,
+                        "evidence_paths": [
+                            "normalized.references[*].local_matches[*].hashes",
+                        ],
+                    })
+
+            for entry in local_catalog.get("entries") or []:
+                if not isinstance(entry, dict):
+                    continue
+                entry_model_key = _normalize_model_name_key(
+                    entry.get("model_name")
+                    or entry.get("version_name")
+                    or entry.get("display_name")
+                    or entry.get("source_identifier")
+                )
+                if not canonical_model_key or not entry_model_key:
+                    continue
+                if not (
+                    _model_keys_compatible(canonical_model_key, entry_model_key)
+                ):
+                    continue
+                entry_hashes = set(str(item).strip().lower() for item in _list_payload(entry.get("hashes")))
+                if not entry_hashes:
+                    continue
+                entry_hash_prefix_match = _hash_token_sets_match(local_hash_tokens, entry_hashes)
+                if not entry_hash_prefix_match and not include_non_prefix_local_reference_matches:
+                    continue
+                source_evidence.append({
+                    "source": "local_catalog",
+                    "display_name": entry.get("display_name"),
+                    "model_name": entry.get("model_name"),
+                    "version_name": entry.get("version_name"),
+                    "civitai_model_id": entry.get("civitai_model_id"),
+                    "civitai_model_version_id": entry.get("civitai_model_version_id"),
+                    "hash_tokens": sorted(entry_hashes),
+                    "model_name_compatible": True,
+                    "hash_prefix_match": entry_hash_prefix_match,
+                })
+    except Exception as exc:
+        source_evidence.append({
+            "source": "local_catalog",
+            "error": str(exc),
+        })
+
+    # Tier 1: Same-source confirmation — a single source has both
+    # model_name_compatible and hash_prefix_match.
+    confirmed_tier_1 = any(
+        isinstance(item, dict)
+        and item.get("model_name_compatible")
+        and item.get("hash_prefix_match")
+        for item in source_evidence
+    )
+
+    # Tier 2: Cross-source confirmation — one source provides hash_prefix_match
+    # and another source provides matching CivitAI model/version IDs.
+    confirmed_tier_2 = False
+    cross_source_detail: list[str] = []
+    if not confirmed_tier_1:
+        sources_with_hash_match = [
+            item for item in source_evidence
+            if isinstance(item, dict) and item.get("hash_prefix_match")
+        ]
+        sources_with_ids: list[dict[str, Any]] = []
+        for item in source_evidence:
+            if not isinstance(item, dict):
+                continue
+            item_mids: list[Any] = list(item.get("civitai_model_ids") or [])
+            item_vids: list[Any] = list(item.get("civitai_model_version_ids") or [])
+            if item.get("civitai_model_id") is not None:
+                item_mids.append(item["civitai_model_id"])
+            if item.get("civitai_model_version_id") is not None:
+                item_vids.append(item["civitai_model_version_id"])
+            if item_mids or item_vids:
+                sources_with_ids.append({
+                    "source_label": str(item.get("source") or "unknown"),
+                    "model_ids": sorted(set(int(x) for x in item_mids if x is not None)),
+                    "version_ids": sorted(set(int(x) for x in item_vids if x is not None)),
+                })
+
+        if sources_with_hash_match and sources_with_ids:
+            # Collect any IDs present on hash-match sources themselves.
+            all_hash_match_ids_m: set[int] = set()
+            all_hash_match_ids_v: set[int] = set()
+            for hm in sources_with_hash_match:
+                for mid in _list_payload(hm.get("civitai_model_ids")) or []:
+                    if isinstance(mid, (int, float)):
+                        all_hash_match_ids_m.add(int(mid))
+                for vid in _list_payload(hm.get("civitai_model_version_ids")) or []:
+                    if isinstance(vid, (int, float)):
+                        all_hash_match_ids_v.add(int(vid))
+                if hm.get("civitai_model_id") is not None:
+                    all_hash_match_ids_m.add(int(hm["civitai_model_id"]))
+                if hm.get("civitai_model_version_id") is not None:
+                    all_hash_match_ids_v.add(int(hm["civitai_model_version_id"]))
+
+            # Sub-case A: Hash-match sources carry IDs that overlap with
+            # IDs from a separate source (e.g. CivitAI metadata provides
+            # model_id/version_id, and local_reference_match has the same IDs
+            # plus a hash_prefix_match).
+            for id_source in sources_with_ids:
+                if id_source["model_ids"] and all_hash_match_ids_m:
+                    shared_m = set(id_source["model_ids"]) & all_hash_match_ids_m
+                    if shared_m:
+                        confirmed_tier_2 = True
+                        cross_source_detail.append(
+                            f"model_id overlap: {sorted(shared_m)} "
+                            f"(hash_match sources + {id_source['source_label']})"
+                        )
+                if id_source["version_ids"] and all_hash_match_ids_v:
+                    shared_v = set(id_source["version_ids"]) & all_hash_match_ids_v
+                    if shared_v:
+                        confirmed_tier_2 = True
+                        cross_source_detail.append(
+                            f"version_id overlap: {sorted(shared_v)} "
+                            f"(hash_match sources + {id_source['source_label']})"
+                        )
+
+            # Sub-case B: Hash-match sources have no IDs but one source with
+            # IDs also provides model_name_compatible, giving contextual
+            # confidence that the hash match refers to the same model.
+            if not confirmed_tier_2 and not all_hash_match_ids_m and not all_hash_match_ids_v:
+                for id_src in sources_with_ids:
+                    id_label = id_src["source_label"]
+                    for ev in source_evidence:
+                        if not isinstance(ev, dict):
+                            continue
+                        if str(ev.get("source") or "") != id_label:
+                            continue
+                        if ev.get("model_name_compatible") and not ev.get("hash_prefix_match"):
+                            # This source has name context + IDs; hash-match
+                            # source provides the hash evidence.
+                            confirmed_tier_2 = True
+                            cross_source_detail.append(
+                                f"name_compat+ids from {id_label} + "
+                                f"hash_prefix_match from "
+                                f"{sources_with_hash_match[0].get('source') if sources_with_hash_match else 'unknown'}"
+                            )
+                            break
+                    if confirmed_tier_2:
+                        break
+
+    confirmed_exact = confirmed_tier_1 or confirmed_tier_2
+    confirmation_tier = (
+        "same_source" if confirmed_tier_1
+        else "cross_source" if confirmed_tier_2
+        else None
+    )
+
+    return {
+        "local_model": canonical_model,
+        "local_model_hash": canonical_model_hash,
+        "local_hash_tokens": sorted(local_hash_tokens),
+        "confirmed_exact_match": bool(confirmed_exact),
+        "confirmation_tier": confirmation_tier,
+        "cross_source_detail": cross_source_detail if cross_source_detail else None,
+        "sources": source_evidence,
     }
 
 
@@ -10825,24 +11990,7 @@ def analyze_a1111_bridge(
     generation_payload, exif_refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
 
     user_comment_candidates = _extract_a1111_user_comment_candidates(generation_payload)
-    preferred_candidate = next(
-        (
-            candidate
-            for candidate in user_comment_candidates
-            if _looks_like_a1111_user_comment(str(candidate.get("text") or ""))
-        ),
-        user_comment_candidates[0] if user_comment_candidates else None,
-    )
-
-    parse_payload = _parse_a1111_user_comment(str(preferred_candidate.get("text") or "")) if preferred_candidate else {
-        "raw_text": "",
-        "positive_prompt": "",
-        "negative_prompt": "",
-        "parameters": {},
-        "lora_tags": [],
-        "parsed_fields": {},
-        "warnings": ["No A1111 user_comment/parameters metadata was found in local payloads."],
-    }
+    parse_payload, preferred_candidate = _build_authoritative_a1111_parse_payload(user_comment_candidates)
 
     comfy_export = _build_generation_comfy_workspace_export_payload(
         generation_payload,
@@ -10905,6 +12053,62 @@ def analyze_a1111_bridge(
     if request.include_generation_payload:
         response_payload["generation_payload"] = generation_payload
     return response_payload
+
+
+@app.post("/generation-prototype/parity-workbench/candidate-audit", response_model=dict)
+def analyze_parity_candidate(
+    request: ParityCandidateAuditRequest,
+    db: Session = Depends(get_db),
+):
+    file_hash = str(request.file_hash or "").strip()
+    if not file_hash:
+        raise HTTPException(status_code=422, detail="file_hash is required.")
+
+    image = (
+        db.query(ImageModel)
+        .filter(ImageModel.file_hash == file_hash)
+        .filter(_active_image_filter())
+        .first()
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found.")
+
+    generation_payload = _build_generation_prototype_local_payload(image)
+    generation_payload, exif_refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+
+    user_comment_candidates = _extract_a1111_user_comment_candidates(generation_payload)
+    parse_payload, preferred_candidate = _build_authoritative_a1111_parse_payload(user_comment_candidates)
+
+    provided_workflow_json = _dict_payload(request.comfy_workflow_json)
+    provided_workflow_supplied = request.comfy_workflow_json is not None
+
+    audit = _build_parity_candidate_audit(
+        file_hash=file_hash,
+        parse_payload=parse_payload,
+        provided_workflow_json=provided_workflow_json,
+        provided_workflow_supplied=provided_workflow_supplied,
+        model_hash_evidence=_build_model_hash_evidence_for_parity(
+            image=image,
+            canonical_model=_dict_payload(parse_payload.get("parsed_fields")).get("model"),
+            canonical_model_hash=_dict_payload(parse_payload.get("parsed_fields")).get("model_hash"),
+            include_non_prefix_local_reference_matches=bool(
+                request.include_non_prefix_local_reference_hash_evidence
+            ),
+        ),
+    )
+
+    audit["candidate"]["warnings"] = [
+        *[str(item) for item in _list_payload(audit["candidate"].get("warnings")) if str(item).strip()],
+        *[str(item) for item in exif_refresh_warnings if str(item).strip()],
+    ]
+    audit["user_comment"] = {
+        "source": preferred_candidate.get("source") if preferred_candidate else None,
+        "candidate_count": len(user_comment_candidates),
+        "parsed": parse_payload,
+    }
+    if request.include_generation_payload:
+        audit["generation_payload"] = generation_payload
+    return audit
 
 
 @app.post("/generation-prototype/a1111-bridge/save-analysis", response_model=dict)
@@ -11089,6 +12293,74 @@ def generate_and_compare_comfy_workspace(
     reference_file_hash = str(payload.reference_file_hash or "").strip()
     if not reference_file_hash:
         raise HTTPException(status_code=422, detail="reference_file_hash is required.")
+
+    threshold_override = payload.match_threshold_override
+    threshold_source = "default"
+    if threshold_override is not None:
+        close_enough_similarity_threshold = max(0.0, min(1.0, float(threshold_override)))
+        threshold_source = "request_override"
+
+    tweak_label = str(payload.tweak_label or "").strip() or None
+    tweak_parameters = _dict_payload(payload.tweaked_parameters)
+
+    next_attempt_index = (
+        int(
+            db.query(func.max(GenerationMatchAttempt.attempt_index))
+            .filter(GenerationMatchAttempt.reference_file_hash == reference_file_hash)
+            .scalar()
+            or 0
+        )
+        + 1
+    )
+
+    def _persist_generation_match_attempt(
+        *,
+        prompt_id_value: Optional[str],
+        outputs_value: list[dict[str, Any]],
+        best_match_value: Optional[dict[str, Any]],
+        best_similarity_value: Optional[float],
+        is_matched_value: bool,
+        is_fundamental_issue_value: bool,
+        notes_value: Optional[str],
+        error_message_value: Optional[str],
+    ) -> None:
+        try:
+            best_phash_distance = None
+            best_output_filename = None
+            if isinstance(best_match_value, dict):
+                best_output_filename = str(best_match_value.get("filename") or "").strip() or None
+                distance_raw = _dict_payload(best_match_value.get("phash")).get("distance")
+                try:
+                    best_phash_distance = int(distance_raw) if distance_raw is not None else None
+                except (TypeError, ValueError):
+                    best_phash_distance = None
+
+            attempt = GenerationMatchAttempt(
+                reference_file_hash=reference_file_hash,
+                comfy_prompt_id=(str(prompt_id_value or "").strip() or None),
+                attempt_index=next_attempt_index,
+                tweak_label=tweak_label,
+                tweak_parameters_json=_clone_json_value(tweak_parameters),
+                effective_parameters_json={
+                    "include_all_workspace_images": include_all_workspace_images,
+                    "threshold": close_enough_similarity_threshold,
+                    "threshold_source": threshold_source,
+                },
+                generated_outputs_json=_clone_json_value(outputs_value),
+                best_output_filename=best_output_filename,
+                best_phash_distance=best_phash_distance,
+                best_similarity=best_similarity_value,
+                threshold_used=close_enough_similarity_threshold,
+                is_matched=is_matched_value,
+                is_fundamental_generation_issue=is_fundamental_issue_value,
+                notes=notes_value,
+                error_message=error_message_value,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(attempt)
+            db.commit()
+        except Exception:
+            db.rollback()
     reference_image = _get_image_or_404(db, reference_file_hash)
     reference_path = _resolve_image_library_path(reference_image)
     if not reference_path.exists() or not reference_path.is_file():
@@ -11206,13 +12478,24 @@ def generate_and_compare_comfy_workspace(
                 used_cache_bust_retry = True
 
         if not generated_items:
+            failure_detail = (
+                "ComfyUI run produced zero image outputs. "
+                f"status={status_text}. Ensure your prompt graph includes SaveImage output nodes. "
+                f"prompt_id={prompt_id}. messages={status_messages}"
+            )
+            _persist_generation_match_attempt(
+                prompt_id_value=prompt_id,
+                outputs_value=[],
+                best_match_value=None,
+                best_similarity_value=None,
+                is_matched_value=False,
+                is_fundamental_issue_value=True,
+                notes_value="No outputs generated from Comfy run.",
+                error_message_value=failure_detail,
+            )
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    "ComfyUI run produced zero image outputs. "
-                    f"status={status_text}. Ensure your prompt graph includes SaveImage output nodes. "
-                    f"prompt_id={prompt_id}. messages={status_messages}"
-                ),
+                detail=failure_detail,
             )
 
     selected_items = list(generated_items)
@@ -11292,10 +12575,22 @@ def generate_and_compare_comfy_workspace(
     except (TypeError, ValueError):
         best_similarity = None
     is_close_enough = bool(best_similarity is not None and best_similarity >= close_enough_similarity_threshold)
+    is_fundamental_issue = not is_close_enough
 
     status_obj = _dict_payload(history_entry.get("status"))
     completed = bool(status_obj.get("completed"))
     status_text = str(status_obj.get("status_str") or status_value or "unknown")
+
+    _persist_generation_match_attempt(
+        prompt_id_value=prompt_id,
+        outputs_value=results,
+        best_match_value=best_match if isinstance(best_match, dict) else None,
+        best_similarity_value=best_similarity,
+        is_matched_value=is_close_enough,
+        is_fundamental_issue_value=is_fundamental_issue,
+        notes_value="Matched threshold" if is_close_enough else "Below match threshold",
+        error_message_value=None,
+    )
 
     return {
         "ok": completed and bool(results),
@@ -11327,6 +12622,9 @@ def generate_and_compare_comfy_workspace(
             "best_similarity": round(best_similarity, 6) if best_similarity is not None else None,
             "close_enough": is_close_enough,
             "close_enough_threshold": close_enough_similarity_threshold,
+            "matched": is_close_enough,
+            "match_threshold": close_enough_similarity_threshold,
+            "fundamental_generation_issue": is_fundamental_issue,
             "fetch_errors": fetch_errors,
             "selection": {
                 "include_all_workspace_images": include_all_workspace_images,
@@ -11343,6 +12641,58 @@ def generate_and_compare_comfy_workspace(
         "history": {
             "outputs": _dict_payload(history_entry.get("outputs")),
         },
+    }
+
+
+@app.get("/generation-prototype/comfy/attempts", response_model=dict)
+def list_comfy_generation_match_attempts(
+    reference_file_hash: Optional[str] = Query(default=None),
+    only_fundamental_issues: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = db.query(GenerationMatchAttempt)
+    if reference_file_hash:
+        query = query.filter(GenerationMatchAttempt.reference_file_hash == str(reference_file_hash).strip())
+    if only_fundamental_issues:
+        query = query.filter(GenerationMatchAttempt.is_fundamental_generation_issue.is_(True))
+
+    total_count = int(query.count())
+    attempts = (
+        query
+        .order_by(GenerationMatchAttempt.created_at.desc(), GenerationMatchAttempt.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "ok": True,
+        "count": len(attempts),
+        "total_count": total_count,
+        "offset": offset,
+        "limit": limit,
+        "attempts": [
+            {
+                "id": attempt.id,
+                "reference_file_hash": attempt.reference_file_hash,
+                "comfy_prompt_id": attempt.comfy_prompt_id,
+                "attempt_index": attempt.attempt_index,
+                "tweak_label": attempt.tweak_label,
+                "tweak_parameters": _clone_json_value(_dict_payload(attempt.tweak_parameters_json)),
+                "best_output_filename": attempt.best_output_filename,
+                "best_phash_distance": attempt.best_phash_distance,
+                "best_similarity": attempt.best_similarity,
+                "threshold_used": attempt.threshold_used,
+                "matched": bool(attempt.is_matched),
+                "fundamental_generation_issue": bool(attempt.is_fundamental_generation_issue),
+                "notes": attempt.notes,
+                "error_message": attempt.error_message,
+                "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+            }
+            for attempt in attempts
+        ],
     }
 
 
@@ -12079,6 +13429,9 @@ def read_images(
     nsfw_safety: Optional[list[str]] = Query(default=None),
     artist_name: Optional[list[str]] = Query(default=None),
     collection_name: Optional[list[str]] = Query(default=None),
+    a1111_hires: Optional[list[str]] = Query(default=None),
+    a1111_regional_prompter: Optional[list[str]] = Query(default=None),
+    a1111_adetailer: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
@@ -12100,6 +13453,9 @@ def read_images(
             "nsfw_safety": _normalize_cache_list(nsfw_safety),
             "artist_name": _normalize_cache_list(artist_name),
             "collection_name": _normalize_cache_list(collection_name),
+            "a1111_hires": _normalize_cache_list(a1111_hires),
+            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
+            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
         },
     )
     cache_headers = _build_json_cache_headers(cache_key)
@@ -12126,6 +13482,9 @@ def read_images(
         nsfw_safety=nsfw_safety,
         artist_name=artist_name,
         collection_name=collection_name,
+        a1111_hires=a1111_hires,
+        a1111_regional_prompter=a1111_regional_prompter,
+        a1111_adetailer=a1111_adetailer,
         group_variants=group_variants,
     )
     filtered_count = len(display_items)
@@ -12175,6 +13534,9 @@ def read_image_keys(
     nsfw_safety: Optional[list[str]] = Query(default=None),
     artist_name: Optional[list[str]] = Query(default=None),
     collection_name: Optional[list[str]] = Query(default=None),
+    a1111_hires: Optional[list[str]] = Query(default=None),
+    a1111_regional_prompter: Optional[list[str]] = Query(default=None),
+    a1111_adetailer: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     cache_key = _build_search_cache_key(
@@ -12189,6 +13551,9 @@ def read_image_keys(
             "nsfw_safety": _normalize_cache_list(nsfw_safety),
             "artist_name": _normalize_cache_list(artist_name),
             "collection_name": _normalize_cache_list(collection_name),
+            "a1111_hires": _normalize_cache_list(a1111_hires),
+            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
+            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
         },
     )
     cache_headers = _build_json_cache_headers(cache_key)
@@ -12212,6 +13577,9 @@ def read_image_keys(
         nsfw_safety=nsfw_safety,
         artist_name=artist_name,
         collection_name=collection_name,
+        a1111_hires=a1111_hires,
+        a1111_regional_prompter=a1111_regional_prompter,
+        a1111_adetailer=a1111_adetailer,
         group_variants=group_variants,
     )
     keys = [str(item.get("gallery_item_key") or "") for item in display_items if item.get("gallery_item_key")]

@@ -929,6 +929,28 @@
     container.append(field);
   }
 
+  function toNumericId(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function hasExactLocalMatch(reference) {
+    if (!reference || typeof reference !== 'object') {
+      return false;
+    }
+    const referenceModelId = toNumericId(reference.civitai_model_id);
+    const referenceVersionId = toNumericId(reference.civitai_model_version_id);
+    if (referenceModelId === null || referenceVersionId === null) {
+      return false;
+    }
+    const localMatches = Array.isArray(reference.local_matches) ? reference.local_matches : [];
+    return localMatches.some((match) => {
+      const matchModelId = toNumericId(match?.civitai_model_id);
+      const matchVersionId = toNumericId(match?.civitai_model_version_id);
+      return matchModelId === referenceModelId && matchVersionId === referenceVersionId;
+    });
+  }
+
   function createReferenceCard(reference) {
     const card = document.createElement('article');
     card.className = 'reference-card';
@@ -980,21 +1002,7 @@
     const fields = document.createElement('div');
     fields.className = 'reference-fields';
     appendReferenceField(fields, 'Usage Count', reference.observation_count);
-    const primaryCivitaiModelUrl = String(reference?.civitai_url || '').trim()
-      || buildCivitaiModelUrl(reference?.civitai_model_id, reference?.civitai_model_version_id)
-      || (() => {
-        const firstMatchWithUrl = (reference.local_matches || []).find((match) => {
-          const matchUrl = String(match?.civitai_url || '').trim()
-            || buildCivitaiModelUrl(match?.civitai_model_id, match?.civitai_model_version_id);
-          return Boolean(matchUrl);
-        });
-        if (!firstMatchWithUrl) {
-          return '';
-        }
-        return String(firstMatchWithUrl.civitai_url || '').trim()
-          || buildCivitaiModelUrl(firstMatchWithUrl.civitai_model_id, firstMatchWithUrl.civitai_model_version_id)
-          || '';
-      })();
+    const primaryCivitaiModelUrl = buildCivitaiModelUrl(reference?.civitai_model_id, reference?.civitai_model_version_id) || '';
     appendSingleReferenceLinkField(fields, 'CIVITAI MODEL SOURCE', {
       label: primaryCivitaiModelUrl,
       url: primaryCivitaiModelUrl,
@@ -1003,12 +1011,12 @@
     appendReferenceField(fields, 'CivitAI Model ID', reference.civitai_model_id);
     appendReferenceField(fields, 'CivitAI Version ID', reference.civitai_model_version_id);
 
-    const canDownloadMissingLocal = !reference.local_installed
-      && Number.isFinite(Number(reference.civitai_model_id))
+    const canDownloadByIds = Number.isFinite(Number(reference.civitai_model_id))
       && Number(reference.civitai_model_id) > 0
       && Number.isFinite(Number(reference.civitai_model_version_id))
       && Number(reference.civitai_model_version_id) > 0;
-    if (canDownloadMissingLocal) {
+    const shouldOfferDownload = canDownloadByIds && !hasExactLocalMatch(reference);
+    if (shouldOfferDownload) {
       const downloadField = document.createElement('div');
       downloadField.className = 'reference-field reference-download-field';
 
@@ -1019,7 +1027,7 @@
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'reference-download-button';
-      button.textContent = 'Download via LoRA Manager';
+      button.textContent = 'Download with LoRA Manager';
       button.addEventListener('click', async () => {
         button.disabled = true;
         const originalText = button.textContent;
@@ -1038,13 +1046,13 @@
         } catch (error) {
           setStatus('is-error', 'Download failed', error instanceof Error ? error.message : String(error));
           button.disabled = false;
-          button.textContent = originalText || 'Download via LoRA Manager';
+          button.textContent = originalText || 'Download with LoRA Manager';
         }
       });
 
       const note = document.createElement('small');
       note.className = 'reference-download-note';
-      note.textContent = 'Only shown for references missing from local catalog with CivitAI model/version IDs.';
+      note.textContent = 'Shown when no exact local model/version match is found for this reference.';
 
       downloadField.append(button, note);
       fields.append(downloadField);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from threading import RLock
 from typing import Any, Optional
@@ -14,6 +15,11 @@ class ImageQueryService:
     _NSFW_GRANULAR_RATINGS: frozenset[str] = frozenset({"pg", "pg13", "r", "x", "xxx"})
     _NSFW_SAFETY_CLASSES: frozenset[str] = frozenset({"safe", "mature", "explicit"})
     _NSFW_NA_SENTINELS: frozenset[str] = frozenset({"n/a"})
+    _A1111_RP_DIRECTIVE_RE: re.Pattern = re.compile(r"\b(ADDCOMM|ADDROW|ADDCOL)\b", re.IGNORECASE)
+    _A1111_HIRES_KEYWORDS: tuple[str, ...] = (
+        "hires upscaler", "hires steps", "hires upscale",
+        "hr upscaler", "hr upscale", "denoising strength"
+    )
 
     """Encapsulates image list filtering and generation software lookup logic."""
 
@@ -258,6 +264,195 @@ class ImageQueryService:
                 self._nsfw_ratings_cache[cache_key] = (sidecar_mtime, list(sidecar_labels))
 
         return self._dedupe_labels(sidecar_labels + db_labels)
+
+    def _read_exif_for_image(self, image: Any) -> dict[str, Any]:
+        """Read EXIF data from DB json_metadata or sidecar JSON."""
+        db_json = image.json_metadata if isinstance(getattr(image, "json_metadata", None), dict) else {}
+        raw_exif = db_json.get("exif_data") if isinstance(db_json, dict) else None
+        exif_from_db: dict[str, Any] = raw_exif if isinstance(raw_exif, dict) else {}
+
+        sidecar_path = (self._image_library_path / str(image.file_path)).with_suffix(".json")
+        try:
+            sidecar_mtime = sidecar_path.stat().st_mtime if sidecar_path.exists() else None
+        except OSError:
+            sidecar_mtime = None
+
+        sidecar_exif: dict[str, Any] = {}
+        if sidecar_mtime is not None:
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if isinstance(payload, dict):
+                    raw_sidecar_exif = payload.get("exif_data")
+                    sidecar_exif = raw_sidecar_exif if isinstance(raw_sidecar_exif, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                sidecar_exif = {}
+
+        return {**exif_from_db, **sidecar_exif}
+
+    def _looks_like_a1111_user_comment_payload(self, exif: dict[str, Any]) -> bool:
+        """Detect whether EXIF contains A1111-style generation metadata."""
+        exif_parameters = [exif.get("parameters"), exif.get("Parameters")]
+        candidate = next((v for v in exif_parameters if isinstance(v, str) and v.strip()), None)
+        if candidate:
+            normalized = candidate.strip().lower()
+            has_steps = "steps:" in normalized
+            has_seed = "seed:" in normalized
+            has_sampler = "sampler:" in normalized
+            has_cfg = "cfg scale:" in normalized
+            has_negative = "negative prompt:" in normalized
+            if has_steps and (has_cfg or has_sampler or has_seed or has_negative):
+                return True
+
+        exact_user_comment = exif.get("user_comment")
+        if isinstance(exact_user_comment, str) and exact_user_comment.strip():
+            return True
+
+        legacy_user_comment = exif.get("UserComment")
+        if not isinstance(legacy_user_comment, str):
+            return False
+
+        text = legacy_user_comment.strip()
+        if not text:
+            return False
+
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    if parsed.get("prompt") or parsed.get("workflow") or parsed.get("resource-stack"):
+                        return False
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        normalized = text.lower()
+        if "civitai resources:" in normalized:
+            return False
+        has_steps = "steps:" in normalized
+        has_seed = "seed:" in normalized
+        has_sampler = "sampler:" in normalized
+        has_cfg = "cfg scale:" in normalized
+        has_negative = "negative prompt:" in normalized
+        return has_steps and (has_cfg or has_sampler or has_seed or has_negative)
+
+    def _get_a1111_parameter_text(self, exif: dict[str, Any]) -> str:
+        """Extract normalized A1111 parameter text from EXIF fields."""
+        candidate_values = [
+            exif.get("parameters"),
+            exif.get("Parameters"),
+            exif.get("user_comment"),
+            exif.get("UserComment"),
+        ]
+
+        for value in candidate_values:
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            if text.startswith("{") or text.startswith("["):
+                continue
+            return text.lower()
+        return ""
+
+    def read_a1111_features_for_image(self, image: Any) -> dict[str, bool]:
+        """Detect A1111 feature flags (Hires, RP, ADetailer) from image EXIF.
+
+        Returns:
+            dict with keys: "hires_upscale", "regional_prompter", "adetailer"
+        """
+        exif = self._read_exif_for_image(image)
+        if not self._looks_like_a1111_user_comment_payload(exif):
+            return {"hires_upscale": False, "regional_prompter": False, "adetailer": False}
+
+        text = self._get_a1111_parameter_text(exif)
+        if not text:
+            return {"hires_upscale": False, "regional_prompter": False, "adetailer": False}
+
+        hires_upscale = any(keyword in text for keyword in self._A1111_HIRES_KEYWORDS)
+
+        user_comment_text = str(exif.get("user_comment") or exif.get("UserComment") or "")
+        regional_prompter = (
+            "rp active" in text or
+            "regional prompt" in text or
+            bool(self._A1111_RP_DIRECTIVE_RE.search(user_comment_text))
+        )
+
+        adetailer = "adetailer" in text
+
+        return {
+            "hires_upscale": bool(hires_upscale),
+            "regional_prompter": bool(regional_prompter),
+            "adetailer": bool(adetailer),
+        }
+
+    def filter_image_ids_by_a1111_features(
+        self,
+        images_query,
+        *,
+        a1111_hires: Optional[list[str]] = None,
+        a1111_regional_prompter: Optional[list[str]] = None,
+        a1111_adetailer: Optional[list[str]] = None,
+    ) -> Optional[list[int]]:
+        """Filter images by A1111 feature presence/absence.
+
+        Args:
+            a1111_hires: ["present"] to show images with Hires, ["absent"] to show without
+            a1111_regional_prompter: ["present"] to show images with RP, ["absent"] to show without
+            a1111_adetailer: ["present"] to show images with ADetailer, ["absent"] to show without
+
+        Returns:
+            List of image IDs matching all specified feature constraints, or None if no constraints
+        """
+        constraints = {
+            "hires_upscale": self.normalize_query_values(a1111_hires),
+            "regional_prompter": self.normalize_query_values(a1111_regional_prompter),
+            "adetailer": self.normalize_query_values(a1111_adetailer),
+        }
+
+        active_constraints = {
+            key: set(values) for key, values in constraints.items() if values
+        }
+        if not active_constraints:
+            return None
+
+        candidate_images = (
+            images_query.options()
+            .with_entities(
+                ImageModel.id,
+                ImageModel.file_path,
+                ImageModel.json_metadata,
+            )
+            .all()
+        )
+
+        matched_ids: list[int] = []
+        for image_id, file_path, json_metadata in candidate_images:
+            stub = type(
+                "_ImageStub",
+                (),
+                {
+                    "id": image_id,
+                    "file_path": file_path,
+                    "json_metadata": json_metadata,
+                },
+            )()
+            features = self.read_a1111_features_for_image(stub)
+
+            matches = True
+            for feature_key, allowed_modes in active_constraints.items():
+                has_feature = bool(features.get(feature_key, False))
+                if "present" in allowed_modes and not has_feature:
+                    matches = False
+                    break
+                if "absent" in allowed_modes and has_feature:
+                    matches = False
+                    break
+
+            if matches:
+                matched_ids.append(int(image_id))
+
+        return matched_ids
 
     def filter_image_ids_by_generation_software(
         self,

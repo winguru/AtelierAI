@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import socket
+import struct
 import tempfile
 import threading
 import time
@@ -8,6 +10,116 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import requests
+import urllib3.util.connection as urllib3_conn
+
+
+# ---------------------------------------------------------------------------
+# DNS fallback helpers
+# ---------------------------------------------------------------------------
+# On macOS the system resolver (getaddrinfo) can fail even when the network
+# is healthy – see the "homenet.local" search-domain wedge bug.  We keep a
+# tiny UDP-based A-record resolver so that CivitAI traffic keeps working
+# when the system resolver is down.
+# ---------------------------------------------------------------------------
+
+_DNS_FALLBACK_SERVERS = ("8.8.8.8", "1.1.1.1")
+_DNS_FALLBACK_TTL = 300  # seconds to cache resolved IPs
+
+
+def _udp_resolve_a(hostname: str, dns_server: str, timeout: float = 3.0) -> list[str]:
+    """Resolve *hostname* via a single UDP A-record query to *dns_server*."""
+    txid = b"\xab\xcd"
+    header = txid + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    question = b""
+    for label in hostname.split("."):
+        question += struct.pack("B", len(label)) + label.encode()
+    question += b"\x00\x00\x01\x00\x01"
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        s.sendto(header + question, (dns_server, 53))
+        data, _ = s.recvfrom(4096)
+    # Parse answer section
+    idx = 12
+    while data[idx] != 0:
+        idx += data[idx] + 1
+    idx += 5  # null + qtype(2) + qclass(2)
+    answers: list[str] = []
+    ancount = struct.unpack(">H", data[6:8])[0]
+    for _ in range(ancount):
+        if data[idx] & 0xC0 == 0xC0:
+            idx += 2
+        else:
+            while data[idx] != 0:
+                idx += data[idx] + 1
+            idx += 1
+        rtype = struct.unpack(">H", data[idx:idx + 2])[0]
+        idx += 8  # type(2) + class(2) + ttl(4)
+        rdlen = struct.unpack(">H", data[idx:idx + 2])[0]
+        idx += 2
+        if rtype == 1 and rdlen == 4:
+            answers.append(".".join(str(b) for b in data[idx:idx + 4]))
+        idx += rdlen
+    return answers
+
+
+_dns_cache: dict[str, tuple[float, list[str]]] = {}
+_dns_cache_lock = threading.Lock()
+
+
+def _resolve_with_fallback(hostname: str) -> list[str] | None:
+    """Return cached IPs, or resolve via UDP fallback, or *None*."""
+    now = time.time()
+    with _dns_cache_lock:
+        entry = _dns_cache.get(hostname)
+        if entry and now < entry[0]:
+            return entry[1]
+    for ns in _DNS_FALLBACK_SERVERS:
+        try:
+            ips = _udp_resolve_a(hostname, ns)
+            if ips:
+                with _dns_cache_lock:
+                    _dns_cache[hostname] = (now + _DNS_FALLBACK_TTL, ips)
+                return ips
+        except Exception:
+            continue
+    return None
+
+
+class _DnsFallbackAdapter(requests.adapters.HTTPAdapter):
+    """HTTPAdapter that retries with manual DNS resolution on getaddrinfo failure."""
+
+    def send(self, request, **kwargs):
+        try:
+            return super().send(request, **kwargs)
+        except requests.ConnectionError as exc:
+            # Only intercept DNS-resolution failures
+            if "Failed to resolve" not in str(exc) and "nodename nor servname" not in str(exc):
+                raise
+            from urllib3.util import parse_url
+            parsed = parse_url(request.url)
+            host = parsed.host
+            if not host:
+                raise
+            ips = _resolve_with_fallback(host)
+            if not ips:
+                raise
+            # Patch urllib3's create_connection for this one call
+            original = urllib3_conn.create_connection
+            resolved_host = ips[0]
+
+            def _patched_create_connection(address, *args, **kw):
+                dest_host, dest_port = address
+                if dest_host == host:
+                    return original((resolved_host, dest_port), *args, **kw)
+                return original(address, *args, **kw)
+
+            urllib3_conn.create_connection = _patched_create_connection
+            try:
+                # Set Host header so SNI / virtual-hosting works
+                request.headers.setdefault("Host", host)
+                return super().send(request, **kwargs)
+            finally:
+                urllib3_conn.create_connection = original
 
 
 class CivitaiRequestError(RuntimeError):
@@ -288,6 +400,9 @@ class CivitaiHttpClient:
         session = getattr(self._thread_local, "session", None)
         if session is None:
             session = requests.Session()
+            # Mount a DNS-aware adapter that falls back to direct UDP resolution
+            # when the system resolver (getaddrinfo) fails.
+            session.mount("https://", _DnsFallbackAdapter())
             self._thread_local.session = session
         return session
 

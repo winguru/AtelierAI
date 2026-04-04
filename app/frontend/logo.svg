@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 50">
+  <defs>
+    <linearGradient id="logo-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e06830"/>
+      <stop offset="100%" stop-color="#a83f19"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fffdf9"/>
+      <stop offset="100%" stop-color="#f0e0d0"/>
+    </linearGradient>
+  </defs>
+  <!-- Icon mark: stylized easel silhouette with AI sparkles -->
+  <g transform="translate(1, 1)">
+    <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#logo-grad)"/>
+    <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+    <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+    <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#wood)"/>
+    <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#wood)"/>
+    <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#wood)"/>
+    <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#wood)"/>
+    <!-- AI sparkles -->
+    <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+    <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="56" y="28" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#2a1d12" letter-spacing="-0.5">Atelier</text>
+  <text x="144" y="28" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#d85b29" letter-spacing="-0.5">AI</text>
+</svg>

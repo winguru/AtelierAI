@@ -97,7 +97,6 @@
   const parityUseLocalHashButton = document.getElementById('parity-use-local-hash-btn');
   const paritySelectedImagePanel = document.getElementById('parity-selected-image-panel');
   const parityWorkflowJsonInput = document.getElementById('parity-workflow-json');
-  const parityIncludeNonPrefixHashEvidenceInput = document.getElementById('parity-include-non-prefix-hash-evidence');
   const parityAuditButton = document.getElementById('parity-audit-btn');
   const parityStatusPanel = document.getElementById('parity-status-panel');
   const parityStatusTitle = document.getElementById('parity-status-title');
@@ -107,7 +106,18 @@
   const parityExtractedPanel = document.getElementById('parity-extracted-json');
   const parityNormalizedPanel = document.getElementById('parity-normalized-json');
   const parityWorkflowMatchPanel = document.getElementById('parity-workflow-match-json');
-  const parityModelHashEvidencePanel = document.getElementById('parity-model-hash-evidence-json');
+  const parityModelVerificationPanel = document.getElementById('parity-model-hash-evidence-json');
+  const paritySummaryCard = document.getElementById('parity-summary-card');
+  const parityClassificationBadge = document.getElementById('parity-classification-badge');
+  const parityReadinessScore = document.getElementById('parity-readiness-score');
+  const paritySummaryText = document.getElementById('parity-summary-text');
+  const parityActionItemsList = document.getElementById('parity-action-items');
+  const parityFieldDiffSection = document.getElementById('parity-field-diff');
+  const parityFieldTbody = document.getElementById('parity-field-tbody');
+  const parityLoadTemplateButton = document.getElementById('parity-load-template-btn');
+  const parityUploadWorkflowButton = document.getElementById('parity-upload-workflow-btn');
+  const parityWorkflowFileInput = document.getElementById('parity-workflow-file');
+  const parityTemplateSelect = document.getElementById('parity-template-select');
   const inspectionPanels = document.getElementById('inspection-panels');
   const themeToggle = document.getElementById('theme-toggle');
   const preferences = window.AtelierPreferences || null;
@@ -709,7 +719,7 @@
         ? comparison.field_alignment.fields
         : {};
       const matched = [];
-      const didNotMatch = [];
+      const localOnly = [];
       Object.entries(fieldAlignmentFields).forEach(([fieldName, info]) => {
         const matchCount = Number(info?.match_count || 0);
         const entry = {
@@ -721,7 +731,7 @@
         if (matchCount > 0) {
           matched.push(entry);
         } else {
-          didNotMatch.push(entry);
+          localOnly.push(entry);
         }
       });
 
@@ -740,25 +750,25 @@
         counts: {
           matched: matched.length,
           mismatched: mismatchSamples.length,
-          did_not_match: didNotMatch.length,
+          local_only: localOnly.length,
         },
         matched,
         mismatched: mismatchSamples,
-        did_not_match: didNotMatch,
+        local_only: localOnly,
       };
     } else {
       workflowMatchBuckets = {
         provided_workflow_supplied: false,
         source: 'none',
-        message: 'No expected workflow JSON was provided, so match buckets are unavailable.',
+        message: 'No workflow JSON was provided, so comparison is unavailable.',
         counts: {
           matched: 0,
           mismatched: 0,
-          did_not_match: 0,
+          local_only: 0,
         },
         matched: [],
         mismatched: [],
-        did_not_match: [],
+        local_only: [],
       };
     }
 
@@ -777,9 +787,157 @@
     if (parityWorkflowMatchPanel instanceof HTMLElement) {
       parityWorkflowMatchPanel.textContent = stringifyJson(workflowMatchBuckets);
     }
-    if (parityModelHashEvidencePanel instanceof HTMLElement) {
-      parityModelHashEvidencePanel.textContent = stringifyJson(comparison?.model_hash_evidence || null);
+    if (parityModelVerificationPanel instanceof HTMLElement) {
+      parityModelVerificationPanel.textContent = stringifyJson(comparison?.model_hash_evidence || null);
     }
+
+    // Render summary card
+    renderParitySummary(candidate, comparison);
+
+    // Render visual field diff
+    renderParityFieldDiff(comparison?.unified_field_status || {});
+  }
+
+  function renderParitySummary(candidate, comparison) {
+    if (!paritySummaryCard) return;
+
+    const classification = String(candidate?.classification || 'unknown');
+    const readinessScore = Number(candidate?.readiness_score ?? 0);
+    const actionItems = Array.isArray(candidate?.action_items) ? candidate.action_items : [];
+    const missingFields = Array.isArray(candidate?.missing_required_fields) ? candidate.missing_required_fields : [];
+    const conflicts = Array.isArray(candidate?.conflicts) ? candidate.conflicts : [];
+    const modelVerification = comparison?.model_hash_evidence;
+
+    // Build classification badge
+    const classLabel = {
+      generatable_now: 'Generatable Now',
+      generatable_with_inference: 'Needs Inference',
+      needs_manual_intervention: 'Needs Intervention',
+      non_generatable_missing_generation_data: 'No Generation Data',
+    }[classification] || classification;
+
+    const badgeColors = {
+      generatable_now: 'parity-badge-green',
+      generatable_with_inference: 'parity-badge-yellow',
+      needs_manual_intervention: 'parity-badge-red',
+      non_generatable_missing_generation_data: 'parity-badge-gray',
+    };
+    const badgeClass = badgeColors[classification] || 'parity-badge-gray';
+
+    if (parityClassificationBadge) {
+      parityClassificationBadge.textContent = classLabel;
+      parityClassificationBadge.className = 'parity-badge ' + badgeClass;
+    }
+    if (parityReadinessScore) {
+      parityReadinessScore.textContent = `${readinessScore}% ready`;
+    }
+
+    // Build summary text
+    let summaryText = `Classification: ${classLabel}. `;
+    if (missingFields.length === 0) {
+      summaryText += 'All required fields present. ';
+    } else {
+      summaryText += `Missing ${missingFields.length} required field(s): ${missingFields.join(', ')}. `;
+    }
+    if (modelVerification) {
+      if (modelVerification.confirmed_exact_match) {
+        const tier = modelVerification.confirmation_tier || 'unknown';
+        summaryText += `Model hash verified (${tier}). `;
+      } else {
+        summaryText += 'Model hash not confirmed. ';
+      }
+    }
+    if (conflicts.length > 0) {
+      summaryText += `${conflicts.length} conflict(s) detected. `;
+    }
+
+    if (paritySummaryText) {
+      paritySummaryText.textContent = summaryText;
+    }
+
+    // Render action items
+    if (parityActionItemsList) {
+      parityActionItemsList.innerHTML = '';
+      if (actionItems.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = 'No action items — everything looks good.';
+        li.className = 'parity-action-item parity-action-ok';
+        parityActionItemsList.appendChild(li);
+      } else {
+        actionItems.forEach((item) => {
+          const li = document.createElement('li');
+          li.textContent = String(item);
+          li.className = 'parity-action-item';
+          parityActionItemsList.appendChild(li);
+        });
+      }
+    }
+
+    paritySummaryCard.style.display = '';
+  }
+
+  function renderParityFieldDiff(unifiedFieldStatus) {
+    if (!parityFieldDiffSection || !parityFieldTbody) return;
+
+    if (!unifiedFieldStatus || typeof unifiedFieldStatus !== 'object' || Object.keys(unifiedFieldStatus).length === 0) {
+      parityFieldDiffSection.style.display = 'none';
+      return;
+    }
+
+    parityFieldTbody.innerHTML = '';
+    const statusIcons = {
+      verified: '✅',
+      matched: '✅',
+      mismatched: '⚠️',
+      local_only: '➖',
+      workflow_only: '➕',
+      not_checked: '—',
+    };
+
+    // Friendly field names
+    const fieldLabels = {
+      prompt_positive: 'Positive Prompt',
+      prompt_negative: 'Negative Prompt',
+      sampler_name: 'Sampler',
+      scheduler_name: 'Scheduler',
+      seed: 'Seed',
+      steps: 'Steps',
+      cfg_scale: 'CFG Scale',
+      width: 'Width',
+      height: 'Height',
+      denoise: 'Denoise',
+      clip_skip: 'Clip Skip',
+      model: 'Model',
+      model_hash: 'Model Hash',
+    };
+
+    Object.entries(unifiedFieldStatus).forEach(([fieldName, info]) => {
+      const tr = document.createElement('tr');
+      const status = String(info?.status || 'not_checked');
+      const icon = statusIcons[status] || '—';
+      const label = fieldLabels[fieldName] || fieldName;
+
+      const localVal = info?.local_value != null ? truncateFieldValue(String(info.local_value)) : '—';
+      const workflowVal = info?.workflow_value != null ? truncateFieldValue(String(info.workflow_value)) : '—';
+      const detail = info?.detail || '';
+
+      tr.innerHTML = `
+        <td title="${fieldName}">${label}</td>
+        <td class="parity-status-${status}">${icon} ${status.replace('_', ' ')}</td>
+        <td title="${String(info?.local_value ?? '')}">${localVal}</td>
+        <td title="${String(info?.workflow_value ?? '')}">${workflowVal}</td>
+        <td>${detail}</td>
+      `;
+      parityFieldTbody.appendChild(tr);
+    });
+
+    parityFieldDiffSection.style.display = '';
+  }
+
+  function truncateFieldValue(value, maxLen = 60) {
+    if (!value) return '—';
+    if (value.length <= maxLen) return value;
+    return value.substring(0, maxLen - 3) + '...';
   }
 
   function buildParityAuditRequestPayload() {
@@ -788,16 +946,16 @@
     }
     const fileHash = parityFileHashInput.value.trim();
     if (!fileHash) {
-      throw new Error('Enter a local file hash to run parity audit.');
+      throw new Error('Enter a local file hash to run audit.');
     }
     let comfyWorkflowJson = null;
     if (parityWorkflowJsonInput instanceof HTMLTextAreaElement && parityWorkflowJsonInput.value.trim()) {
       const parsed = parseJsonText(parityWorkflowJsonInput.value, {
-        fieldLabel: 'Parity workflow JSON',
+        fieldLabel: 'Workflow JSON',
         fallbackValue: null,
       });
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Parity workflow JSON must be an object.');
+        throw new Error('Workflow JSON must be an object.');
       }
       comfyWorkflowJson = parsed;
     }
@@ -805,11 +963,6 @@
     return {
       file_hash: fileHash,
       comfy_workflow_json: comfyWorkflowJson,
-      include_non_prefix_local_reference_hash_evidence: Boolean(
-        parityIncludeNonPrefixHashEvidenceInput instanceof HTMLInputElement
-          ? parityIncludeNonPrefixHashEvidenceInput.checked
-          : false
-      ),
     };
   }
 
@@ -818,16 +971,16 @@
     setParityStatus(
       'is-loading',
       'Analyzing',
-      'Extracting fields and running parity audit. Workflow JSON is included for alignment checks when provided...'
+      'Extracting fields and running audit...'
     );
-    const response = await fetch('/generation-prototype/parity-workbench/candidate-audit', {
+    const response = await fetch('/generation-audit/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestPayload),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(String(payload?.detail || `Parity audit failed with HTTP ${response.status}.`));
+      throw new Error(String(payload?.detail || `Audit failed with HTTP ${response.status}.`));
     }
 
     renderParityAudit(payload);
@@ -3855,7 +4008,73 @@
     }
 
     if (parityWorkflowJsonInput instanceof HTMLTextAreaElement) {
-      attachJsonFileDrop(parityWorkflowJsonInput, { fieldLabel: 'Parity workflow JSON' });
+      attachJsonFileDrop(parityWorkflowJsonInput, { fieldLabel: 'Workflow JSON' });
+    }
+
+    // Template selector
+    if (parityLoadTemplateButton instanceof HTMLButtonElement) {
+      parityLoadTemplateButton.addEventListener('click', async () => {
+        try {
+          const resp = await fetch('/generation-templates/list');
+          if (!resp.ok) {
+            setParityStatus('is-error', 'Templates unavailable', `Failed to load templates (HTTP ${resp.status}).`);
+            return;
+          }
+          const data = await resp.json();
+          const templates = Array.isArray(data) ? data : (data?.templates || []);
+          if (!parityTemplateSelect instanceof HTMLSelectElement) return;
+          parityTemplateSelect.innerHTML = '<option value="">— Select a template —</option>';
+          templates.forEach((t) => {
+            const opt = document.createElement('option');
+            opt.value = String(t?.id || t?.template_id || '');
+            opt.textContent = String(t?.name || t?.label || t?.id || 'Unnamed');
+            parityTemplateSelect.appendChild(opt);
+          });
+          parityTemplateSelect.style.display = '';
+        } catch (err) {
+          setParityStatus('is-error', 'Template load failed', err instanceof Error ? err.message : String(err));
+        }
+      });
+    }
+
+    if (parityTemplateSelect instanceof HTMLSelectElement) {
+      parityTemplateSelect.addEventListener('change', async () => {
+        const templateId = parityTemplateSelect.value.trim();
+        if (!templateId || !(parityWorkflowJsonInput instanceof HTMLTextAreaElement)) return;
+        try {
+          const resp = await fetch(`/generation-templates/get/${encodeURIComponent(templateId)}`);
+          if (!resp.ok) {
+            setParityStatus('is-error', 'Template fetch failed', `HTTP ${resp.status}`);
+            return;
+          }
+          const data = await resp.json();
+          const workflow = data?.resolved_workflow || data?.workflow_json || data?.workflow || data;
+          parityWorkflowJsonInput.value = typeof workflow === 'string' ? workflow : JSON.stringify(workflow, null, 2);
+          setParityStatus('is-success', 'Template loaded', `Loaded template "${templateId}" into workflow input.`);
+        } catch (err) {
+          setParityStatus('is-error', 'Template fetch failed', err instanceof Error ? err.message : String(err));
+        }
+      });
+    }
+
+    // File upload
+    if (parityUploadWorkflowButton instanceof HTMLButtonElement && parityWorkflowFileInput instanceof HTMLInputElement) {
+      parityUploadWorkflowButton.addEventListener('click', () => {
+        parityWorkflowFileInput.click();
+      });
+      parityWorkflowFileInput.addEventListener('change', () => {
+        const file = parityWorkflowFileInput.files?.[0];
+        if (!file || !(parityWorkflowJsonInput instanceof HTMLTextAreaElement)) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          parityWorkflowJsonInput.value = String(reader.result || '');
+          setParityStatus('is-success', 'File loaded', `Loaded "${file.name}" into workflow input.`);
+        };
+        reader.onerror = () => {
+          setParityStatus('is-error', 'File read failed', 'Could not read the selected file.');
+        };
+        reader.readAsText(file);
+      });
     }
   }
 

@@ -57,20 +57,25 @@ def get_image_metadata(file_path: str) -> tuple[int, int, str | None, dict]:
                     print(f"  {key}: {val}")
 
                 # Second pass: get IFD (Image File Directory) data including ExifOffset
-                if hasattr(exif_data_raw, 'get_ifd_list'):
-                    for ifd_id in exif_data_raw.get_ifd_list():
-                        ifd_data = exif_data_raw.get_ifd(ifd_id)
-                        for tag, value in ifd_data.items():
-                            tag_name = TAGS.get(tag, tag)
-                            # Decode bytes to string if needed
-                            if isinstance(value, bytes):
-                                try:
-                                    value = value.decode('utf-8', errors='replace')
-                                except:
-                                    value = str(value)
-                            if isinstance(value, (str, int, float, list, tuple, dict)):
-                                # Prefix with IFD name to avoid collisions
-                                exif_data[f"{ifd_id.name}_{tag_name}"] = value
+                try:
+                    for ifd_id in (0x8825, 0x8827):  # GPS IFD and Exif IFD tag IDs
+                        try:
+                            ifd_data = exif_data_raw.get_ifd(ifd_id)
+                            for tag, value in ifd_data.items():
+                                tag_name = TAGS.get(tag, tag)
+                                # Decode bytes to string if needed
+                                if isinstance(value, bytes):
+                                    try:
+                                        value = value.decode('utf-8', errors='replace')
+                                    except:
+                                        value = str(value)
+                                if isinstance(value, (str, int, float, list, tuple, dict)):
+                                    # Prefix with IFD name to avoid collisions
+                                    exif_data[f"IFD_{ifd_id}_{tag_name}"] = value
+                        except (AttributeError, KeyError):
+                            pass
+                except (AttributeError, KeyError):
+                    pass
                 print(f"Second pass: Extracted EXIF data from {file_path}:")
 
                 for key, val in exif_data.items():

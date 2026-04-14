@@ -22,6 +22,7 @@
           <span>Dark mode</span>
         </label>
         <a class="lab-link" href="/tree">Open concept prototype</a>
+        <a class="lab-link" href="/frontend/search-lab.html">CivitAI Search Lab</a>
       </div>
     </header>
 
@@ -80,7 +81,7 @@
           <input id="include-full-catalog-raw" name="include-full-catalog-raw" type="checkbox">
           <span>Include full catalog raw payload in exports</span>
         </label>
-        <p class="control-help"><code>ATELIER_COMFYUI_MODEL_CATALOG_URL</code> can be provided as a BASE URL. Optional endpoint overrides can target custom LoRA Manager routes directly.</p>
+        <p class="control-help"><code>ATELIER_COMFYUI_BASE_URL</code> can be provided as a BASE URL. LoRA Manager catalog endpoints are derived automatically from this base URL.</p>
       </form>
     </section>
 
@@ -366,10 +367,10 @@
       </article>
     </section>
 
-    <section id="parity-workbench-section" class="template-lab" aria-label="Image parity workbench">
+    <section id="parity-workbench-section" class="template-lab" aria-label="Generation audit">
       <article class="control-card template-card">
-        <h2>Parity Workbench</h2>
-        <p class="control-help">Audit extracted generation metadata, normalize A1111 fields for ComfyUI, and identify missing/conflicting parameters before running generation attempts.</p>
+        <h2>Generation Audit</h2>
+        <p class="control-help">Audit extracted generation metadata, normalize A1111 fields for ComfyUI, and identify missing or conflicting parameters before running generation attempts.</p>
 
         <div class="bridge-controls-grid">
           <label for="parity-file-hash">Reference local file hash</label>
@@ -389,17 +390,22 @@
           </div>
           <p class="control-help">Search by full or partial hash, filename, collection, source, or metadata terms. Selecting a result sets the active image and copies its hash.</p>
 
-          <label for="parity-workflow-json">Comfy workflow JSON (optional, used now for alignment checks)</label>
-          <textarea id="parity-workflow-json" name="parity-workflow-json" rows="6" placeholder='{"nodes": []}'></textarea>
+          <label for="parity-workflow-json">Comfy workflow JSON (optional, for alignment checks)</label>
+          <div class="control-row">
+            <textarea id="parity-workflow-json" name="parity-workflow-json" rows="6" placeholder='{"nodes": []}'></textarea>
+          </div>
+          <div class="control-row" style="gap:8px; margin-bottom: 8px;">
+            <button id="parity-load-template-btn" type="button" class="secondary-btn">Load from Templates</button>
+            <button id="parity-upload-workflow-btn" type="button" class="secondary-btn">Upload File</button>
+            <input id="parity-workflow-file" type="file" accept=".json" style="display:none">
+          </div>
+          <select id="parity-template-select" style="display:none; margin-bottom:8px;">
+            <option value="">— Select a template —</option>
+          </select>
           <p class="control-help">Provide this to compare extracted fields against workflow values and surface conflicts early.</p>
 
-          <label class="control-checkbox" for="parity-include-non-prefix-hash-evidence">
-            <input id="parity-include-non-prefix-hash-evidence" name="parity-include-non-prefix-hash-evidence" type="checkbox">
-            Include non-prefix LoRA Manager model hash evidence (debug)
-          </label>
-
           <div class="template-actions">
-            <button id="parity-audit-btn" type="button">Analyze Candidate</button>
+            <button id="parity-audit-btn" type="button">Analyze</button>
           </div>
 
           <section id="parity-status-panel" class="status-panel is-idle" aria-live="polite">
@@ -408,38 +414,63 @@
           </section>
         </div>
 
-        <section class="template-output-grid">
-          <div>
-            <h3>Candidate Classification</h3>
-            <pre id="parity-classification-json" class="json-panel">{}</pre>
+        <!-- Summary Card -->
+        <section id="parity-summary-card" class="parity-summary-card" style="display:none">
+          <div class="parity-summary-header">
+            <span id="parity-classification-badge" class="parity-badge">—</span>
+            <span id="parity-readiness-score" class="parity-score">—</span>
           </div>
-          <div>
-            <h3>Missing & Conflicts</h3>
-            <pre id="parity-issues-json" class="json-panel">{}</pre>
-          </div>
+          <p id="parity-summary-text" class="parity-summary-text"></p>
+          <ul id="parity-action-items" class="parity-action-items"></ul>
         </section>
 
-        <section class="template-output-grid">
-          <div>
-            <h3>Extracted Fields</h3>
-            <pre id="parity-extracted-json" class="json-panel">{}</pre>
-          </div>
-          <div>
-            <h3>Normalized Canonical Fields</h3>
-            <pre id="parity-normalized-json" class="json-panel">{}</pre>
-          </div>
+        <!-- Visual Field Diff Table -->
+        <section id="parity-field-diff" class="parity-field-diff" style="display:none">
+          <h3>Field Status</h3>
+          <table id="parity-field-table" class="parity-field-table">
+            <thead>
+              <tr><th>Field</th><th>Status</th><th>Local Value</th><th>Workflow Value</th><th>Detail</th></tr>
+            </thead>
+            <tbody id="parity-field-tbody"></tbody>
+          </table>
         </section>
 
-        <section class="template-output-grid">
-          <div>
-            <h3>Workflow Match Buckets</h3>
-            <pre id="parity-workflow-match-json" class="json-panel">{}</pre>
-          </div>
-          <div>
-            <h3>Model Hash Evidence</h3>
-            <pre id="parity-model-hash-evidence-json" class="json-panel">{}</pre>
-          </div>
-        </section>
+        <!-- Collapsible Raw JSON Details -->
+        <details class="parity-raw-details">
+          <summary>Raw JSON Details</summary>
+          <section class="template-output-grid">
+            <div>
+              <h3>Classification</h3>
+              <pre id="parity-classification-json" class="json-panel">{}</pre>
+            </div>
+            <div>
+              <h3>Issues & Actions</h3>
+              <pre id="parity-issues-json" class="json-panel">{}</pre>
+            </div>
+          </section>
+
+          <section class="template-output-grid">
+            <div>
+              <h3>Extracted Fields</h3>
+              <pre id="parity-extracted-json" class="json-panel">{}</pre>
+            </div>
+            <div>
+              <h3>Normalized Fields</h3>
+              <pre id="parity-normalized-json" class="json-panel">{}</pre>
+            </div>
+          </section>
+
+          <section class="template-output-grid">
+            <div>
+              <h3>Workflow Comparison</h3>
+              <pre id="parity-workflow-match-json" class="json-panel">{}</pre>
+            </div>
+            <div>
+              <h3>Model Verification</h3>
+              <pre id="parity-model-hash-evidence-json" class="json-panel">{}</pre>
+            </div>
+          </section>
+        </details>
       </article>
     </section>
 

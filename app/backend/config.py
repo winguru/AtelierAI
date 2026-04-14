@@ -79,11 +79,15 @@ except OSError as e:
 
 
 # --- Schema Versioning ---
-CURRENT_SCHEMA_VERSION = "1.4"  # Increment this when you make schema changes
+CURRENT_SCHEMA_VERSION = "1.5"  # Increment this when you make schema changes
 ALLOW_SCHEMA_RESET = _env_bool("ALLOW_SCHEMA_RESET", default=False)
 
 # --- CivitAI Configuration ---
 CIVITAI_API_KEY = os.getenv("CIVITAI_API_KEY", "")
+
+# Meilisearch public search key (static, embedded in CivitAI frontend JS).
+# Auto-scraped from _app JS chunk when empty.
+CIVITAI_MEILISEARCH_KEY = os.getenv("CIVITAI_MEILISEARCH_KEY", "")
 
 # CivitAI credentials for automatic authentication (Playwright)
 CIVITAI_USERNAME = os.getenv("CIVITAI_USERNAME", "")
@@ -92,9 +96,30 @@ CIVITAI_PASSWORD = os.getenv("CIVITAI_PASSWORD", "")
 # Session cache file for automatic authentication
 CIVITAI_SESSION_CACHE = os.getenv("CIVITAI_SESSION_CACHE", ".civitai_session")
 
-# Session cookie for CivitAI API authentication
-# Can be set in .env file or via scripts/setup_session_token.py
-CIVITAI_SESSION_COOKIE = os.getenv("CIVITAI_SESSION_COOKIE", "")
+def _read_civitai_session_cookie_from_cache(cache_path: str) -> str:
+    """Read current CivitAI session cookie from the cache file.
+
+    This keeps runtime behavior aligned with token refresh flows, where the
+    authoritative value lives in `.civitai_session`.
+    """
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+        if token and len(token) > 100:
+            return token
+    except OSError:
+        pass
+    return ""
+
+
+# Session cookie for CivitAI API authentication.
+# Source of truth is the session cache file, not environment variables.
+CIVITAI_SESSION_COOKIE = _read_civitai_session_cookie_from_cache(CIVITAI_SESSION_CACHE)
+
+# Optional Chrome profile overrides for OAuth fallback behavior.
+# Leave unset to use the project-local .civitai_chrome_profile directory.
+CIVITAI_CHROME_USER_DATA_DIR = os.getenv("CIVITAI_CHROME_USER_DATA_DIR", "").strip()
+CIVITAI_CHROME_PROFILE_DIRECTORY = os.getenv("CIVITAI_CHROME_PROFILE_DIRECTORY", "").strip()
 
 # --- ComfyUI Configuration ---
 ATELIER_COMFYUI_BASE_URL = os.getenv("ATELIER_COMFYUI_BASE_URL", "").strip()

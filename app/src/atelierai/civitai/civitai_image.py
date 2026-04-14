@@ -43,7 +43,7 @@ class CivitaiImage:
         self.base_model = "Unknown"
         self.sampler = "Unknown"
         self.steps = 0
-        self.cfg_scale = 0
+        self.cfg_scale = 0.0
         self.seed = 0
         self.width = 0
         self.height = 0
@@ -154,9 +154,13 @@ class CivitaiImage:
         # Author information
         user = basic_data.get("user")
         if user and isinstance(user, dict):
-            self.author = user.get("username", "Unknown")
-        elif basic_data.get("username"):
-            self.author = basic_data.get("username")
+            username = user.get("username")
+            if isinstance(username, str) and username.strip():
+                self.author = username.strip()
+        else:
+            username = basic_data.get("username")
+            if isinstance(username, str) and username.strip():
+                self.author = username.strip()
 
         # NSFW status
         raw_nsfw_level = basic_data.get("nsfwLevel")
@@ -186,7 +190,7 @@ class CivitaiImage:
                 api = CivitaiAPI.get_instance()
             self.tags = api.fetch_image_tags(self.image_id)
             if self.tags:
-                print(f"  [OK] Fetched {len(self.tags)} tags for image")
+                print(f"  [OK] Fetched {len(self.tags)} tags for image {self.image_id}")
             else:
                 if hasattr(api, "is_rate_limited") and callable(api.is_rate_limited) and api.is_rate_limited():
                     remaining = 0.0
@@ -194,7 +198,7 @@ class CivitaiImage:
                         remaining = float(api.rate_limit_remaining_seconds() or 0.0)
                     print(f"  [INFO] Tag fetch deferred due to CivitAI rate limit backoff ({remaining:.1f}s remaining)")
                 else:
-                    print("  [WARN] No tags found for this image")
+                    print(f"  [WARN] No tags found for image {self.image_id}")
 
         # Check for tags directly in basic_data (fallback)
         elif "tags" in basic_data and isinstance(basic_data["tags"], list):
@@ -281,7 +285,7 @@ class CivitaiImage:
             first_meta_value("cfgScale", "cfg_scale", "cfg", "guidanceScale", "guidance", default=0),
             default=0,
         )
-        self.seed = first_meta_value("seed", "seedValue", "seed_value", default=0)
+        self.seed = to_int(first_meta_value("seed", "seedValue", "seed_value", default=0), default=0)
         self.width = to_int(first_meta_value("width", "imageWidth", "image_width", default=0), default=0)
         self.height = to_int(first_meta_value("height", "imageHeight", "image_height", default=0), default=0)
         self.prompt = str(
@@ -660,8 +664,8 @@ class CivitaiImage:
         # Merge basic info from collection item
         image.author = (
             item.get("username")
-            or item_user.get("username")
-            or item_account.get("username")
+            or (item_user.get("username") if item_user else None)
+            or (item_account.get("username") if item_account else None)
             or "Unknown"
         )
         image.created_at = item.get("createdAt")

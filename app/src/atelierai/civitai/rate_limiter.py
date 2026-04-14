@@ -8,8 +8,7 @@ Based on the pseudocode provided for VoyageAI API integration.
 import time
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Any
-from collections import deque
+from typing import List, Any
 
 
 @dataclass
@@ -315,7 +314,7 @@ class RateLimiter:
             actual_tokens = count_tokens_function(chunk_data)
 
             # Send API Request
-            api_response = api_post_function(data=chunk_data)
+            api_post_function(data=chunk_data)
 
             # Optional: Handle API response for errors or extract embeddings
             # For example with VoyageAI/LanceDB, you might want to check:

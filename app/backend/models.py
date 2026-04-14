@@ -62,6 +62,21 @@ class ImageModel(Base):
     user_nsfw_rating = Column(String, nullable=True)       # pg | pg13 | r | x | xxx
     user_nsfw_safety_class = Column(String, nullable=True)  # safe | mature | explicit
 
+    # User-defined tags (persisted in both DB column and sidecar JSON)
+    user_tags = Column(JSON, nullable=True)
+
+    # Promoted metadata columns (authoritative; backfilled from json_metadata/sidecar)
+    generation_software = Column(String, nullable=True)
+    civitai_nsfw_level = Column(Integer, nullable=True)  # 1=PG, 2=PG13, 4=R, 8=X, 16=XXX
+
+    # A1111 / ComfyUI feature flags (detected from EXIF at import time)
+    has_a1111_metadata = Column(Boolean, nullable=False, default=False)
+    a1111_hires = Column(Boolean, nullable=False, default=False)
+    a1111_regional_prompter = Column(Boolean, nullable=False, default=False)
+    a1111_adetailer = Column(Boolean, nullable=False, default=False)
+    has_comfyui_metadata = Column(Boolean, nullable=False, default=False)
+    has_generation_prompt = Column(Boolean, nullable=False, default=False)
+
     # Relationships
     license = relationship("License", back_populates="images")
     analysis_data = relationship("AnalysisData", back_populates="images")
@@ -143,6 +158,7 @@ class ImageModel(Base):
             "json_metadata": json_metadata,
             "user_nsfw_rating": self.user_nsfw_rating,
             "user_nsfw_safety_class": self.user_nsfw_safety_class,
+            "user_tags": self.user_tags,
         }
 
 
@@ -207,7 +223,7 @@ class ConceptAlias(Base):
     alias_type = Column(String, nullable=False, default="synonym")
     is_preferred = Column(Boolean, nullable=False, default=False)
     authority_id = Column(Integer, ForeignKey("tag_authorities.id"), nullable=True)
-    external_tag_id = Column(String, nullable=True)
+    external_tag_id = Column(Integer, nullable=True)
     notes = Column(Text)
 
     concept = relationship("Concept", back_populates="aliases")
@@ -223,7 +239,7 @@ class AuthorityTerm(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     authority_id = Column(Integer, ForeignKey("tag_authorities.id"), nullable=False, index=True)
-    external_tag_id = Column(String, nullable=False)
+    external_tag_id = Column(Integer, nullable=True)
     external_name = Column(String, nullable=False)
     normalized_external_name = Column(String, nullable=False, index=True)
     concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=True, index=True)
@@ -299,6 +315,10 @@ class ImageConceptObservation(Base):
     __table_args__ = (
         Index("ix_obs_image_dimension", "image_id", "dimension"),
         Index("ix_obs_concept_dimension", "concept_id", "dimension"),
+        UniqueConstraint(
+            "image_id", "concept_id", "authority_id",
+            name="uq_obs_image_concept_authority",
+        ),
     )
 
 

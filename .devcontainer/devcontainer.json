@@ -1,10 +1,13 @@
 {
   "name": "AI Image Curator",
   "dockerComposeFile": "../docker-compose.yml",
-  "service": "backend",
-  "workspaceFolder": "/app",
+  "service": "atelier-dev",
+  "runServices": ["atelier-dev"],
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
   "remoteEnv": {
-    "PYTHONPATH": "${containerWorkspaceFolder}/src:${containerWorkspaceFolder}/backend:${containerWorkspaceFolder}/dev:${PYTHONPATH}"
+    "PYTHONPATH": "${containerWorkspaceFolder}/app:${containerWorkspaceFolder}/app/src:${containerWorkspaceFolder}/app/backend:${containerWorkspaceFolder}/app/dev:${PYTHONPATH}",
+    "ATELIER_APP_ROOT": "${containerWorkspaceFolder}/app"
   },
   
   // Configure VS Code to install these extensions inside the container
@@ -28,9 +31,7 @@
     }
   },
 
-  // Command to run after the container is created
-  // "postCreateCommand": "pip install --upgrade pip",
+  "postCreateCommand": "pip install --no-cache-dir -e app/src",
 
-  // Port to forward for the FastAPI application
   "forwardPorts": [8000]
 }

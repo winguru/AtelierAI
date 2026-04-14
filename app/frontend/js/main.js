@@ -220,6 +220,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fullscreenIndexHint: null,
         fullscreenNavInFlight: false,
         fullscreenQueuedDelta: null,
+        galleryIndexHint: null,
         searchRunId: 0,
         // Lower page size is intentional for testing end-of-library UI transitions.
         pageSize: TEST_PAGE_SIZE,
@@ -242,6 +243,12 @@ document.addEventListener('DOMContentLoaded', () => {
         activeServerFilterSignature: null,
         activeServerFilterConfig: null,
         treeTagFilter: null,
+        missingSourceFilter: {
+            civitai: false,
+            danbooru: false,
+            prompt: false,
+            user: false,
+        },
         advancedFilters: createEmptyAdvancedFilters(),
         filterOptions: {
             tagNames: [],
@@ -319,6 +326,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const imageCount = document.getElementById('image-count');
     const selectionCount = document.getElementById('selection-count');
     const searchInput = document.getElementById('search-input');
+    const searchAutocomplete = document.getElementById('search-autocomplete');
+    const quickChipsContainer = document.getElementById('advanced-filters-quick-chips');
     const advancedFiltersPanel = document.getElementById('advanced-filters-panel');
     const advancedFiltersSummary = document.getElementById('advanced-filters-summary');
     const advancedFiltersClearBtn = document.getElementById('advanced-filters-clear');
@@ -1012,6 +1021,18 @@ document.addEventListener('DOMContentLoaded', () => {
             metadata: selectedTask.metadata,
         };
         importOutput.textContent = JSON.stringify(payload, null, 2);
+
+        // Detect auth_required on failed tasks and auto-open the auth panel.
+        // Only override the auth status indicator if the last known state is
+        // not a verified-ok session (otherwise a stale failed task keeps
+        // clobbering a freshly-validated green dot).
+        const taskMeta = selectedTask.metadata || {};
+        if (selectedTask.status === 'failed' && taskMeta.auth_required) {
+            openCivitaiAuthPanel();
+            if (civitaiAuthStatusIcon && civitaiAuthStatusIcon.textContent !== '🟢') {
+                setCivitaiAuthStatus('fail', 'Session expired — re-authenticate or paste a new cookie.');
+            }
+        }
     }
 
     function updateTaskOutput() {
@@ -1108,11 +1129,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const fullscreenDebugCopyBtn = document.getElementById('fullscreen-debug-copy-btn');
     const fullscreenDebugContent = document.getElementById('fullscreen-debug-content');
     const fullscreenDebugSnapshot = document.getElementById('fullscreen-debug-snapshot');
+    const fullscreenCounter = document.getElementById('fullscreen-counter');
     const fullscreenImage = document.getElementById('fullscreen-image');
     const fullscreenVideo = document.getElementById('fullscreen-video');
     const fullscreenEffectiveTagsCloud = document.getElementById('fullscreen-effective-tags-cloud');
     const fullscreenNegativeTagsWrap = document.getElementById('fullscreen-negative-tags-wrap');
     const fullscreenNegativeTagsCloud = document.getElementById('fullscreen-negative-tags-cloud');
+    const userTagsCloud = document.getElementById('user-tags-cloud');
     const detailTitle = document.getElementById('detail-title');
     const detailSubtitle = document.getElementById('detail-subtitle');
     const repairImageBtn = document.getElementById('repair-image-btn');
@@ -1155,6 +1178,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let heightSyncRaf = 0;
     let lastSyncedGalleryHeight = -1;
     let searchDebounceTimer = null;
+    let suggestDebounceTimer = null;
+    let suggestRunId = 0;
+    let acFocusedIndex = -1;
     let posterCaptureObserver = null;
     let videoThumbnailObserver = null;
     let fullscreenDebugFrozen = false;
@@ -1183,8 +1209,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const queryActive = searchInput.value.trim().length > 0;
         const treeTagFilterActive = Boolean(state.treeTagFilter);
         const detailFiltersActive = hasActiveDetailFilters();
-        const nsfwVisibilityActive = state.nsfwVisibility !== 'explicit';
-        return queryActive || treeTagFilterActive || detailFiltersActive || nsfwVisibilityActive;
+        return queryActive || treeTagFilterActive || detailFiltersActive;
     }
 
     function getServerFilterConfig(query) {
@@ -1197,47 +1222,83 @@ document.addEventListener('DOMContentLoaded', () => {
         const mimetypes = getAdvancedFilterValues('mimetype')
             .map((value) => normalizeDetailFilterValue(value))
             .filter(Boolean);
-        const selectedNsfwRatings = getAdvancedFilterValues('nsfwRating')
+        const nsfwRatings = getAdvancedFilterValues('nsfwRating')
             .map((value) => normalizeDetailFilterValue(value))
             .filter(Boolean);
         const nsfwSafety = getAdvancedFilterValues('nsfwSafety')
             .map((value) => normalizeDetailFilterValue(value))
             .filter(Boolean);
-        const visibilityMode = state.nsfwVisibility;
-        const visibilityActive = visibilityMode !== 'explicit';
-        let nsfwRatings = selectedNsfwRatings;
-        if (visibilityActive) {
-            if (selectedNsfwRatings.length) {
-                nsfwRatings = selectedNsfwRatings.filter((value) => isNsfwValueAllowedByVisibility(value, visibilityMode));
-                if (!nsfwRatings.length) {
-                    nsfwRatings = ['__nsfw_visibility_no_match__'];
-                }
+
+        // Parse artist names with include/exclude modes
+        const includeArtists = [];
+        const excludeArtists = [];
+        for (const entry of getAdvancedFilterValues('artistName')) {
+            const { mode, name } = _parseModePrefixEntry(entry);
+            const trimmed = name.trim();
+            if (!trimmed) continue;
+            if (mode === 'exclude') {
+                excludeArtists.push(trimmed);
             } else {
-                nsfwRatings = getNsfwVisibilityServerRatings(visibilityMode);
+                includeArtists.push(trimmed);
             }
         }
-        const artistNames = getAdvancedFilterValues('artistName')
-            .map((value) => String(value || '').trim())
-            .filter((value) => value.length > 0);
-        const collectionNames = getAdvancedFilterValues('collections')
-            .map((value) => String(value || '').trim())
-            .filter((value) => value.length > 0);
+
+        // Parse collection names with include/exclude modes
+        const includeCollections = [];
+        const excludeCollections = [];
+        for (const entry of getAdvancedFilterValues('collections')) {
+            const { mode, name } = _parseModePrefixEntry(entry);
+            const trimmed = name.trim();
+            if (!trimmed) continue;
+            if (mode === 'exclude') {
+                excludeCollections.push(trimmed);
+            } else {
+                includeCollections.push(trimmed);
+            }
+        }
 
         const a1111Hires = getDataExtractionMode('A1111 Hires Upscale');
         const a1111RegionalPrompter = getDataExtractionMode('A1111 Regional Prompter');
         const a1111Adetailer = getDataExtractionMode('A1111 ADetailer');
 
-        const hasUnsupportedStructuredFilters = Boolean(state.treeTagFilter)
-            || getAdvancedFilterValues('tags').length > 0;
-        const hasSupportedStructuredFilters = Boolean(
-            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || visibilityActive || a1111Hires || a1111RegionalPrompter || a1111Adetailer
-        );
-
-        if (!hasSupportedStructuredFilters || hasUnsupportedStructuredFilters) {
-            return null;
+        // Collect tag filters from both advanced filter pills and tree tag filter.
+        const includeTags = [];
+        const excludeTags = [];
+        for (const tagEntry of getAdvancedFilterValues('tags')) {
+            const { mode, name } = _parseModePrefixEntry(tagEntry);
+            const normalized = normalizeDetailFilterValue(name);
+            if (!normalized) continue;
+            if (mode === 'exclude') {
+                excludeTags.push(normalized);
+            } else {
+                includeTags.push(normalized);
+            }
+        }
+        if (Array.isArray(state.treeTagFilter)) {
+            for (const filter of state.treeTagFilter) {
+                const normalized = normalizeDetailFilterValue(filter.name);
+                if (!normalized) continue;
+                if (filter.mode === 'exclude') {
+                    excludeTags.push(normalized);
+                } else {
+                    includeTags.push(normalized);
+                }
+            }
         }
 
+        // Combine include + exclude arrays for has-filter checks
+        const artistNames = [...includeArtists, ...excludeArtists];
+        const collectionNames = [...includeCollections, ...excludeCollections];
+
+        const hasSupportedStructuredFilters = Boolean(
+            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || a1111Hires || a1111RegionalPrompter || a1111Adetailer || includeTags.length || excludeTags.length
+        );
+
         const normalizedQuery = String(query || '').trim();
+
+        if (!hasSupportedStructuredFilters && !normalizedQuery) {
+            return null;
+        }
         return {
             search: normalizedQuery,
             generationSoftwares,
@@ -1245,11 +1306,15 @@ document.addEventListener('DOMContentLoaded', () => {
             mimetypes,
             nsfwRatings,
             nsfwSafety,
-            artistNames,
-            collectionNames,
+            artistNames: includeArtists,
+            excludeArtists,
+            collectionNames: includeCollections,
+            excludeCollections,
             a1111Hires: a1111Hires ? [a1111Hires] : null,
             a1111RegionalPrompter: a1111RegionalPrompter ? [a1111RegionalPrompter] : null,
             a1111Adetailer: a1111Adetailer ? [a1111Adetailer] : null,
+            includeTags,
+            excludeTags,
             signature: JSON.stringify({
                 search: normalizedQuery,
                 generationSoftwares,
@@ -1257,15 +1322,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 mimetypes,
                 nsfwRatings,
                 nsfwSafety,
-                artistNames,
-                collectionNames,
-                nsfwVisibility: visibilityMode,
+                includeArtists,
+                excludeArtists,
+                includeCollections,
+                excludeCollections,
                 a1111Hires,
                 a1111RegionalPrompter,
                 a1111Adetailer,
+                includeTags,
+                excludeTags,
             }),
         };
 
+    }
+
+    function _appendNsfwVisibilityParams(params) {
+        // Always apply NSFW visibility preference as a base catalog constraint.
+        const visibilityMode = state.nsfwVisibility || 'explicit';
+        if (visibilityMode !== 'explicit') {
+            const ratings = getNsfwVisibilityServerRatings(visibilityMode);
+            ratings.forEach((value) => params.append('nsfw_rating', value));
+        }
     }
 
     function buildImagesRequestUrl(skip, limit) {
@@ -1275,6 +1352,9 @@ document.addEventListener('DOMContentLoaded', () => {
             sort_by: state.sortOrder,
             group_variants: state.groupVariantsEnabled ? 'true' : 'false',
         });
+
+        // Always include NSFW visibility preference to constrain the base catalog.
+        _appendNsfwVisibilityParams(params);
 
         const config = state.serverFilterMode ? state.activeServerFilterConfig : null;
         if (config) {
@@ -1288,6 +1368,12 @@ document.addEventListener('DOMContentLoaded', () => {
             config.nsfwSafety.forEach((value) => params.append('nsfw_safety', value));
             config.artistNames.forEach((value) => params.append('artist_name', value));
             config.collectionNames.forEach((value) => params.append('collection_name', value));
+            if (config.excludeArtists && config.excludeArtists.length) {
+                config.excludeArtists.forEach((value) => params.append('exclude_artist_name', value));
+            }
+            if (config.excludeCollections && config.excludeCollections.length) {
+                config.excludeCollections.forEach((value) => params.append('exclude_collection_name', value));
+            }
             if (config.a1111Hires && config.a1111Hires.length) {
                 config.a1111Hires.forEach((value) => params.append('a1111_hires', value));
             }
@@ -1296,6 +1382,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (config.a1111Adetailer && config.a1111Adetailer.length) {
                 config.a1111Adetailer.forEach((value) => params.append('a1111_adetailer', value));
+            }
+            if (config.includeTags && config.includeTags.length) {
+                config.includeTags.forEach((value) => params.append('include_tag', value));
+            }
+            if (config.excludeTags && config.excludeTags.length) {
+                config.excludeTags.forEach((value) => params.append('exclude_tag', value));
             }
         }
 
@@ -1306,6 +1398,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const params = new URLSearchParams({
             group_variants: state.groupVariantsEnabled ? 'true' : 'false',
         });
+
+        // Always include NSFW visibility preference to constrain the base catalog.
+        _appendNsfwVisibilityParams(params);
+
         if (config) {
             if (config.search) {
                 params.set('search', config.search);
@@ -1317,6 +1413,12 @@ document.addEventListener('DOMContentLoaded', () => {
             config.nsfwSafety.forEach((value) => params.append('nsfw_safety', value));
             config.artistNames.forEach((value) => params.append('artist_name', value));
             config.collectionNames.forEach((value) => params.append('collection_name', value));
+            if (config.excludeArtists && config.excludeArtists.length) {
+                config.excludeArtists.forEach((value) => params.append('exclude_artist_name', value));
+            }
+            if (config.excludeCollections && config.excludeCollections.length) {
+                config.excludeCollections.forEach((value) => params.append('exclude_collection_name', value));
+            }
             if (config.a1111Hires && config.a1111Hires.length) {
                 config.a1111Hires.forEach((value) => params.append('a1111_hires', value));
             }
@@ -1325,6 +1427,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (config.a1111Adetailer && config.a1111Adetailer.length) {
                 config.a1111Adetailer.forEach((value) => params.append('a1111_adetailer', value));
+            }
+            if (config.includeTags && config.includeTags.length) {
+                config.includeTags.forEach((value) => params.append('include_tag', value));
+            }
+            if (config.excludeTags && config.excludeTags.length) {
+                config.excludeTags.forEach((value) => params.append('exclude_tag', value));
             }
         }
 
@@ -1853,6 +1961,292 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    /* ── User Tags pane: multi-select cloud + add/remove ──────────── */
+
+    function getImageUserTags(image) {
+        if (!image || typeof image !== 'object') return [];
+        const tags = new Set();
+        const addAll = (arr) => { (arr || []).forEach((t) => { if (t) tags.add(normalizeTagName(t)); }); };
+        addAll(image.user_tags);
+        const exif = image.exif_data && typeof image.exif_data === 'object' ? image.exif_data : {};
+        addAll(exif.user_tags);
+        return Array.from(tags).sort((a, b) => a.localeCompare(b));
+    }
+
+    /**
+     * Collect all distinct user tags across a group of images,
+     * with match counts for partial-application badges.
+     * Returns Map<string, { name: string, count: number }> sorted alphabetically.
+     */
+    function collectUserTagsAcrossGroup(images) {
+        const tagMap = new Map();
+        for (const image of images) {
+            const tags = getImageUserTags(image);
+            for (const t of tags) {
+                const existing = tagMap.get(t);
+                if (existing) {
+                    existing.count++;
+                } else {
+                    tagMap.set(t, { name: t, count: 1 });
+                }
+            }
+        }
+        return new Map([...tagMap.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+    }
+
+    /** Get existing user tag names for autosuggest, merged from filter options + current selection. */
+    function getUserTagSuggestions() {
+        const pool = new Set();
+        const fromFilter = state.filterOptions?.tagNamesBySource?.user;
+        if (Array.isArray(fromFilter)) {
+            fromFilter.forEach((t) => { if (t) pool.add(normalizeTagName(t)); });
+        }
+        // Also include user tags from all currently loaded images so that
+        // newly-added tags appear in suggestions without a server round-trip.
+        if (Array.isArray(state.allImages)) {
+            for (const image of state.allImages) {
+                const tags = getImageUserTags(image);
+                for (const t of tags) {
+                    if (t) pool.add(t);
+                }
+            }
+        }
+        return Array.from(pool).sort();
+    }
+
+    async function applyUserTagToGroup(tagName) {
+        const normalised = normalizeTagName(tagName);
+        if (!normalised) { showToast('Tag name cannot be empty.', 'warn'); return; }
+        const targets = getDetailSelectionGroup(getSelectedImage());
+        if (!targets.length) { showToast('No images selected.', 'warn'); return; }
+
+        let successCount = 0;
+        for (const image of targets) {
+            const editableHash = getEditableFileHash(image);
+            if (!editableHash) continue;
+            const current = getImageUserTags(image);
+            if (current.includes(normalised)) { successCount++; continue; }
+            const next = [...current, normalised].sort((a, b) => a.localeCompare(b));
+            try {
+                const result = await saveImageMetadata(editableHash, { user_tags: next });
+                const saved = Array.isArray(result?.user_tags)
+                    ? result.user_tags.map((t) => normalizeTagName(t)).filter(Boolean)
+                    : next;
+                image.user_tags = [...saved];
+                successCount++;
+            } catch (err) {
+                showToast(`Failed on ${image.file_hash?.slice(0, 8) || 'image'}: ${err.message}`, 'warn');
+            }
+        }
+        showToast(`Added user tag "${normalised}" to ${successCount}/${targets.length} image(s).`, 'success');
+        renderUserTagsPanel();
+        postSelectedImageTagsToTree(getSelectedImage());
+    }
+
+    async function removeUserTagFromGroup(tagName) {
+        const normalised = normalizeTagName(tagName);
+        if (!normalised) return;
+        const targets = getDetailSelectionGroup(getSelectedImage());
+        if (!targets.length) return;
+
+        let successCount = 0;
+        for (const image of targets) {
+            const editableHash = getEditableFileHash(image);
+            if (!editableHash) continue;
+            const current = getImageUserTags(image);
+            if (!current.includes(normalised)) { successCount++; continue; }
+            const next = current.filter((t) => t !== normalised);
+            try {
+                const result = await saveImageMetadata(editableHash, { user_tags: next });
+                const saved = Array.isArray(result?.user_tags)
+                    ? result.user_tags.map((t) => normalizeTagName(t)).filter(Boolean)
+                    : next;
+                image.user_tags = [...saved];
+                successCount++;
+            } catch (err) {
+                showToast(`Failed on ${image.file_hash?.slice(0, 8) || 'image'}: ${err.message}`, 'warn');
+            }
+        }
+        showToast(`Removed user tag "${normalised}" from ${successCount}/${targets.length} image(s).`, 'success');
+        renderUserTagsPanel();
+        postSelectedImageTagsToTree(getSelectedImage());
+    }
+
+    function renderUserTagsPanel() {
+        if (!userTagsCloud) return;
+        userTagsCloud.innerHTML = '';
+
+        const targets = getDetailSelectionGroup(getSelectedImage());
+        if (!targets.length) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-tag-empty';
+            empty.textContent = 'Select an image to manage user tags.';
+            userTagsCloud.appendChild(empty);
+            return;
+        }
+
+        const totalCount = targets.length;
+        const tagMap = collectUserTagsAcrossGroup(targets);
+
+        // Render existing tag chips
+        for (const [, entry] of tagMap) {
+            const isPartial = entry.count < totalCount;
+            const chip = document.createElement('span');
+            chip.className = `user-tag-chip${isPartial ? ' partial' : ''}`;
+
+            const label = document.createElement('span');
+            label.className = 'user-tag-chip-label';
+            label.textContent = entry.name;
+            label.title = `Click to filter gallery by user tag "${entry.name}"`;
+            label.style.cursor = 'pointer';
+            label.addEventListener('click', () => {
+                setTreeTagFilter({ source: 'user', name: entry.name });
+                void applyFilter();
+            });
+            chip.appendChild(label);
+
+            if (totalCount > 1) {
+                const badge = document.createElement('span');
+                badge.className = 'user-tag-chip-count';
+                badge.textContent = `${entry.count}/${totalCount}`;
+                badge.title = `${entry.count} of ${totalCount} selected image(s) have this tag`;
+                chip.appendChild(badge);
+            }
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'user-tag-chip-remove';
+            removeBtn.textContent = '×';
+            removeBtn.title = `Remove "${entry.name}" from all selected images`;
+            removeBtn.addEventListener('click', () => { void removeUserTagFromGroup(entry.name); });
+            chip.appendChild(removeBtn);
+
+            userTagsCloud.appendChild(chip);
+        }
+
+        // "+ New" chip
+        const newBtn = document.createElement('button');
+        newBtn.type = 'button';
+        newBtn.className = 'user-tag-new-btn';
+        newBtn.textContent = '+ New';
+        newBtn.title = 'Add a user tag to all selected images';
+        newBtn.addEventListener('click', () => {
+            // Replace button with inline input
+            const wrap = document.createElement('span');
+            wrap.className = 'user-tag-input-wrap';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'user-tag-input';
+            input.placeholder = 'Tag name…';
+
+            const suggest = document.createElement('div');
+            suggest.className = 'user-tag-suggest hidden';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'user-tag-input-cancel';
+            cancelBtn.textContent = '×';
+            cancelBtn.title = 'Cancel';
+
+            wrap.appendChild(input);
+            wrap.appendChild(suggest);
+            wrap.appendChild(cancelBtn);
+            newBtn.replaceWith(wrap);
+            input.focus();
+
+            // Build autosuggest list
+            let activeIndex = -1;
+            const allSuggestions = getUserTagSuggestions();
+            const appliedTags = new Set(tagMap.keys());
+
+            function renderSuggestions(filter = '') {
+                suggest.innerHTML = '';
+                activeIndex = -1;
+                const filtered = filter
+                    ? allSuggestions.filter((s) => s.includes(filter) && !appliedTags.has(s))
+                    : allSuggestions.filter((s) => !appliedTags.has(s));
+                if (!filtered.length) {
+                    suggest.classList.add('hidden');
+                    return;
+                }
+                filtered.slice(0, 20).forEach((name, i) => {
+                    const item = document.createElement('div');
+                    item.className = 'user-tag-suggest-item';
+                    item.textContent = name;
+                    item.addEventListener('mousedown', (e) => {
+                        e.preventDefault(); // prevent blur
+                        input.value = name;
+                        suggest.classList.add('hidden');
+                        commitTag(name);
+                    });
+                    suggest.appendChild(item);
+                });
+                suggest.classList.remove('hidden');
+            }
+
+            function updateActiveItem() {
+                const items = suggest.querySelectorAll('.user-tag-suggest-item');
+                items.forEach((el, i) => el.classList.toggle('active', i === activeIndex));
+            }
+
+            function commitTag(value) {
+                const name = normalizeTagName(value);
+                if (!name) { teardown(); return; }
+                void applyUserTagToGroup(name);
+                teardown();
+            }
+
+            function teardown() {
+                wrap.replaceWith(newBtn);
+            }
+
+            input.addEventListener('input', () => { renderSuggestions(input.value.trim().toLowerCase()); });
+            input.addEventListener('keydown', (e) => {
+                const items = suggest.querySelectorAll('.user-tag-suggest-item');
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    activeIndex = Math.min(activeIndex + 1, items.length - 1);
+                    updateActiveItem();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    activeIndex = Math.max(activeIndex - 1, -1);
+                    updateActiveItem();
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (activeIndex >= 0 && items[activeIndex]) {
+                        input.value = items[activeIndex].textContent;
+                    }
+                    commitTag(input.value);
+                } else if (e.key === 'Escape') {
+                    teardown();
+                }
+            });
+
+            input.addEventListener('blur', () => {
+                // Small delay to allow mousedown on suggestion items to fire first
+                setTimeout(teardown, 120);
+            });
+
+            cancelBtn.addEventListener('click', teardown);
+
+            // Show suggestions on open
+            renderSuggestions();
+        });
+        userTagsCloud.appendChild(newBtn);
+
+        // Empty state: no chips except the + New button
+        if (!tagMap.size) {
+            const hint = document.createElement('p');
+            hint.className = 'detail-tag-empty';
+            hint.textContent = 'No user tags yet. Click + New to add one.';
+            hint.style.marginBottom = '0';
+            userTagsCloud.insertBefore(hint, newBtn);
+        }
+    }
+
+    /* ── End User Tags pane ────────────────────────────────────────── */
+
     function buildSelectedImageTagsPayload(activeImage) {
         const selectedImages = getSelectedImages();
         const images = selectedImages.length
@@ -1935,8 +2329,37 @@ document.addEventListener('DOMContentLoaded', () => {
         );
     }
 
-    function setTreeTagFilter(payload) {
-        if (!payload || typeof payload !== 'object') {
+    /**
+     * Set the tree tag filter state.
+     * Supports both single-select (legacy) and multi-select modes.
+     * - Single: payload = {source, name} | null
+     * - Multi:  payload = [{source, name, mode}, ...] (array with include/exclude modes)
+     */
+    function setTreeTagFilter(payload, isMultiSelect) {
+        if (!payload) {
+            state.treeTagFilter = null;
+            renderTreeTagFilterIndicator();
+            return;
+        }
+
+        if (isMultiSelect && Array.isArray(payload)) {
+            // Multi-select mode: store array of {source, name, mode}
+            const filters = payload
+                .map((entry) => {
+                    const source = normalizeTagName(entry.source);
+                    const name = normalizeTagName(entry.name);
+                    const mode = entry.mode === 'exclude' ? 'exclude' : 'include';
+                    if (!source || !name) return null;
+                    return { source, name, mode };
+                })
+                .filter(Boolean);
+            state.treeTagFilter = filters.length > 0 ? filters : null;
+            renderTreeTagFilterIndicator();
+            return;
+        }
+
+        // Single-select (legacy)
+        if (typeof payload !== 'object' || Array.isArray(payload)) {
             state.treeTagFilter = null;
             renderTreeTagFilterIndicator();
             return;
@@ -1950,10 +2373,8 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        state.treeTagFilter = {
-            source,
-            name,
-        };
+        // Wrap single filter in array format for uniform processing
+        state.treeTagFilter = [{ source, name, mode: 'include' }];
         renderTreeTagFilterIndicator();
     }
 
@@ -1962,7 +2383,9 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (!state.treeTagFilter) {
+        const hasMissingSource = Object.values(state.missingSourceFilter || {}).some(Boolean);
+
+        if (!state.treeTagFilter && !hasMissingSource) {
             treeTagFilterIndicator.classList.add('hidden');
             treeTagFilterText.textContent = '';
             treeTagFilterChip.className = 'tree-tag-filter-chip';
@@ -1970,19 +2393,72 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         treeTagFilterIndicator.classList.remove('hidden');
-        treeTagFilterChip.className = `tree-tag-filter-chip source-${state.treeTagFilter.source}`;
-        treeTagFilterText.innerHTML = `<strong>${state.treeTagFilter.source}</strong>: ${state.treeTagFilter.name}`;
+
+        // Show missing-source filters as additional indicator text
+        const missingSources = Object.entries(state.missingSourceFilter || {})
+            .filter(([, active]) => active)
+            .map(([source]) => source);
+
+        if (state.treeTagFilter) {
+            const filters = state.treeTagFilter;
+            if (filters.length === 1) {
+                // Single filter — show as single chip
+                const f = filters[0];
+                treeTagFilterChip.className = `tree-tag-filter-chip source-${f.source} ${f.mode === 'exclude' ? 'mode-exclude' : 'mode-include'}`;
+                const prefix = f.mode === 'exclude' ? '✕ ' : '';
+                treeTagFilterText.innerHTML = `<strong>${f.source}</strong>: ${prefix}${f.name}`;
+            } else {
+                // Multiple filters — show count summary
+                const includeCount = filters.filter((f) => f.mode !== 'exclude').length;
+                const excludeCount = filters.filter((f) => f.mode === 'exclude').length;
+                const parts = [];
+                if (includeCount > 0) parts.push(`${includeCount} include`);
+                if (excludeCount > 0) parts.push(`${excludeCount} exclude`);
+                // Use the source of the first filter for chip color
+                treeTagFilterChip.className = 'tree-tag-filter-chip mode-include';
+                treeTagFilterText.innerHTML = `<strong>Tree filter</strong>: ${parts.join(', ')}`;
+            }
+            if (missingSources.length > 0) {
+                treeTagFilterText.innerHTML += ` + <strong>missing:</strong> ${missingSources.join(', ')}`;
+            }
+        } else {
+            // Only missing-source filters active
+            treeTagFilterChip.className = 'tree-tag-filter-chip mode-exclude';
+            treeTagFilterText.innerHTML = `<strong>Missing tags:</strong> ${missingSources.join(', ')}`;
+        }
     }
 
     function imageMatchesTreeTagFilter(image) {
         if (!state.treeTagFilter) {
             return true;
         }
+
         const bySource = extractImageScopeTags(image);
-        const sourceTags = Array.isArray(bySource?.[state.treeTagFilter.source])
-            ? bySource[state.treeTagFilter.source]
-            : [];
-        return sourceTags.some((tagName) => normalizeTagName(tagName) === state.treeTagFilter.name);
+        const allTagNames = new Set();
+        Object.values(bySource).forEach((names) => {
+            if (Array.isArray(names)) {
+                names.forEach((n) => {
+                    const norm = normalizeTagName(n);
+                    if (norm) allTagNames.add(norm);
+                });
+            }
+        });
+        const filters = state.treeTagFilter;
+
+        // All filters must be satisfied (AND logic)
+        for (const filter of filters) {
+            const hasTag = allTagNames.has(filter.name);
+
+            if (filter.mode === 'exclude') {
+                // Exclude: image must NOT have this tag
+                if (hasTag) return false;
+            } else {
+                // Include: image MUST have this tag
+                if (!hasTag) return false;
+            }
+        }
+
+        return true;
     }
 
     function normalizeDetailFilterValue(value) {
@@ -1990,27 +2466,65 @@ document.addEventListener('DOMContentLoaded', () => {
         return normalized || null;
     }
 
-    function sanitizeAdvancedFilterValues(values) {
+    /** Categories that store values with "include:" / "exclude:" mode prefixes. */
+    const MODE_PREFIX_CATEGORIES = new Set(['tags', 'artistName', 'collections']);
+
+    function _isModePrefixCategory(category) {
+        return MODE_PREFIX_CATEGORIES.has(category);
+    }
+
+    /** Extract mode and raw name from a potentially mode-prefixed entry. */
+    function _parseModePrefixEntry(entry) {
+        const colonIdx = entry.indexOf(':');
+        if (colonIdx >= 0) {
+            return { mode: entry.substring(0, colonIdx), name: entry.substring(colonIdx + 1) };
+        }
+        return { mode: 'include', name: entry };
+    }
+
+    function sanitizeAdvancedFilterValues(values, hasModePrefix) {
         const nextValues = [];
         const seen = new Set();
         (Array.isArray(values) ? values : []).forEach((value) => {
             const text = String(value || '').trim();
-            const normalized = normalizeDetailFilterValue(text);
-            if (!normalized || seen.has(normalized)) {
-                return;
+            if (hasModePrefix) {
+                // Values may be prefixed with "include:" or "exclude:"
+                // Deduplicate by the name portion only
+                const { name } = _parseModePrefixEntry(text);
+                const normalized = normalizeDetailFilterValue(name);
+                if (!normalized || seen.has(normalized)) {
+                    return;
+                }
+                seen.add(normalized);
+                nextValues.push(text);
+            } else {
+                const normalized = normalizeDetailFilterValue(text);
+                if (!normalized || seen.has(normalized)) {
+                    return;
+                }
+                seen.add(normalized);
+                nextValues.push(text);
             }
-            seen.add(normalized);
-            nextValues.push(text);
         });
         return nextValues;
     }
 
     function getAdvancedFilterValues(category) {
-        return sanitizeAdvancedFilterValues(state.advancedFilters?.[category] || []);
+        return sanitizeAdvancedFilterValues(state.advancedFilters?.[category] || [], _isModePrefixCategory(category));
     }
 
     function getAdvancedFilterValueSet(category) {
-        return new Set(getAdvancedFilterValues(category)
+        const values = getAdvancedFilterValues(category);
+        if (_isModePrefixCategory(category)) {
+            // Return Set of normalized names (without mode prefix)
+            return new Set(values
+                .map((entry) => {
+                    const { name } = _parseModePrefixEntry(entry);
+                    return normalizeDetailFilterValue(name);
+                })
+                .filter(Boolean));
+        }
+        return new Set(values
             .map((value) => normalizeDetailFilterValue(value))
             .filter(Boolean));
     }
@@ -3088,16 +3602,25 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function imageMatchesNsfwVisibility(image) {
-        if (state.nsfwVisibility === 'explicit') {
-            return true;
+    function setNsfwVisibilityMode(nextMode) {
+        const normalizedMode = String(nextMode || '').toLowerCase();
+        if (!['safe', 'mature', 'explicit'].includes(normalizedMode)) {
+            return;
         }
-        const labels = getImageNsfwRatings(image);
-        if (!labels.length) {
-            return true;
-        }
-        const allowedValues = new Set(getNsfwVisibilityServerRatings(state.nsfwVisibility));
-        return labels.some((label) => allowedValues.has(normalizeDetailFilterValue(label)));
+        state.nsfwVisibility = normalizedMode;
+        writeCookieValue(COOKIE_KEYS.nsfwVisibility, normalizedMode);
+        writeCookieValue(COOKIE_KEYS.showNsfw, normalizedMode === 'explicit' ? 'true' : 'false');
+        syncNsfwVisibilityUi();
+        // NSFW visibility is a base catalog preference, not a display filter.
+        // Reload the entire gallery so the server constrains the image set.
+        void resetAndLoadImages({ preserveSelection: true });
+    }
+
+    function cycleNsfwVisibilityMode() {
+        const sequence = ['safe', 'mature', 'explicit'];
+        const currentIndex = sequence.indexOf(String(state.nsfwVisibility || '').toLowerCase());
+        const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % sequence.length : 2;
+        setNsfwVisibilityMode(sequence[nextIndex]);
     }
 
     function imageMatchesAnyMultiValueFilter(imageValues, category) {
@@ -3169,6 +3692,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 .filter(Boolean)
         );
         return Array.from(selections).some((value) => normalizedCollections.has(value));
+    }
+
+    /** Client-side filter for a scalar field in a mode-prefix category. */
+    function _imageMatchesModePrefixFilter(imageValue, category) {
+        const entries = getAdvancedFilterValues(category);
+        if (!entries.length) return true;
+        const normalizedValue = normalizeDetailFilterValue(imageValue);
+        for (const entry of entries) {
+            const { mode, name } = _parseModePrefixEntry(entry);
+            const normalizedName = normalizeDetailFilterValue(name);
+            if (!normalizedName) continue;
+            const matches = normalizedValue === normalizedName;
+            if (mode === 'exclude' && matches) return false;
+            if (mode !== 'exclude' && !matches) return false;
+        }
+        return true;
+    }
+
+    /** Client-side collection filter with mode-prefix (include/exclude). */
+    function _imageMatchesCollectionModePrefixFilter(image, category) {
+        const entries = getAdvancedFilterValues(category);
+        if (!entries.length) return true;
+        const normalizedCollections = new Set(
+            (Array.isArray(image?.collection_names) ? image.collection_names : [])
+                .map((name) => normalizeDetailFilterValue(name))
+                .filter(Boolean)
+        );
+        for (const entry of entries) {
+            const { mode, name } = _parseModePrefixEntry(entry);
+            const normalizedName = normalizeDetailFilterValue(name);
+            if (!normalizedName) continue;
+            const inCollection = normalizedCollections.has(normalizedName);
+            if (mode === 'exclude' && inCollection) return false;
+            if (mode !== 'exclude' && !inCollection) return false;
+        }
+        return true;
     }
 
     function isMissingDataConditionMet(image, condition) {
@@ -3432,9 +3991,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function imageMatchesDetailFilters(image) {
-        if (!imageMatchesNsfwVisibility(image)) {
-            return false;
-        }
         if (!imageMatchesAnyFilter(image?.generation_software, 'generationSoftware')) {
             return false;
         }
@@ -3450,19 +4006,26 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!imageMatchesNsfwSafetyFilter(image)) {
             return false;
         }
-        if (!imageMatchesAnyFilter(image?.artist_name, 'artistName')) {
+        if (!_imageMatchesModePrefixFilter(image?.artist_name, 'artistName')) {
             return false;
         }
-        if (!imageMatchesAnyCollectionFilter(image, 'collections')) {
+        if (!_imageMatchesCollectionModePrefixFilter(image, 'collections')) {
             return false;
         }
 
-        const selectedTags = getAdvancedFilterValueSet('tags');
-        if (selectedTags.size) {
+        // Tag filters with mode (include/exclude)
+        const selectedTags = getAdvancedFilterValues('tags');
+        if (selectedTags.length) {
             const imageTags = getImageTagSet(image);
-            for (const tag of selectedTags) {
-                if (!imageTags.has(tag)) {
-                    return false;
+            for (const tagEntry of selectedTags) {
+                const { mode, name } = _parseModePrefixEntry(tagEntry);
+                const normalizedTag = normalizeDetailFilterValue(name);
+                if (!normalizedTag) continue;
+                const hasTag = imageTags.has(normalizedTag);
+                if (mode === 'exclude') {
+                    if (hasTag) return false;
+                } else {
+                    if (!hasTag) return false;
                 }
             }
         }
@@ -3601,25 +4164,49 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const values = getAdvancedFilterValues(category);
         container.classList.toggle('hidden', values.length === 0);
-        if (uiKit?.renderActionChips) {
-            uiKit.renderActionChips(container, values, {
-                chipClass: 'advanced-filter-selected-chip',
-                titlePrefix: 'Remove filter: ',
-                onClick: (value) => {
-                    void toggleDetailFilter(category, value, value);
-                },
-            });
-            return;
-        }
+
+        const hasModePrefix = _isModePrefixCategory(category);
+
         container.innerHTML = '';
-        values.forEach((value) => {
+        values.forEach((entry) => {
+            let displayLabel = entry;
+            let mode = null;
+
+            if (hasModePrefix) {
+                const parsed = _parseModePrefixEntry(entry);
+                mode = parsed.mode;
+                displayLabel = parsed.name;
+            }
+
             const chip = document.createElement('button');
             chip.type = 'button';
             chip.className = 'advanced-filter-selected-chip';
-            chip.title = `Remove filter: ${value}`;
-            chip.textContent = value;
+            if (mode) {
+                chip.classList.add(`mode-${mode}`);
+            }
+            chip.title = `Click to toggle include/exclude`;
+
+            const labelSpan = document.createElement('span');
+            labelSpan.className = 'chip-label';
+            labelSpan.textContent = displayLabel;
+            chip.appendChild(labelSpan);
+
+            const removeBtn = document.createElement('span');
+            removeBtn.className = 'chip-remove';
+            removeBtn.textContent = '×';
+            removeBtn.title = `Remove filter: ${displayLabel}`;
+            removeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                void removeAdvancedFilterEntry(category, displayLabel);
+            });
+            chip.appendChild(removeBtn);
+
             chip.addEventListener('click', () => {
-                void toggleDetailFilter(category, value, value);
+                if (hasModePrefix) {
+                    void toggleFilterIncludeExclude(category, displayLabel);
+                } else {
+                    void removeAdvancedFilterEntry(category, displayLabel);
+                }
             });
             container.appendChild(chip);
         });
@@ -3640,6 +4227,228 @@ document.addEventListener('DOMContentLoaded', () => {
             datalist.appendChild(option);
         });
     }
+
+    // ── Search autocomplete ────────────────────────────────────────────
+
+    function getSearchDebounceMs(text) {
+        const len = text.trim().length;
+        if (len <= 0) return 0;
+        if (len === 1) return 2000;
+        if (len === 2) return 1000;
+        return 0; // 3+ chars: immediate
+    }
+
+    async function fetchSuggestions(query) {
+        const response = await fetch(`/search/suggest?q=${encodeURIComponent(query)}&limit=15`);
+        if (!response.ok) return { collections: [], artists: [], tags: [] };
+        return response.json();
+    }
+
+    function highlightMatch(text, query) {
+        if (!query) return document.createTextNode(text);
+        const lowerText = text.toLowerCase();
+        const lowerQuery = query.toLowerCase();
+        const idx = lowerText.indexOf(lowerQuery);
+        if (idx < 0) return document.createTextNode(text);
+
+        const frag = document.createDocumentFragment();
+        if (idx > 0) frag.appendChild(document.createTextNode(text.substring(0, idx)));
+        const mark = document.createElement('mark');
+        mark.textContent = text.substring(idx, idx + query.length);
+        frag.appendChild(mark);
+        if (idx + query.length < text.length) {
+            frag.appendChild(document.createTextNode(text.substring(idx + query.length)));
+        }
+        return frag;
+    }
+
+    function renderAutocomplete(results, query) {
+        if (!searchAutocomplete) return;
+
+        const groups = [
+            { label: 'collection', items: results.collections, category: 'collections' },
+            { label: 'artist', items: results.artists, category: 'artistName' },
+            { label: 'tag', items: results.tags, category: 'tags' },
+        ];
+
+        const hasAny = groups.some((g) => g.items && g.items.length > 0);
+        if (!hasAny) {
+            hideAutocomplete();
+            return;
+        }
+
+        searchAutocomplete.innerHTML = '';
+        acFocusedIndex = -1;
+        let itemIndex = 0;
+
+        for (const group of groups) {
+            if (!group.items || group.items.length === 0) continue;
+
+            const groupLabel = document.createElement('span');
+            groupLabel.className = 'search-ac-group-label';
+            groupLabel.textContent = group.label;
+            searchAutocomplete.appendChild(groupLabel);
+
+            for (const name of group.items) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-ac-item';
+                btn.setAttribute('role', 'option');
+                btn.dataset.category = group.category;
+                btn.dataset.value = name;
+                btn.dataset.acIndex = String(itemIndex);
+
+                const typeSpan = document.createElement('span');
+                typeSpan.className = 'ac-type';
+                typeSpan.textContent = group.label;
+                btn.appendChild(typeSpan);
+
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'ac-name';
+                nameSpan.appendChild(highlightMatch(name, query));
+                btn.appendChild(nameSpan);
+
+                btn.addEventListener('mousedown', (e) => {
+                    e.preventDefault(); // prevent blur
+                });
+                btn.addEventListener('click', () => {
+                    void selectAutocompleteSuggestion(group.category, name);
+                });
+                searchAutocomplete.appendChild(btn);
+                itemIndex++;
+            }
+        }
+
+        searchAutocomplete.classList.remove('hidden');
+    }
+
+    function showAutocompleteSpinner() {
+        if (!searchAutocomplete) return;
+        searchAutocomplete.innerHTML = '';
+        const spinner = document.createElement('div');
+        spinner.className = 'search-ac-spinner';
+        spinner.textContent = 'Searching…';
+        searchAutocomplete.appendChild(spinner);
+        searchAutocomplete.classList.remove('hidden');
+        acFocusedIndex = -1;
+    }
+
+    function hideAutocomplete() {
+        if (!searchAutocomplete) return;
+        searchAutocomplete.classList.add('hidden');
+        searchAutocomplete.innerHTML = '';
+        acFocusedIndex = -1;
+    }
+
+    function focusAutocompleteItem(newIndex) {
+        const items = searchAutocomplete?.querySelectorAll('.search-ac-item') || [];
+        if (items.length === 0) return;
+
+        // Remove previous focus
+        if (acFocusedIndex >= 0 && acFocusedIndex < items.length) {
+            items[acFocusedIndex].classList.remove('is-focused');
+        }
+
+        // Clamp
+        if (newIndex < 0) newIndex = items.length - 1;
+        if (newIndex >= items.length) newIndex = 0;
+        acFocusedIndex = newIndex;
+
+        items[acFocusedIndex].classList.add('is-focused');
+        items[acFocusedIndex].scrollIntoView({ block: 'nearest' });
+    }
+
+    async function selectAutocompleteSuggestion(category, value) {
+        hideAutocomplete();
+        if (searchInput) searchInput.value = '';
+
+        // For tags, the label displayed in toast is 'tag'; for others derive from category
+        const labelMap = { collections: 'collection', artistName: 'author', tags: 'tag' };
+        const label = labelMap[category] || category;
+        await addAdvancedFilterValue(category, value, label);
+    }
+
+    function renderQuickChips() {
+        if (!quickChipsContainer) return;
+
+        const entries = [];
+        // Gather all active advanced filter values as chip descriptors
+        const categoryLabels = {
+            generationSoftware: 'source',
+            sourceSite: 'host',
+            mimetype: 'type',
+            nsfwRating: 'nsfw',
+            nsfwSafety: 'safety',
+            artistName: 'artist',
+            tags: 'tag',
+            collections: 'collection',
+            missingData: 'data',
+        };
+        for (const [category, label] of Object.entries(categoryLabels)) {
+            const hasModePrefix = _isModePrefixCategory(category);
+            for (const rawValue of getAdvancedFilterValues(category)) {
+                let displayValue = rawValue;
+                let mode = 'include';
+                if (hasModePrefix) {
+                    const parsed = _parseModePrefixEntry(rawValue);
+                    mode = parsed.mode;
+                    displayValue = parsed.name;
+                }
+                entries.push({ category, rawValue, displayValue, label, mode, hasModePrefix });
+            }
+        }
+
+        if (entries.length === 0) {
+            quickChipsContainer.classList.add('hidden');
+            quickChipsContainer.innerHTML = '';
+            return;
+        }
+
+        quickChipsContainer.innerHTML = '';
+        for (const entry of entries) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'advanced-filter-selected-chip';
+            if (entry.hasModePrefix) {
+                chip.classList.add(`mode-${entry.mode}`);
+            }
+            chip.title = entry.hasModePrefix
+                ? `Click to toggle include/exclude`
+                : `Click to remove`;
+
+            const typeSpan = document.createElement('span');
+            typeSpan.className = 'chip-type-label';
+            typeSpan.textContent = entry.label;
+            chip.appendChild(typeSpan);
+
+            const labelSpan = document.createElement('span');
+            labelSpan.className = 'chip-label';
+            labelSpan.textContent = entry.displayValue;
+            chip.appendChild(labelSpan);
+
+            const removeBtn = document.createElement('span');
+            removeBtn.className = 'chip-remove';
+            removeBtn.textContent = '×';
+            removeBtn.title = `Remove filter: ${entry.displayValue}`;
+            removeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                void removeAdvancedFilterEntry(entry.category, entry.displayValue);
+            });
+            chip.appendChild(removeBtn);
+
+            chip.addEventListener('click', () => {
+                if (entry.hasModePrefix) {
+                    void toggleFilterIncludeExclude(entry.category, entry.displayValue);
+                } else {
+                    void removeAdvancedFilterEntry(entry.category, entry.displayValue);
+                }
+            });
+            quickChipsContainer.appendChild(chip);
+        }
+        quickChipsContainer.classList.remove('hidden');
+    }
+
+    // ── End search autocomplete ────────────────────────────────────────
 
     function renderAdvancedFilters() {
         if (!advancedFiltersPanel) {
@@ -3671,16 +4480,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const authorOptions = getSortedUniqueDisplayValues([
             ...(Array.isArray(state.filterOptions?.artistNames) ? state.filterOptions.artistNames : []),
             ...state.artistNames,
-            ...getAdvancedFilterValues('artistName'),
+            // Strip mode prefix from stored filter values for datalist display
+            ...getAdvancedFilterValues('artistName').map((entry) => _parseModePrefixEntry(entry).name),
         ]);
         const tagOptions = getSortedUniqueDisplayValues([
             ...(Array.isArray(state.filterOptions?.tagNames) ? state.filterOptions.tagNames : []),
-            ...getAdvancedFilterValues('tags'),
+            // Strip mode prefix from stored tag filter values for datalist display
+            ...getAdvancedFilterValues('tags').map((entry) => _parseModePrefixEntry(entry).name),
         ]);
         const collectionOptions = getSortedUniqueDisplayValues([
             ...(Array.isArray(state.filterOptions?.collectionNames) ? state.filterOptions.collectionNames : []),
             ...state.collections.map((collection) => collection?.name),
-            ...getAdvancedFilterValues('collections'),
+            // Strip mode prefix from stored filter values for datalist display
+            ...getAdvancedFilterValues('collections').map((entry) => _parseModePrefixEntry(entry).name),
         ]);
 
         renderAdvancedFilterPillGroup(advancedGenerationPills, 'generationSoftware', generationOptions);
@@ -3707,6 +4519,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (advancedFiltersClearBtn) {
             advancedFiltersClearBtn.disabled = !hasActiveDetailFilters();
         }
+
+        renderQuickChips();
     }
 
     async function addAdvancedFilterValue(category, rawValue, label) {
@@ -3722,7 +4536,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
 
-        state.advancedFilters[category] = [...currentValues, nextValue];
+        // Mode-prefixed categories store values as "include:value" / "exclude:value"
+        const storedValue = _isModePrefixCategory(category)
+            ? `include:${nextValue}`
+            : nextValue;
+
+        state.advancedFilters[category] = [...currentValues, storedValue];
+        // Provide immediate visual feedback before async filtering.
+        renderAdvancedFilters();
         await applyFilter({ ensureSearchCoverage: true });
         showToast(`Added ${label} filter: ${nextValue}`, 'info');
         return true;
@@ -4153,10 +4974,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Update thumbnail image to reflect the active variant.
-        const mediaUrl = getMediaUrlForDisplay(image);
-        const img = tile.querySelector(':scope > img');
-        if (img && img.src !== mediaUrl) {
-            img.src = mediaUrl;
+        // Video tiles use a separate poster image managed by
+        // applyTileVideoPoster(); setting its src to the video URL
+        // would corrupt the poster, so skip the update for those.
+        if (!tile.classList.contains('video-tile')) {
+            const mediaUrl = getMediaUrlForDisplay(image);
+            const img = tile.querySelector(':scope > img');
+            if (img && img.src !== mediaUrl) {
+                img.src = mediaUrl;
+            }
         }
     }
 
@@ -4720,6 +5546,7 @@ document.addEventListener('DOMContentLoaded', () => {
         fullscreenPreview.setAttribute('aria-hidden', 'true');
         state.fullscreenSelectedKey = null;
         state.fullscreenIndexHint = null;
+        updateFullscreenSelectionUi();
         if (fullscreenDebugOverlay) {
             fullscreenDebugOverlay.classList.add('hidden');
         }
@@ -4797,6 +5624,30 @@ document.addEventListener('DOMContentLoaded', () => {
         fullscreenLoopBtn.setAttribute('aria-pressed', state.fullscreenLoopEnabled ? 'true' : 'false');
     }
 
+    function updateFullscreenSelectionUi() {
+        if (!fullscreenCounter) {
+            return;
+        }
+
+        const currentKey = state.fullscreenSelectedKey || state.selectedKey || null;
+        const filteredCount = Array.isArray(state.filteredImages) ? state.filteredImages.length : 0;
+        const currentIndex = currentKey
+            ? state.filteredImages.findIndex((image) => image.__key === currentKey)
+            : -1;
+        const selectionStats = getSelectionStats();
+
+        const indexLabel = currentIndex >= 0
+            ? `${currentIndex + 1}/${Math.max(1, filteredCount)}`
+            : `0/${Math.max(1, filteredCount)}`;
+        fullscreenCounter.textContent = `${selectionStats.total} selected / ${filteredCount} filtered • ${indexLabel}`;
+
+        // Toggle orange border on the visible media element.
+        // Clear from both elements to avoid stale class on a hidden element.
+        const isSelected = Boolean(currentKey && state.selectedKeys.has(currentKey));
+        fullscreenImage.classList.toggle('fullscreen-selected', isSelected && !fullscreenImage.classList.contains('hidden'));
+        fullscreenVideo.classList.toggle('fullscreen-selected', isSelected && !fullscreenVideo.classList.contains('hidden'));
+    }
+
     function openFullscreenPreviewFromImage(image) {
         const mediaUrl = getMediaUrlForDisplay(image);
         if (!mediaUrl) {
@@ -4813,9 +5664,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         state.fullscreenSelectedKey = image.__key || null;
-        const nextHint = state.filteredImages.findIndex((img) => img.__key === state.fullscreenSelectedKey);
-        if (nextHint >= 0) {
-            state.fullscreenIndexHint = nextHint;
+        // Find the position by object reference first to preserve the correct
+        // index when duplicate keys exist (same group key from different DB rows).
+        // Only update the hint when we can confirm a better position; leave the
+        // existing hint alone when it already points at a matching key.
+        const existingHint = Number.isInteger(state.fullscreenIndexHint) ? Number(state.fullscreenIndexHint) : -1;
+        if (existingHint >= 0 && existingHint < state.filteredImages.length && state.filteredImages[existingHint]?.__key === state.fullscreenSelectedKey) {
+            // Existing hint is already consistent – keep it.
+        } else {
+            const refHint = state.filteredImages.indexOf(image);
+            if (refHint >= 0) {
+                state.fullscreenIndexHint = refHint;
+            } else {
+                const keyHint = state.filteredImages.findIndex((img) => img.__key === state.fullscreenSelectedKey);
+                if (keyHint >= 0) {
+                    state.fullscreenIndexHint = keyHint;
+                }
+            }
         }
 
         const videoMode = shouldRenderAsVideo(image, mediaUrl);
@@ -4824,6 +5689,8 @@ document.addEventListener('DOMContentLoaded', () => {
         updateFullscreenDebugOverlay('open-fullscreen', {
             mediaType: videoMode ? 'video' : 'image',
         });
+        // Note: updateFullscreenSelectionUi() is called after the media
+        // switch below so the correct element gets the border class.
         renderFullscreenEffectiveTags(image);
         if (videoMode) {
             fullscreenImage.classList.add('hidden');
@@ -4840,6 +5707,16 @@ document.addEventListener('DOMContentLoaded', () => {
             fullscreenImage.src = mediaUrl;
             fullscreenImage.alt = safeText(image.file_name, 'Fullscreen preview');
         }
+        // Must run AFTER the media switch so the visible element gets the border.
+        updateFullscreenSelectionUi();
+    }
+
+    function toggleFullscreenSelection() {
+        const key = state.fullscreenSelectedKey;
+        if (!key) return;
+
+        toggleSelectionAndRender(key);
+        updateFullscreenSelectionUi();
     }
 
     async function navigateFullscreenBy(delta) {
@@ -4864,8 +5741,17 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const currentKey = state.fullscreenSelectedKey || state.selectedKey;
-            let currentIndex = state.filteredImages.findIndex((img) => img.__key === currentKey);
             const hintedIndex = Number.isInteger(state.fullscreenIndexHint) ? Number(state.fullscreenIndexHint) : -1;
+            // When duplicate keys exist (e.g. same file imported as separate DB rows),
+            // findIndex always returns the first occurrence.  Prefer the hinted index
+            // when it is consistent with the current key so navigation advances from
+            // the actual position instead of wrapping back to the first duplicate.
+            let currentIndex = -1;
+            if (hintedIndex >= 0 && hintedIndex < state.filteredImages.length && state.filteredImages[hintedIndex]?.__key === currentKey) {
+                currentIndex = hintedIndex;
+            } else {
+                currentIndex = state.filteredImages.findIndex((img) => img.__key === currentKey);
+            }
 
             // During import refresh, selected/fullscreen keys can temporarily fall outside the loaded page window.
             // Try to recover a real anchor by loading additional pages toward the hinted index.
@@ -4902,7 +5788,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (currentImage && stepImageVariant(currentImage, delta)) {
                 state.fullscreenSelectedKey = currentImage.__key;
                 state.fullscreenIndexHint = baseIndex;
-                assignSingleSelection(currentImage.__key);
+                focusKeyInView(currentImage.__key);
                 renderSelectionState({ force: true });
                 openFullscreenPreviewFromImage(currentImage);
                 updateFullscreenDebugOverlay('nav-variant-committed', {
@@ -4944,7 +5830,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
 
                     const refreshedKey = state.fullscreenSelectedKey || state.selectedKey;
-                    const refreshedIndex = state.filteredImages.findIndex((img) => img.__key === refreshedKey);
+                    // Prefer the actual navigation position over findIndex to avoid
+                    // jumping to an earlier duplicate when the key appears more than once.
+                    let refreshedIndex = -1;
+                    if (baseIndex >= 0 && baseIndex < state.filteredImages.length && state.filteredImages[baseIndex]?.__key === refreshedKey) {
+                        refreshedIndex = baseIndex;
+                    } else {
+                        refreshedIndex = state.filteredImages.findIndex((img) => img.__key === refreshedKey);
+                    }
                     const anchoredIndex = refreshedIndex >= 0 ? refreshedIndex : baseIndex;
                     nextIndex = anchoredIndex + 1;
                     updateFullscreenDebugOverlay('nav-extended-after-load', {
@@ -4982,7 +5875,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             state.fullscreenSelectedKey = nextImage.__key;
             state.fullscreenIndexHint = nextIndex;
-            setSingleSelectionAndRender(nextImage.__key);
+            focusKeyInView(nextImage.__key);
+            renderSelectionState();
             openFullscreenPreviewFromImage(nextImage);
             updateFullscreenDebugOverlay('nav-committed', {
                 delta,
@@ -5016,7 +5910,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         state.fullscreenSelectedKey = nextImage.__key;
         state.fullscreenIndexHint = target === 'first' ? 0 : state.filteredImages.length - 1;
-        setSingleSelectionAndRender(nextImage.__key);
+        focusKeyInView(nextImage.__key);
+        renderSelectionState();
         openFullscreenPreviewFromImage(nextImage);
         updateFullscreenDebugOverlay('nav-boundary', {
             target,
@@ -5065,7 +5960,15 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const currentIndex = state.filteredImages.findIndex((img) => img.__key === state.selectedKey);
+        // Prefer the last-known gallery index when the key still matches,
+        // to avoid findIndex jumping to an earlier duplicate group key.
+        const existingHint = Number.isInteger(state.galleryIndexHint) ? Number(state.galleryIndexHint) : -1;
+        let currentIndex = -1;
+        if (existingHint >= 0 && existingHint < state.filteredImages.length && state.filteredImages[existingHint]?.__key === state.selectedKey) {
+            currentIndex = existingHint;
+        } else {
+            currentIndex = state.filteredImages.findIndex((img) => img.__key === state.selectedKey);
+        }
         const baseIndex = currentIndex >= 0 ? currentIndex : 0;
         const currentImage = state.filteredImages[baseIndex] || null;
 
@@ -5088,7 +5991,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
 
-                const refreshedIndex = state.filteredImages.findIndex((img) => img.__key === state.selectedKey);
+                // Prefer baseIndex when the key still sits there after the page refresh.
+                let refreshedIndex = -1;
+                if (baseIndex >= 0 && baseIndex < state.filteredImages.length && state.filteredImages[baseIndex]?.__key === state.selectedKey) {
+                    refreshedIndex = baseIndex;
+                } else {
+                    refreshedIndex = state.filteredImages.findIndex((img) => img.__key === state.selectedKey);
+                }
                 const anchoredIndex = refreshedIndex >= 0 ? refreshedIndex : baseIndex;
                 nextIndex = anchoredIndex + 1;
             } else {
@@ -5100,6 +6009,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        state.galleryIndexHint = nextIndex;
         selectGalleryImage(state.filteredImages[nextIndex]);
     }
 
@@ -5389,7 +6299,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchImagesStateSignature() {
-        const response = await fetch('/images/state');
+        const params = new URLSearchParams();
+        _appendNsfwVisibilityParams(params);
+        const queryString = params.toString();
+        const url = queryString ? `/images/state?${queryString}` : '/images/state';
+        const response = await fetch(url);
         const result = await response.json();
         if (!response.ok) {
             throw new Error(result.detail || `HTTP ${response.status}`);
@@ -5530,6 +6444,16 @@ document.addEventListener('DOMContentLoaded', () => {
         state.selectedKeys = new Set([key]);
         state.lastSelectionAnchorKey = key;
         saveSelectionToStorage();
+    }
+
+    /** Update the focused/active key for detail panel without touching the selection set.
+     *  Used by fullscreen navigation so viewing an image does not replace existing selections. */
+    function focusKeyInView(key) {
+        if (!key) {
+            state.selectedKey = null;
+        } else {
+            state.selectedKey = key;
+        }
     }
 
     function syncSelectionState() {
@@ -5685,6 +6609,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.lastRenderedSelectionSignature = nextSelectionSignature;
         state.lastRenderedGallerySignature = nextGallerySignature;
         state.lastRenderedDetailKey = nextDetailKey;
+        updateFullscreenSelectionUi();
     }
 
     function setSingleSelectionAndRender(key, options = {}) {
@@ -6409,6 +7334,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 event.dataTransfer.effectAllowed = 'move';
                 event.dataTransfer.setData('text/plain', String(node.id));
             }
+        });
+
+        btn.addEventListener('dragend', () => {
+            taxonomyDragSourceConceptId = null;
         });
 
         btn.addEventListener('dragover', (event) => {
@@ -7193,6 +8122,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         postSelectedImageTagsToTree(image);
+        renderUserTagsPanel();
 
         scheduleGalleryGridHeightSync();
     }
@@ -7348,6 +8278,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 return false;
             }
 
+            if (!imageMatchesMissingSourceFilter(image)) {
+                return false;
+            }
+
             if (!imageMatchesDetailFilters(image)) {
                 return false;
             }
@@ -7356,6 +8290,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return true;
             }
 
+            const tagNames = Array.from(getImageTagSet(image));
             const haystack = [
                 image.file_name,
                 image.file_hash,
@@ -7366,9 +8301,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 image.generation_software,
                 image.mimetype,
                 ...(Array.isArray(image.collection_names) ? image.collection_names : []),
+                ...tagNames,
             ].filter(Boolean).join(' ').toLowerCase();
             return haystack.includes(query);
         });
+    }
+
+    function imageMatchesMissingSourceFilter(image) {
+        const sources = ['civitai', 'danbooru', 'prompt', 'user'];
+        for (const source of sources) {
+            if (!state.missingSourceFilter[source]) {
+                continue;
+            }
+            // Image must have zero tags from this source to pass the filter
+            const tagsBySource = extractImageScopeTags(image);
+            const tags = tagsBySource?.[source];
+            if (Array.isArray(tags) && tags.length > 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     function isCivitaiHostedImage(image) {
@@ -7564,11 +8516,42 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        if (isAdvancedFilterValueActive(category, normalizedValue)) {
-            state.advancedFilters[category] = currentValues.filter((entry) => normalizeDetailFilterValue(entry) !== nextKey);
+        if (_isModePrefixCategory(category)) {
+            // Three-state cycling: include → exclude → remove
+            const includeEntry = `include:${normalizedValue}`;
+            const excludeEntry = `exclude:${normalizedValue}`;
+            const existingIdx = currentValues.findIndex((entry) => {
+                const { mode, name } = _parseModePrefixEntry(entry);
+                return normalizeDetailFilterValue(name) === nextKey && (mode === 'include' || mode === 'exclude' || mode === '');
+            });
+
+            if (existingIdx < 0) {
+                // Not present → add as include
+                state.advancedFilters[category] = [...currentValues, includeEntry];
+            } else {
+                const existing = currentValues[existingIdx];
+                const { mode: currentMode } = _parseModePrefixEntry(existing);
+                if (currentMode === 'include') {
+                    // include → exclude
+                    const updated = [...currentValues];
+                    updated[existingIdx] = excludeEntry;
+                    state.advancedFilters[category] = updated;
+                } else {
+                    // exclude → remove
+                    state.advancedFilters[category] = currentValues.filter((_, i) => i !== existingIdx);
+                }
+            }
         } else {
-            state.advancedFilters[category] = [...currentValues, normalizedValue];
+            // Non-tag categories: original toggle behavior
+            if (isAdvancedFilterValueActive(category, normalizedValue)) {
+                state.advancedFilters[category] = currentValues.filter((entry) => normalizeDetailFilterValue(entry) !== nextKey);
+            } else {
+                state.advancedFilters[category] = [...currentValues, normalizedValue];
+            }
         }
+
+        // Provide immediate visual feedback on chip/pill state before async filtering.
+        renderAdvancedFilters();
         await applyFilter({ ensureSearchCoverage: true });
         const targetLabel = String(label || 'value').trim() || 'value';
         if (isAdvancedFilterValueActive(category, normalizedValue)) {
@@ -7576,6 +8559,45 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             showToast(`Cleared ${targetLabel} filter: ${normalizedValue}`, 'info');
         }
+    }
+
+    /** Remove a filter entry outright (used by the "x" button on chips). */
+    async function removeAdvancedFilterEntry(category, displayValue) {
+        const normalizedValue = normalizeDetailFilterValue(displayValue);
+        if (!normalizedValue || !state.advancedFilters || !(category in state.advancedFilters)) return;
+
+        const currentValues = getAdvancedFilterValues(category);
+        if (_isModePrefixCategory(category)) {
+            state.advancedFilters[category] = currentValues.filter((entry) => {
+                const { name } = _parseModePrefixEntry(entry);
+                return normalizeDetailFilterValue(name) !== normalizedValue;
+            });
+        } else {
+            state.advancedFilters[category] = currentValues.filter((entry) => normalizeDetailFilterValue(entry) !== normalizedValue);
+        }
+        renderAdvancedFilters();
+        await applyFilter({ ensureSearchCoverage: true });
+    }
+
+    /** Toggle a mode-prefix entry between include and exclude (no remove). */
+    async function toggleFilterIncludeExclude(category, displayValue) {
+        if (!_isModePrefixCategory(category)) return;
+        const normalizedValue = normalizeDetailFilterValue(displayValue);
+        if (!normalizedValue) return;
+        const currentValues = getAdvancedFilterValues(category);
+        const existingIdx = currentValues.findIndex((entry) => {
+            const { name } = _parseModePrefixEntry(entry);
+            return normalizeDetailFilterValue(name) === normalizedValue;
+        });
+        if (existingIdx < 0) return;
+        const { mode } = _parseModePrefixEntry(currentValues[existingIdx]);
+        const updated = [...currentValues];
+        updated[existingIdx] = mode === 'include'
+            ? `exclude:${displayValue}`
+            : `include:${displayValue}`;
+        state.advancedFilters[category] = updated;
+        renderAdvancedFilters();
+        await applyFilter({ ensureSearchCoverage: true });
     }
 
     function appendDetailSubtitleText(container, text) {
@@ -7639,7 +8661,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const ensureSearchCoverage = options.ensureSearchCoverage !== false;
         const query = searchInput.value.trim().toLowerCase();
         const runId = ++state.searchRunId;
-        const structuredFiltersActive = Boolean(state.treeTagFilter) || hasActiveDetailFilters();
+        const nsfwVisibilityActive = state.nsfwVisibility !== 'explicit';
+        const structuredFiltersActive = Boolean(state.treeTagFilter)
+            || hasActiveDetailFilters()
+            || Object.values(state.missingSourceFilter || {}).some(Boolean)
+            || nsfwVisibilityActive;
         const anyFiltersActive = Boolean(query) || structuredFiltersActive;
         const serverFilterConfig = getServerFilterConfig(searchInput.value.trim());
 
@@ -7680,7 +8706,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            state.filteredImages = state.allImages.slice();
+            // Server already filtered by search + server-supported structured params.
+            // Run computeFilteredImages with empty query to apply client-only structural
+            // filters (missingSource, missingData, etc.) without re-running text search.
+            state.filteredImages = computeFilteredImages('');
             syncSelectionState();
             renderSelectionState({ force: false });
             return;
@@ -7745,8 +8774,23 @@ document.addEventListener('DOMContentLoaded', () => {
         state.loadingPage = true;
         updatePagingUi();
 
+        // Capture the filter signature before the fetch so we can detect if a
+        // concurrent applyFilter() call changed the active filter while the
+        // request was in-flight.  When that happens the response is stale and
+        // must be discarded to avoid mixing unfiltered/differently-filtered
+        // images into the active result set.
+        const filterSignatureAtRequest = state.activeServerFilterSignature;
+
         try {
-            const response = await fetch(buildImagesRequestUrl(state.offset, state.pageSize));
+            const response = await fetch(buildImagesRequestUrl(state.offset, state.pageSize), {
+                cache: 'no-store',
+            });
+
+            // Stale response — the filter changed while we were fetching.
+            if (state.activeServerFilterSignature !== filterSignatureAtRequest) {
+                return;
+            }
+
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
@@ -7776,6 +8820,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (recomputeFilter) {
                 await applyFilter({ ensureSearchCoverage: false });
             }
+
         } catch (error) {
             galleryStatus.textContent = `Failed to load images: ${error.message}`;
         } finally {
@@ -7985,6 +9030,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (treeTagFilterClear) {
         treeTagFilterClear.addEventListener('click', () => {
             state.treeTagFilter = null;
+            state.missingSourceFilter = { civitai: false, danbooru: false, prompt: false, user: false };
             renderTreeTagFilterIndicator();
             void applyFilter({ ensureSearchCoverage: true });
         });
@@ -7993,6 +9039,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (advancedFiltersClearBtn) {
         advancedFiltersClearBtn.addEventListener('click', async () => {
             clearAdvancedFilters();
+            // Provide immediate visual feedback before async filtering.
+            renderAdvancedFilters();
             await applyFilter({ ensureSearchCoverage: true });
             showToast('Cleared advanced filters.', 'info');
         });
@@ -8006,14 +9054,76 @@ document.addEventListener('DOMContentLoaded', () => {
         if (searchDebounceTimer !== null) {
             window.clearTimeout(searchDebounceTimer);
         }
+        if (suggestDebounceTimer !== null) {
+            window.clearTimeout(suggestDebounceTimer);
+        }
 
         // Cancel in-flight progressive-search loops started by previous input.
         state.searchRunId += 1;
+        suggestRunId += 1;
 
-        searchDebounceTimer = window.setTimeout(() => {
+        const text = (searchInput.value || '').trim();
+        const delayMs = getSearchDebounceMs(text);
+
+        if (!text) {
+            hideAutocomplete();
+            // Still fire applyFilter immediately to clear active search
+            void applyFilter({ ensureSearchCoverage: true });
+            return;
+        }
+
+        const fireSearch = () => {
             searchDebounceTimer = null;
             void applyFilter({ ensureSearchCoverage: true });
-        }, 180);
+        };
+
+        const fireSuggest = () => {
+            suggestDebounceTimer = null;
+            const myRunId = ++suggestRunId;
+            showAutocompleteSpinner();
+            fetchSuggestions(text).then((results) => {
+                if (suggestRunId !== myRunId) return; // stale
+                renderAutocomplete(results, text);
+            }).catch(() => {
+                if (suggestRunId !== myRunId) return;
+                hideAutocomplete();
+            });
+        };
+
+        if (delayMs === 0) {
+            fireSearch();
+            fireSuggest();
+        } else {
+            searchDebounceTimer = window.setTimeout(fireSearch, delayMs);
+            suggestDebounceTimer = window.setTimeout(fireSuggest, delayMs);
+        }
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+        if (!searchAutocomplete || searchAutocomplete.classList.contains('hidden')) {
+            return;
+        }
+        const items = searchAutocomplete.querySelectorAll('.search-ac-item');
+        if (items.length === 0) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            focusAutocompleteItem(acFocusedIndex + 1);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            focusAutocompleteItem(acFocusedIndex - 1);
+        } else if (e.key === 'Enter' && acFocusedIndex >= 0 && acFocusedIndex < items.length) {
+            e.preventDefault();
+            items[acFocusedIndex].click();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            hideAutocomplete();
+        }
+    });
+
+    searchInput.addEventListener('blur', () => {
+        // Small delay to allow mousedown on autocomplete items to register
+        window.setTimeout(() => hideAutocomplete(), 150);
     });
     detailImage.addEventListener('load', () => {
         if (!currentDebugImage) {
@@ -8235,6 +9345,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.key === 'End') {
             event.preventDefault();
             navigateFullscreenToBoundary('last');
+            return;
+        }
+        if (event.key === ' ') {
+            event.preventDefault();
+            toggleFullscreenSelection();
+            return;
         }
     });
     galleryGrid.addEventListener('scroll', () => {
@@ -9349,6 +10465,111 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ── CivitAI Authentication UI ──────────────────────────────────────
+    const civitaiAuthDetails = document.getElementById('civitai-auth-details');
+    const civitaiAuthStatusIcon = document.getElementById('civitai-auth-status-icon');
+    const civitaiAuthStatusText = document.getElementById('civitai-auth-status-text');
+    const civitaiAuthVerifyBtn = document.getElementById('civitai-auth-verify-btn');
+    const civitaiCookieInput = document.getElementById('civitai-cookie-input');
+    const civitaiCookieSaveBtn = document.getElementById('civitai-cookie-save-btn');
+    const civitaiAuthRefreshBtn = document.getElementById('civitai-auth-refresh-btn');
+
+    function setCivitaiAuthStatus(state, message) {
+        if (civitaiAuthStatusIcon) {
+            civitaiAuthStatusIcon.textContent = state === 'ok' ? '🟢' : state === 'fail' ? '🔴' : state === 'loading' ? '🔄' : '⚪';
+        }
+        if (civitaiAuthStatusText) {
+            civitaiAuthStatusText.textContent = message;
+            civitaiAuthStatusText.className = 'civitai-auth-status-text' +
+                (state === 'ok' ? ' auth-ok' : state === 'fail' ? ' auth-fail' : '');
+        }
+    }
+
+    async function checkCivitaiAuthStatus() {
+        setCivitaiAuthStatus('loading', 'Checking connection…');
+        try {
+            const resp = await fetch('/civitai/auth/status');
+            const data = await resp.json();
+            if (data.authenticated) {
+                setCivitaiAuthStatus('ok', data.message || 'Authenticated');
+            } else {
+                setCivitaiAuthStatus('fail', data.message || 'Not authenticated');
+            }
+        } catch (err) {
+            setCivitaiAuthStatus('fail', 'Could not check auth status');
+        }
+    }
+
+    function openCivitaiAuthPanel() {
+        if (civitaiAuthDetails && !civitaiAuthDetails.open) {
+            civitaiAuthDetails.open = true;
+        }
+    }
+
+    if (civitaiAuthVerifyBtn) {
+        civitaiAuthVerifyBtn.addEventListener('click', () => {
+            void checkCivitaiAuthStatus();
+        });
+    }
+
+    if (civitaiCookieSaveBtn) {
+        civitaiCookieSaveBtn.addEventListener('click', async () => {
+            const cookie = civitaiCookieInput ? civitaiCookieInput.value.trim() : '';
+            if (!cookie) {
+                showToast('Please paste a cookie value first.', 'warn');
+                return;
+            }
+            civitaiCookieSaveBtn.disabled = true;
+            setCivitaiAuthStatus('loading', 'Saving cookie…');
+            try {
+                const resp = await fetch('/civitai/auth/cookie', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cookie }),
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    throw new Error(data.detail || `HTTP ${resp.status}`);
+                }
+                setCivitaiAuthStatus('ok', data.message || 'Cookie saved and validated');
+                showToast('CivitAI cookie saved successfully.', 'success');
+                civitaiCookieInput.value = '';
+            } catch (err) {
+                setCivitaiAuthStatus('fail', `Save failed: ${err.message}`);
+                showToast(`Cookie save failed: ${err.message}`, 'warn');
+            } finally {
+                civitaiCookieSaveBtn.disabled = false;
+            }
+        });
+    }
+
+    if (civitaiAuthRefreshBtn) {
+        civitaiAuthRefreshBtn.addEventListener('click', async () => {
+            civitaiAuthRefreshBtn.disabled = true;
+            setCivitaiAuthStatus('loading', 'Launching browser re-authentication (this may take a while)…');
+            try {
+                const resp = await fetch('/civitai/auth/refresh', { method: 'POST' });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    throw new Error(data.detail || `HTTP ${resp.status}`);
+                }
+                if (data.success === false) {
+                    throw new Error(data.error || 'Re-authentication failed');
+                }
+                setCivitaiAuthStatus('ok', data.message || 'Re-authenticated');
+                showToast('CivitAI re-authentication successful.', 'success');
+            } catch (err) {
+                setCivitaiAuthStatus('fail', `Re-auth failed: ${err.message}`);
+                showToast(`Re-authentication failed: ${err.message}`, 'warn');
+            } finally {
+                civitaiAuthRefreshBtn.disabled = false;
+            }
+        });
+    }
+
+    // Initial auth status check
+    void checkCivitaiAuthStatus();
+
     infiniteScrollToggle.checked = state.infiniteEnabled;
     if (variantGroupingToggle) {
         variantGroupingToggle.checked = state.groupVariantsEnabled;
@@ -9399,11 +10620,28 @@ document.addEventListener('DOMContentLoaded', () => {
         if (event.origin !== window.location.origin) {
             return;
         }
-        if (!event.data || event.data.type !== 'atelier:gallery-tag-filter') {
+        if (!event.data || typeof event.data.type !== 'string') {
             return;
         }
-        setTreeTagFilter(event.data.payload || null);
-        void applyFilter({ ensureSearchCoverage: true });
+
+        if (event.data.type === 'atelier:gallery-tag-filter') {
+            const isMultiSelect = Boolean(event.data.multiSelect);
+            setTreeTagFilter(event.data.payload || null, isMultiSelect);
+            void applyFilter({ ensureSearchCoverage: true });
+            return;
+        }
+
+        if (event.data.type === 'atelier:gallery-missing-source-filter') {
+            const source = event.data.source;
+            const active = Boolean(event.data.active);
+            if (source && state.missingSourceFilter.hasOwnProperty(source)) {
+                state.missingSourceFilter[source] = active;
+            }
+            renderTreeTagFilterIndicator();
+            renderAdvancedFilters();
+            void applyFilter({ ensureSearchCoverage: true });
+            return;
+        }
     });
 
     let autoRefreshInFlight = false;
@@ -9453,9 +10691,7 @@ document.addEventListener('DOMContentLoaded', () => {
             allowedValues: ['safe', 'mature', 'explicit'],
             formatLabel: (value) => formatNsfwVisibilityLabel(value),
             onChange: (nextMode) => {
-                writeCookieValue(COOKIE_KEYS.nsfwVisibility, nextMode);
-                writeCookieValue(COOKIE_KEYS.showNsfw, nextMode === 'explicit' ? 'true' : 'false');
-                void applyFilter({ ensureSearchCoverage: true });
+                setNsfwVisibilityMode(nextMode);
             },
         });
     } else if (nsfwVisibilityControl && nsfwVisibilityCurrent) {
@@ -9471,13 +10707,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!['safe', 'mature', 'explicit'].includes(nextMode)) {
                     return;
                 }
-                state.nsfwVisibility = nextMode;
-                writeCookieValue(COOKIE_KEYS.nsfwVisibility, nextMode);
-                writeCookieValue(COOKIE_KEYS.showNsfw, nextMode === 'explicit' ? 'true' : 'false');
-                syncNsfwVisibilityUi();
+                setNsfwVisibilityMode(nextMode);
                 nsfwVisibilityControl.classList.remove('is-open');
-                void applyFilter({ ensureSearchCoverage: true });
             });
+        });
+    }
+
+    // Emergency fallback: if clicking the NSFW control does not open the menu,
+    // cycle through modes so the control remains usable.
+    if (nsfwVisibilityControl && nsfwVisibilityCurrent) {
+        nsfwVisibilityCurrent.addEventListener('click', () => {
+            const wasOpen = nsfwVisibilityControl.classList.contains('is-open');
+            window.setTimeout(() => {
+                const isOpen = nsfwVisibilityControl.classList.contains('is-open');
+                if (!wasOpen && !isOpen) {
+                    cycleNsfwVisibilityMode();
+                }
+            }, 0);
         });
     }
 });

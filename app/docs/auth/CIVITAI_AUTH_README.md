@@ -6,23 +6,19 @@ CivitAI does not provide an official API key for their private tRPC API. The aut
 
 ---
 
-## Method 1: Static Session Cookie (Current Method)
+## Method 1: Static Session Token File
 
 **Status:** ✅ Works but requires manual updates
 
 ### How it works
-You manually extract the session cookie from your browser and hardcode it in `config.py`.
+You manually extract the session cookie from your browser and store it in `.civitai_session`.
 
 ### Steps
 1. Log into civitai.com in your browser
 2. Open Developer Tools (F12)
 3. Go to Application → Cookies → https://civitai.com
 4. Find `__Secure-civitai-token` (NOT `__Secure-next-auth.session-token`)
-5. Copy the value and add it to your `.env` file:
-
-```env
-CIVITAI_SESSION_COOKIE=your_token_here
-```
+5. Copy the value and save it to `.civitai_session`.
 
 ### Pros
 - Simple to set up
@@ -70,8 +66,6 @@ CIVITAI_PASSWORD=your_password
 # Optional: Custom cache file location (default: .civitai_session)
 CIVITAI_SESSION_CACHE=.civitai_session
 
-# Session cookie (set via setup_session_token.py or civitai_auth.py)
-CIVITAI_SESSION_COOKIE=your_token_here
 ```
 
 #### 3. Usage
@@ -83,7 +77,7 @@ from civitai import CivitaiPrivateScraper
 scraper = CivitaiPrivateScraper(auto_authenticate=True)
 data = scraper.scrape(11035255)
 
-# Method B: Use existing session cookie if available
+# Method B: Use explicit session token if available
 scraper = CivitaiPrivateScraper(session_cookie="your_token")
 ```
 
@@ -140,43 +134,12 @@ token = get_cached_or_refresh_session_token(headless=False)
 
 ---
 
-## Method 3: Manual Session Cookie with Environment Variable
+## Method 3: (Deprecated) Session Cookie in `.env`
 
-**Status:** ✅ Works, minimal setup
+This method is deprecated in this repository.
 
-### How it works
-Store the session cookie in an environment variable instead of hardcoding it.
-
-### Setup
-
-1. Extract session cookie (same as Method 1)
-2. Add to `.env` file:
-
-```env
-CIVITAI_SESSION_COOKIE=your_token_here
-```
-
-3. `config.py` already handles this correctly via `os.getenv()`.
-
-### Usage
-
-```python
-from civitai import CivitaiPrivateScraper
-from config import CIVITAI_SESSION_COOKIE
-
-scraper = CivitaiPrivateScraper(CIVITAI_SESSION_COOKIE)
-data = scraper.scrape(11035255)
-```
-
-### Pros
-- More secure than hardcoding
-- Easy to update when expired
-- Works with current code
-
-### Cons
-- Still requires manual extraction
-- Still expires periodically
-- Not portable across users
+Session tokens are now sourced from `.civitai_session` to avoid stale `.env`
+values causing authentication confusion after token refresh.
 
 ---
 
@@ -186,21 +149,13 @@ data = scraper.scrape(11035255)
 Add `.env` to your `.gitignore`:
 
 ```gitignore
-# Environment variables
-.env
-.env.local
-
 # Session cache
 .civitai_session
 ```
 
 ### 2. Use Different Tokens per Environment
 ```env
-# Development
-CIVITAI_SESSION_COOKIE=dev_token_here
-
-# Production
-# Use a different token for production
+# Use separate `.civitai_session` files per environment.
 ```
 
 ### 3. Rotate Tokens Regularly
@@ -217,9 +172,9 @@ CIVITAI_SESSION_COOKIE=dev_token_here
 **Problem:** "401 Unauthorized" or "Session expired"
 
 **Solutions:**
-1. For Method 1/3: Extract fresh session cookie
+1. For Method 1: Extract fresh session cookie
 2. For Method 2: Delete `.civitai_session` cache file and re-run
-3. Check that credentials are correct in `.env`
+3. Check that credentials are correct in `.env` (for auto-auth)
 
 ### Playwright Installation Fails
 
@@ -259,8 +214,7 @@ playwright install-deps chromium
 
 | Method | Auto-Refresh | Setup Effort | Maintenance | Dependencies |
 |--------|--------------|--------------|-------------|---------------|
-| Static Cookie | ❌ | Low | High (manual) | None |
-| Env Variable | ❌ | Low | High (manual) | None |
+| Static Token File | ❌ | Low | High (manual) | None |
 | Playwright Auto | ✅ | High | Low (automatic) | Playwright |
 
 ---
@@ -276,7 +230,7 @@ playwright install-deps chromium
 - Store tokens in secure secret management
 - Implement monitoring for expired tokens
 
-**For One-time Scripts:** Use **Method 1 or 3**
+**For One-time Scripts:** Use **Method 1**
 - Simplest to implement
 - No extra dependencies
 

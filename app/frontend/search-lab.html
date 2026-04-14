@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CivitAI Search Lab</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/folder-tabs.css">
+  <link rel="stylesheet" href="/frontend/css/search-lab.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1>CivitAI Search Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">← Gallery</a>
+        <a class="btn ghost" href="/frontend/generation-lab.html">Generation Lab</a>
+      </div>
+    </header>
+
+    <main class="search-layout">
+      <!-- Left: gallery pane -->
+      <section class="gallery-pane">
+        <div class="search-toolbar">
+          <form id="search-form" class="search-form">
+            <div class="search-input-row">
+              <input id="search-query" type="search" placeholder="Search CivitAI images…" autocomplete="off">
+              <button type="submit">Search</button>
+            </div>
+            <details id="search-advanced" class="search-advanced">
+              <summary>Filters &amp; Options</summary>
+              <div class="search-advanced-body">
+                <div class="filter-row">
+                  <label for="filter-tags">Tags</label>
+                  <input id="filter-tags" type="text" placeholder="bikini, 1girl, outdoors…">
+                  <span class="filter-hint">Comma-separated</span>
+                </div>
+                <div class="filter-row">
+                  <label for="filter-sort">Sort</label>
+                  <select id="filter-sort">
+                    <option value="stats.reactionCountAllTime:desc">Most Reactions</option>
+                    <option value="stats.commentCountAllTime:desc">Most Comments</option>
+                    <option value="stats.collectedCountAllTime:desc">Most Collected</option>
+                    <option value="createdAt:desc">Newest</option>
+                    <option value="createdAtUnix:asc">Oldest</option>
+                  </select>
+                </div>
+                <div class="filter-row">
+                  <label for="filter-base-model">Base Model</label>
+                  <select id="filter-base-model">
+                    <option value="">Any</option>
+                    <option value="SDXL">SDXL</option>
+                    <option value="SD 1.5">SD 1.5</option>
+                    <option value="SD 3">SD 3</option>
+                    <option value="SD 3.5">SD 3.5</option>
+                    <option value="Flux.1 D">Flux.1 D</option>
+                    <option value="Flux.1 S">Flux.1 S</option>
+                    <option value="Pony">Pony</option>
+                    <option value="Illustrious">Illustrious</option>
+                    <option value="NoobAI">NoobAI</option>
+                  </select>
+                </div>
+                <div class="filter-row">
+                  <label for="filter-username">Username</label>
+                  <input id="filter-username" type="text" placeholder="e.g. winguru">
+                </div>
+                <div class="filter-row">
+                  <label for="filter-nsfw">NSFW Level</label>
+                  <select id="filter-nsfw">
+                    <option value="1,2">Safe</option>
+                    <option value="1,2,4">Soft</option>
+                    <option value="1,2,4,8,16">Mature</option>
+                    <option value="1,2,4,8,16,32">Explicit</option>
+                  </select>
+                </div>
+              </div>
+            </details>
+          </form>
+
+          <div id="facet-bar" class="facet-bar" aria-label="Active facet filters">
+            <!-- Facet chips rendered here dynamically -->
+          </div>
+        </div>
+
+        <div id="search-status" class="search-status" aria-live="polite">
+          <span id="search-status-text">Enter a search query to get started.</span>
+        </div>
+
+        <div id="gallery-grid" class="gallery-grid" aria-label="Search results grid">
+          <!-- Tiles rendered here -->
+        </div>
+
+        <div id="gallery-footer" class="gallery-footer hidden">
+          <button id="load-more-btn" type="button">Load more</button>
+          <span id="results-count"></span>
+          <span id="selection-count" class="selection-count hidden"></span>
+        </div>
+      </section>
+
+      <!-- Right: details pane -->
+      <aside id="details-pane" class="details-pane">
+        <div id="details-empty" class="details-empty">
+          <h2>Select an image</h2>
+          <p>Click a thumbnail from the search results to see details here.</p>
+        </div>
+
+        <div id="details-content" class="details-content hidden">
+          <div id="detail-media-frame" class="detail-media-frame">
+            <div id="detail-media-preview" class="detail-media-preview">
+              <img id="detail-image" class="detail-image" alt="Selected image preview">
+            </div>
+          </div>
+
+          <div class="detail-header">
+            <div class="detail-header-main">
+              <h2 id="detail-title">Untitled</h2>
+              <p id="detail-subtitle"></p>
+            </div>
+            <div class="detail-header-actions">
+              <button id="fullscreen-btn" class="btn ghost btn-sm" type="button" title="Fullscreen preview" aria-label="Fullscreen preview">⛶</button>
+              <a id="open-civitai-link" class="btn ghost btn-sm" href="#" target="_blank" rel="noopener" title="Open on CivitAI" aria-label="Open on CivitAI">↗ CivitAI</a>
+              <a id="send-to-gen-lab-link" class="btn ghost btn-sm" href="#" title="Open in Generation Lab" aria-label="Open in Generation Lab">🧪 Gen Lab</a>
+            </div>
+          </div>
+
+          <div id="detail-folder-mount" class="detail-folder-host"></div>
+          <div id="detail-panel-stash" class="detail-panel-stash hidden" aria-hidden="true">
+            <section id="detail-panel-info" class="detail-folder-panel is-active" role="tabpanel" aria-labelledby="detail-tab-info">
+              <div id="detail-meta" class="meta-grid"></div>
+            </section>
+
+            <section id="detail-panel-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-tags" hidden>
+              <div id="detail-tags-list" class="detail-tags-list"></div>
+            </section>
+
+            <section id="detail-panel-stats" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-stats" hidden>
+              <div id="detail-stats" class="meta-grid"></div>
+            </section>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Fullscreen preview overlay -->
+    <div id="fullscreen-preview" class="fullscreen-preview hidden" aria-hidden="true">
+      <div class="fullscreen-backdrop"></div>
+      <div class="fullscreen-content">
+        <img id="fullscreen-image" class="fullscreen-image" alt="">
+        <aside id="fullscreen-tags-panel" class="fullscreen-tags-panel hidden" aria-label="Image tags">
+          <h3>Tags</h3>
+          <div id="fullscreen-tags-cloud" class="fullscreen-tags-cloud"></div>
+        </aside>
+        <div class="fullscreen-overlay-top">
+          <span id="fullscreen-counter" class="fullscreen-counter"></span>
+          <button id="fullscreen-close-btn" class="fullscreen-btn" type="button" title="Close (Escape)" aria-label="Close">✕</button>
+        </div>
+        <button id="fullscreen-prev" class="fullscreen-nav fullscreen-nav-prev" type="button" title="Previous (←)" aria-label="Previous">❮</button>
+        <button id="fullscreen-next" class="fullscreen-nav fullscreen-nav-next" type="button" title="Next (→)" aria-label="Next">❯</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/frontend/js/shared/preferences.js"></script>
+  <script src="/frontend/js/shared/ui-kit.js"></script>
+  <script src="/frontend/js/search-lab.js"></script>
+</body>
+</html>

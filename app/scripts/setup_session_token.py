@@ -5,7 +5,6 @@ Use this if you're in a Docker container and can't run the browser authenticatio
 """
 
 import os
-import re
 
 # Setup paths
 from path_setup import PROJECT_ROOT
@@ -40,32 +39,6 @@ def save_token_to_cache(cache_file: str, token: str) -> None:
         print(f"❌ Error saving token to cache: {e}")
         exit(1)
 
-def update_env_file(env_file: str, token: str) -> None:
-    try:
-        env_content = ""
-        if os.path.exists(env_file):
-            with open(env_file, "r") as f:
-                env_content = f.read()
-
-        pattern = r'^CIVITAI_SESSION_COOKIE\s*=.*$'
-        replacement = f'CIVITAI_SESSION_COOKIE="{token}"'
-
-        if re.search(pattern, env_content, re.MULTILINE):
-            new_content = re.sub(pattern, replacement, env_content, flags=re.MULTILINE)
-        else:
-            if env_content and not env_content.endswith('\n'):
-                env_content += '\n'
-            new_content = env_content + replacement + '\n'
-
-        with open(env_file, "w") as f:
-            f.write(new_content)
-
-        print(f"✅ Updated {env_file}")
-        print()
-    except Exception as e:
-        print(f"⚠️  Could not update .env file: {e}")
-
-
 print("=" * 70)
 print("CivitAI Session Token Setup")
 print("=" * 70)
@@ -92,9 +65,6 @@ if token:
 
     cache_file = os.path.join(PROJECT_ROOT, ".civitai_session")
     save_token_to_cache(cache_file, token)
-
-    env_file = os.path.join(PROJECT_ROOT, ".env")
-    update_env_file(env_file, token)
 
     print()
     print("You can now run the scraper:")

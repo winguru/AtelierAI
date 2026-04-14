@@ -100,7 +100,7 @@ class TaxonomyService:
         alias_text: str,
         alias_type: str = "synonym",
         authority_id: Optional[int] = None,
-        external_tag_id: Optional[str] = None,
+        external_tag_id: Optional[int] = None,
     ) -> bool:
         normalized_alias = self.normalize_text(alias_text)
         if not normalized_alias:

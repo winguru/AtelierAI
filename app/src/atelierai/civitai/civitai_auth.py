@@ -2,10 +2,15 @@ import os
 import asyncio
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import json
+from pathlib import Path
+from typing import Any
 import requests
+import atelierai.config as app_config
 from urllib.parse import quote
 from playwright.async_api import async_playwright, BrowserContext
 
@@ -14,15 +19,31 @@ from playwright.async_api import async_playwright, BrowserContext
 # and containing dot-separated base64url segments.
 TOKEN_CANDIDATE_RE = re.compile(r"eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){4}")
 
+# Resolve project root from this file path so cache/profile locations are
+# stable regardless of caller current working directory.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _default_local_profile_dir() -> str:
+    return str(_REPO_ROOT / ".civitai_chrome_profile")
+
+
+def _default_browser_state_file() -> str:
+    return str(_REPO_ROOT / ".civitai_browser_state")
+
 # Try to import stealth mode
 STEALTH_AVAILABLE = False
 stealth_obj = None
 try:
-    from playwright_stealth.stealth import Stealth
-    # Create Stealth instance (can pass kwargs to disable specific features)
-    stealth_obj = Stealth()
+    from playwright_stealth.stealth import Stealth  # type: ignore[import-untyped]
+    # Create Stealth instance with macOS-correct platform override.
+    # The default (Win32) conflicts with real macOS browser fingerprints and
+    # triggers Google's bot detection during OAuth.
+    import sys as _sys
+    _platform_override = "MacIntel" if _sys.platform == "darwin" else None
+    stealth_obj = Stealth(navigator_platform_override=_platform_override) if _platform_override else Stealth()
     STEALTH_AVAILABLE = True
-    print("✅ playwright-stealth loaded (Stealth class)")
+    print(f"✅ playwright-stealth loaded (platform={_platform_override or 'default'})")
 except ImportError as e:
     print(f"⚠️  Could not import playwright-stealth: {e}")
 except Exception as e:
@@ -44,42 +65,32 @@ class CivitaiAuthenticator:
         self.session_token = None
         self.persist_state_file = persist_state_file
 
-    async def _apply_stealth_to_page(self, page) -> None:
-        """Apply playwright-stealth to a single page when available."""
-        if not (STEALTH_AVAILABLE and stealth_obj):
-            return
-        try:
-            await stealth_obj.apply_stealth_async(page)
-        except Exception as e:
-            print(f"⚠️  Stealth apply failed on page {page.url!r}: {e}")
-
     async def _configure_context_stealth(self, context: BrowserContext) -> None:
-        """Install anti-detection init script and auto-apply stealth to new pages."""
-        # Lightweight JS hardening that applies before any document scripts run.
-        await context.add_init_script(
-            """
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
-window.chrome = window.chrome || { runtime: {} };
-"""
-        )
+        """Best-effort stealth hardening for CDP-connected contexts.
 
-        if not (STEALTH_AVAILABLE and stealth_obj):
-            print("ℹ️  playwright-stealth is not available for this run.")
-            return
+        When connected via CDP to a real Chrome instance, most stealth is
+        unnecessary — the browser has no automation markers.  We apply
+        playwright-stealth as a belt-and-suspenders measure only when the
+        context supports ``add_init_script`` (i.e. is a Playwright-managed
+        context, not a raw CDP connection).
+        """
+        try:
+            if STEALTH_AVAILABLE and stealth_obj:
+                print("🕵️  Applying stealth init scripts...")
+                await stealth_obj.apply_stealth_async(context)
+                print("✅ Stealth applied")
+        except Exception as e:
+            print(f"ℹ️  Stealth not applicable to CDP context ({e})")
+            # This is expected for CDP-connected contexts — they don't need
+            # stealth because Chrome was launched manually without automation.
 
-        print("🕵️  Enabling stealth for all browser pages/popups...")
-
-        async def apply_and_wait(page):
-            await self._apply_stealth_to_page(page)
-
-        for page in context.pages:
-            await apply_and_wait(page)
-
-        context.on("page", lambda page: asyncio.create_task(apply_and_wait(page)))
-
-    async def _wait_for_oauth_completion(self, context: BrowserContext, timeout_ms: int = 120000) -> None:
+    async def _wait_for_oauth_completion(
+        self,
+        context: BrowserContext,
+        *,
+        timeout_ms: int = 120000,
+        headless: bool = False,
+    ) -> None:
         """Wait for OAuth completion without relying on page.wait_for_url internals.
 
         This avoids occasional Playwright waiter crashes observed on some versions.
@@ -88,6 +99,8 @@ window.chrome = window.chrome || { runtime: {} };
         max_loops = int(timeout_ms / (poll_interval * 1000))
 
         blocked_text = "This browser or app may not be secure"
+        blocked_detected = False
+        blocked_warning_shown = False
 
         for _ in range(max_loops):
             pages_snapshot = list(context.pages)
@@ -99,12 +112,27 @@ window.chrome = window.chrome || { runtime: {} };
 
                 if "accounts.google.com" in current_url:
                     try:
-                        blocked_count = await p.get_by_text(blocked_text).count()
+                        blocked_locator = p.get_by_text(blocked_text)
+                        blocked_count = await blocked_locator.count()
                         if blocked_count > 0:
-                            raise Exception(
-                                "Google blocked automated OAuth for this browser session. "
-                                "Use the manual token fallback prompt to continue."
-                            )
+                            is_visible = False
+                            try:
+                                is_visible = await blocked_locator.first.is_visible()
+                            except Exception:
+                                # If visibility cannot be checked, treat as detected but not definitive.
+                                is_visible = False
+
+                            if is_visible:
+                                blocked_detected = True
+                                if headless:
+                                    raise Exception(
+                                        "Google blocked automated OAuth for this browser session. "
+                                        "Use the manual token fallback prompt to continue."
+                                    )
+                                if not blocked_warning_shown:
+                                    print("⚠️  Google may be blocking this OAuth session in the browser window.")
+                                    print("   If this page persists, use the manual token fallback when prompted.")
+                                    blocked_warning_shown = True
                     except Exception as e:
                         # Surface explicit blocked message and ignore transient page errors.
                         if "Google blocked automated OAuth" in str(e):
@@ -115,63 +143,242 @@ window.chrome = window.chrome || { runtime: {} };
 
             await asyncio.sleep(poll_interval)
 
+        if blocked_detected:
+            raise Exception(
+                "Google blocked automated OAuth for this browser session. "
+                "Use the manual token fallback prompt to continue."
+            )
+
         raise Exception(
             "OAuth authentication timed out. Did not return to civitai.com within 2 minutes."
         )
 
-    async def _launch_context(self, p, headless: bool, prefer_system_chrome: bool = False):
-        """Launch a browser context with fallbacks for OAuth compatibility on macOS.
+    # ------------------------------------------------------------------
+    # Chrome binary discovery
+    # ------------------------------------------------------------------
 
-        For first-time interactive auth, we prefer branded Chrome with a persistent
-        user-data dir because Google OAuth often blocks automation in bundled Chromium.
+    _CHROME_CANDIDATES_MAC = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    _CHROME_CANDIDATES_LINUX = [
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+    ]
+
+    @classmethod
+    def _find_chrome_binary(cls) -> str | None:
+        """Return the path to a Chrome/Chromium binary, or None."""
+        candidates = (
+            cls._CHROME_CANDIDATES_MAC
+            if sys.platform == "darwin"
+            else cls._CHROME_CANDIDATES_LINUX
+        )
+        for path in candidates:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return None
+
+    # ------------------------------------------------------------------
+    # CDP-based Chrome launch (zero automation markers)
+    # ------------------------------------------------------------------
+
+    async def _launch_chrome_cdp(
+        self,
+        *,
+        headless: bool,
+        profile_dir: str,
+        use_fresh_local_profile: bool = False,
+    ) -> tuple["subprocess.Popen[bytes] | None", BrowserContext]:
+        """Launch a real Chrome instance and connect Playwright via CDP.
+
+        This is the preferred launch path because it produces a browser with
+        **zero** Playwright automation markers.  Google OAuth sees a normal
+        Chrome session.
+
+        Returns:
+            (chrome_process, browser_context) — caller must terminate the
+            process when done.
+
+        Raises:
+            RuntimeError: if Chrome binary is not found or CDP connection fails.
         """
-        profile_dir = ".civitai_chrome_profile"
+        chrome_bin = self._find_chrome_binary()
+        if not chrome_bin:
+            raise RuntimeError(
+                "No Chrome/Chromium binary found for CDP launch. "
+                "Install Google Chrome and retry."
+            )
 
-        chrome_attempt = {
-            "name": "system chrome (persistent profile)",
-            "kwargs": {
-                "user_data_dir": profile_dir,
-                "headless": headless,
-                "channel": "chrome",
-                "ignore_default_args": ["--enable-automation", "--no-sandbox"],
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                ],
-            },
-        }
+        # Pick a free port for DevTools.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        _, debug_port = sock.getsockname()
+        sock.close()
 
-        chromium_persistent_attempt = {
-            "name": "bundled chromium (persistent profile)",
-            "kwargs": {
-                "user_data_dir": profile_dir,
-                "headless": headless,
-                "ignore_default_args": ["--enable-automation", "--no-sandbox"],
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                ],
-            },
-        }
+        configured_user_data_dir = ""
+        configured_profile_directory = ""
+        if not use_fresh_local_profile:
+            configured_user_data_dir = str(
+                getattr(app_config, "CIVITAI_CHROME_USER_DATA_DIR", "") or ""
+            ).strip()
+            configured_profile_directory = str(
+                getattr(app_config, "CIVITAI_CHROME_PROFILE_DIRECTORY", "") or ""
+            ).strip()
 
-        launch_attempts = (
-            [chrome_attempt, chromium_persistent_attempt]
-            if prefer_system_chrome
-            else [chromium_persistent_attempt, chrome_attempt]
+        user_data_dir = configured_user_data_dir or os.path.abspath(profile_dir)
+        os.makedirs(user_data_dir, exist_ok=True)
+
+        # Detect if Chrome is already running with this profile.
+        # Chrome holds a SingletonLock symlink inside the profile directory.
+        # If it exists we cannot start another instance on the same profile.
+        singleton_lock = os.path.join(user_data_dir, "SingletonLock")
+        if os.path.exists(singleton_lock) or os.path.islink(singleton_lock):
+            hint = (
+                "Close all Chrome windows and retry"
+                if configured_user_data_dir
+                else "Close all Chrome windows and retry, or unset CIVITAI_CHROME_USER_DATA_DIR to use a separate automation profile"
+            )
+            raise RuntimeError(
+                f"Chrome appears to be already running with profile '{user_data_dir}' "
+                f"(SingletonLock present). {hint}."
+            )
+
+        # Keep launch arguments minimal for Google OAuth compatibility.
+        # Excessive hardening/disable flags can trigger "browser not secure"
+        # behavior in some Google sign-in flows.
+        cmd = [
+            chrome_bin,
+            f"--remote-debugging-port={debug_port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+        ]
+        if configured_profile_directory:
+            cmd.append(f"--profile-directory={configured_profile_directory}")
+        if headless:
+            cmd.append("--headless=new")
+
+        print(f"🚀 Launching Chrome (CDP port {debug_port})...")
+        print(f"   Binary: {chrome_bin}")
+        print(f"   User data dir: {user_data_dir}")
+        if configured_profile_directory:
+            print(f"   Profile directory: {configured_profile_directory}")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            # Detach from parent process group so Ctrl+C in the terminal
+            # doesn't kill Chrome mid-OAuth.
+            preexec_fn=os.setsid if sys.platform != "win32" else None,
+            creationflags=(
+                int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                if sys.platform == "win32"
+                else 0
+            ),
         )
 
-        last_error = None
-        for attempt in launch_attempts:
+        # Wait for Chrome's DevTools to become available.
+        cdp_url = f"http://127.0.0.1:{debug_port}"
+        for attempt in range(30):  # up to ~15 seconds
+            await asyncio.sleep(0.5)
             try:
-                print(f"Starting browser via {attempt['name']}...")
-                return await p.chromium.launch_persistent_context(**attempt["kwargs"])
-            except Exception as e:
-                last_error = e
-                print(f"⚠️  Browser launch failed via {attempt['name']}: {type(e).__name__}: {e}")
+                import urllib.request
+                urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1)
+                break
+            except Exception:
+                if attempt == 14:
+                    print("   Waiting for Chrome DevTools...")
+        else:
+            proc.terminate()
+            raise RuntimeError(
+                f"Chrome started (PID {proc.pid}) but DevTools did not "
+                f"become available on port {debug_port} after 15 seconds."
+            )
 
-        raise RuntimeError(
-            "Could not launch a Playwright browser context. "
-            "Try: `playwright install chromium`, then re-run. "
-            "If it still fails on macOS, install Google Chrome and retry so Playwright can use channel='chrome'."
-        ) from last_error
+        print(f"✅ Chrome ready (PID {proc.pid}). Connecting Playwright via CDP...")
+
+        browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+
+        return proc, context
+
+    # ------------------------------------------------------------------
+    # Legacy Playwright-managed launch (fallback)
+    # ------------------------------------------------------------------
+
+    async def _launch_playwright_fallback(
+        self, p, headless: bool
+    ) -> tuple[None, BrowserContext]:
+        """Fall back to Playwright-managed browser (has automation markers).
+
+        Only used when no Chrome binary is found.
+        """
+        profile_dir = _default_local_profile_dir()
+        print("⚠️  Falling back to Playwright-managed Chromium (may trigger Google bot detection)")
+
+        launch_kwargs = {
+            "user_data_dir": profile_dir,
+            "headless": headless,
+            "ignore_default_args": ["--enable-automation"],
+        }
+
+        try:
+            print("Starting Playwright-managed Chromium...")
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            return None, context
+        except Exception as e:
+            raise RuntimeError(
+                "Could not launch any browser. "
+                "Install Google Chrome for CDP-based auth, or run "
+                "`playwright install chromium` for the managed fallback."
+            ) from e
+
+    # ------------------------------------------------------------------
+    # Unified launch entry point
+    # ------------------------------------------------------------------
+
+    async def _launch_context(
+        self,
+        p,
+        headless: bool,
+        prefer_system_chrome: bool = False,
+        use_fresh_local_profile: bool = False,
+    ) -> tuple["subprocess.Popen[bytes] | None", BrowserContext]:
+        """Launch a browser and return (chrome_process | None, context).
+
+        Strategy:
+        1. If a Chrome/Chromium binary is available, launch it directly via
+           subprocess and connect Playwright over CDP.  This produces a
+           browser with **zero** automation markers — ideal for Google OAuth.
+        2. Otherwise, fall back to Playwright's managed Chromium.
+
+        Returns:
+            (chrome_subprocess_or_None, browser_context)
+        """
+        self._playwright = p  # store for CDP connect
+
+        profile_dir = _default_local_profile_dir()
+
+        # --- Strategy 1: real Chrome via CDP ---
+        try:
+            return await self._launch_chrome_cdp(
+                headless=headless,
+                profile_dir=profile_dir,
+                use_fresh_local_profile=use_fresh_local_profile,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            # If Chrome is already running with the requested profile we cannot
+            # fall back to Playwright — re-raise with the actionable message.
+            if "SingletonLock" in msg or "already running" in msg:
+                raise
+            print(f"⚠️  CDP launch failed: {msg}")
+
+        # --- Strategy 2: Playwright-managed Chromium ---
+        return await self._launch_playwright_fallback(p, headless)
 
     async def _handle_oauth_login(self, page, context: BrowserContext, headless: bool):
         """Handle OAuth authentication flow."""
@@ -194,19 +401,21 @@ window.chrome = window.chrome || { runtime: {} };
             print("=" * 60)
 
         try:
-            await self._wait_for_oauth_completion(context, timeout_ms=120000)
+            timeout_ms = int(getattr(app_config, "CIVITAI_OAUTH_TIMEOUT_MS", 180000) or 180000)
+            await self._wait_for_oauth_completion(
+                context,
+                timeout_ms=max(30000, timeout_ms),
+                headless=headless,
+            )
             print("✅ OAuth authentication successful!")
             await asyncio.sleep(3)
-        except Exception:
+        except Exception as exc:
             if headless:
                 raise Exception(
                     "OAuth authentication failed in headless mode. "
-                    "Run with visible browser: python civitai_auth.py"
+                    f"Run with visible browser: python civitai_auth.py ({exc})"
                 )
-            raise Exception(
-                "OAuth authentication timed out. "
-                "Did not redirect back to civitai.com within 2 minutes."
-            )
+            raise Exception(str(exc))
 
         print("💾 Saving browser state for future use...")
         await context.storage_state(path=self.persist_state_file)
@@ -219,11 +428,8 @@ window.chrome = window.chrome || { runtime: {} };
         print("Email/password login detected")
         print("⚠️  Note: For Google OAuth users, please use OAuth sign-in method")
 
-        try:
-            from atelierai.config import CIVITAI_USERNAME, CIVITAI_PASSWORD
-        except ImportError:
-            CIVITAI_USERNAME = None
-            CIVITAI_PASSWORD = None
+        CIVITAI_USERNAME = str(getattr(app_config, "CIVITAI_USERNAME", "") or "").strip()
+        CIVITAI_PASSWORD = str(getattr(app_config, "CIVITAI_PASSWORD", "") or "").strip()
 
         if CIVITAI_USERNAME and CIVITAI_PASSWORD:
             print("Attempting email/password login...")
@@ -251,35 +457,82 @@ window.chrome = window.chrome || { runtime: {} };
         cookies = await context.cookies()
         print(f"🔍 Found {len(cookies)} cookies total")
 
-        auth_cookies = []
+        preferred_cookie_names = {
+            "__Secure-civitai-token",
+            "__Secure-next-auth.session-token",
+        }
+
+        # First pass: exact cookie name matches for known session cookies.
+        matched: list[Any] = []
         for c in cookies:
-            name = c.get('name', '')
-            name_lower = name.lower()
-            if 'auth' in name_lower or 'session' in name_lower or 'civitai' in name_lower:
-                auth_cookies.append(c)
-                print(f"  📌 Found: {name} (value length: {len(c.get('value', ''))})")
+            name = str(c.get("name") or "")
+            value = str(c.get("value") or "")
+            if name in preferred_cookie_names and value:
+                matched.append(c)
+                print(f"  📌 Found preferred cookie: {name} (value length: {len(value)})")
 
-        if not auth_cookies:
-            print("❌ No auth/session cookies found!")
-            print("   Available cookie names:")
-            for c in cookies:
-                print(f"     - {c.get('name', 'unknown')}")
-            raise Exception("No authentication cookies found")
+        if matched:
+            session_cookie = max(matched, key=lambda c: len(str(c.get("value") or "")))
+            token_value = str(session_cookie.get("value") or "")
+            print(
+                f"✅ Using preferred session cookie: {session_cookie.get('name')} "
+                f"({len(token_value)} chars)"
+            )
+            return token_value
 
-        session_cookie = max(auth_cookies, key=lambda c: len(c['value']))
-        print(f"✅ Using longest auth cookie: {session_cookie['name']} ({len(session_cookie['value'])} chars)")
+        # Second pass: conservative fallback only for JWT-like token values.
+        fallback_candidates: list[Any] = []
+        for c in cookies:
+            name = str(c.get("name") or "")
+            value = str(c.get("value") or "")
+            if not value:
+                continue
+            normalized = _normalize_token(value)
+            if normalized:
+                fallback_candidates.append(c)
+                print(f"  📌 Found JWT-like auth cookie: {name} (value length: {len(value)})")
 
-        if len(session_cookie['value']) < 100:
-            print(f"⚠️  Warning: Session token seems short ({len(session_cookie['value'])} chars)")
-            print("   This might be a CSRF token, not the actual session token")
-            print("   You may need to re-authenticate")
+        if fallback_candidates:
+            session_cookie = max(fallback_candidates, key=lambda c: len(str(c.get("value") or "")))
+            token_value = str(session_cookie.get("value") or "")
+            print(
+                f"✅ Using fallback JWT-like cookie: {session_cookie.get('name')} "
+                f"({len(token_value)} chars)"
+            )
+            return token_value
 
-        if not session_cookie:
-            raise Exception("Session token not found in cookies")
+        print("❌ No valid CivitAI session cookie found.")
+        print("   Expected one of:")
+        print("   - __Secure-civitai-token")
+        print("   - __Secure-next-auth.session-token")
+        print("   Available cookie names:")
+        for c in cookies:
+            print(f"     - {c.get('name', 'unknown')}")
+        raise Exception("No valid CivitAI session cookie found in browser profile")
 
-        return session_cookie["value"]
+    def _terminate_chrome(self, chrome_process) -> None:
+        """Terminate the Chrome subprocess gracefully."""
+        if chrome_process is None:
+            return
+        try:
+            pid = chrome_process.pid
+            if sys.platform != "win32":
+                # Kill the process group (so child processes are included).
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            else:
+                chrome_process.terminate()
+            print(f"🛑 Chrome terminated (PID {pid})")
+        except (ProcessLookupError, OSError):
+            pass  # Already dead.
 
-    async def get_session_token(self, headless: bool = True, force_reauth: bool = False):
+    async def get_session_token(
+        self,
+        headless: bool = True,
+        force_reauth: bool = False,
+        use_fresh_local_profile: bool = False,
+        manual_login_extract: bool = False,
+        extract_only: bool = False,
+    ):
         """
         Logs into CivitAI and retrieves the session token.
         Supports Google OAuth and browser state persistence.
@@ -287,31 +540,66 @@ window.chrome = window.chrome || { runtime: {} };
         Args:
             headless: Run browser in headless mode (no GUI)
             force_reauth: Force re-authentication even if logged in
+            use_fresh_local_profile: Force use of a new local automation
+                profile under .civitai_chrome_profile.
+            manual_login_extract: Open browser and wait for manual sign-in,
+                then extract cookie without scripted OAuth actions.
+            extract_only: Skip OAuth/sign-in interactions and only extract
+                token from current signed-in browser cookies.
 
         Returns:
             str: The session token
         """
+        chrome_process = None
+        context: BrowserContext | None = None
         async with async_playwright() as p:
-            first_time_interactive = (not headless) and (not os.path.exists(self.persist_state_file))
-            context = await self._launch_context(
-                p,
-                headless=headless,
-                prefer_system_chrome=first_time_interactive,
-            )
-            await self._configure_context_stealth(context)
-
-            page = context.pages[0] if context.pages else await context.new_page()
-
             try:
+                chrome_process, context = await self._launch_context(
+                    p,
+                    headless=headless,
+                    use_fresh_local_profile=use_fresh_local_profile,
+                )
+                await self._configure_context_stealth(context)
+
+                page = context.pages[0] if context.pages else await context.new_page()
+
                 print("Navigating to CivitAI...")
                 await page.goto("https://civitai.com/", timeout=60000)
                 await asyncio.sleep(2)
 
-                is_logged_in = await page.locator("text=Sign In").count() == 0
+                if extract_only:
+                    print("🔎 Extract-only mode: skipping OAuth/sign-in interactions.")
+                    token = await self._extract_session_token(context)
+                    self.session_token = token
+                    print(f"✅ Session token retrieved: {token[:50]}...")
+                    return token
 
-                if not STEALTH_AVAILABLE and not is_logged_in:
-                    print("ℹ️  OAuth flow detected - stealth mode not available")
-                    print("   (This is OK - you already authenticated successfully)")
+                if manual_login_extract:
+                    if headless:
+                        raise Exception(
+                            "Manual login extraction requires a visible browser. "
+                            "Use --visible."
+                        )
+
+                    print("=" * 60)
+                    print("MANUAL LOGIN MODE")
+                    print("1. In the opened Chrome window, sign in to civitai.com")
+                    print("2. Confirm you can see your signed-in account")
+                    print("3. Return here and press Enter to extract the cookie")
+                    print("=" * 60)
+                    await asyncio.to_thread(input, "Press Enter when ready to extract token... ")
+
+                    # Ensure we're on civitai.com before reading cookies.
+                    await page.goto("https://civitai.com/", timeout=60000)
+                    await asyncio.sleep(1)
+
+                    print("🔑 Extracting session token after manual login...")
+                    token = await self._extract_session_token(context)
+                    self.session_token = token
+                    print(f"✅ Session token retrieved: {token[:50]}...")
+                    return token
+
+                is_logged_in = await page.locator("text=Sign In").count() == 0
 
                 if is_logged_in:
                     print("✅ Already logged in! Extracting session token...")
@@ -339,44 +627,81 @@ window.chrome = window.chrome || { runtime: {} };
                 await asyncio.sleep(2)
 
                 print("🔑 Extracting session token...")
-                self.session_token = await self._extract_session_token(context)
-                print(f"✅ Session token retrieved: {self.session_token[:50]}...")
+                token = await self._extract_session_token(context)
+                self.session_token = token
+                print(f"✅ Session token retrieved: {token[:50]}...")
 
-                return self.session_token
+                return token
 
             finally:
-                await context.close()
+                # Disconnect Playwright from the browser (doesn't close Chrome).
+                if context is not None:
+                    try:
+                        await context.browser.close() if context.browser else None
+                    except Exception:
+                        pass
+                # Terminate the Chrome subprocess we spawned.
+                self._terminate_chrome(chrome_process)
 
-    def get_session_token_sync(self, headless: bool = True, force_reauth: bool = False):
+    def get_session_token_sync(
+        self,
+        headless: bool = True,
+        force_reauth: bool = False,
+        use_fresh_local_profile: bool = False,
+        manual_login_extract: bool = False,
+        extract_only: bool = False,
+    ):
         """
         Synchronous wrapper for get_session_token.
 
         Args:
             headless: Run browser in headless mode
             force_reauth: Force re-authentication even if logged in
+            use_fresh_local_profile: Force use of a new local automation
+                profile under .civitai_chrome_profile.
+            manual_login_extract: Open browser and wait for manual sign-in,
+                then extract cookie without scripted OAuth actions.
+            extract_only: Skip OAuth/sign-in interactions and only extract
+                token from current signed-in browser cookies.
 
         Returns:
             str: The session token
         """
-        return asyncio.run(self.get_session_token(headless=headless, force_reauth=force_reauth))
+        return asyncio.run(
+            self.get_session_token(
+                headless=headless,
+                force_reauth=force_reauth,
+                use_fresh_local_profile=use_fresh_local_profile,
+                manual_login_extract=manual_login_extract,
+                extract_only=extract_only,
+            )
+        )
 
 
-def _clear_cache_files(cache_file: str):
-    """Delete cache files if force re-authentication is requested."""
-    print("🔄 Force re-authentication requested. Deleting cache files...")
+def _clear_cache_files(cache_file: str, *, keep_profile: bool = False):
+    """Delete cache files if force re-authentication is requested.
+
+    Args:
+        cache_file: Path to the session token cache file.
+        keep_profile: When True, preserve the Chrome profile directory
+            so Google OAuth bot detection is less likely to trigger.
+    """
+    print("🔄 Force re-authentication requested. Clearing session caches...")
     if os.path.exists(cache_file):
         os.remove(cache_file)
         print(f"  Deleted {cache_file}")
 
-    state_file = ".civitai_browser_state"
+    state_file = _default_browser_state_file()
     if os.path.exists(state_file):
         os.remove(state_file)
         print(f"  Deleted {state_file}")
 
-    profile_dir = ".civitai_chrome_profile"
-    if os.path.isdir(profile_dir):
+    profile_dir = _default_local_profile_dir()
+    if os.path.isdir(profile_dir) and not keep_profile:
         shutil.rmtree(profile_dir)
         print(f"  Deleted {profile_dir}/")
+    elif os.path.isdir(profile_dir) and keep_profile:
+        print(f"  Preserved {profile_dir}/ (helps avoid Google OAuth bot detection)")
     print()
 
 
@@ -404,7 +729,7 @@ def _print_cache_status(cache_file: str):
 
 def _adjust_headless_mode(headless: bool):
     """Adjust headless mode if browser state not found."""
-    state_file = ".civitai_browser_state"
+    state_file = _default_browser_state_file()
     if not os.path.exists(state_file) and headless:
         print("⚠️  No browser state found. Switching to visible browser for OAuth login...")
         return False
@@ -412,43 +737,97 @@ def _adjust_headless_mode(headless: bool):
 
 
 def _save_token_to_cache(token: str, cache_file: str):
-    """Save session token to cache file and .env file."""
+    """Save session token to cache file."""
     try:
-        # Save to cache file for backward compatibility
         with open(cache_file, 'w') as f:
             f.write(token)
         print(f"💾 Session token cached to {cache_file}")
-
-        # Also save to .env file
-        env_file = os.path.join(os.path.dirname(cache_file), ".env")
-        try:
-            # Read existing .env file if it exists
-            env_content = ""
-            if os.path.exists(env_file):
-                with open(env_file, "r") as f:
-                    env_content = f.read()
-
-            # Update or add CIVITAI_SESSION_COOKIE
-            pattern = r'^CIVITAI_SESSION_COOKIE\s*=.*$'
-            replacement = f'CIVITAI_SESSION_COOKIE="{token}"'
-
-            if re.search(pattern, env_content, re.MULTILINE):
-                # Replace existing line
-                new_content = re.sub(pattern, replacement, env_content, flags=re.MULTILINE)
-            else:
-                # Add new line at the end
-                if env_content and not env_content.endswith('\n'):
-                    env_content += '\n'
-                new_content = env_content + replacement + '\n'
-
-            with open(env_file, "w") as f:
-                f.write(new_content)
-
-            print(f"💾 Session token saved to {env_file}")
-        except Exception as e:
-            print(f"⚠️  Could not save to .env file: {e}")
     except Exception as e:
         print(f"⚠️  Failed to cache token: {e}")
+
+
+def _open_chrome_for_manual_profile_signin() -> None:
+    """Open Chrome with the local automation profile for manual sign-in."""
+    profile_dir = _default_local_profile_dir()
+    os.makedirs(profile_dir, exist_ok=True)
+
+    cmd = [
+        "open",
+        "-na",
+        "Google Chrome",
+        "--args",
+        f"--user-data-dir={profile_dir}",
+        "--new-window",
+        "https://civitai.com/",
+    ]
+
+    printable_cmd = (
+        f'open -na "Google Chrome" --args --user-data-dir="{profile_dir}" '
+        "--new-window https://civitai.com/"
+    )
+    print("🔧 Profile bootstrap command:")
+    print(f"   {printable_cmd}")
+
+    try:
+        subprocess.run(cmd, check=False)
+    except Exception as exc:
+        print(f"⚠️  Could not launch Chrome automatically: {exc}")
+
+
+def _try_bootstrap_profile_then_retry_extract(
+    authenticator: CivitaiAuthenticator,
+    *,
+    headless: bool,
+    force_reauth: bool,
+) -> str | None:
+    """Guide manual profile login and retry extract-only flow once."""
+    if headless:
+        return None
+
+    print()
+    print("Could not extract a valid CivitAI session cookie automatically.")
+    try:
+        choice = input("Open Chrome for manual profile sign-in and retry extract? [Y/n]: ").strip().lower()
+    except KeyboardInterrupt:
+        print("\n⚠️  Bootstrap prompt cancelled.")
+        return None
+
+    if choice in {"n", "no"}:
+        return None
+
+    _open_chrome_for_manual_profile_signin()
+    print("1. Sign in to Google and civitai.com in the opened Chrome window.")
+    print("2. Close that Chrome window when finished.")
+    try:
+        input("Press Enter to retry extraction... ")
+    except KeyboardInterrupt:
+        print("\n⚠️  Retry cancelled.")
+        return None
+
+    try:
+        return authenticator.get_session_token_sync(
+            headless=headless,
+            force_reauth=force_reauth,
+            use_fresh_local_profile=False,
+            manual_login_extract=False,
+            extract_only=True,
+        )
+    except Exception as retry_exc:
+        print(f"⚠️  Retry after manual profile sign-in failed: {retry_exc}")
+        return None
+
+
+def _reset_local_oauth_profile() -> None:
+    """Reset the local automation profile to a fresh state."""
+    profile_dir = _default_local_profile_dir()
+    state_file = _default_browser_state_file()
+
+    if os.path.isdir(profile_dir):
+        shutil.rmtree(profile_dir)
+        print(f"🧹 Reset local OAuth profile: removed {profile_dir}/")
+    if os.path.exists(state_file):
+        os.remove(state_file)
+        print(f"🧹 Removed browser state file: {state_file}")
 
 
 def _prompt_for_manual_token() -> str | None:
@@ -527,7 +906,11 @@ def _read_token_from_clipboard() -> str | None:
 
 
 def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
-    """Validate a token against a lightweight CivitAI authenticated endpoint.
+    """Validate a token against a CivitAI endpoint that requires authentication.
+
+    Uses ``collection.getAllUser`` (with ``authed: true``) which is a
+    protected tRPC procedure — it returns HTTP 401 for invalid or expired
+    session cookies, making it a reliable auth check.
 
     Returns:
         (is_valid, is_definitive_failure, message)
@@ -537,7 +920,7 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
     input_payload_cleartext = '{"json":{"authed":true}}'
     input_payload_encoded = quote(input_payload_cleartext, safe="")
     url = (
-        "https://civitai.com/api/trpc/system.getBrowsingSettingAddons"
+        "https://civitai.com/api/trpc/collection.getAllUser"
         f"?input={input_payload_encoded}"
     )
     headers = {
@@ -573,7 +956,8 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
         return (
             False,
             True,
-            f"Token rejected by CivitAI (HTTP {response.status_code}).",
+            f"Token rejected by CivitAI (HTTP {response.status_code}). "
+            "Your session cookie has expired.",
         )
 
     if response.status_code == 429:
@@ -608,38 +992,39 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
 
     # tRPC errors often appear under `error` even with HTTP 200.
     if isinstance(payload, dict) and payload.get("error"):
+        error_json = payload.get("error", {})
+        if isinstance(error_json, dict):
+            inner = error_json.get("json", {})
+            http_status = inner.get("data", {}).get("httpStatus")
+            if http_status in (401, 403):
+                return (
+                    False,
+                    True,
+                    f"Token rejected by CivitAI (tRPC HTTP {http_status}). "
+                    "Your session cookie has expired.",
+                )
         return (
             False,
             True,
-            f"Token validation error from Civitai: {payload.get('error')}",
+            f"Token validation error from CivitAI: {error_json}",
         )
 
-    response_json = (
-        payload.get("result", {})
-        .get("data", {})
-        .get("json")
-        if isinstance(payload, dict)
-        else None
-    )
-
-    if response_json is None:
-        return (
-            False,
-            True,
-            "Token validation returned no data from system.getBrowsingSettingAddons.",
-        )
-
+    # Successful response from an authenticated endpoint means token is valid.
     return (
         True,
         False,
-        "Token validated successfully with CivitAI system.getBrowsingSettingAddons.",
+        "Token validated successfully with CivitAI.",
     )
 
 
 def get_cached_or_refresh_session_token(
     cache_file: str = ".civitai_session",
     headless: bool = True,
-    force_reauth: bool = False
+    force_reauth: bool = False,
+    non_interactive: bool = False,
+    new_profile: bool = False,
+    manual_login_extract: bool = False,
+    extract_only: bool = False,
 ):
     """
     Gets session token from cache or refreshes it if needed.
@@ -649,14 +1034,27 @@ def get_cached_or_refresh_session_token(
         cache_file: Path to cache file for session token
         headless: Run browser in headless mode
         force_reauth: Force re-authentication even if logged in
+        non_interactive: When True, skip stdin prompts and clipboard
+            fallbacks. Browser auth failure raises immediately.
+        new_profile: Reset and use a fresh local automation Chrome profile.
+        manual_login_extract: Skip scripted OAuth interactions and wait for
+            manual login before extracting token.
+        extract_only: Skip OAuth/sign-in interactions and only extract token
+            from current signed-in browser cookies.
 
     Returns:
         str: Valid session token
     """
-    if force_reauth:
-        _clear_cache_files(cache_file)
+    if new_profile:
+        print("🆕 Initializing a fresh local Chrome automation profile...")
 
-    cached_token = _load_cached_token(cache_file)
+    if force_reauth or new_profile or manual_login_extract:
+        _clear_cache_files(cache_file, keep_profile=not new_profile)
+
+    if new_profile:
+        _reset_local_oauth_profile()
+
+    cached_token = None if manual_login_extract else _load_cached_token(cache_file)
     if cached_token:
         valid, definitive, message = _validate_token_with_civitai(cached_token)
         if valid:
@@ -674,23 +1072,46 @@ def get_cached_or_refresh_session_token(
     _print_cache_status(cache_file)
     headless = _adjust_headless_mode(headless)
 
-    state_file = ".civitai_browser_state"
+    state_file = _default_browser_state_file()
     authenticator = CivitaiAuthenticator(persist_state_file=state_file)
     try:
         token = authenticator.get_session_token_sync(
             headless=headless,
             force_reauth=force_reauth,
+            use_fresh_local_profile=new_profile,
+            manual_login_extract=manual_login_extract,
+            extract_only=extract_only,
         )
     except Exception as e:
         print(f"⚠️  Automated OAuth failed: {e}")
 
-        clipboard_token = _read_token_from_clipboard()
-        if clipboard_token:
-            print("✅ Found a valid-looking token in clipboard; using it.")
-            token = clipboard_token
+        if extract_only:
+            retried_token = _try_bootstrap_profile_then_retry_extract(
+                authenticator,
+                headless=headless,
+                force_reauth=force_reauth,
+            )
+            if retried_token:
+                token = retried_token
+            else:
+                token = None
         else:
-            print("ℹ️  No valid token found in clipboard.")
-            token = _prompt_for_manual_token()
+            token = None
+
+        if non_interactive:
+            raise RuntimeError(
+                f"Automated CivitAI authentication failed: {e}. "
+                "Use the manual cookie paste endpoint (/civitai/auth/cookie) instead."
+            )
+
+        if not token:
+            clipboard_token = _read_token_from_clipboard()
+            if clipboard_token:
+                print("✅ Found a valid-looking token in clipboard; using it.")
+                token = clipboard_token
+            else:
+                print("ℹ️  No valid token found in clipboard.")
+                token = _prompt_for_manual_token()
         if not token:
             raise RuntimeError(
                 "Authentication cancelled. No manual token provided."
@@ -721,6 +1142,15 @@ Examples:
   # First-time setup with Google OAuth (shows browser window)
   python civitai_auth.py
 
+    # Initialize a fresh local Chrome automation profile
+    python civitai_auth.py --new-profile --visible
+
+    # Manual login and cookie extraction (no scripted OAuth clicks)
+    python civitai_auth.py --manual-login-extract --visible
+
+    # Extract token only from an already signed-in profile
+    python civitai_auth.py --extract-only --visible
+
   # Refresh token with visible browser
   python civitai_auth.py --visible
 
@@ -734,6 +1164,9 @@ Examples:
     parser.add_argument('--headless', action='store_true', help='Run in headless mode (requires prior browser state)')
     parser.add_argument('--visible', action='store_true', help='Force visible browser mode')
     parser.add_argument('--force', action='store_true', help='Force re-authentication')
+    parser.add_argument('--new-profile', action='store_true', help='Reset and use a fresh local .civitai_chrome_profile')
+    parser.add_argument('--manual-login-extract', action='store_true', help='Wait for manual civitai.com login then extract cookie')
+    parser.add_argument('--extract-only', action='store_true', help='Skip OAuth/sign-in and only extract token from current profile cookies')
     args = parser.parse_args()
 
     headless_mode = args.headless and not args.visible
@@ -748,6 +1181,9 @@ Examples:
         token = get_cached_or_refresh_session_token(
             headless=headless_mode,
             force_reauth=args.force,
+            new_profile=args.new_profile,
+            manual_login_extract=args.manual_login_extract,
+            extract_only=args.extract_only,
         )
     except KeyboardInterrupt:
         print("\n⚠️  Authentication cancelled by user.")

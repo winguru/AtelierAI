@@ -8,7 +8,6 @@ import hashlib
 import io
 import logging
 import os
-import csv
 import json
 import re
 import shutil
@@ -45,7 +44,6 @@ CURRENT_SCHEMA_VERSION = str(getattr(app_config, "CURRENT_SCHEMA_VERSION", "1.0"
 DATABASE_URL = str(getattr(app_config, "DATABASE_URL", "sqlite:///image_db.sqlite"))
 ALLOW_SCHEMA_RESET = bool(getattr(app_config, "ALLOW_SCHEMA_RESET", False))
 ATELIER_COMFYUI_BASE_URL = str(getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "")).strip()
-ATELIER_COMFYUI_MODEL_CATALOG_URL = str(getattr(app_config, "ATELIER_COMFYUI_MODEL_CATALOG_URL", "")).strip()
 ATELIER_COMFY_MATCH_THRESHOLD = float(getattr(app_config, "ATELIER_COMFY_MATCH_THRESHOLD", 0.95))
 
 # Use absolute imports for consistency with our project structure
@@ -59,8 +57,8 @@ from models import (
     ImageModel,
     CollectionModel,
     ImageCollectionMembership,
-    ImageTag,
     Tag,
+    ImageTag,
     Concept,
     ConceptAlias,
     AuthorityTerm,
@@ -68,7 +66,6 @@ from models import (
     TagAuthority,
     DatasetImage,
     AnalysisData,
-    Tool,
     License,
     Artist,
     GenerationTemplate,
@@ -103,15 +100,16 @@ from atelierai.task_manager import BackgroundTaskManager, TaskContext
 from atelierai.utils import PngRepacker, build_prompt_tag_payload
 from services.gallery_tag_service import GalleryTagService
 from services.image_query_service import ImageQueryService
+from services.metadata_extraction import extract_civitai_nsfw_level
 from services.model_reference_service import ModelReferenceService
 from services.taxonomy_service import TaxonomyService
 from bootstrap import populate_initial_data
 from schemas import (
-    ScanRequest,
     ImageUpdateRequest,
     CivitaiImportRequest,
     CivitaiCollectionSyncRequest,
     CivitaiNsfwBackfillRequest,
+    CivitaiCookieRequest,
     CollectionCreateRequest,
     CollectionRenameRequest,
     CollectionBulkMembershipRequest,
@@ -124,6 +122,9 @@ from schemas import (
     TaxonomyBootstrapImportRequest,
     TaxonomyTagAssociationRequest,
     TaxonomyTagDetailsUpdateRequest,
+    TaxonomyTagMaintUpdateRequest,
+    TaxonomyTagMaintBulkDeleteRequest,
+    TaxonomyTagMaintPurgeRequest,
     GenerationTemplateImportRequest,
     GenerationTemplateUpdateRequest,
     GenerationTemplateResolveRequest,
@@ -131,6 +132,7 @@ from schemas import (
     A1111BridgeSaveRequest,
     ComfyGenerateCompareRequest,
     ParityCandidateAuditRequest,
+    CivitaiSearchRequest,
 )
 
 try:
@@ -495,6 +497,19 @@ def _filter_image_ids_by_a1111_features(
     )
 
 
+def _filter_image_ids_by_tag_names(
+    images_query,
+    *,
+    include_tags: Optional[list[str]] = None,
+    exclude_tags: Optional[list[str]] = None,
+) -> Optional[list[int]]:
+    return image_query_service.filter_image_ids_by_tag_names(
+        images_query,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
+    )
+
+
 def _apply_image_list_filters(
     images_query,
     *,
@@ -503,6 +518,8 @@ def _apply_image_list_filters(
     mimetypes: Optional[list[str]] = None,
     artist_names: Optional[list[str]] = None,
     collection_names: Optional[list[str]] = None,
+    exclude_artist_names: Optional[list[str]] = None,
+    exclude_collection_names: Optional[list[str]] = None,
     nsfw_ratings: Optional[list[str]] = None,
 ):
     return image_query_service.apply_image_list_filters(
@@ -512,6 +529,8 @@ def _apply_image_list_filters(
         mimetypes=mimetypes,
         artist_names=artist_names,
         collection_names=collection_names,
+        exclude_artist_names=exclude_artist_names,
+        exclude_collection_names=exclude_collection_names,
     )
 
 
@@ -671,6 +690,54 @@ def _ensure_civitai_hash_column() -> None:
             connection.execute(text("ALTER TABLE images ADD COLUMN civitai_hash VARCHAR"))
 
 
+def _ensure_user_tags_column() -> None:
+    """Backfill user_tags JSON column for existing sqlite databases."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+
+        if "user_tags" not in existing:
+            connection.execute(text("ALTER TABLE images ADD COLUMN user_tags JSON"))
+
+
+def _backfill_user_tags_from_sidecars() -> None:
+    """One-time migration: copy user_tags from sidecar JSON files into the DB column."""
+    import json as _json
+
+    with SessionLocal() as db:
+        images_needing_backfill = (
+            db.query(ImageModel.id, ImageModel.file_path)
+            .filter(ImageModel.user_tags.is_(None))
+            .filter(ImageModel.file_path.isnot(None))
+            .limit(5000)
+            .all()
+        )
+        updated = 0
+        for img_id, file_path in images_needing_backfill:
+            try:
+                sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(file_path)).with_suffix(".json")
+                if not sidecar_path.exists():
+                    continue
+                with open(sidecar_path, "r", encoding="utf-8") as f:
+                    sidecar = _json.load(f)
+                if not isinstance(sidecar, dict):
+                    continue
+                sc_user_tags = sidecar.get("user_tags")
+                if isinstance(sc_user_tags, list) and sc_user_tags:
+                    db.query(ImageModel).filter(ImageModel.id == img_id).update(
+                        {ImageModel.user_tags: _json.dumps(sc_user_tags)},
+                        synchronize_session="fetch",
+                    )
+                    updated += 1
+            except Exception:
+                continue
+        if updated:
+            db.commit()
+            print(f"   Backfilled user_tags from sidecars for {updated} image(s).")
+
+
 def _ensure_image_variant_columns() -> None:
     """Backfill image variant grouping columns for existing sqlite databases."""
     with engine.begin() as connection:
@@ -694,6 +761,59 @@ def _ensure_image_variant_columns() -> None:
                 "AND file_hash IS NOT NULL AND file_hash != ''"
             )
         )
+
+
+def _ensure_promoted_metadata_columns() -> None:
+    """Add promoted metadata columns for existing sqlite databases.
+
+    These columns move filterable data out of json_metadata / sidecar JSON
+    into proper indexed columns.  Values are backfilled by the standalone
+    ``backfill_image_columns.py`` migration script.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+
+        new_columns = {
+            "generation_software": "ALTER TABLE images ADD COLUMN generation_software VARCHAR",
+            "civitai_nsfw_level": "ALTER TABLE images ADD COLUMN civitai_nsfw_level INTEGER",
+            "has_a1111_metadata": "ALTER TABLE images ADD COLUMN has_a1111_metadata BOOLEAN NOT NULL DEFAULT 0",
+            "a1111_hires": "ALTER TABLE images ADD COLUMN a1111_hires BOOLEAN NOT NULL DEFAULT 0",
+            "a1111_regional_prompter": "ALTER TABLE images ADD COLUMN a1111_regional_prompter BOOLEAN NOT NULL DEFAULT 0",
+            "a1111_adetailer": "ALTER TABLE images ADD COLUMN a1111_adetailer BOOLEAN NOT NULL DEFAULT 0",
+            "has_comfyui_metadata": "ALTER TABLE images ADD COLUMN has_comfyui_metadata BOOLEAN NOT NULL DEFAULT 0",
+            "has_generation_prompt": "ALTER TABLE images ADD COLUMN has_generation_prompt BOOLEAN NOT NULL DEFAULT 0",
+        }
+
+        for col_name, ddl in new_columns.items():
+            if col_name not in existing:
+                connection.execute(text(ddl))
+
+
+def _ensure_observation_unique_constraint() -> None:
+    """Add unique constraint to image_concept_observations if missing.
+
+    SQLite does not support ALTER TABLE ADD CONSTRAINT, so we check for the
+    index that SQLAlchemy generates from the UniqueConstraint declaration and
+    create it manually when absent.
+    """
+    index_name = "uq_obs_image_concept_authority"
+    with engine.begin() as connection:
+        existing_indexes = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA index_list(image_concept_observations)")
+            ).fetchall()
+        }
+        if index_name not in existing_indexes:
+            connection.execute(
+                text(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
+                    "ON image_concept_observations (image_id, concept_id, authority_id)"
+                )
+            )
 
 
 def _parse_civitai_image_id(value: str) -> int:
@@ -840,6 +960,7 @@ def _gallery_tag_names_by_source_db_only(db: Session) -> dict[str, list[str]]:
     """Fast path for filter option hydration using DB metadata only.
 
     This intentionally avoids sidecar reads to keep startup filters responsive.
+    Reads user_tags from the dedicated DB column so user-assigned tags are included.
     """
     by_source: dict[str, set[str]] = {
         "civitai": set(),
@@ -849,16 +970,18 @@ def _gallery_tag_names_by_source_db_only(db: Session) -> dict[str, list[str]]:
     }
 
     rows = (
-        db.query(ImageModel.json_metadata, ImageModel.exif_data)
+        db.query(ImageModel.json_metadata, ImageModel.exif_data, ImageModel.user_tags)
         .filter(_active_image_filter())
         .all()
     )
-    for json_metadata, exif_data in rows:
+    for json_metadata, exif_data, user_tags_col in rows:
         payload: dict[str, Any] = {}
         if isinstance(json_metadata, dict):
             payload.update(json_metadata)
         if isinstance(exif_data, dict):
             payload["exif_data"] = exif_data
+        if isinstance(user_tags_col, list):
+            payload["user_tags"] = user_tags_col
         extracted = _extract_image_scope_tag_names(payload)
         for source, names in extracted.items():
             by_source[source].update(names)
@@ -905,6 +1028,7 @@ def _gallery_tag_usage_counts_by_source_db_only(db: Session) -> dict[str, dict[s
     """Fast path for tag usage counts using DB metadata only, avoiding sidecar reads.
 
     This provides approximate counts from json_metadata fields for responsive tree loads.
+    Reads user_tags from the dedicated DB column so user-assigned tags are counted.
     """
     by_source: dict[str, dict[str, int]] = {
         "civitai": {},
@@ -914,16 +1038,18 @@ def _gallery_tag_usage_counts_by_source_db_only(db: Session) -> dict[str, dict[s
     }
 
     rows = (
-        db.query(ImageModel.json_metadata, ImageModel.exif_data)
+        db.query(ImageModel.json_metadata, ImageModel.exif_data, ImageModel.user_tags)
         .filter(_active_image_filter())
         .all()
     )
-    for json_metadata, exif_data in rows:
+    for json_metadata, exif_data, user_tags_col in rows:
         payload: dict[str, Any] = {}
         if isinstance(json_metadata, dict):
             payload.update(json_metadata)
         if isinstance(exif_data, dict):
             payload["exif_data"] = exif_data
+        if isinstance(user_tags_col, list):
+            payload["user_tags"] = user_tags_col
         extracted = _extract_image_scope_tag_names(payload)
         for source, names in extracted.items():
             bucket = by_source.setdefault(source, {})
@@ -968,7 +1094,7 @@ def _ensure_alias_for_concept(
     alias_text: str,
     alias_type: str = "synonym",
     authority_id: Optional[int] = None,
-    external_tag_id: Optional[str] = None,
+    external_tag_id: Optional[int] = None,
 ) -> bool:
     return taxonomy_service.ensure_alias_for_concept(
         db,
@@ -1013,9 +1139,11 @@ def _execute_taxonomy_bootstrap_import(
                     continue
 
                 normalized_name = _normalize_taxonomy_text(raw_name)
-                external_tag_id = str((row or {}).get("external_tag_id") or "").strip()
-                if not external_tag_id:
-                    external_tag_id = f"name:{normalized_name}"
+                raw_tag_id = (row or {}).get("external_tag_id")
+                try:
+                    external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                except (TypeError, ValueError):
+                    external_tag_id = None
 
                 mapped_concept_name = str((row or {}).get("concept_name") or "").strip()
                 concept_name = mapped_concept_name or normalized_name
@@ -1067,7 +1195,7 @@ def _execute_taxonomy_bootstrap_import(
                     stats["authority_terms_created"] += 1
                 else:
                     changed = False
-                    if str(term.external_tag_id or "") != external_tag_id:
+                    if term.external_tag_id != external_tag_id:
                         term.external_tag_id = external_tag_id
                         changed = True
                     if str(term.external_name or "") != raw_name:
@@ -5906,7 +6034,6 @@ def _import_single_civitai_image(
             recovered_existing = True
 
     temp_path = None
-    mismatch_static_temp_path: Optional[Path] = None
     try:
         target = _resolve_civitai_image_target(api, image_id)
         download_result = _download_civitai_image_with_validation(
@@ -5914,7 +6041,6 @@ def _import_single_civitai_image(
             target=target,
         )
         temp_path = download_result.temp_path
-        mismatch_static_temp_path = download_result.mismatch_static_temp_path
 
         prepared = _PreparedCivitaiImport(
             image_id=image_id,
@@ -6219,7 +6345,20 @@ def _ensure_civitai_metadata_for_existing_image(
     db_has_civitai = isinstance(db_civitai_payload, dict)
     sidecar_has_nsfw_level = _payload_has_nsfw_level(sidecar_civitai_payload)
     db_has_nsfw_level = _payload_has_nsfw_level(db_civitai_payload)
+
+    # Even when CivitAI metadata is already complete, sync tags into
+    # the taxonomy so that authority_terms get their external_tag_id
+    # filled in from sidecar data (backfills legacy terms that were
+    # imported without numeric IDs).  Must commit here because the
+    # fast-path caller does not commit when we return False.
     if sidecar_has_civitai and db_has_civitai and sidecar_has_nsfw_level and db_has_nsfw_level:
+        sidecar_tags = sidecar_civitai_payload.get("tags") if isinstance(sidecar_civitai_payload, dict) else None
+        if isinstance(sidecar_tags, list) and sidecar_tags:
+            try:
+                _upsert_civitai_authority_terms(db, {"tags": sidecar_tags})
+                db.commit()
+            except Exception:
+                db.rollback()
         return False
 
     civitai_data = fetch_civitai_image_data(source_url)
@@ -6236,8 +6375,19 @@ def _ensure_civitai_metadata_for_existing_image(
     if isinstance(raw_hash, str) and raw_hash.strip():
         civitai_hash = raw_hash.strip()
 
+    # Sync CivitAI tags into taxonomy authority_terms so numeric IDs
+    # and names are tracked for concept mapping.  This is best-effort
+    # and must not block the enrichment pipeline on failure.
+    try:
+        _upsert_civitai_authority_terms(db, civitai_data)
+    except Exception as exc:
+        print(f"Warning: CivitAI authority-term sync failed for {source_url}: {exc}")
+
     merged_json = dict(db_json)
     merged_json["civitai"] = civitai_data
+
+    # Extract civitai_nsfw_level from the enrichment data
+    nsfw_level = extract_civitai_nsfw_level({"civitai": civitai_data})
 
     (
         db.query(ImageModel)
@@ -6249,6 +6399,7 @@ def _ensure_civitai_metadata_for_existing_image(
                 ImageModel.source_site: "civitai",
                 ImageModel.civitai_uuid: civitai_uuid,
                 ImageModel.civitai_hash: civitai_hash,
+                ImageModel.civitai_nsfw_level: nsfw_level,
             },
             synchronize_session=False,
         )
@@ -6263,6 +6414,115 @@ def _ensure_civitai_metadata_for_existing_image(
         additional_data={"civitai": civitai_data},
     )
     return True
+
+
+def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
+    """Sync CivitAI tag records into the taxonomy authority_terms table.
+
+    For each tag in civitai_data["tags"], creates or updates an AuthorityTerm
+    under the CivitAI authority.  Does NOT create new Concepts — tags that
+    don't map to an existing concept are stored with concept_id=NULL so
+    they can be resolved later by user curation or AI-assisted mapping.
+
+    Returns a small stats dict for logging.
+    """
+    tag_records = civitai_data.get("tags")
+    if not isinstance(tag_records, list) or not tag_records:
+        return {"terms_upserted": 0, "terms_created": 0, "terms_updated": 0}
+
+    authority = _get_or_create_authority(db, "civitai")
+    stats = {"terms_upserted": 0, "terms_created": 0, "terms_updated": 0}
+
+    for tag in tag_records:
+        if not isinstance(tag, dict):
+            continue
+
+        raw_name = str(tag.get("name") or "").strip()
+        if not raw_name:
+            continue
+
+        normalized_name = _normalize_taxonomy_text(raw_name)
+
+        raw_tag_id = tag.get("id")
+        try:
+            external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+        except (TypeError, ValueError):
+            external_tag_id = None
+
+        # Build extra metadata for the tag (type, nsfw level, etc.)
+        tag_meta: dict = {}
+        for meta_key in ("type", "nsfwLevel", "automated", "concrete", "score"):
+            val = tag.get(meta_key)
+            if val is not None:
+                # Use API-camelCase keys to avoid confusion with DB columns.
+                tag_meta[meta_key] = val
+
+        # Look up by (authority_id, external_tag_id) when ID available,
+        # otherwise fall back to (authority_id, normalized_external_name).
+        term = None
+        if external_tag_id is not None:
+            term = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority.id,
+                    AuthorityTerm.external_tag_id == external_tag_id,
+                )
+                .first()
+            )
+        if term is None:
+            term = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority.id,
+                    AuthorityTerm.normalized_external_name == normalized_name,
+                )
+                .first()
+            )
+
+        now = datetime.utcnow()
+
+        if term is None:
+            term = AuthorityTerm(
+                authority_id=authority.id,
+                external_tag_id=external_tag_id,
+                external_name=raw_name,
+                normalized_external_name=normalized_name,
+                concept_id=None,  # Unresolved until user/AI maps it
+                metadata_json=tag_meta if tag_meta else None,
+                created_at=now,
+                updated_at=now,
+                last_seen_at=now,
+            )
+            db.add(term)
+            stats["terms_created"] += 1
+        else:
+            changed = False
+            if term.external_tag_id != external_tag_id:
+                term.external_tag_id = external_tag_id
+                changed = True
+            if str(term.external_name or "") != raw_name:
+                term.external_name = raw_name
+                changed = True
+            if str(term.normalized_external_name or "") != normalized_name:
+                term.normalized_external_name = normalized_name
+                changed = True
+            if tag_meta:
+                existing_meta = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+                merged_meta = {**existing_meta, **tag_meta}
+                if merged_meta != existing_meta:
+                    term.metadata_json = merged_meta
+                    changed = True
+            term.last_seen_at = now
+            if changed:
+                term.updated_at = now
+                stats["terms_updated"] += 1
+
+        stats["terms_upserted"] += 1
+
+    if stats["terms_upserted"]:
+        db.flush()
+
+    return stats
 
 
 def _normalize_collection_name(name: str) -> str:
@@ -6321,6 +6581,17 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
         response = api._make_request(
             endpoint="collection.getAllUser",
             payload_data={"authed": True},
+            strict=True,
+        )
+    except CivitaiRequestError as exc:
+        if getattr(exc, "status_code", None) == 401:
+            raise HTTPException(
+                status_code=502,
+                detail="CivitAI returned HTTP 401 Unauthorized. Your session cookie has expired. Please re-authenticate via /civitai/auth/cookie or /civitai/auth/refresh.",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch CivitAI user collections: {exc}",
         )
     except Exception as e:
         raise HTTPException(
@@ -7317,6 +7588,38 @@ def _build_civitai_import_summary(
     }
 
 
+def _sync_civitai_tags_from_sidecar(db: Session, image_path: Path) -> None:
+    """Read CivitAI tags from a sidecar JSON file and upsert them into
+    authority_terms so legacy terms gain their numeric external_tag_id.
+
+    This is a lightweight alternative to full metadata backfill — it only
+    touches the taxonomy, not the image record itself.
+    """
+    sidecar_path = image_path.with_suffix(".json")
+    if not sidecar_path.exists():
+        return
+    try:
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            sidecar_data = json.load(f)
+        if not isinstance(sidecar_data, dict):
+            return
+        civitai_payload = sidecar_data.get("civitai")
+        if not isinstance(civitai_payload, dict):
+            return
+        tags = civitai_payload.get("tags")
+        if not isinstance(tags, list) or not tags:
+            return
+        stats = _upsert_civitai_authority_terms(db, {"tags": tags})
+        if stats.get("terms_updated"):
+            db.commit()
+    except Exception as exc:
+        logging.getLogger(__name__).debug("Sidecar tag sync failed for %s: %s", image_path.name, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _handle_existing_civitai_image(
     db: Session,
     *,
@@ -7400,6 +7703,11 @@ def _handle_existing_civitai_image(
                 image=existing_by_source,
                 source_url=source_url,
             )
+        else:
+            # Even when full metadata backfill is not requested, sync
+            # tags from the sidecar into authority_terms so that legacy
+            # terms gain their external_tag_id during normal syncs.
+            _sync_civitai_tags_from_sidecar(db, existing_path)
         if attach_collection_id is not None:
             _ensure_image_in_collection(db, existing_by_source.id, attach_collection_id)
         return {
@@ -8424,6 +8732,94 @@ def _build_display_items_for_image(image: ImageModel, merged_payload: dict[str, 
     return _build_flat_variant_display_items(image, merged_payload, variants)
 
 
+def _load_filtered_image_keys(
+    db: Session,
+    *,
+    search: Optional[str],
+    generation_software: Optional[list[str]],
+    source_site: Optional[list[str]],
+    mimetype: Optional[list[str]],
+    nsfw_rating: Optional[list[str]],
+    nsfw_safety: Optional[list[str]],
+    artist_name: Optional[list[str]],
+    collection_name: Optional[list[str]],
+    exclude_artist_name: Optional[list[str]] = None,
+    exclude_collection_name: Optional[list[str]] = None,
+    a1111_hires: Optional[list[str]] = None,
+    a1111_regional_prompter: Optional[list[str]] = None,
+    a1111_adetailer: Optional[list[str]] = None,
+    include_tag: Optional[list[str]] = None,
+    exclude_tag: Optional[list[str]] = None,
+    group_variants: bool = True,
+) -> list[str]:
+    """Lightweight DB-only key generation — no sidecar reads or relationship loading."""
+    images_query = db.query(ImageModel).filter(_active_image_filter())
+    images_query = _apply_image_list_filters(
+        images_query,
+        search=search,
+        source_sites=source_site,
+        mimetypes=mimetype,
+        artist_names=artist_name,
+        collection_names=collection_name,
+        exclude_artist_names=exclude_artist_name,
+        exclude_collection_names=exclude_collection_name,
+    )
+
+    generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
+    nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
+    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
+    a1111_filtered_ids = _filter_image_ids_by_a1111_features(
+        images_query,
+        a1111_hires=a1111_hires,
+        a1111_regional_prompter=a1111_regional_prompter,
+        a1111_adetailer=a1111_adetailer,
+    )
+    tag_filtered_ids = _filter_image_ids_by_tag_names(
+        images_query,
+        include_tags=include_tag,
+        exclude_tags=exclude_tag,
+    )
+
+    constrained_ids: Optional[set[int]] = None
+    for filtered_ids in (
+        generation_filtered_ids,
+        nsfw_filtered_ids,
+        nsfw_safety_filtered_ids,
+        a1111_filtered_ids,
+        tag_filtered_ids,
+    ):
+        if filtered_ids is None:
+            continue
+        filtered_set = set(filtered_ids)
+        constrained_ids = filtered_set if constrained_ids is None else constrained_ids.intersection(filtered_set)
+
+    if constrained_ids is not None:
+        if constrained_ids:
+            images_query = images_query.filter(ImageModel.id.in_(list(constrained_ids)))
+        else:
+            return []
+
+    rows = (
+        images_query
+        .with_entities(ImageModel.file_hash, ImageModel.variant_group_key)
+        .order_by(ImageModel.id.asc())
+        .all()
+    )
+
+    if group_variants:
+        seen: set[str] = set()
+        keys: list[str] = []
+        for file_hash, variant_group_key in rows:
+            group_key = (variant_group_key or "").strip() or str(file_hash or "")
+            item_key = f"group:{group_key}"
+            if item_key not in seen:
+                seen.add(item_key)
+                keys.append(item_key)
+        return keys
+    else:
+        return [str(file_hash) for file_hash, _ in rows if file_hash]
+
+
 def _load_display_image_items(
     db: Session,
     *,
@@ -8436,9 +8832,13 @@ def _load_display_image_items(
     nsfw_safety: Optional[list[str]],
     artist_name: Optional[list[str]],
     collection_name: Optional[list[str]],
+    exclude_artist_name: Optional[list[str]] = None,
+    exclude_collection_name: Optional[list[str]] = None,
     a1111_hires: Optional[list[str]] = None,
     a1111_regional_prompter: Optional[list[str]] = None,
     a1111_adetailer: Optional[list[str]] = None,
+    include_tag: Optional[list[str]] = None,
+    exclude_tag: Optional[list[str]] = None,
     group_variants: bool,
 ) -> list[dict[str, Any]]:
     display_cache_key = _build_search_cache_key(
@@ -8453,15 +8853,22 @@ def _load_display_image_items(
             "nsfw_safety": _normalize_cache_list(nsfw_safety),
             "artist_name": _normalize_cache_list(artist_name),
             "collection_name": _normalize_cache_list(collection_name),
+            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
+            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
             "a1111_hires": _normalize_cache_list(a1111_hires),
             "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
             "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
+            "include_tag": _normalize_cache_list(include_tag),
+            "exclude_tag": _normalize_cache_list(exclude_tag),
             "group_variants": bool(group_variants),
         },
     )
     cached_items = _search_cache_get(display_cache_key)
     if isinstance(cached_items, list):
         return cached_items
+
+    import time as _time
+    _t0 = _time.perf_counter()
 
     images_query = db.query(ImageModel).options(
         joinedload(ImageModel.artist),
@@ -8475,17 +8882,40 @@ def _load_display_image_items(
         mimetypes=mimetype,
         artist_names=artist_name,
         collection_names=collection_name,
+        exclude_artist_names=exclude_artist_name,
+        exclude_collection_names=exclude_collection_name,
     )
+    _t1 = _time.perf_counter()
+    print(f"[PERF] query build: {_t1-_t0:.3f}s")
 
     generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
+    _t2 = _time.perf_counter()
+    print(f"[PERF] gen_sw filter: {_t2-_t1:.3f}s  ids={len(generation_filtered_ids) if generation_filtered_ids else 'skip'}")
+
     nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
+    _t3 = _time.perf_counter()
+    print(f"[PERF] nsfw_rating filter: {_t3-_t2:.3f}s  ids={len(nsfw_filtered_ids) if nsfw_filtered_ids else 'skip'}")
+
     nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
+    _t4 = _time.perf_counter()
+    print(f"[PERF] nsfw_safety filter: {_t4-_t3:.3f}s  ids={len(nsfw_safety_filtered_ids) if nsfw_safety_filtered_ids else 'skip'}")
+
     a1111_filtered_ids = _filter_image_ids_by_a1111_features(
         images_query,
         a1111_hires=a1111_hires,
         a1111_regional_prompter=a1111_regional_prompter,
         a1111_adetailer=a1111_adetailer,
     )
+    _t5 = _time.perf_counter()
+    print(f"[PERF] a1111 filter: {_t5-_t4:.3f}s  ids={len(a1111_filtered_ids) if a1111_filtered_ids else 'skip'}")
+
+    tag_filtered_ids = _filter_image_ids_by_tag_names(
+        images_query,
+        include_tags=include_tag,
+        exclude_tags=exclude_tag,
+    )
+    _t5b = _time.perf_counter()
+    print(f"[PERF] tag filter: {_t5b-_t5:.3f}s  ids={len(tag_filtered_ids) if tag_filtered_ids is not None else 'skip'}")
 
     constrained_ids: Optional[set[int]] = None
     for filtered_ids in (
@@ -8493,6 +8923,7 @@ def _load_display_image_items(
         nsfw_filtered_ids,
         nsfw_safety_filtered_ids,
         a1111_filtered_ids,
+        tag_filtered_ids,
     ):
         if filtered_ids is None:
             continue
@@ -8511,6 +8942,9 @@ def _load_display_image_items(
         images_query = images_query.order_by(ImageModel.id.asc())
 
     images = images_query.all()
+    _t6 = _time.perf_counter()
+    print(f"[PERF] main query exec: {_t6-_t5:.3f}s  images={len(images)}")
+
     display_items: list[dict[str, Any]] = []
     for image in images:
         db_dict = ImageData.from_db_record(image).to_dict()
@@ -8547,7 +8981,17 @@ def _load_display_image_items(
         merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
         merged["user_nsfw_rating"] = image.user_nsfw_rating
         merged["user_nsfw_safety_class"] = image.user_nsfw_safety_class
+        # Inject DB-backed user_tags only when sidecar did not already provide them,
+        # so that sidecar remains the authority when present.
+        if "user_tags" not in merged or not merged["user_tags"]:
+            db_user_tags = getattr(image, "user_tags", None)
+            if isinstance(db_user_tags, list) and db_user_tags:
+                merged["user_tags"] = db_user_tags
         display_items.extend(_build_display_items_for_image(image, merged, group_variants=group_variants))
+
+    _t7 = _time.perf_counter()
+    print(f"[PERF] sidecar+display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
+    print(f"[PERF] TOTAL: {_t7-_t0:.3f}s")
 
     _search_cache_put(display_cache_key, display_items)
     return display_items
@@ -9142,7 +9586,35 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
     retry_metrics_before = _snapshot_civitai_payload_retry_metrics(api)
     task_context.set_total(0)
     task_context.set_message("Fetching your CivitAI collections")
-    remote_collections = _fetch_civitai_user_image_collections(api)
+    try:
+        remote_collections = _fetch_civitai_user_image_collections(api)
+    except HTTPException as exc:
+        detail = str(exc.detail) if exc.detail else ""
+        is_auth_error = exc.status_code == 502 and "401" in detail and "Unauthorized" in detail
+        if is_auth_error:
+            task_context.set_metadata("auth_required", True)
+            task_context.fail(f"CivitAI authentication expired. {detail}")
+        else:
+            task_context.fail(detail or f"Could not fetch collections (HTTP {exc.status_code}).")
+        return {
+            "message": detail,
+            "collections_requested": 0,
+            "collections_synced": 0,
+            "images_added": 0,
+            "images_skipped": 0,
+            "images_recovered": 0,
+            "images_cancelled": 0,
+            "json_files_created": 0,
+            "memberships_removed": 0,
+            "errors": [detail],
+            "warnings": _get_runtime_warnings(),
+            "collections": [],
+            "orphaned_local_collections": [],
+            "civitai_payload_retry_metrics": _diff_civitai_payload_retry_metrics(
+                retry_metrics_before,
+                _snapshot_civitai_payload_retry_metrics(api),
+            ),
+        }
     if not remote_collections:
         retry_metrics = _diff_civitai_payload_retry_metrics(
             retry_metrics_before,
@@ -9821,6 +10293,21 @@ async def lifespan(app: FastAPI):
                         except Exception as migrate_exc:
                             print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
 
+                    if str(version_result or "") == "1.4" and str(CURRENT_SCHEMA_VERSION) == "1.5":
+                        print("   Attempting in-place schema upgrade 1.4 -> 1.5 (user_tags column)...")
+                        try:
+                            _ensure_user_tags_column()
+                            # Backfill user_tags from sidecar JSON files into DB column
+                            _backfill_user_tags_from_sidecars()
+                            with SessionLocal() as db:
+                                db.query(SchemaVersion).delete()
+                                db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+                                db.commit()
+                            migrated = True
+                            print("✅ In-place schema upgrade complete.")
+                        except Exception as migrate_exc:
+                            print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
+
                     if migrated:
                         version_result = CURRENT_SCHEMA_VERSION
 
@@ -9892,7 +10379,10 @@ async def lifespan(app: FastAPI):
     _ensure_user_nsfw_columns()
     _ensure_civitai_uuid_column()
     _ensure_civitai_hash_column()
+    _ensure_user_tags_column()
     _ensure_image_variant_columns()
+    _ensure_promoted_metadata_columns()
+    _ensure_observation_unique_constraint()
 
     print("AtelierAI API is ready to go!")
 
@@ -9924,6 +10414,7 @@ app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
 # Expose processed images so the gallery can render thumbnails/full previews.
 app.mount("/image_library", StaticFiles(directory=IMAGE_LIBRARY_PATH), name="image_library")
 app.mount("/image_resources", StaticFiles(directory=IMAGE_RESOURCES_PATH), name="image_resources")
+app.mount("/frontend/images", StaticFiles(directory="images"), name="frontend_images")
 
 
 # Define a root endpoint to serve the main index.html file
@@ -9942,6 +10433,23 @@ async def read_generation_lab():
     return FileResponse("frontend/generation-lab.html")
 
 
+@app.get("/healthz", response_model=dict)
+def read_healthz(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database healthcheck failed: {exc}",
+        )
+
+    return {
+        "status": "ok",
+        "database": "ok",
+        "app": "atelierai",
+    }
+
+
 @app.get("/model-lab")
 async def read_model_lab():
     return FileResponse("frontend/model-lab.html")
@@ -9955,6 +10463,25 @@ async def read_folder_lab():
 @app.get("/perceptual-lab")
 async def read_perceptual_lab():
     return FileResponse("frontend/perceptual-lab.html")
+
+
+@app.get("/expression-lab")
+async def read_expression_lab():
+    return FileResponse("frontend/expression-lab.html")
+
+
+@app.get("/api/expression-sets")
+async def list_expression_sets():
+    """Return the list of expression image files in /images/expressions."""
+    from pathlib import Path
+    expr_dir = Path("images") / "expressions"
+    if not expr_dir.is_dir():
+        return {"files": []}
+    files = sorted(
+        f.name for f in expr_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+    )
+    return {"files": files}
 
 
 @app.get("/tasks/", response_model=list[dict])
@@ -11067,7 +11594,7 @@ def _build_semantic_workflow_match_buckets(
     }
 
     matched: list[dict[str, Any]] = []
-    did_not_match: list[dict[str, Any]] = []
+    local_only: list[dict[str, Any]] = []
     matched_field_names: set[str] = set()
     for field_name, local_value in local_fields.items():
         if _is_missing_process_value(local_value):
@@ -11082,7 +11609,7 @@ def _build_semantic_workflow_match_buckets(
             matched.append({
                 "field": field_name,
                 "local_value": local_value,
-                "match_reason": "semantic_match",
+                "match_basis": "semantic_match",
                 "match_count": len(match_paths),
                 "path_samples": match_paths[:10],
             })
@@ -11094,7 +11621,7 @@ def _build_semantic_workflow_match_buckets(
             matched.append({
                 "field": field_name,
                 "local_value": local_value,
-                "match_reason": f"validated_by_external_model_hash_evidence:{tier}",
+                "match_basis": f"verified_by_model_verification:{tier}",
                 "confirmation_tier": tier,
                 "match_count": max(1, len(evidence_sources)),
                 "path_samples": [
@@ -11109,23 +11636,23 @@ def _build_semantic_workflow_match_buckets(
             mismatch_entry = {
                 "field": field_name,
                 "local_value": local_value,
-                "match_reason": "no_semantic_match_found",
+                "match_basis": "no_workflow_comparison",
                 "match_count": 0,
                 "path_samples": [],
             }
             if field_name in {"prompt_positive", "prompt_negative"}:
                 mismatch_entry["prompt_diagnostics"] = _build_prompt_mismatch_diagnostics(local_value, parameter_scalars)
-            did_not_match.append(mismatch_entry)
+            local_only.append(mismatch_entry)
 
     expected_params = _extract_expected_workflow_parameters(workflow_payload)
     mismatched: list[dict[str, Any]] = []
-    unmatched_expected_parameters: list[dict[str, Any]] = []
+    workflow_only: list[dict[str, Any]] = []
     for expected in expected_params:
         field_name = str(expected.get("field") or "").strip()
         expected_value = expected.get("expected_value")
         local_value = local_fields.get(field_name)
         if _is_missing_process_value(local_value):
-            unmatched_expected_parameters.append({
+            workflow_only.append({
                 **expected,
                 "reason": "no_local_candidate_value",
             })
@@ -11145,13 +11672,13 @@ def _build_semantic_workflow_match_buckets(
         "counts": {
             "matched": len(matched),
             "mismatched": len(mismatched),
-            "did_not_match": len(did_not_match),
-            "unmatched_expected_parameters": len(unmatched_expected_parameters),
+            "local_only": len(local_only),
+            "workflow_only": len(workflow_only),
         },
         "matched": matched,
         "mismatched": mismatched,
-        "did_not_match": did_not_match,
-        "unmatched_expected_parameters": unmatched_expected_parameters,
+        "local_only": local_only,
+        "workflow_only": workflow_only,
         "expected_workflow_parameter_samples": expected_params[:25],
     }
 
@@ -11243,9 +11770,115 @@ def _build_parity_candidate_audit(
             "unsupported_features": _list_payload(capability_signals.get("unsupported_features")),
         })
 
+    # Build readiness_score and action_items
+    readiness_score = 0
+    action_items: list[str] = []
+
+    if required_field_names:
+        present_count = len(required_field_names) - len(missing_fields)
+        readiness_score = int((present_count / len(required_field_names)) * 100)
+
+    # Readiness modifiers
+    if isinstance(model_hash_evidence, dict) and model_hash_evidence.get("confirmed_exact_match"):
+        tier = str(model_hash_evidence.get("confirmation_tier") or "")
+        if tier == "same_source":
+            readiness_score = min(100, readiness_score + 10)
+        elif tier == "cross_source":
+            readiness_score = min(100, readiness_score + 5)
+
+    if _list_payload(capability_signals.get("unsupported_features")):
+        readiness_score = max(0, readiness_score - 30)
+
+    if provided_workflow_supplied and isinstance(semantic_workflow_match, dict):
+        counts = _dict_payload(semantic_workflow_match.get("counts"))
+        total_semantic = sum(
+            int(counts.get(k) or 0)
+            for k in ("matched", "mismatched", "local_only", "workflow_only")
+        )
+        if total_semantic > 0:
+            match_ratio = int(counts.get("matched") or 0) / total_semantic
+            if match_ratio > 0.80:
+                readiness_score = min(100, readiness_score + 5)
+            elif match_ratio < 0.35:
+                readiness_score = max(0, readiness_score - 10)
+
+    if conflicts:
+        readiness_score = max(0, readiness_score - 5 * len(conflicts))
+
+    # Action items
+    if missing_fields:
+        action_items.append(f"Set {', '.join(missing_fields)} — missing from extracted metadata")
+    if classification == "needs_manual_intervention":
+        action_items.append("Resolve blocking issues before attempting generation")
+    if isinstance(model_hash_evidence, dict) and not model_hash_evidence.get("confirmed_exact_match"):
+        action_items.append("Verify model — local checkpoint could not be confirmed by hash")
+    if _list_payload(capability_signals.get("unsupported_features")):
+        unsupported_names = [str(f) for f in _list_payload(capability_signals.get("unsupported_features"))]
+        action_items.append(f"Unsupported A1111 features detected: {', '.join(unsupported_names)}")
+    if not provided_workflow_supplied:
+        action_items.append("Provide a workflow JSON to enable field alignment checking")
+
+    # Build unified_field_status
+    unified_field_status: dict[str, dict[str, Any]] = {}
+    for field_name, local_value in canonical_fields.items():
+        if field_name == "lora_tags":
+            continue
+        unified_field_status[field_name] = {
+            "status": "not_checked",
+            "local_value": local_value,
+            "workflow_value": None,
+            "confidence": None,
+            "detail": None,
+        }
+
+    if provided_workflow_supplied and isinstance(semantic_workflow_match, dict):
+        for entry in _list_payload(semantic_workflow_match.get("matched")):
+            fname = str(entry.get("field") or "")
+            if fname in unified_field_status:
+                unified_field_status[fname]["status"] = "matched"
+                unified_field_status[fname]["workflow_value"] = entry.get("local_value")
+                unified_field_status[fname]["detail"] = entry.get("match_reason")
+        for entry in _list_payload(semantic_workflow_match.get("mismatched")):
+            fname = str(entry.get("field") or "")
+            if fname in unified_field_status:
+                unified_field_status[fname]["status"] = "mismatched"
+                unified_field_status[fname]["workflow_value"] = entry.get("expected_value")
+                unified_field_status[fname]["detail"] = entry.get("reason")
+        for entry in _list_payload(semantic_workflow_match.get("local_only")):
+            fname = str(entry.get("field") or "")
+            if fname in unified_field_status:
+                unified_field_status[fname]["status"] = "local_only"
+                unified_field_status[fname]["detail"] = entry.get("match_reason")
+        for entry in _list_payload(semantic_workflow_match.get("workflow_only")):
+            fname = str(entry.get("field") or "")
+            if fname in unified_field_status:
+                unified_field_status[fname]["status"] = "workflow_only"
+                unified_field_status[fname]["workflow_value"] = entry.get("expected_value")
+                unified_field_status[fname]["detail"] = entry.get("reason")
+
+    # Override model_hash with verification tier
+    if isinstance(model_hash_evidence, dict) and "model_hash" in unified_field_status:
+        mh_status = unified_field_status["model_hash"]
+        if model_hash_evidence.get("confirmed_exact_match"):
+            tier = str(model_hash_evidence.get("confirmation_tier") or "")
+            mh_status["status"] = "verified"
+            if tier == "same_source":
+                mh_status["confidence"] = "verified"
+                sources = _list_payload(model_hash_evidence.get("sources"))
+                src_labels = [str(s.get("source", "")) for s in sources if isinstance(s, dict)]
+                mh_status["detail"] = f"Hash confirmed via {', '.join(src_labels[:3]) or 'external sources'}"
+            elif tier == "cross_source":
+                mh_status["confidence"] = "probable"
+                cross_detail = model_hash_evidence.get("cross_source_detail")
+                detail_str = ", ".join(str(d) for d in (_list_payload(cross_detail) if cross_detail else []))
+                mh_status["detail"] = f"Cross-source verification: {detail_str}" if detail_str else "Cross-source hash match"
+        else:
+            mh_status["status"] = "local_only"
+            mh_status["detail"] = "No external hash confirmation found"
+
     return {
         "ok": True,
-        "mode": "parity_candidate_audit",
+        "mode": "generation_audit",
         "target": {
             "file_hash": file_hash,
         },
@@ -11258,6 +11891,8 @@ def _build_parity_candidate_audit(
             "conflicts": conflicts,
             "capability_signals": capability_signals,
             "classification": classification,
+            "readiness_score": readiness_score,
+            "action_items": action_items,
         },
         "comparison": {
             "provided_workflow_supplied": provided_workflow_supplied,
@@ -11265,6 +11900,7 @@ def _build_parity_candidate_audit(
             "structural": structural,
             "workflow_match_buckets_semantic": semantic_workflow_match,
             "model_hash_evidence": model_hash_evidence,
+            "unified_field_status": unified_field_status,
         },
     }
 
@@ -11629,8 +12265,8 @@ def _build_model_hash_evidence_for_parity(
 
     confirmed_exact = confirmed_tier_1 or confirmed_tier_2
     confirmation_tier = (
-        "same_source" if confirmed_tier_1
-        else "cross_source" if confirmed_tier_2
+        "verified" if confirmed_tier_1
+        else "probable" if confirmed_tier_2
         else None
     )
 
@@ -11811,13 +12447,13 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         lora_tags = _list_payload(record.get("lora_tags"))
 
         missing_any = False
-        for field in _A1111_PROCESS_CORE_FIELDS:
-            value = parsed_fields.get(field)
+        for core_field in _A1111_PROCESS_CORE_FIELDS:
+            value = parsed_fields.get(core_field)
             if _is_missing_process_value(value):
-                coverage_missing[field] += 1
+                coverage_missing[core_field] += 1
                 missing_any = True
             else:
-                coverage_present[field] += 1
+                coverage_present[core_field] += 1
         if not missing_any:
             records_with_all_core_fields += 1
 
@@ -11857,10 +12493,10 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         return round((value / total) * 100.0, 2)
 
     field_coverage: dict[str, Any] = {}
-    for field in _A1111_PROCESS_CORE_FIELDS:
-        present = coverage_present[field]
-        missing = coverage_missing[field]
-        field_coverage[field] = {
+    for core_field in _A1111_PROCESS_CORE_FIELDS:
+        present = coverage_present[core_field]
+        missing = coverage_missing[core_field]
+        field_coverage[core_field] = {
             "present": present,
             "missing": missing,
             "coverage_percent": _pct(present, record_count),
@@ -12056,6 +12692,7 @@ def analyze_a1111_bridge(
 
 
 @app.post("/generation-prototype/parity-workbench/candidate-audit", response_model=dict)
+@app.post("/generation-audit/analyze", response_model=dict)
 def analyze_parity_candidate(
     request: ParityCandidateAuditRequest,
     db: Session = Depends(get_db),
@@ -12082,6 +12719,7 @@ def analyze_parity_candidate(
     provided_workflow_json = _dict_payload(request.comfy_workflow_json)
     provided_workflow_supplied = request.comfy_workflow_json is not None
 
+    # Always include all evidence sources (prefix + non-prefix)
     audit = _build_parity_candidate_audit(
         file_hash=file_hash,
         parse_payload=parse_payload,
@@ -12091,9 +12729,7 @@ def analyze_parity_candidate(
             image=image,
             canonical_model=_dict_payload(parse_payload.get("parsed_fields")).get("model"),
             canonical_model_hash=_dict_payload(parse_payload.get("parsed_fields")).get("model_hash"),
-            include_non_prefix_local_reference_matches=bool(
-                request.include_non_prefix_local_reference_hash_evidence
-            ),
+            include_non_prefix_local_reference_matches=True,
         ),
     )
 
@@ -12106,8 +12742,6 @@ def analyze_parity_candidate(
         "candidate_count": len(user_comment_candidates),
         "parsed": parse_payload,
     }
-    if request.include_generation_payload:
-        audit["generation_payload"] = generation_payload
     return audit
 
 
@@ -12163,8 +12797,6 @@ def get_a1111_bridge_dataset_quality_report():
 
 def _resolve_comfyui_base_url() -> str:
     base = str(getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "") or "").strip()
-    if not base:
-        base = str(getattr(app_config, "ATELIER_COMFYUI_MODEL_CATALOG_URL", "") or "").strip()
     return base.rstrip("/")
 
 
@@ -12260,8 +12892,7 @@ def generate_and_compare_comfy_workspace(
         raise HTTPException(
             status_code=422,
             detail=(
-                "ComfyUI base URL is not configured. Set ATELIER_COMFYUI_BASE_URL "
-                "(preferred) or ATELIER_COMFYUI_MODEL_CATALOG_URL."
+                "ComfyUI base URL is not configured. Set ATELIER_COMFYUI_BASE_URL."
             ),
         )
 
@@ -13429,9 +14060,13 @@ def read_images(
     nsfw_safety: Optional[list[str]] = Query(default=None),
     artist_name: Optional[list[str]] = Query(default=None),
     collection_name: Optional[list[str]] = Query(default=None),
+    exclude_artist_name: Optional[list[str]] = Query(default=None),
+    exclude_collection_name: Optional[list[str]] = Query(default=None),
     a1111_hires: Optional[list[str]] = Query(default=None),
     a1111_regional_prompter: Optional[list[str]] = Query(default=None),
     a1111_adetailer: Optional[list[str]] = Query(default=None),
+    include_tag: Optional[list[str]] = Query(default=None),
+    exclude_tag: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
@@ -13453,9 +14088,13 @@ def read_images(
             "nsfw_safety": _normalize_cache_list(nsfw_safety),
             "artist_name": _normalize_cache_list(artist_name),
             "collection_name": _normalize_cache_list(collection_name),
+            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
+            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
             "a1111_hires": _normalize_cache_list(a1111_hires),
             "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
             "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
+            "include_tag": _normalize_cache_list(include_tag),
+            "exclude_tag": _normalize_cache_list(exclude_tag),
         },
     )
     cache_headers = _build_json_cache_headers(cache_key)
@@ -13482,9 +14121,13 @@ def read_images(
         nsfw_safety=nsfw_safety,
         artist_name=artist_name,
         collection_name=collection_name,
+        exclude_artist_name=exclude_artist_name,
+        exclude_collection_name=exclude_collection_name,
         a1111_hires=a1111_hires,
         a1111_regional_prompter=a1111_regional_prompter,
         a1111_adetailer=a1111_adetailer,
+        include_tag=include_tag,
+        exclude_tag=exclude_tag,
         group_variants=group_variants,
     )
     filtered_count = len(display_items)
@@ -13503,15 +14146,42 @@ def read_images(
 
 
 @app.get("/images/state", response_model=dict)
-def read_images_state(db: Session = Depends(get_db)):
+def read_images_state(
+    nsfw_rating: Optional[list[str]] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """Return lightweight image-library state for polling-based UI refresh logic."""
-    total_count = db.query(ImageModel).filter(_active_image_filter()).count()
-    latest_row = (
-        db.query(ImageModel.id)
-        .filter(_active_image_filter())
-        .order_by(ImageModel.id.desc())
-        .first()
-    )
+    base_query = db.query(ImageModel).filter(_active_image_filter())
+
+    # Apply NSFW visibility preference to constrain the catalog count.
+    if nsfw_rating:
+        nsfw_filtered = _filter_image_ids_by_nsfw_ratings(base_query, nsfw_rating)
+        if nsfw_filtered is not None:
+            visible_ids = set(nsfw_filtered)
+            total_count = len(visible_ids)
+            latest_row = (
+                db.query(ImageModel.id)
+                .filter(_active_image_filter(), ImageModel.id.in_(visible_ids))
+                .order_by(ImageModel.id.desc())
+                .first()
+            )
+        else:
+            total_count = base_query.count()
+            latest_row = (
+                db.query(ImageModel.id)
+                .filter(_active_image_filter())
+                .order_by(ImageModel.id.desc())
+                .first()
+            )
+    else:
+        total_count = base_query.count()
+        latest_row = (
+            db.query(ImageModel.id)
+            .filter(_active_image_filter())
+            .order_by(ImageModel.id.desc())
+            .first()
+        )
+
     latest_id = int(latest_row[0]) if latest_row else 0
     return {
         "count": total_count,
@@ -13534,9 +14204,13 @@ def read_image_keys(
     nsfw_safety: Optional[list[str]] = Query(default=None),
     artist_name: Optional[list[str]] = Query(default=None),
     collection_name: Optional[list[str]] = Query(default=None),
+    exclude_artist_name: Optional[list[str]] = Query(default=None),
+    exclude_collection_name: Optional[list[str]] = Query(default=None),
     a1111_hires: Optional[list[str]] = Query(default=None),
     a1111_regional_prompter: Optional[list[str]] = Query(default=None),
     a1111_adetailer: Optional[list[str]] = Query(default=None),
+    include_tag: Optional[list[str]] = Query(default=None),
+    exclude_tag: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     cache_key = _build_search_cache_key(
@@ -13551,9 +14225,13 @@ def read_image_keys(
             "nsfw_safety": _normalize_cache_list(nsfw_safety),
             "artist_name": _normalize_cache_list(artist_name),
             "collection_name": _normalize_cache_list(collection_name),
+            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
+            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
             "a1111_hires": _normalize_cache_list(a1111_hires),
             "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
             "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
+            "include_tag": _normalize_cache_list(include_tag),
+            "exclude_tag": _normalize_cache_list(exclude_tag),
         },
     )
     cache_headers = _build_json_cache_headers(cache_key)
@@ -13566,9 +14244,8 @@ def read_image_keys(
     if isinstance(cached_keys, list):
         return [str(file_hash) for file_hash in cached_keys if file_hash]
 
-    display_items = _load_display_image_items(
+    keys = _load_filtered_image_keys(
         db,
-        sort_by="first_added",
         search=search,
         generation_software=generation_software,
         source_site=source_site,
@@ -13577,12 +14254,15 @@ def read_image_keys(
         nsfw_safety=nsfw_safety,
         artist_name=artist_name,
         collection_name=collection_name,
+        exclude_artist_name=exclude_artist_name,
+        exclude_collection_name=exclude_collection_name,
         a1111_hires=a1111_hires,
         a1111_regional_prompter=a1111_regional_prompter,
         a1111_adetailer=a1111_adetailer,
+        include_tag=include_tag,
+        exclude_tag=exclude_tag,
         group_variants=group_variants,
     )
-    keys = [str(item.get("gallery_item_key") or "") for item in display_items if item.get("gallery_item_key")]
     _search_cache_put(cache_key, keys)
     return keys
 
@@ -13621,6 +14301,18 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
     if payload.artist_profile is not None:
         normalized_artist_profile = payload.artist_profile.strip() or None
         sidecar_additional_data["artist_profile"] = normalized_artist_profile
+
+    if payload.user_tags is not None:
+        normalized_user_tags: list[str] = []
+        seen_user_tags: set[str] = set()
+        for raw_tag in payload.user_tags:
+            normalized_tag = str(raw_tag or "").strip()
+            if not normalized_tag or normalized_tag.lower() in seen_user_tags:
+                continue
+            seen_user_tags.add(normalized_tag.lower())
+            normalized_user_tags.append(normalized_tag)
+        sidecar_additional_data["user_tags"] = normalized_user_tags
+        update_values[ImageModel.user_tags] = normalized_user_tags
 
     if payload.user_negative_tags is not None:
         normalized_negative_tags: list[str] = []
@@ -13694,6 +14386,12 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
 
         sidecar_artist_profile = None
         sidecar_user_negative_tags: list[str] = []
+        # Prefer DB column for user_tags (always up-to-date after the commit above).
+        response_user_tags: list[str] = (
+            list(image.user_tags)
+            if isinstance(image.user_tags, list)
+            else []
+        )
         sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
         if sidecar_path.exists():
             try:
@@ -13723,6 +14421,7 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
         "artist_id": image.artist_id,
         "artist_name": image.artist.name if image.artist is not None else None,
         "artist_profile": sidecar_artist_profile,
+        "user_tags": response_user_tags,
         "user_negative_tags": sidecar_user_negative_tags,
         "user_nsfw_rating": image.user_nsfw_rating,
         "user_nsfw_safety_class": image.user_nsfw_safety_class,
@@ -13958,7 +14657,7 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             )
         finally:
             _cleanup_temp_file(_temp_path)
-            _cleanup_temp_file(mismatch_temp_path)
+            _cleanup_temp_file(_mismatch_temp_path)
 
     actions_taken: list[str] = []
     issues_found: list[str] = []
@@ -14555,6 +15254,83 @@ def get_artists(
         {"id": artist.id, "name": artist.name, "nickname": artist.nickname}
         for artist in artists
     ]
+
+
+@app.get("/search/suggest", response_model=dict)
+def search_suggest(
+    q: str = Query(default="", min_length=1, max_length=200),
+    limit: int = Query(default=15, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """Return matching collections, artists, and tags for autocomplete suggestions."""
+    needle = q.strip().lower()
+    if not needle:
+        return {"collections": [], "artists": [], "tags": []}
+
+    like_pattern = f"%{needle}%"
+
+    collection_rows = (
+        db.query(CollectionModel.name)
+        .filter(func.lower(CollectionModel.name).like(like_pattern))
+        .order_by(CollectionModel.name)
+        .limit(limit)
+        .all()
+    )
+
+    artist_rows = (
+        db.query(Artist.name)
+        .join(ImageModel, ImageModel.artist_id == Artist.id)
+        .filter(
+            _active_image_filter(),
+            func.lower(Artist.name).like(like_pattern),
+        )
+        .distinct()
+        .order_by(Artist.name)
+        .limit(limit)
+        .all()
+    )
+
+    # Tags: union of Tag.name, Concept.canonical_name, and ConceptAlias.normalized_alias
+    tag_name_rows = (
+        db.query(Tag.name)
+        .filter(func.lower(Tag.name).like(like_pattern))
+        .order_by(Tag.name)
+        .limit(limit)
+        .all()
+    )
+    concept_name_rows = (
+        db.query(Concept.canonical_name)
+        .filter(func.lower(Concept.canonical_name).like(like_pattern))
+        .order_by(Concept.canonical_name)
+        .limit(limit)
+        .all()
+    )
+    alias_name_rows = (
+        db.query(ConceptAlias.normalized_alias)
+        .filter(func.lower(ConceptAlias.normalized_alias).like(like_pattern))
+        .order_by(ConceptAlias.normalized_alias)
+        .limit(limit)
+        .all()
+    )
+
+    # Merge and deduplicate tag results, preserving sort order
+    seen_tags: set[str] = set()
+    merged_tags: list[str] = []
+    for row_list in (tag_name_rows, concept_name_rows, alias_name_rows):
+        for (name,) in row_list:
+            lowered = name.lower()
+            if lowered not in seen_tags:
+                seen_tags.add(lowered)
+                merged_tags.append(name)
+    merged_tags.sort(key=lambda s: s.lower())
+    if len(merged_tags) > limit:
+        merged_tags = merged_tags[:limit]
+
+    return {
+        "collections": [row[0] for row in collection_rows],
+        "artists": [row[0] for row in artist_rows],
+        "tags": merged_tags,
+    }
 
 
 @app.get("/filters/options", response_model=dict)
@@ -15176,6 +15952,122 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
     return response_data
 
 
+# ---------------------------------------------------------------------------
+# CivitAI Authentication Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/civitai/auth/status", response_model=dict)
+def civitai_auth_status():
+    """Check whether the current CivitAI session cookie is valid.
+
+    Returns ``{ authenticated: bool, message: str }``.  Probes
+    ``collection.getAllUser`` (an authenticated endpoint) to verify the token.
+    """
+    try:
+        from atelierai.civitai.civitai_auth import _validate_token_with_civitai
+    except ImportError:
+        return {"authenticated": False, "message": "CivitAI auth module not available."}
+
+    api = CivitaiAPI.get_instance()
+    cookie = getattr(api, "session_cookie", None)
+    if not cookie or len(cookie) < 100:
+        return {"authenticated": False, "message": "No session cookie is configured."}
+
+    is_valid, _definitive, message = _validate_token_with_civitai(cookie)
+    return {"authenticated": is_valid, "message": message}
+
+
+@app.post("/civitai/auth/cookie", response_model=dict)
+def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
+    """Accept a manually-pasted CivitAI session cookie.
+
+    The caller supplies just the ``__Secure-civitai-token`` value (the long
+    JWT-like string starting with ``eyJ``).  The endpoint validates it against
+    CivitAI before persisting.
+    """
+    try:
+        from atelierai.civitai.civitai_auth import (
+            _validate_token_with_civitai,
+            _normalize_token,
+        )
+    except ImportError:
+        raise HTTPException(status_code=500, detail="CivitAI auth module not available.")
+
+    token = _normalize_token(payload.cookie)
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="The provided value does not look like a valid CivitAI session token.",
+        )
+
+    is_valid, is_definitive, message = _validate_token_with_civitai(token)
+    if not is_valid and is_definitive:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Token rejected by CivitAI: {message}",
+        )
+
+    # Update the running singleton so subsequent requests use the new cookie.
+    try:
+        api = CivitaiAPI.get_instance()
+        api.update_session_cookie(token)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update session cookie: {exc}",
+        )
+
+    status_msg = "CivitAI session cookie saved and validated." if is_valid else (
+        f"Cookie saved (validation inconclusive: {message}). It will be used for future requests."
+    )
+    return {"success": True, "message": status_msg, "validated": is_valid}
+
+
+@app.post("/civitai/auth/refresh", response_model=dict)
+def civitai_auth_refresh():
+    """Trigger a Playwright-based re-authentication with CivitAI.
+
+    This runs synchronously and may take 30+ seconds.  The browser window
+    will open on the server host for the user to complete OAuth login.
+    """
+    try:
+        from atelierai.civitai.civitai_auth import get_cached_or_refresh_session_token
+    except ImportError:
+        raise HTTPException(status_code=500, detail="CivitAI auth module not available.")
+
+    cache_file = _get_civitai_session_cache_path()
+
+    try:
+        token = get_cached_or_refresh_session_token(
+            cache_file=cache_file,
+            headless=False,  # OAuth requires visible browser
+            force_reauth=True,
+            non_interactive=True,
+        )
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+    # Update the running singleton.
+    try:
+        api = CivitaiAPI.get_instance()
+        api.update_session_cookie(token)
+    except Exception as exc:
+        return {"success": False, "error": f"Token obtained but failed to update singleton: {exc}"}
+
+    return {"success": True, "message": "CivitAI session refreshed successfully."}
+
+
+def _get_civitai_session_cache_path() -> str:
+    """Return the session cache file path from config, with a sensible default."""
+    try:
+        from atelierai.config import CIVITAI_SESSION_CACHE
+        return CIVITAI_SESSION_CACHE
+    except ImportError:
+        pass
+    env_val = os.getenv("CIVITAI_SESSION_CACHE", "")
+    return env_val or ".civitai_session"
+
+
 @app.post("/collections/sync/civitai", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
 def sync_civitai_collections(
     payload: CivitaiCollectionSyncRequest, db: Session = Depends(get_db)
@@ -15223,6 +16115,163 @@ def backfill_civitai_nsfw_levels(
     return {
         "message": "CivitAI NSFW backfill task queued.",
         "task": task,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Search Proxy
+# ---------------------------------------------------------------------------
+
+_civitai_search_client = None
+_civitai_search_client_lock = threading.Lock()
+
+
+def _get_civitai_search_client():
+    """Lazy-init singleton for the search client."""
+    global _civitai_search_client
+    if _civitai_search_client is not None:
+        return _civitai_search_client
+    with _civitai_search_client_lock:
+        if _civitai_search_client is not None:
+            return _civitai_search_client
+        from atelierai.civitai.civitai_search import CivitaiSearchClient
+        _civitai_search_client = CivitaiSearchClient()
+        return _civitai_search_client
+
+
+# CivitAI image CDN base for constructing URLs from Meilisearch UUIDs.
+_CIVITAI_IMAGE_CDN = "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
+
+
+def _normalize_meili_hit(hit: dict) -> dict:
+    """Transform a raw Meilisearch hit into a frontend-friendly dict.
+
+    Raw Meilisearch hits use internal field names (e.g. ``url`` is just a
+    UUID, stats use ``*AllTime`` suffixes).  This function:
+
+    * Builds ``thumbnail_url`` and full ``url`` from the UUID.
+    * Passes through the BlurHash ``hash`` for progressive loading.
+    * Normalises stats keys to match what the Search Lab frontend expects.
+    """
+    out = dict(hit)
+
+    # ── Image URLs ──
+    uuid = hit.get("url", "")
+    if uuid and "/" not in uuid:
+        # Meilisearch stores just the UUID slug.
+        out["thumbnail_url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=450/{uuid}"
+        out["url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/original=true/{uuid}"
+
+    # Keep the BlurHash as ``blurhash`` for client-side decoding.
+    if hit.get("hash"):
+        out["blurhash"] = hit["hash"]
+
+    # ── Stats normalisation ──
+    stats = hit.get("stats")
+    if isinstance(stats, dict):
+        normalised = {}
+        for key, value in stats.items():
+            # Strip the ``AllTime`` suffix so frontend can use shorter names.
+            short = key.replace("AllTime", "")
+            normalised[short] = value
+        out["stats"] = normalised
+
+    return out
+
+
+@app.post("/civitai-search", response_model=dict)
+def civitai_search_proxy(payload: CivitaiSearchRequest):
+    """Proxy a search request to the CivitAI Meilisearch host.
+
+    Handles bearer-token acquisition automatically from the cached session
+    cookie. Returns the raw Meilisearch result envelope.
+    """
+    # Cache key for identical requests.
+    cache_key = _build_search_cache_key(
+        "civitai-search",
+        payload={
+            "query": payload.query,
+            "tags": sorted(payload.tags),
+            "exclude_tags": sorted(payload.exclude_tags),
+            "sort_by": payload.sort_by,
+            "limit": payload.limit,
+            "offset": payload.offset,
+            "nsfw_levels": sorted(payload.nsfw_levels or []),
+            "base_models": sorted(payload.base_models or []),
+            "exclude_poi": payload.exclude_poi,
+            "exclude_minor": payload.exclude_minor,
+            "username": payload.username,
+            "extra_filters": payload.extra_filters,
+        },
+    )
+    cached = _search_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    client = _get_civitai_search_client()
+
+    try:
+        result = client.search_images(
+            query=payload.query,
+            tags=payload.tags or None,
+            exclude_tags=payload.exclude_tags or None,
+            sort_by=payload.sort_by,
+            limit=payload.limit,
+            offset=payload.offset,
+            nsfw_levels=payload.nsfw_levels,
+            base_models=payload.base_models,
+            exclude_poi=payload.exclude_poi,
+            exclude_minor=payload.exclude_minor,
+            username=payload.username,
+            facets=payload.facets,
+            extra_filters=payload.extra_filters,
+        )
+    except Exception as exc:
+        from atelierai.civitai.http_client import CivitaiRequestError
+        status_code = getattr(exc, "status_code", 502)
+        detail = str(exc)
+        if isinstance(exc, CivitaiRequestError) and not exc.retryable:
+            raise HTTPException(status_code=status_code or 400, detail=detail)
+        raise HTTPException(status_code=502, detail=f"CivitAI search proxy error: {detail}")
+
+    # Build normalized response with frontend-friendly field names.
+    raw_hits = result.get("hits", [])
+    normalized_hits = [_normalize_meili_hit(h) for h in raw_hits]
+
+    response = {
+        "hits": normalized_hits,
+        "total": result.get("estimatedTotalHits", 0),
+        "offset": result.get("offset", payload.offset),
+        "limit": result.get("limit", payload.limit),
+        "processing_time_ms": result.get("processingTimeMs", 0),
+        "facets": {
+            "distribution": result.get("facetDistribution"),
+            "stats": result.get("facetStats"),
+        },
+    }
+
+    # Cache with a shorter TTL for search results.
+    _search_cache_put(cache_key, response, ttl_seconds=60)
+
+    return response
+
+
+@app.get("/civitai-search/auth-status", response_model=dict)
+def civitai_search_auth_status():
+    """Check whether the Meilisearch key is available for search."""
+    from atelierai.civitai.civitai_search import CivitaiSearchClient
+
+    client = CivitaiSearchClient()
+    key = client._get_meili_key()
+    has_key = bool(key)
+
+    return {
+        "authenticated": has_key,
+        "message": (
+            "Meilisearch key available — primary backend ready."
+            if has_key
+            else "No Meilisearch key. Search will use REST API fallback (slower, limited filters)."
+        ),
     }
 
 
@@ -15976,15 +17025,15 @@ def taxonomy_tree_state(
             .all()
         )
 
-    danbooru_name_by_external_tag_id: dict[str, str] = {}
+    danbooru_name_by_external_tag_id: dict[int, str] = {}
     for term, authority, _ in term_rows:
         authority_name = str(authority.name or "").strip().lower()
         if authority_name != "danbooru":
             continue
-        external_tag_id = str(term.external_tag_id or "").strip()
+        ext_id = term.external_tag_id
         external_name = str(term.external_name or "").strip()
-        if external_tag_id and external_name:
-            danbooru_name_by_external_tag_id[external_tag_id] = external_name
+        if ext_id is not None and external_name:
+            danbooru_name_by_external_tag_id[ext_id] = external_name
 
     tags: list[dict] = []
     normalized_term_names: set[str] = set()
@@ -16026,12 +17075,15 @@ def taxonomy_tree_state(
 
         mapped_danbooru_tag_id = None
         mapped_danbooru_name = None
-        external_tag_id = str(term.external_tag_id or "").strip() or None
+        external_tag_id = term.external_tag_id
         if source_name == "prompt":
             raw_mapped_danbooru_tag_id = metadata.get("mapped_danbooru_tag_id") if isinstance(metadata, dict) else None
             if raw_mapped_danbooru_tag_id not in (None, ""):
-                mapped_danbooru_tag_id = str(raw_mapped_danbooru_tag_id).strip() or None
-            elif external_tag_id and external_tag_id.isdigit():
+                try:
+                    mapped_danbooru_tag_id = int(raw_mapped_danbooru_tag_id)
+                except (TypeError, ValueError):
+                    mapped_danbooru_tag_id = None
+            elif external_tag_id is not None:
                 # Prompt terms created during rescan can reuse mapped Danbooru IDs as external_tag_id.
                 mapped_danbooru_tag_id = external_tag_id
 
@@ -16105,7 +17157,7 @@ def taxonomy_tree_state(
         "tag_usage_by_scope": {
             "gallery": gallery_tag_usage_counts_by_source,
             "selected": {source: {} for source in gallery_tag_usage_counts_by_source},
-            "all": {source: {} for source in gallery_tag_usage_counts_by_source},
+            "all": {source: dict(counts) for source, counts in gallery_tag_usage_counts_by_source.items()},
         },
     }
     _search_cache_put(cache_key, payload, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
@@ -16154,7 +17206,7 @@ def taxonomy_tree_tags_for_source(
 
     # Reuse a shared cache for the danbooru name-by-ext-id lookup used by the
     # prompt source; avoids re-scanning 100k rows per cold prompt request.
-    danbooru_name_by_ext_id: dict[str, str] = {}
+    danbooru_name_by_ext_id: dict[int, str] = {}
     if source_lower == "prompt":
         danbooru_names_cache_key = "_shared_danbooru_name_by_ext_id"
         cached_danbooru_names = _search_cache_get(danbooru_names_cache_key)
@@ -16168,10 +17220,8 @@ def taxonomy_tree_tags_for_source(
                 .all()
             )
             for ext_id, ext_name in danbooru_term_rows:
-                eid = str(ext_id or "").strip()
-                ename = str(ext_name or "").strip()
-                if eid and ename:
-                    danbooru_name_by_ext_id[eid] = ename
+                if ext_id is not None and ext_name:
+                    danbooru_name_by_ext_id[ext_id] = str(ext_name).strip()
             _search_cache_put(danbooru_names_cache_key, danbooru_name_by_ext_id, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
     term_rows = (
         db.query(AuthorityTerm, Concept)
@@ -16199,15 +17249,18 @@ def taxonomy_tree_tags_for_source(
             if pc is not None and pc > 0:
                 post_count = pc
 
-        external_tag_id = str(term.external_tag_id or "").strip() or None
+        external_tag_id = term.external_tag_id
 
         mdtag_id = None
         mdtag_name = None
         if source_lower == "prompt":
             raw_mapped = metadata.get("mapped_danbooru_tag_id") if isinstance(metadata, dict) else None
             if raw_mapped not in (None, ""):
-                mdtag_id = str(raw_mapped).strip() or None
-            elif external_tag_id and external_tag_id.isdigit():
+                try:
+                    mdtag_id = int(raw_mapped)
+                except (TypeError, ValueError):
+                    mdtag_id = None
+            elif external_tag_id is not None:
                 mdtag_id = external_tag_id
             if mdtag_id:
                 mdtag_name = danbooru_name_by_ext_id.get(mdtag_id)
@@ -16223,6 +17276,56 @@ def taxonomy_tree_tags_for_source(
             mdtag_name,
         ])
 
+    # For the "user" source, also include user-assigned tags from the
+    # ImageModel.user_tags column that are not already in authority_terms.
+    if source_lower == "user":
+        existing_user_term_names: set[str] = {
+            _normalize_gallery_tag_text(r[1])
+            for r in rows
+            if r[1]
+        }
+        user_tag_name_counts: dict[str, int] = {}
+        user_tag_rows = (
+            db.query(ImageModel.user_tags)
+            .filter(_active_image_filter())
+            .filter(ImageModel.user_tags.isnot(None))
+            .all()
+        )
+        for (user_tags_col,) in user_tag_rows:
+            if not isinstance(user_tags_col, list):
+                continue
+            for tag_name in user_tags_col:
+                normalized = _normalize_gallery_tag_text(str(tag_name))
+                if normalized:
+                    user_tag_name_counts[normalized] = user_tag_name_counts.get(normalized, 0) + 1
+
+        # Reuse shared gallery usage counts if available, otherwise use
+        # the aggregate just computed.
+        usage_counts_cache_key = "_shared_gallery_tag_usage_counts_by_source"
+        usage_counts_all = _search_cache_get(usage_counts_cache_key)
+        if not isinstance(usage_counts_all, dict):
+            usage_counts_all = _gallery_tag_usage_counts_by_source_db_only(db)
+            _search_cache_put(usage_counts_cache_key, usage_counts_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+        user_usage_counts = usage_counts_all.get("user", {})
+
+        _synthetic_user_id = -1
+        for tag_name in sorted(user_tag_name_counts):
+            if tag_name in existing_user_term_names:
+                continue
+            gallery_count = user_usage_counts.get(tag_name, user_tag_name_counts.get(tag_name, 0))
+            synthetic_scope = "gallery" if tag_name in gallery_scope_names else "image"
+            rows.append([
+                _synthetic_user_id,  # unique synthetic ID per tag
+                tag_name,
+                None,  # no external_tag_id
+                synthetic_scope,
+                gallery_count if gallery_count > 0 else None,
+                None,  # no concept
+                None,  # no mapped danbooru tag
+                None,
+            ])
+            _synthetic_user_id -= 1
+
     payload = {"source": source_lower, "cols": _TAG_SOURCE_COLS, "rows": rows}
     _search_cache_put(cache_key, payload, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
     return payload
@@ -16230,20 +17333,60 @@ def taxonomy_tree_tags_for_source(
 
 @app.post("/taxonomy/tree/associate", response_model=dict)
 def taxonomy_tree_associate_tag(payload: TaxonomyTagAssociationRequest, db: Session = Depends(get_db)):
-    term = db.query(AuthorityTerm).filter(AuthorityTerm.id == payload.authority_term_id).first()
-    if term is None:
-        raise HTTPException(status_code=404, detail="Authority term not found")
-
     concept = db.query(Concept).filter(Concept.id == payload.concept_id).first()
     if concept is None:
         raise HTTPException(status_code=404, detail="Concept not found")
+
+    term_id = payload.authority_term_id
+    created_term = False
+
+    # Synthetic (negative) ID — auto-create a real AuthorityTerm for user tags.
+    if term_id < 0:
+        raw_name = (payload.tag_name or "").strip()
+        source_name = (payload.tag_source or "user").strip().lower()
+        if not raw_name:
+            raise HTTPException(status_code=400, detail="tag_name is required for synthetic tag IDs")
+        normalized_name = _normalize_taxonomy_text(raw_name)
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="tag_name is empty after normalization")
+
+        authority = _get_or_create_authority(db, source_name)
+        term = (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority.id,
+                AuthorityTerm.normalized_external_name == normalized_name,
+            )
+            .first()
+        )
+        if term is None:
+            now = datetime.utcnow()
+            term = AuthorityTerm(
+                authority_id=authority.id,
+                external_tag_id=None,
+                external_name=raw_name,
+                normalized_external_name=normalized_name,
+                concept_id=None,
+                metadata_json={"origin": "tree_associate", "source": source_name},
+                created_at=now,
+                updated_at=now,
+                last_seen_at=now,
+            )
+            db.add(term)
+            db.flush()
+            created_term = True
+        term_id = term.id
+    else:
+        term = db.query(AuthorityTerm).filter(AuthorityTerm.id == term_id).first()
+        if term is None:
+            raise HTTPException(status_code=404, detail="Authority term not found")
 
     term.concept_id = int(concept.id)
     term.updated_at = datetime.utcnow()
     db.commit()
 
     return {
-        "message": "Tag associated to concept.",
+        "message": "Tag associated to concept." + (" Authority term created." if created_term else ""),
         "authority_term_id": int(term.id),
         "concept_id": int(concept.id),
     }
@@ -16506,6 +17649,371 @@ def taxonomy_tree_update_tag_details(
         "message": "Tag details updated.",
         "authority_term_id": int(term.id),
         "concept_id": int(term.concept_id) if term.concept_id is not None else None,
+    }
+
+
+# ── Tag Maintenance Endpoints ────────────────────────────────────
+
+_VALID_TAG_MAINT_SOURCES = {"civitai", "danbooru", "prompt", "user"}
+
+
+@app.get("/taxonomy/tag-maint/{source}/export")
+def taxonomy_tag_maint_export(source: str, db: Session = Depends(get_db)):
+    """Export all authority_terms for a source as a JSON bootstrap archive."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+
+    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    if authority is None:
+        return {"authority": source_lower, "terms": [], "total": 0}
+
+    term_rows = (
+        db.query(AuthorityTerm)
+        .filter(AuthorityTerm.authority_id == authority.id)
+        .order_by(AuthorityTerm.external_name.asc())
+        .all()
+    )
+
+    terms: list[dict] = []
+    for t in term_rows:
+        concept_name = None
+        if t.concept_id is not None:
+            concept = db.query(Concept).filter(Concept.id == t.concept_id).first()
+            if concept is not None:
+                concept_name = concept.canonical_name
+
+        metadata = t.metadata_json if isinstance(t.metadata_json, dict) else {}
+
+        entry: dict = {
+            "id": int(t.id),
+            "name": t.external_name,
+            "external_tag_id": t.external_tag_id,
+            "concept_name": concept_name,
+            "metadata": metadata,
+        }
+        terms.append(entry)
+
+    return {
+        "authority": source_lower,
+        "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "total": len(terms),
+        "terms": terms,
+    }
+
+
+@app.post("/taxonomy/tag-maint/{source}/purge", response_model=dict)
+def taxonomy_tag_maint_purge(source: str, payload: TaxonomyTagMaintPurgeRequest, db: Session = Depends(get_db)):
+    """Purge all authority_terms for a source."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+
+    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    if authority is None:
+        return {"message": "No authority found for source.", "source": source_lower, "deleted": 0, "dry_run": payload.dry_run}
+
+    term_count = db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id).count()
+
+    if not payload.dry_run:
+        db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id).delete(synchronize_session=False)
+        db.commit()
+
+    return {
+        "message": "Dry-run purge preview." if payload.dry_run else "All authority terms purged.",
+        "source": source_lower,
+        "deleted": term_count,
+        "dry_run": payload.dry_run,
+    }
+
+
+@app.get("/taxonomy/tag-maint/{source}/list", response_model=dict)
+def taxonomy_tag_maint_list(
+    source: str,
+    page: int = 1,
+    page_size: int = 100,
+    sort_col: str = "name",
+    sort_dir: str = "asc",
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Paginated, sortable, searchable tag list for table display."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+
+    page = max(1, page)
+    page_size = max(1, min(500, page_size))
+
+    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    if authority is None:
+        return {"source": source_lower, "cols": _TAG_SOURCE_COLS, "rows": [], "total": 0, "page": page, "page_size": page_size}
+
+    q = db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id)
+
+    if search and search.strip():
+        search_norm = search.strip().lower()
+        q = q.filter(AuthorityTerm.external_name.ilike(f"%{search_norm}%"))
+
+    total = q.count()
+
+    col_map = {
+        "id": AuthorityTerm.id,
+        "name": AuthorityTerm.external_name,
+        "ext_id": AuthorityTerm.external_tag_id,
+    }
+    sort_expr = col_map.get(sort_col, AuthorityTerm.external_name)
+    if sort_dir.strip().lower() == "desc":
+        sort_expr = sort_expr.desc()
+    else:
+        sort_expr = sort_expr.asc()
+
+    term_rows = q.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size).all()
+
+    # Build gallery scope lookup
+    gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
+    gallery_names_all = _search_cache_get(gallery_names_cache_key)
+    if not isinstance(gallery_names_all, dict):
+        gallery_names_all = _gallery_tag_names_by_source_db_only(db)
+        _search_cache_put(gallery_names_cache_key, gallery_names_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+    gallery_scope_names: set[str] = {
+        _normalize_gallery_tag_text(n)
+        for n in gallery_names_all.get(source_lower, [])
+        if n
+    }
+
+    rows: list[list] = []
+    for term in term_rows:
+        gallery_norm = _normalize_gallery_tag_text(term.external_name or "")
+        scope = "gallery" if (gallery_norm and gallery_norm in gallery_scope_names) else "image"
+
+        metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+        post_count = None
+        if source_lower in {"danbooru", "civitai"}:
+            raw_pc = metadata.get("post_count") if isinstance(metadata, dict) else None
+            try:
+                pc = int(raw_pc) if raw_pc is not None else None
+            except (TypeError, ValueError):
+                pc = None
+            if pc is not None and pc > 0:
+                post_count = pc
+
+        external_tag_id = term.external_tag_id
+
+        mdtag_id = None
+        mdtag_name = None
+
+        rows.append([
+            int(term.id),
+            term.external_name,
+            external_tag_id,
+            scope,
+            post_count,
+            int(term.concept_id) if term.concept_id else None,
+            mdtag_id,
+            mdtag_name,
+        ])
+
+    return {
+        "source": source_lower,
+        "cols": _TAG_SOURCE_COLS,
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.patch("/taxonomy/tag-maint/{source}/update", response_model=dict)
+def taxonomy_tag_maint_update(source: str, payload: TaxonomyTagMaintUpdateRequest, db: Session = Depends(get_db)):
+    """Inline cell edit for a single authority_term field."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+
+    term = db.query(AuthorityTerm).filter(AuthorityTerm.id == payload.authority_term_id).first()
+    if term is None:
+        raise HTTPException(status_code=404, detail="Authority term not found")
+
+    # Verify the term belongs to the requested source
+    authority = db.query(TagAuthority).filter(TagAuthority.id == term.authority_id).first()
+    if authority is None or authority.name.strip().lower() != source_lower:
+        raise HTTPException(status_code=409, detail="Authority term does not belong to this source")
+
+    if payload.field == "external_name":
+        new_name = str(payload.value or "").strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="external_name cannot be empty")
+        term.external_name = new_name
+        term.normalized_external_name = _normalize_taxonomy_text(new_name)
+    elif payload.field == "external_tag_id":
+        if payload.value is not None and str(payload.value).strip() != "":
+            try:
+                term.external_tag_id = int(payload.value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="external_tag_id must be an integer")
+        else:
+            term.external_tag_id = None
+    elif payload.field == "concept_id":
+        if payload.value is not None:
+            concept_id = int(payload.value)
+            concept = db.query(Concept).filter(Concept.id == concept_id).first()
+            if concept is None:
+                raise HTTPException(status_code=404, detail="Concept not found")
+            term.concept_id = concept_id
+        else:
+            term.concept_id = None
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown field: {payload.field}")
+
+    term.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return {
+        "message": "Tag updated.",
+        "authority_term_id": int(term.id),
+        "field": payload.field,
+        "value": payload.value,
+    }
+
+
+@app.post("/taxonomy/tag-maint/{source}/bulk-delete", response_model=dict)
+def taxonomy_tag_maint_bulk_delete(source: str, payload: TaxonomyTagMaintBulkDeleteRequest, db: Session = Depends(get_db)):
+    """Delete multiple authority_terms by ID."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+
+    if not payload.authority_term_ids:
+        return {"message": "No IDs provided.", "deleted": 0, "dry_run": payload.dry_run}
+
+    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    if authority is None:
+        return {"message": "Authority not found.", "deleted": 0, "dry_run": payload.dry_run}
+
+    terms = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.id.in_(payload.authority_term_ids),
+        )
+        .all()
+    )
+    deleted_count = len(terms)
+
+    if not payload.dry_run:
+        for term in terms:
+            db.delete(term)
+        db.commit()
+
+    return {
+        "message": "Dry-run bulk delete preview." if payload.dry_run else "Tags deleted.",
+        "source": source_lower,
+        "deleted": deleted_count,
+        "dry_run": payload.dry_run,
+    }
+
+
+@app.post("/taxonomy/tag-maint/civitai/backfill-tag-ids")
+def taxonomy_tag_maint_backfill_civitai_tag_ids(
+    dry_run: bool = Query(True, description="Preview changes without committing"),
+    limit: int = Query(0, description="Max sidecars to scan (0 = all)"),
+    db: Session = Depends(get_db),
+):
+    """Backfill missing external_tag_id on CivitAI authority_terms from sidecar JSON files.
+
+    Scans image library sidecars for civitai tag records that include numeric
+    IDs and feeds them through the existing _upsert_civitai_authority_terms
+    logic to update any legacy terms that are missing their external_tag_id.
+    """
+    library_path = Path(IMAGE_LIBRARY_PATH)
+    if not library_path.is_dir():
+        raise HTTPException(status_code=500, detail="Image library path not found.")
+
+    # Snapshot how many terms are currently missing IDs
+    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == "civitai").first()
+    if authority is None:
+        return {"message": "No CivitAI authority exists yet.", "resolved": 0}
+
+    missing_before = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.external_tag_id.is_(None),
+        )
+        .count()
+    )
+
+    sidecars_scanned = 0
+    sidecars_with_tags = 0
+    total_tags_processed = 0
+    cumulative_stats = {"terms_upserted": 0, "terms_created": 0, "terms_updated": 0}
+    errors = 0
+
+    for json_file in library_path.glob("*.json"):
+        if limit > 0 and sidecars_scanned >= limit:
+            break
+
+        sidecars_scanned += 1
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            errors += 1
+            continue
+
+        if not isinstance(data, dict):
+            continue
+
+        civitai = data.get("civitai")
+        if not isinstance(civitai, dict):
+            continue
+
+        tags = civitai.get("tags")
+        if not isinstance(tags, list) or not tags:
+            continue
+
+        # Only process if at least one tag has a numeric ID
+        has_ids = any(
+            isinstance(t, dict) and t.get("id") is not None
+            for t in tags
+        )
+        if not has_ids:
+            continue
+
+        sidecars_with_tags += 1
+        try:
+            stats = _upsert_civitai_authority_terms(db, civitai)
+            total_tags_processed += stats.get("terms_upserted", 0)
+            for k in ("terms_upserted", "terms_created", "terms_updated"):
+                cumulative_stats[k] += stats.get(k, 0)
+        except Exception as exc:
+            errors += 1
+            print(f"   [backfill-tag-ids] Error processing {json_file.name}: {exc}")
+
+    if not dry_run and cumulative_stats["terms_upserted"] > 0:
+        db.commit()
+
+    missing_after = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.external_tag_id.is_(None),
+        )
+        .count()
+    ) if not dry_run else missing_before
+
+    return {
+        "dry_run": dry_run,
+        "sidecars_scanned": sidecars_scanned,
+        "sidecars_with_tag_ids": sidecars_with_tags,
+        "tags_processed": total_tags_processed,
+        "terms_created": cumulative_stats["terms_created"],
+        "terms_updated": cumulative_stats["terms_updated"],
+        "missing_ids_before": missing_before,
+        "missing_ids_after": missing_after,
+        "resolved": missing_before - missing_after,
+        "errors": errors,
     }
 
 

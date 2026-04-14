@@ -108,6 +108,33 @@
       return;
     }
 
+    if (state.multiSelectEnabled && state.selectedTagModes.size > 0) {
+      // Multi-select mode: send array of {source, name, mode} entries
+      const filters = [];
+      state.selectedTagModes.forEach((mode, tagId) => {
+        const tag = findTagById(tagId);
+        if (!tag) return;
+        const effectiveTag = resolveFilterEquivalentTag(tag);
+        if (!effectiveTag) return;
+        filters.push({
+          tagId: effectiveTag.id,
+          source: effectiveTag.source,
+          name: effectiveTag.name,
+          mode,
+        });
+      });
+      window.parent.postMessage(
+        {
+          type: 'atelier:gallery-tag-filter',
+          payload: filters.length ? filters : null,
+          multiSelect: true,
+        },
+        window.location.origin,
+      );
+      return;
+    }
+
+    // Single-select mode (original behavior)
     const selectedTag = findTagById(state.selectedTagId);
     const effectiveTag = selectedTag ? resolveFilterEquivalentTag(selectedTag) : null;
     window.parent.postMessage(
@@ -189,6 +216,9 @@
     editMode: false,
     showAssignedTags: false,
     showUnassignedTags: false,
+    multiSelectEnabled: false,
+    /** Multi-select filter state: Map<tagId, 'include'|'exclude'> */
+    selectedTagModes: new Map(),
     selectedImageKey: null,
     selectedImageTagNamesBySource: {
       civitai: new Set(),
@@ -229,6 +259,12 @@
       user: 0,
     },
     tagLoadingBySource: {
+      civitai: false,
+      danbooru: false,
+      prompt: false,
+      user: false,
+    },
+    missingDataFilterBySource: {
       civitai: false,
       danbooru: false,
       prompt: false,
@@ -536,17 +572,44 @@
   async function persistTagAssociation(tagId, conceptId) {
     if (!state.apiReady) return;
     const tag = findTagById(tagId);
-    if (!tag?.authorityTermId || !conceptId) return;
+    if (!tag || !conceptId) return;
+
+    const isSynthetic = tag.authorityTermId != null && Number(tag.authorityTermId) < 0;
+    const body = {
+      authority_term_id: Number(tag.authorityTermId),
+      concept_id: Number(conceptId),
+    };
+    if (isSynthetic) {
+      body.tag_name = String(tag.name || '');
+      body.tag_source = String(tag.source || 'user');
+    }
+
     try {
-      await apiRequest(`${TREE_API_BASE}/associate`, {
+      const result = await apiRequest(`${TREE_API_BASE}/associate`, {
         method: 'POST',
-        body: JSON.stringify({
-          authority_term_id: Number(tag.authorityTermId),
-          concept_id: Number(conceptId),
-        }),
+        body: JSON.stringify(body),
       });
-    } catch {
-      // Keep UI optimistic for prototype usage.
+
+      // If a synthetic tag was promoted to a real AuthorityTerm, update
+      // local state so future operations use the real ID.
+      if (isSynthetic && result?.authority_term_id != null) {
+        const realId = Number(result.authority_term_id);
+        const oldId = String(tag.id);
+        tag.authorityTermId = realId;
+        tag.id = `term:${realId}`;
+        // Migrate conceptTagIds references from old synthetic ID to new real ID.
+        for (const [cId, ids] of Object.entries(state.conceptTagIds)) {
+          const idx = ids.indexOf(oldId);
+          if (idx !== -1) {
+            ids[idx] = tag.id;
+          }
+        }
+        // Rebuild the lookup so findTagById resolves the new ID.
+        rebuildTagLookup();
+      }
+    } catch (err) {
+      // Keep UI optimistic for prototype usage, but log the error.
+      console.warn('[tree] persistTagAssociation failed:', err, body);
     }
   }
 
@@ -663,6 +726,10 @@
     });
     if (state.selectedTagId === normalizedTagId) {
       state.selectedTagId = null;
+      notifyGalleryTagFilter();
+    }
+    if (state.selectedTagModes.has(normalizedTagId)) {
+      state.selectedTagModes.delete(normalizedTagId);
       notifyGalleryTagFilter();
     }
   }
@@ -2456,6 +2523,27 @@
     unassignedText.textContent = 'Unassigned';
     unassignedLabel.append(unassignedCheck, unassignedText);
 
+    const multiSelectDivider = document.createElement('span');
+    multiSelectDivider.className = 'tag-controls-divider';
+    multiSelectDivider.setAttribute('aria-hidden', 'true');
+
+    const multiSelectLabel = document.createElement('label');
+    multiSelectLabel.className = 'tag-search-opt';
+    const multiSelectCheck = document.createElement('input');
+    multiSelectCheck.type = 'checkbox';
+    multiSelectCheck.checked = state.multiSelectEnabled;
+    multiSelectCheck.addEventListener('change', () => {
+      state.multiSelectEnabled = multiSelectCheck.checked;
+      // Clear selections when switching modes
+      state.selectedTagModes.clear();
+      state.selectedTagId = null;
+      notifyGalleryTagFilter();
+      renderTagBoard();
+    });
+    const multiSelectText = document.createElement('span');
+    multiSelectText.textContent = 'Multi-Select';
+    multiSelectLabel.append(multiSelectCheck, multiSelectText);
+
     scopeControls.append(
       buttonGroup,
       sortDivider,
@@ -2468,6 +2556,8 @@
       assignmentDivider,
       assignedLabel,
       unassignedLabel,
+      multiSelectDivider,
+      multiSelectLabel,
     );
   }
 
@@ -2475,16 +2565,52 @@
     const pane = document.createElement('section');
     pane.className = `pane tag-pane source-${source}`;
     pane.addEventListener('click', (event) => {
-      if (event.target === pane && state.selectedTagId != null) {
-        state.selectedTagId = null;
-        notifyGalleryTagFilter();
-        render();
+      if (event.target === pane) {
+        if (state.selectedTagId != null || state.selectedTagModes.size > 0) {
+          state.selectedTagId = null;
+          state.selectedTagModes.clear();
+          notifyGalleryTagFilter();
+          render();
+        }
       }
     });
 
+    const titleBar = document.createElement('div');
+    titleBar.className = 'tag-pane-title-bar';
+
     const title = document.createElement('h2');
     title.textContent = `${sourceLabel(source)} Tags`;
-    pane.appendChild(title);
+    titleBar.appendChild(title);
+
+    const missingBtn = document.createElement('button');
+    missingBtn.className = 'tag-pane-icon-btn tag-pane-missing-btn';
+    missingBtn.title = 'Filter gallery images missing tags from this source';
+    missingBtn.innerHTML = '<span class="icon-missing" aria-hidden="true"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="8.5" cy="8.5" r="5.5"/><line x1="12.5" y1="12.5" x2="17" y2="17"/><line x1="6" y1="6" x2="11" y2="11"/><line x1="11" y1="6" x2="6" y2="11"/></svg></span>';
+    missingBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.missingDataFilterBySource[source] = !state.missingDataFilterBySource[source];
+      missingBtn.classList.toggle('active', state.missingDataFilterBySource[source]);
+      // Notify gallery to filter images missing tags from this source
+      window.parent.postMessage({
+        type: 'atelier:gallery-missing-source-filter',
+        source,
+        active: state.missingDataFilterBySource[source],
+      }, '*');
+    });
+    missingBtn.classList.toggle('active', state.missingDataFilterBySource[source]);
+    titleBar.appendChild(missingBtn);
+
+    const wrenchBtn = document.createElement('button');
+    wrenchBtn.className = 'tag-pane-icon-btn tag-pane-wrench-btn';
+    wrenchBtn.title = 'Open tag maintenance page';
+    wrenchBtn.innerHTML = '<span class="icon-wrench" aria-hidden="true"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 3.3a3.5 3.5 0 0 0-4.95 0L8.05 5l1.4 1.4-5 5L3.05 10l-1.7 1.7a3.5 3.5 0 0 0 4.95 4.95l1.7-1.7-1.4-1.4 5-5 1.4 1.4 1.7-1.7a3.5 3.5 0 0 0 0-4.95z"/></svg></span>';
+    wrenchBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(`/frontend/tag-maint.html?source=${source}`, '_blank');
+    });
+    titleBar.appendChild(wrenchBtn);
+
+    pane.appendChild(titleBar);
 
     const pool = document.createElement('div');
     pool.className = 'tag-pool';
@@ -2504,10 +2630,13 @@
       }
     });
     pool.addEventListener('click', (event) => {
-      if (event.target === pool && state.selectedTagId != null) {
-        state.selectedTagId = null;
-        notifyGalleryTagFilter();
-        render();
+      if (event.target === pool) {
+        if (state.selectedTagId != null || state.selectedTagModes.size > 0) {
+          state.selectedTagId = null;
+          state.selectedTagModes.clear();
+          notifyGalleryTagFilter();
+          render();
+        }
       }
     });
     // Show a loading placeholder while the per-source tag list is being fetched
@@ -2528,9 +2657,11 @@
       const isAssigned = isTagAssigned(tag, assignedSet);
       const mappedDanbooruTag = mappedDanbooruTagForPromptTag(tag);
       const usageCount = getTagUsageCount(tag, state.selectedTagScope);
+      const multiMode = state.multiSelectEnabled ? (state.selectedTagModes.get(tag.id) || null) : null;
+      const isActive = state.multiSelectEnabled ? Boolean(multiMode) : state.selectedTagId === tag.id;
       const chip = document.createElement('button');
       chip.type = 'button';
-      chip.className = `tag-block source-${source} ${state.selectedTagId === tag.id ? 'active' : ''} ${isAssigned ? 'assigned' : ''} ${mappedDanbooruTag ? 'mapped' : ''}`;
+      chip.className = `tag-block source-${source} ${isActive ? (state.multiSelectEnabled ? '' : 'active') : ''} ${multiMode ? `mode-${multiMode}` : ''} ${isAssigned ? 'assigned' : ''} ${mappedDanbooruTag ? 'mapped' : ''}`;
       chip.dataset.tagId = String(tag.id);
       const label = document.createElement('span');
       label.className = 'tag-block-label';
@@ -2575,10 +2706,32 @@
         chip.appendChild(badge);
       }
       chip.draggable = true;
-      chip.title = `${tag.source} | ${tag.scope}${usageCount != null ? ` | ${getTagUsageCountTitle(tag, state.selectedTagScope, usageCount)}` : ''}`;
+      chip.title = `${tag.source} | ${tag.scope}${usageCount != null ? ` | ${getTagUsageCountTitle(tag, state.selectedTagScope, usageCount)}` : ''}${state.multiSelectEnabled ? ' | Click: include → exclude → remove' : ''}`;
       chip.addEventListener('click', (event) => {
         event.stopPropagation();
 
+        if (state.multiSelectEnabled) {
+          // Multi-select three-state cycling: null → include → exclude → null
+          const currentMode = state.selectedTagModes.get(tag.id) || null;
+          if (currentMode === null) {
+            state.selectedTagModes.set(tag.id, 'include');
+            chip.classList.add('mode-include');
+            chip.classList.remove('mode-exclude');
+          } else if (currentMode === 'include') {
+            state.selectedTagModes.set(tag.id, 'exclude');
+            chip.classList.remove('mode-include');
+            chip.classList.add('mode-exclude');
+          } else {
+            state.selectedTagModes.delete(tag.id);
+            chip.classList.remove('mode-include', 'mode-exclude');
+          }
+
+          // Notify gallery filter.
+          notifyGalleryTagFilter();
+          return;
+        }
+
+        // Single-select mode (original behavior)
         // Immediately update DOM for instant visual feedback without re-rendering.
         {
           // Remove "active" class from previously selected chip if any.
@@ -2761,6 +2914,44 @@
         : 0;
       requestMoreTags(Math.max(initialVisibleCount, selectedTarget));
     }
+
+    // Allow concept chips to be dropped on the user tag pane to create a user tag.
+    if (source === 'user') {
+      pool.addEventListener('dragover', (event) => {
+        if (state.dragConceptId == null) return;
+        event.preventDefault();
+        pool.classList.add('drag-over');
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      });
+
+      pool.addEventListener('dragleave', (event) => {
+        if (!pool.contains(event.relatedTarget)) {
+          pool.classList.remove('drag-over');
+        }
+      });
+
+      pool.addEventListener('drop', (event) => {
+        event.preventDefault();
+        pool.classList.remove('drag-over');
+        const conceptId = state.dragConceptId;
+        if (conceptId == null) return;
+        const concept = findConceptById(conceptId);
+        if (!concept) { showStatus(`Concept #${conceptId} not found.`, 'warn'); return; }
+        const tagName = concept.name.trim();
+        if (!tagName) return;
+        const scope = state.selectedTagScope || 'all';
+        const created = createTagInSource(tagName, 'user', scope);
+        if (created) {
+          showStatus(`Added user tag "${tagName}" from concept #${conceptId}`, 'success');
+          // Select the newly created tag so it's immediately visible.
+          state.selectedTagId = created.id;
+          render();
+        } else {
+          showStatus(`User tag "${tagName}" already exists.`, 'info');
+        }
+      });
+    }
+
     pane.appendChild(pool);
 
     return pane;
@@ -3319,10 +3510,12 @@
     if (event.origin !== window.location.origin) {
       return;
     }
-    if (!event.data || event.data.type !== 'atelier:selected-image-tags') {
+    if (!event.data || typeof event.data.type !== 'string') {
       return;
     }
-    setSelectedImageTags(event.data.payload || null);
+    if (event.data.type === 'atelier:selected-image-tags') {
+      setSelectedImageTags(event.data.payload || null);
+    }
   });
 
   async function init() {

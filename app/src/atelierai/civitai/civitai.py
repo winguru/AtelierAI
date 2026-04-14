@@ -78,6 +78,9 @@ class CivitaiPrivateScraper:
             print(f"Error fetching collection page: {exc}")
             return None, None
 
+        if not isinstance(data, dict):
+            return None, None
+
         if debug:
             print(f"  DEBUG: Request URL: {self.api.base_url}/{endpoint}")
         try:
@@ -121,10 +124,10 @@ class CivitaiPrivateScraper:
         Returns:
             List of collection items
         """
-        items = []
+        items: List[Dict] = []
         cursor = None
         page_count = 0
-        seen_item_ids = set()
+        seen_item_ids: set[int] = set()
 
         print(f"Fetching collection items for ID: {collection_id}")
         self._debug_session_token(debug)
@@ -349,9 +352,11 @@ class CivitaiPrivateScraper:
 
         for res in resources:
             type_lower = self._get_resource_type(res)
-            name_res = res.get("modelName")
+            raw_name_res = res.get("modelName")
+            name_res = str(raw_name_res) if raw_name_res is not None else ""
             weight = res.get("strength") or 1.0
-            version_name = res.get("versionName")
+            raw_version_name = res.get("versionName")
+            version_name = str(raw_version_name) if raw_version_name is not None else ""
             model_id = res.get("modelId")
             model_version_id = res.get("modelVersionId") or res.get("versionId")
 

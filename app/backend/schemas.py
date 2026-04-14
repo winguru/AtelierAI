@@ -18,6 +18,7 @@ class ImageUpdateRequest(BaseModel):
     source_url: Optional[str] = None
     artist_name: Optional[str] = None
     artist_profile: Optional[str] = None
+    user_tags: Optional[list[str]] = None
     user_negative_tags: Optional[list[str]] = None
     # User NSFW overrides. Set to a valid value to override the source rating;
     # set to "" (empty string) to clear a previously set override.
@@ -40,6 +41,10 @@ class CivitaiNsfwBackfillRequest(BaseModel):
     reimport_if_missing: bool = False
 
 
+class CivitaiCookieRequest(BaseModel):
+    cookie: str = Field(..., min_length=100, description="The __Secure-civitai-token cookie value (JWT-like string starting with eyJ).")
+
+
 class CollectionCreateRequest(BaseModel):
     name: str
 
@@ -57,7 +62,7 @@ class TaxonomyAliasCreateRequest(BaseModel):
     alias_type: str = "synonym"
     is_preferred: bool = False
     authority_name: Optional[str] = None
-    external_tag_id: Optional[str] = None
+    external_tag_id: Optional[int] = None
 
 
 class TaxonomyMergeRequest(BaseModel):
@@ -99,6 +104,8 @@ class TaxonomyBootstrapImportRequest(BaseModel):
 class TaxonomyTagAssociationRequest(BaseModel):
     authority_term_id: int
     concept_id: int
+    tag_name: Optional[str] = None
+    tag_source: Optional[str] = None
 
 
 class TaxonomyTagDetailsUpdateRequest(BaseModel):
@@ -106,6 +113,21 @@ class TaxonomyTagDetailsUpdateRequest(BaseModel):
     aliases: Optional[list[str]] = None
     implies: Optional[list[str]] = None
     examples: Optional[list[str]] = None
+
+
+class TaxonomyTagMaintUpdateRequest(BaseModel):
+    authority_term_id: int
+    field: Literal["external_name", "external_tag_id", "concept_id"]
+    value: Any = None
+
+
+class TaxonomyTagMaintBulkDeleteRequest(BaseModel):
+    authority_term_ids: list[int] = Field(max_length=500)
+    dry_run: bool = True
+
+
+class TaxonomyTagMaintPurgeRequest(BaseModel):
+    dry_run: bool = True
 
 
 class GenerationTemplatePathMapping(BaseModel):
@@ -165,5 +187,26 @@ class ComfyGenerateCompareRequest(BaseModel):
 class ParityCandidateAuditRequest(BaseModel):
     file_hash: str
     comfy_workflow_json: Optional[dict[str, Any]] = None
-    include_generation_payload: bool = False
-    include_non_prefix_local_reference_hash_evidence: bool = False
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Search
+# ---------------------------------------------------------------------------
+
+
+class CivitaiSearchRequest(BaseModel):
+    """Simplified search request proxied to the CivitAI Meilisearch host."""
+
+    query: str = ""
+    tags: list[str] = Field(default_factory=list)
+    exclude_tags: list[str] = Field(default_factory=list)
+    sort_by: str = "stats.reactionCountAllTime:desc"
+    limit: int = Field(default=51, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+    nsfw_levels: Optional[list[int]] = None
+    base_models: Optional[list[str]] = None
+    exclude_poi: bool = True
+    exclude_minor: bool = True
+    username: Optional[str] = None
+    facets: Optional[list[str]] = None
+    extra_filters: Optional[list[str]] = None

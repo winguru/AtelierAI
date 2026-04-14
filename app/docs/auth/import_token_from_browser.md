@@ -36,17 +36,13 @@ python scripts/setup_session_token.py
 ```
 
 Paste your token when prompted. It will save it to both `.civitai_session` (cache) and `.env` file.
+Paste your token when prompted. It will save it to `.civitai_session`.
 
-### Option B: Manually Add to .env File
+### Option B: Manually Add to `.civitai_session`
 
-1. Create or edit `.env` file in your project root
-2. Add the following line:
-
-```env
-CIVITAI_SESSION_COOKIE=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0...[YOUR FULL TOKEN HERE]
-```
-
-3. Make sure `.env` is in your `.gitignore` file
+1. Create or edit `.civitai_session` in your project root
+2. Paste the full token value into that file (single line)
+3. Make sure `.civitai_session` is in your `.gitignore` file
 
 ## Step 4: Test
 
@@ -67,7 +63,7 @@ You should now see:
 - Session tokens expire after ~30 days
 - If you change your password, the token will become invalid
 - Keep the token secure - it gives full access to your CivitAI account
-- Don't commit `.env` file to version control
+- Don't commit `.civitai_session` to version control
 - Use the `__Secure-civitai-token` cookie, NOT `__Secure-next-auth.session-token`
 
 ## Alternative: Automatic Authentication
@@ -82,7 +78,7 @@ This will:
 1. Open a browser window
 2. Let you sign in with Google OAuth
 3. Extract the session token automatically
-4. Save it to `.env` and `.civitai_session`
+4. Save it to `.civitai_session`
 
 ## Verification
 

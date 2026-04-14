@@ -3,3 +3,4 @@ lancedb
 openai
 voyageai
 pytest
+types-requests

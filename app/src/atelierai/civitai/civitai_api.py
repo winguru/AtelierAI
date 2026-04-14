@@ -52,7 +52,8 @@ class CivitaiAPI:
         generation_data = api.fetch_generation_data(image_id)
     """
 
-    _instance = None
+    _instance: Optional["CivitaiAPI"] = None
+    _initialized: bool
     _TRPC_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
     _TRPC_MAX_ATTEMPTS = 4
     _TRPC_BACKOFF_BASE_SECONDS = 0.75
@@ -81,8 +82,8 @@ class CivitaiAPI:
         elif auto_authenticate:
             self.session_cookie = self._get_auto_session_token()
         else:
-            # Fallback to environment variable or config
-            self.session_cookie = _get_config_value("CIVITAI_SESSION_COOKIE")
+            # Non-auto mode still prefers the current cache-file value.
+            self.session_cookie = self._get_session_token_from_cache() or ""
 
         self.base_url = "https://civitai.com/api/trpc"
         self.http_client = CivitaiHttpClient(headers_factory=self._get_headers)
@@ -140,6 +141,30 @@ class CivitaiAPI:
             cls._instance = cls(auto_authenticate=True)
         return cls._instance
 
+    def update_session_cookie(self, new_cookie: str) -> None:
+        """Update the session cookie on the singleton at runtime.
+
+        Persists the new cookie to the cache file so it survives across
+        requests without requiring a server restart.
+
+        Args:
+            new_cookie: The new __Secure-civitai-token value.
+        """
+        if not new_cookie or len(new_cookie) < 100:
+            raise ValueError("Session cookie appears too short to be valid.")
+
+        self.session_cookie = new_cookie
+
+        # Persist to the session cache file.
+        cache_path = _get_config_value("CIVITAI_SESSION_CACHE")
+        if cache_path:
+            try:
+                from .civitai_auth import _save_token_to_cache
+                _save_token_to_cache(new_cookie, cache_path)
+            except Exception as exc:
+                print(f"⚠️  Could not persist cookie to cache: {exc}")
+        print("✅ CivitAI session cookie updated.")
+
     def _get_session_token_from_cache(self) -> Optional[str]:
         """Try to get session token from cache file."""
         CIVITAI_SESSION_CACHE = _get_config_value("CIVITAI_SESSION_CACHE")
@@ -157,23 +182,13 @@ class CivitaiAPI:
                 pass
         return None
 
-    def _get_session_token_from_env(self) -> Optional[str]:
-        """Try to get session token from environment variables."""
-        env_token = os.environ.get("CIVITAI_SESSION_COOKIE") or os.environ.get(
-            "CIVITAI_SESSION_TOKEN"
-        )
-        if env_token and len(env_token) > 100:
-            print("✅ Using session token from environment variable")
-            return env_token
-        return None
-
     def _get_session_token_from_auth(self) -> Optional[str]:
         """Try to get session token using Playwright authentication."""
         CIVITAI_SESSION_CACHE = _get_config_value("CIVITAI_SESSION_CACHE")
         if not CIVITAI_SESSION_CACHE:
             return None
 
-        print("ℹ️  No valid session token found in cache or environment")
+        print("ℹ️  No valid session token found in cache")
         print("   Attempting automatic authentication...")
         try:
             try:
@@ -193,41 +208,34 @@ class CivitaiAPI:
             print(f"Warning: Auto-authentication failed ({e})")
         return None
 
-    def _get_session_token_from_config(self) -> Optional[str]:
-        """Try to get session token from config file."""
-        CIVITAI_SESSION_COOKIE = _get_config_value("CIVITAI_SESSION_COOKIE")
-
-        if CIVITAI_SESSION_COOKIE and len(CIVITAI_SESSION_COOKIE) > 100:
-            print("Using session token from config.py")
-            return CIVITAI_SESSION_COOKIE
-        return None
-
     def _get_auto_session_token(self) -> str:
         """
         Attempts to automatically retrieve a session token.
-        Priority: cache file > environment variable > Playwright auth > config.py
+        Priority: cache file > Playwright auth refresh
         """
-        token = (
-            self._get_session_token_from_cache()
-            or self._get_session_token_from_env()
-            or self._get_session_token_from_auth()
-            or self._get_session_token_from_config()
-        )
+        token = self._get_session_token_from_cache() or self._get_session_token_from_auth()
 
         if token:
             return token
 
         raise Exception(
             "No valid session token available. Please run "
-            "'python scripts/setup_session_token.py' to set up your token, "
-            "or set CIVITAI_SESSION_COOKIE in your .env file."
+            "'python scripts/setup_session_token.py' to set up your token."
         )
 
     def _get_headers(self) -> Dict:
-        """Returns standard headers for requests."""
+        """Returns standard headers for requests.
+
+        Sends both cookie names that CivitAI may use for authentication
+        (``__Secure-civitai-token`` and ``__Secure-next-auth.session-token``)
+        because CivitAI has changed cookie naming across different flows.
+        """
         return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Cookie": f"__Secure-civitai-token={self.session_cookie}",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            "Cookie": (
+                f"__Secure-civitai-token={self.session_cookie}; "
+                f"__Secure-next-auth.session-token={self.session_cookie}"
+            ),
             "Referer": "https://civitai.com/",
         }
 
@@ -325,8 +333,10 @@ class CivitaiAPI:
 
             error_payload = data.get("error")
             if isinstance(error_payload, dict):
-                error_json = error_payload.get("json") if isinstance(error_payload.get("json"), dict) else {}
-                error_data = error_json.get("data") if isinstance(error_json.get("data"), dict) else {}
+                raw_error_json = error_payload.get("json")
+                error_json = raw_error_json if isinstance(raw_error_json, dict) else {}
+                raw_error_data = error_json.get("data")
+                error_data = raw_error_data if isinstance(raw_error_data, dict) else {}
                 status_code = error_data.get("httpStatus")
                 message = error_json.get("message") or error_payload.get("message") or "CivitAI tRPC request failed"
 

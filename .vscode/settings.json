@@ -12,7 +12,13 @@
         "${workspaceFolder}/app/backend",
         "${workspaceFolder}/app/dev"
     ],
+    "terminal.integrated.env.linux": {
+        "PYTHONPATH": "${workspaceFolder}/app/src:${workspaceFolder}/app/backend:${workspaceFolder}/app/dev:${env:PYTHONPATH}"
+    },
     "terminal.integrated.env.osx": {
         "PYTHONPATH": "${workspaceFolder}/app/src:${workspaceFolder}/app/backend:${workspaceFolder}/app/dev:${env:PYTHONPATH}"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "/Users/winguru/Sources/AtelierAI/.venv/bin/python": true
     }
 }

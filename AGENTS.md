@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 ## Project Overview
 AtelierAI is a FastAPI-based application for curating image datasets and enriching metadata (including CivitAI lookups) for analysis and training workflows.
@@ -33,11 +33,10 @@ Do not rely on global shell/profile `PYTHONPATH` for this project.
 ## Running The App
 From repo root:
 ```bash
-cd app
 ./start.sh
 ```
 
-The server is started by `uvicorn backend.main:app` on port `8000`.
+The root launcher resolves the application under `app/` and starts `uvicorn backend.main:app` on port `8000`.
 
 ## Database And Storage Notes
 - Runtime DB configuration comes from `atelierai.config` (backed by `app/backend/config.py`).
@@ -54,6 +53,18 @@ Common checks after edits:
 - Run targeted tests under `app/tests`
 - Confirm backend starts with `./start.sh`
 - Validate key imports resolve in VS Code/Pylance
+
+## Code Review
+- See `.github/instructions/code-review.instructions.md` for the full review checklist (clarity, consistency, naming, performance, security, testing, error handling, UI, documentation).
+
+## Documentation
+- `app/docs/api`: AtelierAI and 3rd-party API documentation
+- `app/docs/archive`: historical/obsolete documentation
+- `app/docs/auth`: 3rd-party authentication reference and documenation
+- `app/docs/coding-notes`: coding notes, fixes, todo's, updates, and refactoring
+- `app/docs/features`: current functionality
+- `app/docs/guides`: application and web interface usage guides
+- `app/docs/plans`: planned features and/or code revisions
 
 ## Editing Guidelines
 - Keep changes localized and avoid unrelated refactors.

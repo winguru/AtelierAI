@@ -58,6 +58,7 @@
                     <input id="debug-toggle" type="checkbox" checked>
                     <span>Debug</span>
                 </label>
+                <a class="btn ghost" href="/frontend/search-lab.html" title="Search CivitAI images">🔍 Search Lab</a>
                 <button id="scan-btn" class="btn solid" type="button">Rescan Library</button>
                 <button id="purge-deleted-btn" class="btn ghost" type="button" title="Purge deleted files from disk">&#128465;</button>
             </div>
@@ -67,7 +68,10 @@
             <section class="gallery-pane">
                 <div class="gallery-toolbar">
                     <div class="toolbar-row toolbar-row-primary">
-                        <input id="search-input" type="search" placeholder="Search by filename, source, software...">
+                        <div class="search-autocomplete-wrap">
+                            <input id="search-input" type="search" placeholder="Search by filename, source, software..." autocomplete="off">
+                            <div id="search-autocomplete" class="search-autocomplete-dropdown hidden" role="listbox" aria-label="Search suggestions"></div>
+                        </div>
                         <div class="toolbar-utility-group">
                             <div id="image-count" class="count-pill count-pill-split" role="group" aria-label="Gallery match and filter actions"></div>
                         </div>
@@ -175,6 +179,7 @@
                             </section>
                         </div>
                     </details>
+                    <div id="advanced-filters-quick-chips" class="advanced-filters-quick-chips hidden"></div>
 
                     <div id="tree-tag-filter-indicator" class="toolbar-row tree-tag-filter-row hidden" aria-live="polite">
                         <span class="tree-tag-filter-label">Tag Filter:</span>
@@ -343,7 +348,7 @@
                         <section id="detail-panel-user-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-user-tags" hidden>
                             <section class="detail-block">
                                 <h3>User Tags</h3>
-                                <p class="detail-placeholder">Tag panel scaffold. Wiring to editable user tags can be added next.</p>
+                                <div id="user-tags-cloud" class="user-tags-cloud"></div>
                             </section>
                         </section>
                         <section id="detail-panel-utilities" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-utilities" hidden>
@@ -409,6 +414,30 @@
                         <button id="sync-civitai-collections-btn" class="btn ghost" type="button">Sync My CivitAI Collections</button>
                     </div>
                 </form>
+                <details id="civitai-auth-details" class="civitai-auth-section">
+                    <summary>
+                        <span id="civitai-auth-status-icon" class="civitai-auth-icon" title="CivitAI connection status">⚪</span>
+                        CivitAI Authentication
+                    </summary>
+                    <div class="civitai-auth-body">
+                        <p id="civitai-auth-status-text" class="civitai-auth-status-text">Checking connection…</p>
+                        <div class="civitai-auth-actions">
+                            <button id="civitai-auth-verify-btn" class="btn ghost btn-sm" type="button">Verify Connection</button>
+                        </div>
+                        <hr class="civitai-auth-divider">
+                        <label class="civitai-cookie-label">
+                            Paste your <code>__Secure-civitai-token</code> cookie value
+                            <input type="text" id="civitai-cookie-input" placeholder="eyJ..." autocomplete="off" spellcheck="false">
+                        </label>
+                        <button id="civitai-cookie-save-btn" class="btn ghost btn-sm" type="button">Save Cookie</button>
+                        <hr class="civitai-auth-divider">
+                        <details class="civitai-auth-advanced">
+                            <summary>Advanced: Browser Re-Authentication</summary>
+                            <p class="civitai-auth-hint">Opens a browser window on the server to re-authenticate with CivitAI via OAuth. This only works when the server is running on your local machine.</p>
+                            <button id="civitai-auth-refresh-btn" class="btn ghost btn-sm" type="button">Re-Authenticate via Browser</button>
+                        </details>
+                    </div>
+                </details>
                 <section class="task-panel" aria-labelledby="task-panel-title">
                     <div class="task-panel-header">
                         <h3 id="task-panel-title">Background Tasks</h3>
@@ -646,6 +675,10 @@
     </div>
 
     <div id="fullscreen-preview" class="fullscreen-preview hidden" aria-hidden="true">
+        <div class="fullscreen-selection-hud" aria-live="polite">
+            <span id="fullscreen-counter" class="fullscreen-counter">0 selected / 0 filtered • 0/0</span>
+
+        </div>
         <button id="fullscreen-loop-btn" class="fullscreen-loop-btn" type="button" aria-pressed="true">Loop: On</button>
         <button id="fullscreen-close-btn" class="fullscreen-close-btn" type="button" aria-label="Close fullscreen preview">X</button>
         <section id="fullscreen-debug-overlay" class="fullscreen-debug-overlay hidden" aria-live="polite">
@@ -678,6 +711,6 @@
 
     <script src="/frontend/js/shared/preferences.js"></script>
     <script src="/frontend/js/shared/ui-kit.js"></script>
-    <script src="/frontend/js/main.js?v=20260324-video-media-fallback-4"></script>
+    <script src="/frontend/js/main.js?v=20260412-fullscreen-selection-hud-1"></script>
 </body>
 </html>

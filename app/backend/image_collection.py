@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from PIL import Image
 from sqlalchemy.orm import Session
-from models import AuthorityTerm, ImageModel, TagAuthority
+from models import AuthorityTerm, ImageConceptObservation, ImageModel, TagAuthority
 from image_processor import ImageProcessor, sanitize_display_filename
 from atelierai.config import IMAGE_LIBRARY_PATH
 from atelierai.utils.prompt_phrases import (
@@ -17,6 +17,7 @@ from atelierai.utils.prompt_phrases import (
 from image_data import ImageData
 from civitai_enrichment import is_civitai_image_url, fetch_civitai_image_data
 from services.gallery_tag_service import GalleryTagService
+from services.metadata_extraction import extract_civitai_nsfw_level
 
 try:
     import blurhash  # pyright: ignore[reportMissingImports]
@@ -108,25 +109,58 @@ class ImageCollection:
         self,
         *,
         authority_id: int,
-        external_tag_id: str,
+        external_tag_id: Optional[int],
         external_name: str,
         metadata: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Upsert an authority term by external id with name fallback; returns True when created."""
         normalized_external_name = self._normalize_text(external_name)
-        if not normalized_external_name or not external_tag_id:
+        if not normalized_external_name:
             return False
 
         now = datetime.utcnow()
-        by_id = (
-            self.db.query(AuthorityTerm)
-            .filter(
-                AuthorityTerm.authority_id == authority_id,
-                AuthorityTerm.external_tag_id == str(external_tag_id),
+        by_id = None
+        if external_tag_id:
+            by_id = (
+                self.db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority_id,
+                    AuthorityTerm.external_tag_id == external_tag_id,
+                )
+                .first()
             )
-            .first()
-        )
         if by_id is not None:
+            # If normalizing the name would collide with a different row, merge instead.
+            if by_id.normalized_external_name != normalized_external_name:
+                collision = (
+                    self.db.query(AuthorityTerm)
+                    .filter(
+                        AuthorityTerm.authority_id == authority_id,
+                        AuthorityTerm.normalized_external_name == normalized_external_name,
+                        AuthorityTerm.id != by_id.id,
+                    )
+                    .first()
+                )
+                if collision is not None:
+                    # Merge: transfer FK refs, delete the old row FIRST to avoid
+                    # UNIQUE constraint conflicts on (authority_id, external_tag_id).
+                    self.db.query(ImageConceptObservation).filter(
+                        ImageConceptObservation.authority_term_id == by_id.id
+                    ).update({"authority_term_id": collision.id}, synchronize_session="fetch")
+                    self.db.delete(by_id)
+                    self.db.flush()
+                    # Now safe to adopt the external_tag_id and update the surviving row.
+                    if not collision.external_tag_id and external_tag_id is not None:
+                        collision.external_tag_id = external_tag_id
+                    collision.external_name = str(external_name)
+                    existing_meta = collision.metadata_json if isinstance(collision.metadata_json, dict) else {}
+                    collision.metadata_json = {**existing_meta, **(metadata or {})} if metadata else existing_meta
+                    collision.last_seen_at = now
+                    collision.updated_at = now
+                    self.db.flush()
+                    self.db.expire_all()
+                    return False
+
             row = by_id
             row.external_name = str(external_name)
             row.normalized_external_name = normalized_external_name
@@ -146,8 +180,28 @@ class ImageCollection:
         )
         if by_name is not None:
             row = by_name
-            if not row.external_tag_id:
-                row.external_tag_id = str(external_tag_id)
+            if not row.external_tag_id and external_tag_id is not None:
+                # Check if another row already holds this external_tag_id under the same authority.
+                tag_id_holder = (
+                    self.db.query(AuthorityTerm)
+                    .filter(
+                        AuthorityTerm.authority_id == authority_id,
+                        AuthorityTerm.external_tag_id == external_tag_id,
+                        AuthorityTerm.id != row.id,
+                    )
+                    .first()
+                )
+                if tag_id_holder is not None:
+                    # Merge: delete the tag_id holder FIRST to avoid UNIQUE constraint
+                    # conflict on (authority_id, external_tag_id), then adopt the ID.
+                    self.db.query(ImageConceptObservation).filter(
+                        ImageConceptObservation.authority_term_id == tag_id_holder.id
+                    ).update({"authority_term_id": row.id}, synchronize_session="fetch")
+                    self.db.delete(tag_id_holder)
+                    self.db.flush()
+                    row.external_tag_id = external_tag_id
+                else:
+                    row.external_tag_id = external_tag_id
             row.external_name = str(external_name)
             existing_meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
             row.metadata_json = {**existing_meta, **(metadata or {})} if metadata else existing_meta
@@ -158,7 +212,7 @@ class ImageCollection:
         self.db.add(
             AuthorityTerm(
                 authority_id=authority_id,
-                external_tag_id=str(external_tag_id),
+                external_tag_id=external_tag_id,
                 external_name=str(external_name),
                 normalized_external_name=normalized_external_name,
                 concept_id=None,
@@ -219,13 +273,17 @@ class ImageCollection:
             if not normalized_name:
                 continue
             record = prompt_record_by_name.get(normalized_name) or {}
-            external_tag_id = str(record.get("danbooru_tag_id") or f"prompt:{normalized_name}")
+            raw_tag_id = record.get("danbooru_tag_id")
+            try:
+                external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+            except (TypeError, ValueError):
+                external_tag_id = None
             metadata = {
                 "origin": "image_rescan",
                 "source": "prompt",
             }
-            if record.get("danbooru_tag_id") is not None:
-                metadata["mapped_danbooru_tag_id"] = str(record.get("danbooru_tag_id"))
+            if external_tag_id is not None:
+                metadata["mapped_danbooru_tag_id"] = external_tag_id
             created = self._upsert_authority_term(
                 authority_id=int(prompt_authority.id),
                 external_tag_id=external_tag_id,
@@ -240,13 +298,22 @@ class ImageCollection:
             if not normalized_name:
                 continue
             record = danbooru_record_by_name.get(normalized_name) or {}
-            external_tag_id = str(record.get("danbooru_tag_id") or f"name:{normalized_name}")
+            raw_tag_id = record.get("danbooru_tag_id")
+            try:
+                external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+            except (TypeError, ValueError):
+                external_tag_id = None
             metadata = {
                 "origin": "image_rescan",
                 "source": "danbooru",
             }
-            if record.get("danbooru_term_id") not in (None, ""):
-                metadata["mapped_danbooru_term_id"] = str(record.get("danbooru_term_id"))
+            raw_term_id = record.get("danbooru_term_id")
+            try:
+                term_id = int(raw_term_id) if raw_term_id not in (None, "") else None
+            except (TypeError, ValueError):
+                term_id = None
+            if term_id is not None:
+                metadata["mapped_danbooru_term_id"] = term_id
             created = self._upsert_authority_term(
                 authority_id=int(danbooru_authority.id),
                 external_tag_id=external_tag_id,
@@ -831,7 +898,7 @@ class ImageCollection:
         mappings: dict[str, dict[str, Any]] = {}
         for row in rows:
             mappings[str(row.normalized_external_name)] = {
-                "danbooru_tag_id": str(row.external_tag_id),
+                "danbooru_tag_id": row.external_tag_id,
                 "danbooru_term_id": int(row.id),
             }
         return mappings
@@ -1328,7 +1395,6 @@ class ImageCollection:
                 }
             )
 
-        sidecar_data = self._load_sidecar_json(final_file_path.with_suffix(".json"))
         prompt_tags = merge_prompt_tag_records(prompt_tag_records)
 
         mapped_danbooru_from_prompt = self._extract_mapped_danbooru_tags_from_prompt_tags(prompt_tags)
@@ -1479,12 +1545,16 @@ class ImageCollection:
         merged_json_metadata = dict(existing_json_metadata)
         merged_json_metadata["civitai"] = civitai_data
 
+        # Extract civitai_nsfw_level from the enrichment data
+        nsfw_level = extract_civitai_nsfw_level({"civitai": civitai_data})
+
         self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
             {
                 ImageModel.json_metadata: merged_json_metadata,
                 ImageModel.source_site: "civitai",
                 ImageModel.civitai_uuid: civitai_uuid,
                 ImageModel.civitai_hash: civitai_hash,
+                ImageModel.civitai_nsfw_level: nsfw_level,
             },
             synchronize_session=False,
         )

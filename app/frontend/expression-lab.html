@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Expression Lab — NSFW Level Icons</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/expression-lab.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1>Expression Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">← Gallery</a>
+      </div>
+    </header>
+
+    <main class="lab-layout">
+      <!-- Instructions -->
+      <section class="lab-intro">
+        <p>Browse expression sets to evaluate their suitability as graphical NSFW-level indicators. Each set is a four-panel image — drag panels to reorder, then assign levels below.</p>
+      </section>
+
+      <!-- Toolbar -->
+      <section class="lab-toolbar">
+        <div class="toolbar-group">
+          <label for="size-slider">Panel size</label>
+          <input id="size-slider" type="range" min="120" max="400" value="220" step="10">
+          <span id="size-label" class="size-label">220 px</span>
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-grid" class="btn ghost active" type="button" title="Grid view">⊞ Grid</button>
+          <button id="btn-strip" class="btn ghost" type="button" title="Strip view">≡ Strip</button>
+        </div>
+        <div class="toolbar-group">
+          <label for="downsample-method">Downsample</label>
+          <select id="downsample-method" class="downsample-select">
+            <option value="auto" selected>Auto (browser)</option>
+            <option value="pixelated">Pixelated</option>
+            <option value="crisp-edges">Crisp edges</option>
+            <option value="lanczos2">Lanczos 2-pass</option>
+            <option value="lanczos3">Lanczos 3-pass</option>
+            <option value="area-avg">Area average</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-export" class="btn ghost" type="button">Copy Mapping JSON</button>
+          <span id="export-status" class="export-status"></span>
+        </div>
+      </section>
+
+      <!-- Set selector -->
+      <section class="set-selector-wrap">
+        <div id="set-selector" class="set-selector">
+          <!-- Thumbnails populated by JS -->
+        </div>
+      </section>
+
+      <!-- Panel Crop Adjustments -->
+      <section id="crop-section" class="crop-section">
+        <h2>Panel Crop Adjustment</h2>
+        <p class="hint">Fine-tune each panel's crop region to trim overlap from neighboring panels. Click a panel to select it, then adjust the inset sliders.</p>
+        <div class="crop-controls-row">
+          <div id="crop-panel-selector" class="crop-panel-selector">
+            <!-- 4 small panel thumbnails rendered by JS -->
+          </div>
+          <div id="crop-sliders" class="crop-sliders">
+            <div class="crop-slider-group">
+              <label for="crop-top">Top inset</label>
+              <input id="crop-top" type="range" min="0" max="20" value="0" step="0.5">
+              <span id="crop-top-val" class="crop-val">0%</span>
+            </div>
+            <div class="crop-slider-group">
+              <label for="crop-bottom">Bottom inset</label>
+              <input id="crop-bottom" type="range" min="0" max="20" value="0" step="0.5">
+              <span id="crop-bottom-val" class="crop-val">0%</span>
+            </div>
+            <div class="crop-slider-group">
+              <label for="crop-left">Left inset</label>
+              <input id="crop-left" type="range" min="0" max="20" value="0" step="0.5">
+              <span id="crop-left-val" class="crop-val">0%</span>
+            </div>
+            <div class="crop-slider-group">
+              <label for="crop-right">Right inset</label>
+              <input id="crop-right" type="range" min="0" max="20" value="0" step="0.5">
+              <span id="crop-right-val" class="crop-val">0%</span>
+            </div>
+            <button id="btn-crop-reset" class="btn ghost" type="button">Reset Current</button>
+            <button id="btn-crop-reset-all" class="btn ghost" type="button">Reset All Panels</button>
+          </div>
+          <div id="crop-preview" class="crop-preview">
+            <canvas id="crop-preview-canvas" width="200" height="200"></canvas>
+            <span class="crop-preview-label">Selected panel preview with crop applied</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active set workspace -->
+      <section id="workspace" class="workspace">
+        <div id="set-label" class="set-label"></div>
+        <div id="panel-grid" class="panel-grid">
+          <!-- 4 panels rendered by JS -->
+        </div>
+      </section>
+
+      <!-- Level assignment -->
+      <section id="level-assignment" class="level-assignment">
+        <h2>Assign Levels</h2>
+        <p class="hint">Drag panels above to reorder, or use the dropdowns below to assign NSFW levels to each position.</p>
+        <div id="level-slots" class="level-slots">
+          <!-- 4 slots rendered by JS -->
+        </div>
+      </section>
+
+      <!-- Preview: how it would look as a selector -->
+      <section class="preview-section">
+        <h2>Widget Preview</h2>
+        <p class="hint">Preview of how the selected expression set could appear as a visual NSFW level selector.</p>
+        <div id="widget-preview" class="widget-preview">
+          <div id="widget-safety" class="widget-group">
+            <h3>Safety Classes (3-level)</h3>
+            <div id="widget-safety-panels" class="widget-panels"></div>
+          </div>
+          <div id="widget-granular" class="widget-group">
+            <h3>Granular Ratings (5-level)</h3>
+            <div id="widget-granular-panels" class="widget-panels"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Downsampling comparison -->
+      <section class="downsample-section">
+        <h2>Downsampling Comparison</h2>
+        <p class="hint">Compare how the selected panel looks at typical widget sizes using different downsample strategies. Each card shows the same panel at 16px, 24px, 32px, 48px, and 64px.</p>
+        <div class="downsample-controls">
+          <label for="compare-panel">Panel:</label>
+          <select id="compare-panel">
+            <option value="0">Panel 1 (top-left)</option>
+            <option value="1">Panel 2 (top-right)</option>
+            <option value="2">Panel 3 (bottom-left)</option>
+            <option value="3" selected>Panel 4 (bottom-right)</option>
+          </select>
+        </div>
+        <div id="downsample-grid" class="downsample-grid">
+          <!-- Rendered by JS -->
+        </div>
+      </section>
+
+      <!-- All sets overview -->
+      <section class="overview-section">
+        <h2>All Sets Overview</h2>
+        <p class="hint">Quick comparison of every set with current level assignments.</p>
+        <div id="overview-grid" class="overview-grid">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/frontend/js/shared/preferences.js"></script>
+  <script src="/frontend/js/shared/ui-kit.js"></script>
+  <script src="/frontend/js/expression-lab.js"></script>
+</body>
+</html>

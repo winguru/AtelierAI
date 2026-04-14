@@ -1,27 +1,51 @@
 services:
-  backend:
+  atelier-dev:
+    profiles: ["dev"]
     build:
       context: .
       dockerfile: .devcontainer/Dockerfile
-    ports:
-      - "8000:8000"  # Map host port 8000 to container port 8000
-    volumes:
-      - ./backend:/app  # Mount the local backend code into the container for live reloading
-      - ./frontend:/app/frontend  # Mount the local frontend code into the container for live reloading
-      - ./image_library:/var/lib/atelierai/image_library  # Mount local image library
-      - db-data:/var/lib/atelierai   # Persistent storage for the database
-
-    environment:
-      # Tell FastAPI where to find the DB and the image library
-      - IMAGE_LIBRARY_PATH=/var/lib/atelierai/image_library
-      - DATABASE_URL=sqlite:////var/lib/atelierai/image_db.sqlite
-
-    # This overrides the CMD in the Dockerfile, preventing the app from starting automatically.
-    # `tail -f /dev/null` is a common command to keep a container running indefinitely.
+    working_dir: /workspace
     command: ["tail", "-f", "/dev/null"]
+    init: true
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/workspace
+    environment:
+      PYTHONPATH: /workspace/app:/workspace/app/src:/workspace/app/backend:/workspace/app/dev
+      IMAGE_LIBRARY_PATH: /workspace/app/image_library
+      IMAGE_RESOURCES_PATH: /workspace/app/image_resources
+      DATABASE_URL: sqlite:////workspace/app/image_db.sqlite
+      ATELIER_HOST: 0.0.0.0
+      ATELIER_PORT: 8000
+      ATELIER_RELOAD: 1
+      ATELIER_SUPPRESS_STATUS_GET_LOGS: ${ATELIER_SUPPRESS_STATUS_GET_LOGS:-1}
 
-    #entrypoint: /bin/sh
-    #command: ["-c", "tail -f /dev/null"]
+  atelier-runtime:
+    profiles: ["runtime"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    ports:
+      - "8000:8000"
+    volumes:
+      - atelier-runtime-data:/var/lib/atelierai
+    environment:
+      IMAGE_LIBRARY_PATH: /var/lib/atelierai/image_library
+      IMAGE_RESOURCES_PATH: /var/lib/atelierai/image_resources
+      DATABASE_URL: sqlite:////var/lib/atelierai/image_db.sqlite
+      ATELIER_HOST: 0.0.0.0
+      ATELIER_PORT: 8000
+      ATELIER_RELOAD: 0
+      ATELIER_SUPPRESS_STATUS_GET_LOGS: ${ATELIER_SUPPRESS_STATUS_GET_LOGS:-1}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
 
 volumes:
-  db-data:
+  atelier-runtime-data:

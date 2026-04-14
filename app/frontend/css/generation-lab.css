@@ -1357,3 +1357,184 @@ body.ihp-open {
     grid-column: 1 / -1;
   }
 }
+
+/* ── Generation Audit (Parity) Summary Card ─────────────────────── */
+
+.parity-summary-card {
+  background: var(--surface, #1e1e2e);
+  border: 1px solid var(--stroke, #333);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  display: none;
+}
+
+.parity-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.parity-badge {
+  display: inline-block;
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.parity-badge-green  { background: #16a34a33; color: #4ade80; border: 1px solid #16a34a55; }
+.parity-badge-yellow { background: #ca8a0433; color: #facc15; border: 1px solid #ca8a0455; }
+.parity-badge-red    { background: #dc262633; color: #f87171; border: 1px solid #dc262655; }
+.parity-badge-gray   { background: #6b728033; color: #9ca3af; border: 1px solid #6b728055; }
+
+.parity-score {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #aaa);
+  font-variant-numeric: tabular-nums;
+}
+
+.parity-summary-text {
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--text, #e0e0e0);
+  margin-bottom: 0.5rem;
+}
+
+.parity-action-items {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0 0;
+}
+
+.parity-action-item {
+  font-size: 0.85rem;
+  padding: 0.25rem 0;
+  color: var(--text-secondary, #ccc);
+  border-bottom: 1px solid var(--stroke, #2a2a3a);
+}
+
+.parity-action-item:last-child { border-bottom: none; }
+
+.parity-action-item.parity-action-ok { color: #4ade80; }
+
+.parity-action-item::before {
+  content: '→ ';
+  opacity: 0.5;
+}
+
+/* ── Parity Field Diff Table ────────────────────────────────────── */
+
+.parity-field-diff-section {
+  display: none;
+  margin-bottom: 1rem;
+}
+
+.parity-field-diff-section h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.95rem;
+  color: var(--text, #e0e0e0);
+}
+
+.parity-field-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.parity-field-table th {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 2px solid var(--stroke, #333);
+  font-weight: 600;
+  color: var(--text-secondary, #999);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.parity-field-table td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--stroke, #2a2a3a);
+  color: var(--text, #ddd);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parity-field-table tr:hover td {
+  background: var(--hover, #ffffff0d);
+}
+
+.parity-status-verified,
+.parity-status-matched { color: #4ade80; }
+
+.parity-status-mismatched { color: #facc15; }
+
+.parity-status-local_only,
+.parity-status-workflow_only { color: #9ca3af; }
+
+/* ── Parity Collapsible Raw Details ─────────────────────────────── */
+
+.parity-raw-details {
+  border: 1px solid var(--stroke, #333);
+  border-radius: 6px;
+  padding: 0;
+  margin-top: 0.75rem;
+}
+
+.parity-raw-details > summary {
+  padding: 0.6rem 1rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-secondary, #aaa);
+  background: var(--surface, #1e1e2e);
+  border-radius: 6px;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.parity-raw-details > summary::-webkit-details-marker { display: none; }
+
+.parity-raw-details > summary::before {
+  content: '▸';
+  transition: transform 0.15s ease;
+  font-size: 0.8rem;
+}
+
+.parity-raw-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.parity-raw-details .json-view {
+  border-top: 1px solid var(--stroke, #333);
+  border-radius: 0 0 6px 6px;
+}
+
+/* ── Secondary button (template upload controls) ────────────────── */
+
+.secondary-btn {
+  background: transparent;
+  border: 1px solid var(--stroke, #444);
+  color: var(--text-secondary, #bbb);
+  padding: 0.35rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.secondary-btn:hover {
+  background: var(--hover, #ffffff0d);
+  border-color: var(--text-secondary, #666);
+}

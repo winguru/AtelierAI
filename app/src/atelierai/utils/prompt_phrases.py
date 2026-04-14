@@ -121,7 +121,7 @@ PHRASE_STOP_WORDS = frozenset(
 
 
 def normalize_phrase_breaks(prompt: str) -> str:
-    """Treat structural prompt delimiters as comma-like separators.
+    r"""Treat structural prompt delimiters as comma-like separators.
 
     Parentheses and square brackets are used by many prompt syntaxes to adjust
     emphasis. For phrase parsing we strip unescaped delimiter characters and

@@ -641,9 +641,9 @@ class ModelReferenceService:
         checkpoints_metadata_url: Optional[str] = None,
         loras_metadata_url: Optional[str] = None,
     ) -> dict[str, Any]:
-        resolved_catalog_url = self._normalize_comfyui_base_url(catalog_url or os.getenv("ATELIER_COMFYUI_MODEL_CATALOG_URL"))
-        resolved_checkpoints_url = str(checkpoints_url or os.getenv("ATELIER_COMFYUI_CHECKPOINTS_URL") or "").strip() or None
-        resolved_loras_url = str(loras_url or os.getenv("ATELIER_COMFYUI_LORAS_URL") or "").strip() or None
+        resolved_catalog_url = self._normalize_comfyui_base_url(catalog_url or os.getenv("ATELIER_COMFYUI_BASE_URL"))
+        resolved_checkpoints_url = str(checkpoints_url or "").strip() or None
+        resolved_loras_url = str(loras_url or "").strip() or None
         resolved_checkpoints_metadata_url = str(
             checkpoints_metadata_url or os.getenv("ATELIER_COMFYUI_CHECKPOINTS_METADATA_URL") or ""
         ).strip() or None

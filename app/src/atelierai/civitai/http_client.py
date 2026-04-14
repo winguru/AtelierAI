@@ -7,10 +7,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import requests
 import urllib3.util.connection as urllib3_conn
+from requests import PreparedRequest, Response
 
 
 # ---------------------------------------------------------------------------
@@ -88,15 +89,33 @@ def _resolve_with_fallback(hostname: str) -> list[str] | None:
 class _DnsFallbackAdapter(requests.adapters.HTTPAdapter):
     """HTTPAdapter that retries with manual DNS resolution on getaddrinfo failure."""
 
-    def send(self, request, **kwargs):
+    def send(
+        self,
+        request: PreparedRequest,
+        stream: bool = False,
+        timeout: float | tuple[float, float] | tuple[float, None] | None = None,
+        verify: bool | str = True,
+        cert: bytes | str | tuple[bytes | str, bytes | str] | None = None,
+        proxies: Mapping[str, str] | None = None,
+    ) -> Response:
         try:
-            return super().send(request, **kwargs)
+            return super().send(
+                request,
+                stream=stream,
+                timeout=timeout,
+                verify=verify,
+                cert=cert,
+                proxies=proxies,
+            )
         except requests.ConnectionError as exc:
             # Only intercept DNS-resolution failures
             if "Failed to resolve" not in str(exc) and "nodename nor servname" not in str(exc):
                 raise
             from urllib3.util import parse_url
-            parsed = parse_url(request.url)
+            request_url = request.url
+            if request_url is None:
+                raise
+            parsed = parse_url(request_url)
             host = parsed.host
             if not host:
                 raise
@@ -117,7 +136,14 @@ class _DnsFallbackAdapter(requests.adapters.HTTPAdapter):
             try:
                 # Set Host header so SNI / virtual-hosting works
                 request.headers.setdefault("Host", host)
-                return super().send(request, **kwargs)
+                return super().send(
+                    request,
+                    stream=stream,
+                    timeout=timeout,
+                    verify=verify,
+                    cert=cert,
+                    proxies=proxies,
+                )
             finally:
                 urllib3_conn.create_connection = original
 

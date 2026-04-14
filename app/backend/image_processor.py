@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 from PIL import Image
 from PIL.ExifTags import TAGS
 from sqlalchemy.orm import Session
+
+from services.metadata_extraction import compute_promoted_columns
 from atelierai.platform_detect import resolve_binary
 
 from models import ImageModel, Artist
@@ -704,7 +706,7 @@ class ImageProcessor:
         """Prints all decoded EXIF data."""
         print(f"Second pass: Extracted EXIF data from {self.metadata.file_name}:")
         for key, value in exif_data.items():
-            # print(f"  {key}: {value[:100] if isinstance(value, str) else value}")
+            print(f"  {key}: {value[:100] if isinstance(value, str) else value}")
             pass
 
     def _extract_generation_text_fields(
@@ -1203,6 +1205,13 @@ class ImageProcessor:
             fallback_ext=Path(relative_filepath).suffix,
         ) or relative_filepath
 
+        # Build the payload for promoted column extraction
+        _payload = dict(json_metadata or {})
+        _exif = self.exif_data if isinstance(self.exif_data, dict) else {}
+        if _exif and "exif_data" not in _payload:
+            _payload["exif_data"] = _exif
+        promoted = compute_promoted_columns(_payload, exif=_exif)
+
         self.db_record = ImageModel(
             file_path=relative_filepath,
             file_name=display_name,
@@ -1219,6 +1228,14 @@ class ImageProcessor:
             license_id=license_id if license_id else None,
             exif_data=self.exif_data,
             json_metadata=json_metadata,
+            generation_software=promoted["generation_software"],
+            civitai_nsfw_level=promoted["civitai_nsfw_level"],
+            has_a1111_metadata=promoted["has_a1111_metadata"],
+            a1111_hires=promoted["a1111_hires"],
+            a1111_regional_prompter=promoted["a1111_regional_prompter"],
+            a1111_adetailer=promoted["a1111_adetailer"],
+            has_comfyui_metadata=promoted["has_comfyui_metadata"],
+            has_generation_prompt=promoted["has_generation_prompt"],
         )
         return self.db_record
 

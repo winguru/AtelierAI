@@ -307,6 +307,13 @@ body {
   overflow: auto;
 }
 
+.tag-pool.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-soft, #e8f0fe);
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
 .tag-pane.source-civitai {
   border-color: #9cb6d9;
   background: #edf4ff;
@@ -471,6 +478,67 @@ body {
   border-color: rgba(127, 137, 150, 0.22);
   background: rgba(255, 255, 255, 0.78);
   color: #4b5561;
+}
+
+/* ── Multi-select filter mode states ────────────────── */
+
+.tag-block.mode-include {
+  border-color: #996945;
+  background: #efd9c2;
+  color: #452616;
+  box-shadow: inset 0 0 0 1px rgba(69, 38, 22, 0.08);
+}
+
+.tag-block.mode-exclude {
+  border-color: #b05050;
+  background: #fde8e8;
+  color: #7a2020;
+  box-shadow: inset 0 0 0 1px rgba(122, 32, 32, 0.08);
+}
+
+.tag-block.mode-exclude .tag-block-label {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+
+.tag-pane.source-civitai .tag-block.mode-include {
+  border-color: #5e86b8;
+  background: #bfd8ff;
+}
+.tag-pane.source-civitai .tag-block.mode-exclude {
+  border-color: #b05050;
+  background: #fde8e8;
+  color: #7a2020;
+}
+
+.tag-pane.source-danbooru .tag-block.mode-include {
+  border-color: #769755;
+  background: #cfe5b2;
+}
+.tag-pane.source-danbooru .tag-block.mode-exclude {
+  border-color: #b05050;
+  background: #fde8e8;
+  color: #7a2020;
+}
+
+.tag-pane.source-prompt .tag-block.mode-include {
+  border-color: #846aad;
+  background: #d1bceb;
+}
+.tag-pane.source-prompt .tag-block.mode-exclude {
+  border-color: #b05050;
+  background: #fde8e8;
+  color: #7a2020;
+}
+
+.tag-pane.source-user .tag-block.mode-include {
+  border-color: #7f8996;
+  background: #cdd3da;
+}
+.tag-pane.source-user .tag-block.mode-exclude {
+  border-color: #b05050;
+  background: #fde8e8;
+  color: #7a2020;
 }
 
 .tag-pane .tag-block.assigned {
@@ -1119,6 +1187,7 @@ body[data-theme="dark"] {
 
   /* Tag pool scroll container */
   .tag-pool { background: var(--panel); border-color: var(--stroke); }
+  .tag-pool.drag-over { border-color: var(--accent); background: rgba(100, 160, 255, 0.08); outline-color: var(--accent); }
 
   /* Base tag-block pill */
   .tag-block {
@@ -1197,6 +1266,27 @@ body[data-theme="dark"] {
   .concept-block.drag-over     { border-color: var(--accent); background: var(--accent-soft); }
   .concept-block.drag-over-alt { border-color: #5b7391; background: #1c2e42; }
 
+  /* Dark mode: multi-select filter mode states */
+  .tag-block.mode-include {
+    border-color: var(--stroke);
+    background: var(--accent-soft);
+    color: var(--ink);
+  }
+  .tag-pane.source-civitai  .tag-block.mode-include { border-color: #6a9ad8; background: #2a4a80; }
+  .tag-pane.source-danbooru .tag-block.mode-include { border-color: #5a8040; background: #264028; }
+  .tag-pane.source-prompt   .tag-block.mode-include { border-color: #8060c8; background: #352060; }
+  .tag-pane.source-user     .tag-block.mode-include { border-color: #6a7a8e; background: #2e3844; }
+
+  .tag-block.mode-exclude {
+    border-color: #7a3535;
+    background: #301a1a;
+    color: #e08080;
+  }
+  .tag-block.mode-exclude .tag-block-label {
+    text-decoration: line-through;
+    text-decoration-thickness: 2px;
+  }
+
   /* Pane body drag-over highlight */
   .pane-body.drag-over { outline-color: var(--accent); background: var(--accent-soft); }
 
@@ -1257,4 +1347,93 @@ body[data-theme="dark"] {
     background: #2a1818;
   }
   .concept-trash.drag-over { border-color: #c04040; background: #3a1a1a; }
+}
+
+/* ── Tag pane title bar with icon buttons ─────────────────────── */
+.tag-pane-title-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.tag-pane-title-bar h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.tag-pane-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid var(--stroke, #ccc);
+  border-radius: 4px;
+  background: var(--panel, #fff);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.tag-pane-icon-btn:hover {
+  opacity: 1;
+  border-color: var(--accent);
+  background: var(--accent-soft, #e8f0fe);
+}
+
+.tag-pane-icon-btn:active {
+  opacity: 1;
+  transform: scale(0.93);
+}
+
+/* Wrench icon (opens tag-maint page) */
+.tag-pane-wrench-btn .icon-wrench {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tag-pane-wrench-btn .icon-wrench svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Missing-data filter icon (magnifying glass with X) */
+.tag-pane-missing-btn .icon-missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tag-pane-missing-btn .icon-missing svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tag-pane-missing-btn.active {
+  opacity: 1;
+  border-color: #d94040;
+  background: #fce8e8;
+}
+
+.tag-pane-missing-btn.active .icon-missing svg {
+  stroke: #b00;
+}
+
+/* Dark mode adjustments */
+html.dark .tag-pane-missing-btn.active {
+  background: #3a1a1a;
+  border-color: #a04040;
+}
+
+html.dark .tag-pane-icon-btn {
+  border-color: var(--stroke, #444);
+  background: var(--panel, #222);
 }

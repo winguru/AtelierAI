@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tag Maintenance</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/tag-maint.css">
+</head>
+<body>
+  <main class="tag-maint-page">
+    <header class="tag-maint-header">
+      <div>
+        <p class="tag-maint-kicker">Utility</p>
+        <h1 id="page-title">Tag Maintenance</h1>
+        <p class="tag-maint-subtitle" id="page-subtitle">Bootstrap, export, search, sort, edit, and bulk-delete tags for a given source.</p>
+      </div>
+      <div class="global-pref-row" aria-label="Page preferences">
+        <label class="toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="tag-maint-link" href="/tree">← Back to Tree</a>
+      </div>
+    </header>
+
+    <!-- Bootstrap Section -->
+    <section class="tag-maint-section" aria-label="Bootstrap tools">
+      <h2>Bootstrap</h2>
+      <div class="bootstrap-row">
+        <div class="bootstrap-card">
+          <h3>Import JSON</h3>
+          <input type="file" id="import-file" accept=".json,.csv,.txt">
+          <label class="checkbox-row" for="import-dry-run">
+            <input id="import-dry-run" type="checkbox" checked>
+            <span>Dry run</span>
+          </label>
+          <button id="import-btn" type="button">Import</button>
+          <pre class="bootstrap-output" id="import-output" hidden></pre>
+        </div>
+        <div class="bootstrap-card">
+          <h3>Export</h3>
+          <button id="export-btn" type="button">Export JSON Archive</button>
+          <pre class="bootstrap-output" id="export-output" hidden></pre>
+        </div>
+        <div class="bootstrap-card">
+          <h3>Purge All</h3>
+          <p class="control-help">Permanently delete all tags for this source.</p>
+          <label class="checkbox-row" for="purge-dry-run">
+            <input id="purge-dry-run" type="checkbox" checked>
+            <span>Dry run</span>
+          </label>
+          <button id="purge-btn" type="button" class="btn-danger">Purge</button>
+          <pre class="bootstrap-output" id="purge-output" hidden></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Table Section -->
+    <section class="tag-maint-section" aria-label="Tag table">
+      <div class="table-toolbar">
+        <h2>Tags</h2>
+        <div class="table-toolbar-actions">
+          <input id="search-input" type="text" placeholder="Search tags…" autocomplete="off">
+          <span id="selection-count" class="selection-count" hidden>0 selected</span>
+          <button id="select-all-btn" type="button">Select All</button>
+          <button id="deselect-all-btn" type="button">Deselect All</button>
+          <label class="checkbox-row" for="bulk-dry-run">
+            <input id="bulk-dry-run" type="checkbox" checked>
+            <span>Dry run</span>
+          </label>
+          <button id="bulk-delete-btn" type="button" class="btn-danger" disabled>Delete Selected</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table id="tag-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="header-check" aria-label="Select all"></th>
+              <th class="sortable" data-col="id">ID <span class="sort-arrow"></span></th>
+              <th class="sortable" data-col="name">Name <span class="sort-arrow"></span></th>
+              <th class="sortable" data-col="ext_id">Ext ID <span class="sort-arrow"></span></th>
+              <th data-col="scope">Scope</th>
+              <th class="sortable" data-col="post_count">Post Count <span class="sort-arrow"></span></th>
+              <th class="sortable" data-col="concept_id">Concept ID <span class="sort-arrow"></span></th>
+              <th data-col="mdtag_id">MDTag ID</th>
+              <th data-col="mdtag_name">MDTag Name</th>
+            </tr>
+          </thead>
+          <tbody id="tag-tbody"></tbody>
+        </table>
+      </div>
+      <div class="table-footer">
+        <span id="table-info">Loading…</span>
+        <div class="pager">
+          <button id="prev-page-btn" type="button" disabled>← Prev</button>
+          <span id="page-indicator">Page 1</span>
+          <button id="next-page-btn" type="button">Next →</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast-container" class="toast-container"></div>
+  </main>
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/tag-maint.js" defer></script>
+</body>
+</html>

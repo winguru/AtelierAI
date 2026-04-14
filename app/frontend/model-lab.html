@@ -78,7 +78,7 @@
           </label>
           <button id="catalog-submit-btn" type="submit">Load Catalog</button>
         </div>
-        <p class="control-help"><code>ATELIER_COMFYUI_MODEL_CATALOG_URL</code> is treated as a BASE URL (for example, <code>http://localhost:8188</code>). Any URI path beyond host:port is ignored, port defaults to <code>8188</code>, and standard LoRA Manager endpoints are derived automatically: <code>/api/lm/checkpoints/list</code> and <code>/api/lm/loras/list</code>. You can still override with <code>ATELIER_COMFYUI_CHECKPOINTS_URL</code> and <code>ATELIER_COMFYUI_LORAS_URL</code>.</p>
+        <p class="control-help"><code>ATELIER_COMFYUI_BASE_URL</code> is treated as a BASE URL (for example, <code>http://localhost:8188</code>). Any URI path beyond host:port is ignored, port defaults to <code>8188</code>, and standard LoRA Manager endpoints are always derived automatically: <code>/api/lm/checkpoints/list</code> and <code>/api/lm/loras/list</code>.</p>
       </form>
     </section>
 

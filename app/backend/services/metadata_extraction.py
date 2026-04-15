@@ -5,19 +5,9 @@ extraction logic in one place.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Optional
 
-
-_A1111_HIRES_KEYWORDS: tuple[str, ...] = (
-    "hires upscaler", "hires steps", "hires upscale",
-    "hr upscaler", "hr upscale", "denoising strength",
-)
-
-_A1111_RP_DIRECTIVE_RE: re.Pattern = re.compile(
-    r"\b(ADDCOMM|ADDROW|ADDCOL)\b", re.IGNORECASE,
-)
+from services import a1111_parser_service as _a1111_svc
 
 
 def extract_generation_software(payload: dict[str, Any]) -> Optional[str]:
@@ -45,59 +35,12 @@ def extract_civitai_nsfw_level(payload: dict[str, Any]) -> Optional[int]:
 
 def _looks_like_a1111(exif: dict[str, Any]) -> bool:
     """Check if EXIF looks like A1111 generation metadata."""
-    for key in ("parameters", "Parameters"):
-        candidate = exif.get(key)
-        if isinstance(candidate, str) and candidate.strip():
-            norm = candidate.strip().lower()
-            has_steps = "steps:" in norm
-            has_cfg = "cfg scale:" in norm
-            has_sampler = "sampler:" in norm
-            has_seed = "seed:" in norm
-            has_negative = "negative prompt:" in norm
-            if has_steps and (has_cfg or has_sampler or has_seed or has_negative):
-                return True
-
-    exact = exif.get("user_comment")
-    if isinstance(exact, str) and exact.strip():
-        return True
-
-    legacy = exif.get("UserComment")
-    if not isinstance(legacy, str):
-        return False
-    text = legacy.strip()
-    if not text:
-        return False
-    if text.startswith("{") or text.startswith("["):
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict) and (
-                parsed.get("prompt") or parsed.get("workflow") or parsed.get("resource-stack")
-            ):
-                return False
-        except (json.JSONDecodeError, TypeError):
-            pass
-    norm = text.lower()
-    if "civitai resources:" in norm:
-        return False
-    has_steps = "steps:" in norm
-    has_cfg = "cfg scale:" in norm
-    has_sampler = "sampler:" in norm
-    has_seed = "seed:" in norm
-    has_negative = "negative prompt:" in norm
-    return has_steps and (has_cfg or has_sampler or has_seed or has_negative)
+    return _a1111_svc.looks_like_a1111_exif(exif)
 
 
 def _get_a1111_text(exif: dict[str, Any]) -> str:
     """Extract normalized A1111 parameter text from EXIF."""
-    for key in ("parameters", "Parameters", "user_comment", "UserComment"):
-        value = exif.get(key)
-        if not isinstance(value, str):
-            continue
-        text = value.strip()
-        if not text or text.startswith("{") or text.startswith("["):
-            continue
-        return text.lower()
-    return ""
+    return _a1111_svc._get_a1111_text(exif)
 
 
 def detect_a1111_features(exif: dict[str, Any]) -> dict[str, bool]:
@@ -106,31 +49,7 @@ def detect_a1111_features(exif: dict[str, Any]) -> dict[str, bool]:
     Returns dict with keys: has_a1111_metadata, a1111_hires,
     a1111_regional_prompter, a1111_adetailer.
     """
-    is_a1111 = _looks_like_a1111(exif)
-    if not is_a1111:
-        return {
-            "has_a1111_metadata": False,
-            "a1111_hires": False,
-            "a1111_regional_prompter": False,
-            "a1111_adetailer": False,
-        }
-
-    text = _get_a1111_text(exif)
-    hires = any(kw in text for kw in _A1111_HIRES_KEYWORDS) if text else False
-    user_comment_text = str(exif.get("user_comment") or exif.get("UserComment") or "")
-    rp = (
-        "rp active" in text
-        or "regional prompt" in text
-        or bool(_A1111_RP_DIRECTIVE_RE.search(user_comment_text))
-    ) if text else False
-    adetailer = "adetailer" in text if text else False
-
-    return {
-        "has_a1111_metadata": True,
-        "a1111_hires": bool(hires),
-        "a1111_regional_prompter": bool(rp),
-        "a1111_adetailer": bool(adetailer),
-    }
+    return _a1111_svc.detect_a1111_features_from_exif(exif)
 
 
 def detect_comfyui(exif: dict[str, Any]) -> bool:

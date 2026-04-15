@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 from sqlalchemy import exists, false as sa_false, func, or_, select, text
 
+from services import a1111_parser_service as _a1111_svc
+
 from models import (
     Artist,
     CollectionModel,
@@ -30,11 +32,8 @@ class ImageQueryService:
     _NSFW_GRANULAR_RATINGS: frozenset[str] = frozenset({"pg", "pg13", "r", "x", "xxx"})
     _NSFW_SAFETY_CLASSES: frozenset[str] = frozenset({"safe", "mature", "explicit"})
     _NSFW_NA_SENTINELS: frozenset[str] = frozenset({"n/a"})
-    _A1111_RP_DIRECTIVE_RE: re.Pattern = re.compile(r"\b(ADDCOMM|ADDROW|ADDCOL)\b", re.IGNORECASE)
-    _A1111_HIRES_KEYWORDS: tuple[str, ...] = (
-        "hires upscaler", "hires steps", "hires upscale",
-        "hr upscaler", "hr upscale", "denoising strength"
-    )
+    _A1111_RP_DIRECTIVE_RE: re.Pattern = _a1111_svc.A1111_RP_DIRECTIVE_RE
+    _A1111_HIRES_KEYWORDS: tuple[str, ...] = _a1111_svc.A1111_HIRES_KEYWORDS
 
     """Encapsulates image list filtering and generation software lookup logic."""
 
@@ -307,68 +306,11 @@ class ImageQueryService:
 
     def _looks_like_a1111_user_comment_payload(self, exif: dict[str, Any]) -> bool:
         """Detect whether EXIF contains A1111-style generation metadata."""
-        exif_parameters = [exif.get("parameters"), exif.get("Parameters")]
-        candidate = next((v for v in exif_parameters if isinstance(v, str) and v.strip()), None)
-        if candidate:
-            normalized = candidate.strip().lower()
-            has_steps = "steps:" in normalized
-            has_seed = "seed:" in normalized
-            has_sampler = "sampler:" in normalized
-            has_cfg = "cfg scale:" in normalized
-            has_negative = "negative prompt:" in normalized
-            if has_steps and (has_cfg or has_sampler or has_seed or has_negative):
-                return True
-
-        exact_user_comment = exif.get("user_comment")
-        if isinstance(exact_user_comment, str) and exact_user_comment.strip():
-            return True
-
-        legacy_user_comment = exif.get("UserComment")
-        if not isinstance(legacy_user_comment, str):
-            return False
-
-        text = legacy_user_comment.strip()
-        if not text:
-            return False
-
-        if text.startswith("{") or text.startswith("["):
-            try:
-                parsed = json.loads(text)
-                if isinstance(parsed, dict):
-                    if parsed.get("prompt") or parsed.get("workflow") or parsed.get("resource-stack"):
-                        return False
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        normalized = text.lower()
-        if "civitai resources:" in normalized:
-            return False
-        has_steps = "steps:" in normalized
-        has_seed = "seed:" in normalized
-        has_sampler = "sampler:" in normalized
-        has_cfg = "cfg scale:" in normalized
-        has_negative = "negative prompt:" in normalized
-        return has_steps and (has_cfg or has_sampler or has_seed or has_negative)
+        return _a1111_svc.looks_like_a1111_exif(exif)
 
     def _get_a1111_parameter_text(self, exif: dict[str, Any]) -> str:
         """Extract normalized A1111 parameter text from EXIF fields."""
-        candidate_values = [
-            exif.get("parameters"),
-            exif.get("Parameters"),
-            exif.get("user_comment"),
-            exif.get("UserComment"),
-        ]
-
-        for value in candidate_values:
-            if not isinstance(value, str):
-                continue
-            text = value.strip()
-            if not text:
-                continue
-            if text.startswith("{") or text.startswith("["):
-                continue
-            return text.lower()
-        return ""
+        return _a1111_svc._get_a1111_text(exif)
 
     def read_a1111_features_for_image(self, image: Any) -> dict[str, bool]:
         """Detect A1111 feature flags (Hires, RP, ADetailer) from image EXIF.
@@ -377,28 +319,11 @@ class ImageQueryService:
             dict with keys: "hires_upscale", "regional_prompter", "adetailer"
         """
         exif = self._read_exif_for_image(image)
-        if not self._looks_like_a1111_user_comment_payload(exif):
-            return {"hires_upscale": False, "regional_prompter": False, "adetailer": False}
-
-        text = self._get_a1111_parameter_text(exif)
-        if not text:
-            return {"hires_upscale": False, "regional_prompter": False, "adetailer": False}
-
-        hires_upscale = any(keyword in text for keyword in self._A1111_HIRES_KEYWORDS)
-
-        user_comment_text = str(exif.get("user_comment") or exif.get("UserComment") or "")
-        regional_prompter = (
-            "rp active" in text or
-            "regional prompt" in text or
-            bool(self._A1111_RP_DIRECTIVE_RE.search(user_comment_text))
-        )
-
-        adetailer = "adetailer" in text
-
+        features = _a1111_svc.detect_a1111_features_from_exif(exif)
         return {
-            "hires_upscale": bool(hires_upscale),
-            "regional_prompter": bool(regional_prompter),
-            "adetailer": bool(adetailer),
+            "hires_upscale": features.get("a1111_hires", False),
+            "regional_prompter": features.get("a1111_regional_prompter", False),
+            "adetailer": features.get("a1111_adetailer", False),
         }
 
     def filter_image_ids_by_tag_names(

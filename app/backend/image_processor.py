@@ -14,6 +14,11 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 from sqlalchemy.orm import Session
 
+try:
+    import blurhash as _blurhash_mod  # pyright: ignore[reportMissingImports]
+except Exception:
+    _blurhash_mod = None
+
 from services.metadata_extraction import compute_promoted_columns
 from atelierai.platform_detect import resolve_binary
 
@@ -1102,6 +1107,8 @@ class ImageProcessor:
 
     def _get_metadata(self) -> tuple[int, int, Optional[str], dict, dict[str, Any]]:
         """Extracts metadata from image/video files."""
+        self._blurhash: Optional[str] = None
+
         # Non-image formats are handled via exiftool.
         if self.extension in {".mp4", ".webm", ".mov", ".mkv"}:
             return self._extract_metadata_with_exiftool()
@@ -1128,6 +1135,25 @@ class ImageProcessor:
                 self._extract_generation_text_fields(img, exif_data, exif_tags)
                 self._prune_ifd_pointer_tags(exif_data)
                 self._print_exif_data(exif_data)
+
+                # Compute blurhash while image is open.
+                if _blurhash_mod is not None:
+                    try:
+                        small = img.copy()
+                        small.thumbnail((128, 128), Image.LANCZOS)
+                        if small.mode != "RGB":
+                            small = small.convert("RGB")
+                        w, h = small.size
+                        raw = small.load()
+                        pixel_rows = [
+                            [raw[x, y] for x in range(w)]
+                            for y in range(h)
+                        ]
+                        self._blurhash = _blurhash_mod.encode(
+                            pixel_rows, components_x=4, components_y=3
+                        )
+                    except Exception:
+                        pass
 
             return width, height, mimetype, exif_data, exif_tags
         except Exception:
@@ -1215,6 +1241,7 @@ class ImageProcessor:
         self.db_record = ImageModel(
             file_path=relative_filepath,
             file_name=display_name,
+            original_file_name=original_filename or self.metadata.file_name or None,
             file_hash=self.file_hash,
             file_size=stat.st_size,
             width=self.width,
@@ -1236,6 +1263,7 @@ class ImageProcessor:
             a1111_adetailer=promoted["a1111_adetailer"],
             has_comfyui_metadata=promoted["has_comfyui_metadata"],
             has_generation_prompt=promoted["has_generation_prompt"],
+            blurhash=getattr(self, "_blurhash", None),
         )
         return self.db_record
 

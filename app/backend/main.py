@@ -261,6 +261,7 @@ _JSON_CACHE_SCHEMA_VERSION = int(os.getenv("ATELIER_JSON_CACHE_SCHEMA_VERSION", 
 _FILTER_OPTIONS_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ATELIER_FILTER_OPTIONS_CACHE_TTL_SECONDS", "120")))
 _search_cache_lock = threading.RLock()
 _search_cache_version = 0
+_gallery_cache_version = 0  # Only bumped on image-affecting changes
 _search_cache: dict[str, _SearchCacheEntry] = {}
 
 
@@ -283,11 +284,19 @@ def _build_search_cache_key(kind: str, *, payload: dict[str, Any]) -> str:
 
 
 def _invalidate_search_cache(reason: str = "unspecified") -> None:
-    del reason
-    global _search_cache_version
+    global _search_cache_version, _gallery_cache_version
     with _search_cache_lock:
         _search_cache_version += 1
         _search_cache.clear()
+    # Image-affecting changes also bump gallery version for ETag invalidation
+    _image_affecting_reasons = {
+        "db_commit", "image_update", "image_delete", "image_add",
+        "collection_change", "scan_complete", "metadata_update",
+        "variant_update", "nsfw_update", "tags_update",
+    }
+    if reason in _image_affecting_reasons:
+        with _search_cache_lock:
+            _gallery_cache_version += 1
 
 
 def _search_cache_get(key: str) -> Optional[Any]:
@@ -421,8 +430,13 @@ def _current_search_cache_version() -> int:
         return int(_search_cache_version)
 
 
-def _build_json_cache_headers(cache_key: str, *, max_age_seconds: int = 0) -> dict[str, str]:
-    version = _current_search_cache_version()
+def _current_gallery_cache_version() -> int:
+    with _search_cache_lock:
+        return int(_gallery_cache_version)
+
+
+def _build_json_cache_headers(cache_key: str, *, max_age_seconds: int = 15, gallery: bool = False) -> dict[str, str]:
+    version = _current_gallery_cache_version() if gallery else _current_search_cache_version()
     digest = hashlib.sha1(
         f"{cache_key}|v={version}|schema={_JSON_CACHE_SCHEMA_VERSION}".encode("utf-8")
     ).hexdigest()
@@ -792,6 +806,54 @@ def _ensure_promoted_metadata_columns() -> None:
                 connection.execute(text(ddl))
 
 
+def _ensure_original_file_name_column() -> None:
+    """Add original_file_name column and backfill from json_metadata or file_name."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+        if "original_file_name" in existing:
+            return
+
+        connection.execute(
+            text("ALTER TABLE images ADD COLUMN original_file_name VARCHAR")
+        )
+        # Backfill: try json_metadata.original_filename first, fall back to file_name
+        connection.execute(
+            text(
+                "UPDATE images "
+                "SET original_file_name = COALESCE("
+                "  NULLIF(TRIM(json_extract(json_metadata, '$.original_filename')), ''), "
+                "  file_name"
+                ") "
+                "WHERE original_file_name IS NULL"
+            )
+        )
+
+
+def _ensure_blurhash_column() -> None:
+    """Add blurhash column and backfill from civitai_hash where available."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+        if "blurhash" in existing:
+            return
+
+        connection.execute(
+            text("ALTER TABLE images ADD COLUMN blurhash VARCHAR")
+        )
+        # Instant backfill: CivitAI's `hash` field IS a BlurHash string.
+        connection.execute(
+            text(
+                "UPDATE images SET blurhash = civitai_hash "
+                "WHERE civitai_hash IS NOT NULL AND blurhash IS NULL"
+            )
+        )
+
+
 def _ensure_observation_unique_constraint() -> None:
     """Add unique constraint to image_concept_observations if missing.
 
@@ -933,6 +995,12 @@ def _load_image_sidecar_payload(image: ImageModel) -> dict[str, Any]:
 
 
 def _gallery_tag_names_by_source(db: Session) -> dict[str, list[str]]:
+    """DEPRECATED: Use _gallery_tag_names_by_source_from_observations instead.
+
+    Reads tag names from json_metadata JSON columns. Replaced by observation-based
+    counting that queries authority_terms + image_concept_observations tables.
+    Kept for reference only; no active callers.
+    """
     by_source: dict[str, set[str]] = {
         "civitai": set(),
         "danbooru": set(),
@@ -957,6 +1025,12 @@ def _gallery_tag_names_by_source(db: Session) -> dict[str, list[str]]:
 
 
 def _gallery_tag_names_by_source_db_only(db: Session) -> dict[str, list[str]]:
+    """DEPRECATED: Use _gallery_tag_names_by_source_from_observations instead.
+
+    Reads tag names from json_metadata JSON columns. Replaced by observation-based
+    counting that queries authority_terms + image_concept_observations tables.
+    Kept for reference only; no active callers.
+    """
     """Fast path for filter option hydration using DB metadata only.
 
     This intentionally avoids sidecar reads to keep startup filters responsive.
@@ -993,6 +1067,12 @@ def _gallery_tag_names_by_source_db_only(db: Session) -> dict[str, list[str]]:
 
 
 def _gallery_tag_usage_counts_by_source(db: Session) -> dict[str, dict[str, int]]:
+    """DEPRECATED: Use _gallery_tag_usage_counts_by_source_from_observations instead.
+
+    Reads usage counts from json_metadata JSON columns + sidecar files.
+    Replaced by observation-based counting.
+    Kept for reference only; no active callers.
+    """
     by_source: dict[str, dict[str, int]] = {
         "civitai": {},
         "danbooru": {},
@@ -1025,6 +1105,12 @@ def _gallery_tag_usage_counts_by_source(db: Session) -> dict[str, dict[str, int]
 
 
 def _gallery_tag_usage_counts_by_source_db_only(db: Session) -> dict[str, dict[str, int]]:
+    """DEPRECATED: Use _gallery_tag_usage_counts_by_source_from_observations instead.
+
+    Reads usage counts from json_metadata JSON columns. Replaced by observation-based
+    counting that queries authority_terms + image_concept_observations tables.
+    Kept for reference only; no active callers.
+    """
     """Fast path for tag usage counts using DB metadata only, avoiding sidecar reads.
 
     This provides approximate counts from json_metadata fields for responsive tree loads.
@@ -1058,6 +1144,129 @@ def _gallery_tag_usage_counts_by_source_db_only(db: Session) -> dict[str, dict[s
                 if not normalized_name:
                     continue
                 bucket[normalized_name] = int(bucket.get(normalized_name, 0)) + 1
+
+    return {
+        source: {
+            name: counts[name]
+            for name in sorted(counts)
+        }
+        for source, counts in by_source.items()
+    }
+
+
+def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, list[str]]:
+    """Gallery tag names sourced from DB observations instead of json_metadata.
+
+    Queries authority_terms joined with image_concept_observations to produce
+    the same ``{source: sorted([tag_name, ...])}`` shape as the legacy
+    ``_gallery_tag_names_by_source_db_only`` — but entirely from relational
+    tables with no JSON parsing.
+
+    User-assigned tags that exist only in the ``ImageModel.user_tags`` column
+    (not yet back-filled into authority_terms) are merged in so nothing is
+    lost.
+    """
+    by_source: dict[str, set[str]] = {
+        "civitai": set(),
+        "danbooru": set(),
+        "prompt": set(),
+        "user": set(),
+    }
+
+    # --- Core path: authority_terms + observations ---
+    obs_rows = (
+        db.query(
+            TagAuthority.name,
+            AuthorityTerm.external_name,
+        )
+        .join(AuthorityTerm, AuthorityTerm.authority_id == TagAuthority.id)
+        .join(ImageConceptObservation, ImageConceptObservation.authority_term_id == AuthorityTerm.id)
+        .join(ImageModel, ImageModel.id == ImageConceptObservation.image_id)
+        .filter(_active_image_filter())
+        .distinct()
+        .all()
+    )
+    for authority_name, external_name in obs_rows:
+        source_key = (authority_name or "").strip().lower()
+        if source_key in by_source and external_name:
+            by_source[source_key].add(_normalize_gallery_tag_text(external_name))
+
+    # --- Supplemental: user_tags column not yet in authority_terms ---
+    existing_user_term_names: set[str] = by_source.get("user", set())
+    user_rows = (
+        db.query(ImageModel.user_tags)
+        .filter(_active_image_filter())
+        .all()
+    )
+    for (user_tags_col,) in user_rows:
+        if not isinstance(user_tags_col, list):
+            continue
+        for tag in user_tags_col:
+            normalized = _normalize_gallery_tag_text(str(tag))
+            if normalized and normalized not in existing_user_term_names:
+                by_source["user"].add(normalized)
+
+    return {
+        source: sorted(name for name in names if name)
+        for source, names in by_source.items()
+    }
+
+
+def _gallery_tag_usage_counts_by_source_from_observations(db: Session) -> dict[str, dict[str, int]]:
+    """Gallery tag usage counts sourced from DB observations.
+
+    Returns ``{source: {tag_name: count}}`` where *count* is the number of
+    distinct active images observed with that tag from the given authority.
+
+    Mirrors the shape of ``_gallery_tag_usage_counts_by_source_db_only`` but
+    computes counts via SQL ``GROUP BY`` on pre-computed observation rows
+    instead of Python-side JSON parsing.
+    """
+    by_source: dict[str, dict[str, int]] = {
+        "civitai": {},
+        "danbooru": {},
+        "prompt": {},
+        "user": {},
+    }
+
+    # --- Core path: authority_terms + observations ---
+    count_rows = (
+        db.query(
+            TagAuthority.name,
+            AuthorityTerm.external_name,
+            func.count(func.distinct(ImageConceptObservation.image_id)),
+        )
+        .join(AuthorityTerm, AuthorityTerm.authority_id == TagAuthority.id)
+        .join(ImageConceptObservation, ImageConceptObservation.authority_term_id == AuthorityTerm.id)
+        .join(ImageModel, ImageModel.id == ImageConceptObservation.image_id)
+        .filter(_active_image_filter())
+        .group_by(TagAuthority.name, AuthorityTerm.external_name)
+        .all()
+    )
+    for authority_name, external_name, image_count in count_rows:
+        source_key = (authority_name or "").strip().lower()
+        if source_key in by_source and external_name:
+            normalized = _normalize_gallery_tag_text(external_name)
+            if normalized:
+                by_source[source_key][normalized] = int(image_count)
+
+    # --- Supplemental: user_tags column not yet in authority_terms ---
+    existing_user_term_names: set[str] = set(by_source.get("user", {}).keys())
+    user_rows = (
+        db.query(ImageModel.user_tags)
+        .filter(_active_image_filter())
+        .all()
+    )
+    user_tag_name_counts: dict[str, int] = {}
+    for (user_tags_col,) in user_rows:
+        if not isinstance(user_tags_col, list):
+            continue
+        for tag in user_tags_col:
+            normalized = _normalize_gallery_tag_text(str(tag))
+            if normalized and normalized not in existing_user_term_names:
+                user_tag_name_counts[normalized] = user_tag_name_counts.get(normalized, 0) + 1
+    for name, count in user_tag_name_counts.items():
+        by_source["user"][name] = count
 
     return {
         source: {
@@ -8467,6 +8676,12 @@ def _build_static_resource_variant(
                     file_name = resource_path.name
                     break
 
+    # Skip variant entirely if the referenced file does not exist on disk.
+    # This avoids building display_urls that will 404 (e.g. legacy ID-named
+    # variant paths for resources that were never downloaded).
+    if not resource_path.exists() or not resource_path.is_file():
+        return None
+
     mimetype = metadata_mime
     file_size = metadata_size
     file_hash = metadata_hash
@@ -8840,7 +9055,10 @@ def _load_display_image_items(
     include_tag: Optional[list[str]] = None,
     exclude_tag: Optional[list[str]] = None,
     group_variants: bool,
-) -> list[dict[str, Any]]:
+    skip: int = 0,
+    limit: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (paginated_display_items, total_filtered_count)."""
     display_cache_key = _build_search_cache_key(
         "images_display_items",
         payload={
@@ -8861,11 +9079,13 @@ def _load_display_image_items(
             "include_tag": _normalize_cache_list(include_tag),
             "exclude_tag": _normalize_cache_list(exclude_tag),
             "group_variants": bool(group_variants),
+            "skip": skip,
+            "limit": limit,
         },
     )
-    cached_items = _search_cache_get(display_cache_key)
-    if isinstance(cached_items, list):
-        return cached_items
+    cached_result = _search_cache_get(display_cache_key)
+    if isinstance(cached_result, dict) and "items" in cached_result:
+        return cached_result["items"], cached_result["filtered_count"]
 
     import time as _time
     _t0 = _time.perf_counter()
@@ -8941,6 +9161,17 @@ def _load_display_image_items(
     else:
         images_query = images_query.order_by(ImageModel.id.asc())
 
+    # Count total matching rows before pagination
+    total_count = images_query.with_entities(func.count(ImageModel.id)).scalar() or 0
+    _t5c = _time.perf_counter()
+    print(f"[PERF] count query: {_t5c-_t5b:.3f}s  total={total_count}")
+
+    # Apply SQL-level pagination
+    if skip > 0:
+        images_query = images_query.offset(skip)
+    if limit is not None:
+        images_query = images_query.limit(limit)
+
     images = images_query.all()
     _t6 = _time.perf_counter()
     print(f"[PERF] main query exec: {_t6-_t5:.3f}s  images={len(images)}")
@@ -8949,23 +9180,10 @@ def _load_display_image_items(
     for image in images:
         db_dict = ImageData.from_db_record(image).to_dict()
 
-        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
-        sidecar_dict: dict[str, Any] = {}
-        if sidecar_path.exists():
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    sidecar_dict = loaded
-            except (OSError, json.JSONDecodeError):
-                sidecar_dict = {}
+        # DB-only display: no sidecar reads.  All gallery-critical fields
+        # come from DB columns or json_metadata (a JSON column).
+        merged = db_dict
 
-        merged = {**db_dict, **sidecar_dict}
-        merged = _normalize_merged_image_payload(
-            image,
-            db_payload=db_dict,
-            merged_payload=merged,
-        )
         if (image.mimetype or "").lower().startswith("video/"):
             image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
             poster_path = get_video_poster_path(image_path, IMAGE_RESOURCES_PATH)
@@ -8981,20 +9199,17 @@ def _load_display_image_items(
         merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
         merged["user_nsfw_rating"] = image.user_nsfw_rating
         merged["user_nsfw_safety_class"] = image.user_nsfw_safety_class
-        # Inject DB-backed user_tags only when sidecar did not already provide them,
-        # so that sidecar remains the authority when present.
-        if "user_tags" not in merged or not merged["user_tags"]:
-            db_user_tags = getattr(image, "user_tags", None)
-            if isinstance(db_user_tags, list) and db_user_tags:
-                merged["user_tags"] = db_user_tags
+        db_user_tags = getattr(image, "user_tags", None)
+        if isinstance(db_user_tags, list) and db_user_tags:
+            merged["user_tags"] = db_user_tags
         display_items.extend(_build_display_items_for_image(image, merged, group_variants=group_variants))
 
     _t7 = _time.perf_counter()
-    print(f"[PERF] sidecar+display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
+    print(f"[PERF] display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
     print(f"[PERF] TOTAL: {_t7-_t0:.3f}s")
 
-    _search_cache_put(display_cache_key, display_items)
-    return display_items
+    _search_cache_put(display_cache_key, {"items": display_items, "filtered_count": total_count})
+    return display_items, total_count
 
 
 def _replace_image_with_uploaded_file(
@@ -10382,6 +10597,8 @@ async def lifespan(app: FastAPI):
     _ensure_user_tags_column()
     _ensure_image_variant_columns()
     _ensure_promoted_metadata_columns()
+    _ensure_original_file_name_column()
+    _ensure_blurhash_column()
     _ensure_observation_unique_constraint()
 
     print("AtelierAI API is ready to go!")
@@ -14097,7 +14314,7 @@ def read_images(
             "exclude_tag": _normalize_cache_list(exclude_tag),
         },
     )
-    cache_headers = _build_json_cache_headers(cache_key)
+    cache_headers = _build_json_cache_headers(cache_key, gallery=True)
     for header_name, header_value in cache_headers.items():
         response.headers[header_name] = header_value
     if _should_return_json_not_modified(request, cache_headers):
@@ -14110,7 +14327,7 @@ def read_images(
         if isinstance(items, list):
             return items
 
-    display_items = _load_display_image_items(
+    display_items, filtered_count = _load_display_image_items(
         db,
         sort_by=sort_by,
         search=search,
@@ -14129,20 +14346,20 @@ def read_images(
         include_tag=include_tag,
         exclude_tag=exclude_tag,
         group_variants=group_variants,
+        skip=skip,
+        limit=limit,
     )
-    filtered_count = len(display_items)
     response.headers["X-Filtered-Count"] = str(filtered_count)
-    response_payload = display_items[skip:skip + limit]
 
     _search_cache_put(
         cache_key,
         {
             "filtered_count": filtered_count,
-            "items": response_payload,
+            "items": display_items,
         },
     )
 
-    return response_payload
+    return display_items
 
 
 @app.get("/images/state", response_model=dict)
@@ -14234,7 +14451,7 @@ def read_image_keys(
             "exclude_tag": _normalize_cache_list(exclude_tag),
         },
     )
-    cache_headers = _build_json_cache_headers(cache_key)
+    cache_headers = _build_json_cache_headers(cache_key, gallery=True)
     for header_name, header_value in cache_headers.items():
         response.headers[header_name] = header_value
     if _should_return_json_not_modified(request, cache_headers):
@@ -15260,6 +15477,7 @@ def get_artists(
 def search_suggest(
     q: str = Query(default="", min_length=1, max_length=200),
     limit: int = Query(default=15, ge=1, le=50),
+    nsfw_rating: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Return matching collections, artists, and tags for autocomplete suggestions."""
@@ -15268,6 +15486,18 @@ def search_suggest(
         return {"collections": [], "artists": [], "tags": []}
 
     like_pattern = f"%{needle}%"
+    nsfw_ratings = nsfw_rating if nsfw_rating else None
+
+    # When NSFW filtering is active, precompute the set of allowed image IDs
+    # so tag/concept/alias queries only return tags from visible images.
+    nsfw_allowed_image_ids: Optional[set[int]] = None
+    if nsfw_ratings:
+        nsfw_filtered = _filter_image_ids_by_nsfw_ratings(
+            db.query(ImageModel).filter(_active_image_filter()),
+            nsfw_ratings,
+        )
+        if nsfw_filtered is not None:
+            nsfw_allowed_image_ids = set(nsfw_filtered)
 
     collection_rows = (
         db.query(CollectionModel.name)
@@ -15277,41 +15507,66 @@ def search_suggest(
         .all()
     )
 
-    artist_rows = (
+    artist_query = (
         db.query(Artist.name)
         .join(ImageModel, ImageModel.artist_id == Artist.id)
         .filter(
             _active_image_filter(),
             func.lower(Artist.name).like(like_pattern),
         )
-        .distinct()
-        .order_by(Artist.name)
-        .limit(limit)
-        .all()
     )
+    if nsfw_allowed_image_ids is not None:
+        artist_query = artist_query.filter(ImageModel.id.in_(nsfw_allowed_image_ids))
+    artist_rows = artist_query.distinct().order_by(Artist.name).limit(limit).all()
 
     # Tags: union of Tag.name, Concept.canonical_name, and ConceptAlias.normalized_alias
-    tag_name_rows = (
+    # When NSFW filtering is active, only include tags that appear on images with allowed ratings.
+    tag_name_query = (
         db.query(Tag.name)
         .filter(func.lower(Tag.name).like(like_pattern))
-        .order_by(Tag.name)
-        .limit(limit)
-        .all()
     )
-    concept_name_rows = (
+    concept_name_query = (
         db.query(Concept.canonical_name)
         .filter(func.lower(Concept.canonical_name).like(like_pattern))
-        .order_by(Concept.canonical_name)
-        .limit(limit)
-        .all()
     )
-    alias_name_rows = (
+    alias_name_query = (
         db.query(ConceptAlias.normalized_alias)
         .filter(func.lower(ConceptAlias.normalized_alias).like(like_pattern))
-        .order_by(ConceptAlias.normalized_alias)
-        .limit(limit)
-        .all()
     )
+
+    if nsfw_allowed_image_ids is not None:
+        # Restrict tags to those linked to at least one image with an allowed NSFW rating
+        allowed_ids_sub = (
+            db.query(ImageModel.id)
+            .filter(ImageModel.id.in_(nsfw_allowed_image_ids))
+            .subquery()
+        )
+        # Tag → image_tags → ImageModel
+        tag_name_query = (
+            tag_name_query
+            .join(ImageTag, ImageTag.tag_id == Tag.id)
+            .filter(ImageTag.image_id.in_(allowed_ids_sub))
+            .distinct()
+        )
+        # Concept → image_concept_observations → ImageModel
+        concept_name_query = (
+            concept_name_query
+            .join(ImageConceptObservation, ImageConceptObservation.concept_id == Concept.id)
+            .filter(ImageConceptObservation.image_id.in_(allowed_ids_sub))
+            .distinct()
+        )
+        # ConceptAlias → Concept → image_concept_observations → ImageModel
+        alias_name_query = (
+            alias_name_query
+            .join(Concept, Concept.id == ConceptAlias.concept_id)
+            .join(ImageConceptObservation, ImageConceptObservation.concept_id == Concept.id)
+            .filter(ImageConceptObservation.image_id.in_(allowed_ids_sub))
+            .distinct()
+        )
+
+    tag_name_rows = tag_name_query.order_by(Tag.name).limit(limit).all()
+    concept_name_rows = concept_name_query.order_by(Concept.canonical_name).limit(limit).all()
+    alias_name_rows = alias_name_query.order_by(ConceptAlias.normalized_alias).limit(limit).all()
 
     # Merge and deduplicate tag results, preserving sort order
     seen_tags: set[str] = set()
@@ -15446,7 +15701,7 @@ def get_filter_options(
         rating_tokens.update(ratings)
         safety_tokens.update(safeties)
 
-    tag_names_by_source = _gallery_tag_names_by_source_db_only(db)
+    tag_names_by_source = _gallery_tag_names_by_source_from_observations(db)
     tag_names = sorted({
         name
         for names in tag_names_by_source.values()
@@ -16974,8 +17229,8 @@ def taxonomy_tree_state(
     if isinstance(cached_state, dict):
         return cached_state
 
-    gallery_tag_names_by_source = _gallery_tag_names_by_source_db_only(db)
-    gallery_tag_usage_counts_by_source = _gallery_tag_usage_counts_by_source_db_only(db)
+    gallery_tag_names_by_source = _gallery_tag_names_by_source_from_observations(db)
+    gallery_tag_usage_counts_by_source = _gallery_tag_usage_counts_by_source_from_observations(db)
     gallery_tag_name_sets_by_source = {
         source: set(names)
         for source, names in gallery_tag_names_by_source.items()
@@ -17196,7 +17451,7 @@ def taxonomy_tree_tags_for_source(
     gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
     gallery_names_all = _search_cache_get(gallery_names_cache_key)
     if not isinstance(gallery_names_all, dict):
-        gallery_names_all = _gallery_tag_names_by_source_db_only(db)
+        gallery_names_all = _gallery_tag_names_by_source_from_observations(db)
         _search_cache_put(gallery_names_cache_key, gallery_names_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
     gallery_scope_names: set[str] = {
         _normalize_gallery_tag_text(n)
@@ -17304,7 +17559,7 @@ def taxonomy_tree_tags_for_source(
         usage_counts_cache_key = "_shared_gallery_tag_usage_counts_by_source"
         usage_counts_all = _search_cache_get(usage_counts_cache_key)
         if not isinstance(usage_counts_all, dict):
-            usage_counts_all = _gallery_tag_usage_counts_by_source_db_only(db)
+            usage_counts_all = _gallery_tag_usage_counts_by_source_from_observations(db)
             _search_cache_put(usage_counts_cache_key, usage_counts_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
         user_usage_counts = usage_counts_all.get("user", {})
 
@@ -17774,7 +18029,7 @@ def taxonomy_tag_maint_list(
     gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
     gallery_names_all = _search_cache_get(gallery_names_cache_key)
     if not isinstance(gallery_names_all, dict):
-        gallery_names_all = _gallery_tag_names_by_source_db_only(db)
+        gallery_names_all = _gallery_tag_names_by_source_from_observations(db)
         _search_cache_put(gallery_names_cache_key, gallery_names_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
     gallery_scope_names: set[str] = {
         _normalize_gallery_tag_text(n)

@@ -43,6 +43,7 @@ class ImageData:
     # File identification
     file_path: Optional[str] = None
     file_name: Optional[str] = None
+    original_file_name: Optional[str] = None
     file_hash: Optional[str] = None
 
     # File properties (file-derived)
@@ -61,12 +62,26 @@ class ImageData:
 
     # Extended metadata
     exif_data: Dict[str, Any] = field(default_factory=dict)
+    json_metadata: Dict[str, Any] = field(default_factory=dict)
     civitai_data: Dict[str, Any] = field(default_factory=dict)
+
+    # CivitAI identifiers
+    civitai_uuid: Optional[str] = None
+    civitai_hash: Optional[str] = None
+
+    # BlurHash placeholder
+    blurhash: Optional[str] = None
+
+    # Variant grouping
+    variant_group_key: Optional[str] = None
+    variant_role: Optional[str] = None
 
     def __post_init__(self):
         """Initialize fields after dataclass creation."""
         if self.exif_data is None:
             self.exif_data = {}
+        if self.json_metadata is None:
+            self.json_metadata = {}
         if self.civitai_data is None:
             self.civitai_data = {}
 
@@ -88,6 +103,7 @@ class ImageData:
         return cls(
             file_path=data.get("file_path"),
             file_name=data.get("file_name"),
+            original_file_name=data.get("original_file_name"),
             file_hash=data.get("file_hash"),
             file_size=data.get("file_size"),
             width=data.get("width"),
@@ -100,11 +116,17 @@ class ImageData:
             source_site=data.get("source_site"),
             license_id=data.get("license_id"),
             exif_data=data.get("exif_data", {}),
+            json_metadata=data.get("json_metadata", {}),
             civitai_data=(
                 data.get("civitai_data")
                 or data.get("civitai")
                 or (data.get("json_metadata") or {}).get("civitai", {})
             ),
+            civitai_uuid=data.get("civitai_uuid"),
+            civitai_hash=data.get("civitai_hash"),
+            blurhash=data.get("blurhash"),
+            variant_group_key=data.get("variant_group_key"),
+            variant_role=data.get("variant_role"),
         )
 
     @classmethod
@@ -153,6 +175,7 @@ class ImageData:
         return cls(
             file_path=db_record.file_path,
             file_name=db_record.file_name,
+            original_file_name=getattr(db_record, "original_file_name", None),
             file_hash=db_record.file_hash,
             file_size=db_record.file_size,
             width=db_record.width,
@@ -173,7 +196,13 @@ class ImageData:
             source_site=getattr(db_record, "source_site", None),
             license_id=db_record.license_id,
             exif_data=db_record.exif_data,
+            json_metadata=db_record.json_metadata or {},
             civitai_data=((db_record.json_metadata or {}).get("civitai", {})),
+            civitai_uuid=getattr(db_record, "civitai_uuid", None),
+            civitai_hash=getattr(db_record, "civitai_hash", None),
+            blurhash=getattr(db_record, "blurhash", None),
+            variant_group_key=getattr(db_record, "variant_group_key", None),
+            variant_role=getattr(db_record, "variant_role", None),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -186,6 +215,7 @@ class ImageData:
         return {
             "file_path": self.file_path,
             "file_name": self.file_name,
+            "original_file_name": self.original_file_name,
             "file_hash": self.file_hash,
             "file_size": self.file_size,
             "width": self.width,
@@ -198,7 +228,13 @@ class ImageData:
             "source_site": self.source_site,
             "license_id": self.license_id,
             "exif_data": self.exif_data,
+            "json_metadata": self.json_metadata,
             "civitai_data": self.civitai_data,
+            "civitai_uuid": self.civitai_uuid,
+            "civitai_hash": self.civitai_hash,
+            "blurhash": self.blurhash,
+            "variant_group_key": self.variant_group_key,
+            "variant_role": self.variant_role,
         }
 
     def to_json(self, indent: int = 2) -> str:

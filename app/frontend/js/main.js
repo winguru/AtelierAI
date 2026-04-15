@@ -2584,6 +2584,316 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    /**
+     * Recursively parse embedded JSON strings within an object.
+     * For example, if a value is '{"1": {"class_type": "KSampler"}}' it will
+     * be parsed into a real object so JSON.stringify produces indented output.
+     */
+    function deepParseJsonStrings(obj) {
+        if (obj === null || obj === undefined) {
+            return obj;
+        }
+        if (typeof obj === 'string') {
+            const parsed = parsePossibleJsonObject(obj);
+            return parsed ? deepParseJsonStrings(parsed) : obj;
+        }
+        if (Array.isArray(obj)) {
+            return obj.map(deepParseJsonStrings);
+        }
+        if (typeof obj === 'object') {
+            const result = {};
+            for (const key of Object.keys(obj)) {
+                result[key] = deepParseJsonStrings(obj[key]);
+            }
+            return result;
+        }
+        return obj;
+    }
+
+    /**
+     * Format an A1111/ComfyUI packed "parameters" string for display.
+     *
+     * The raw string looks like:
+     *   <positive prompt>\nNegative prompt: <neg tags>\nSteps: 20, Sampler: ..., Hashes: {...}, Version: ...
+     * Or without a Negative prompt section:
+     *   <positive prompt>\nSteps: 9, Sampler: Euler, ..., Civitai resources: [...], Civitai metadata: {...}
+     *
+     * We split on \n first (which separates the sections), then only
+     * split comma-separated Key: Value pairs in the KV metadata section
+     * (the part after "Negative prompt:", or the second+ segment if there's
+     * no "Negative prompt:").
+     * Prompt text sections (positive & negative) are kept as-is.
+     * Inline JSON fragments like Hashes: {...} and Civitai resources: [...] are expanded.
+     *
+     * Output lines have no absolute indent — the display formatter adds that.
+     */
+    function _formatA1111Parameters(text) {
+        if (typeof text !== 'string' || !text) return text;
+
+        // Split on \n literal or actual newlines
+        const segments = text.split(/\\n|\n/);
+
+        if (segments.length === 0) return text;
+
+        const formatted = [];
+        let foundNegPrompt = false;
+        let segmentIndex = 0;
+
+        for (const segment of segments) {
+            const trimmed = segment.trim();
+            if (!trimmed) continue;
+
+            // "Negative prompt:" starts the negative prompt section (kept as-is)
+            if (/^Negative prompt:/i.test(trimmed)) {
+                foundNegPrompt = true;
+                formatted.push(trimmed);
+                segmentIndex++;
+                continue;
+            }
+
+            // KV metadata section: either after "Negative prompt:" OR
+            // the second+ segment when there's no "Negative prompt:"
+            // (first segment is the positive prompt)
+            if (foundNegPrompt || segmentIndex > 0) {
+                const parts = _splitKVSegment(trimmed);
+                for (const part of parts) {
+                    formatted.push(_expandInlineJsonFragments(part));
+                }
+            } else {
+                // Positive prompt (first segment) — keep as-is (don't split on commas)
+                formatted.push(trimmed);
+            }
+            segmentIndex++;
+        }
+
+        return formatted.join('\n');
+    }
+
+    /**
+     * Expand inline JSON-like fragments (objects {...} and arrays [...]) in a
+     * single KV line. Uses brace-depth scanning instead of regex so it handles
+     * arbitrarily nested structures.
+     *
+     * E.g. 'Hashes: {"LORA:foo": "abc123"}' →
+     *   'Hashes: {\n  LORA:foo: abc123\n}'
+     *
+     * E.g. 'Civitai resources: [{"type":"checkpoint"}]' →
+     *   'Civitai resources: [\n  {\n    type: checkpoint\n  }\n]'
+     *
+     * Handles trailing text after the closing brace/bracket:
+     *   'Hashes: {"x": "1"} Version: ComfyUI' → expanded + '\nVersion: ComfyUI'
+     *
+     * Indentation is relative (2-space) — the display formatter adds absolute indent.
+     */
+    function _expandInlineJsonFragments(text) {
+        // Scan for patterns like "Key: {" or "Key: [" and find the matching close
+        // using depth tracking, then expand if parseable.
+        const result = [];
+        let i = 0;
+
+        while (i < text.length) {
+            // Look for a key followed by ": {" or ": ["
+            const keyMatch = text.slice(i).match(/^([A-Za-z][A-Za-z0-9 _-]*):\s*([{\[])/);
+            if (!keyMatch) {
+                result.push(text[i]);
+                i++;
+                continue;
+            }
+
+            const key = keyMatch[1];
+            const openChar = keyMatch[2];
+            const closeChar = openChar === '{' ? '}' : ']';
+            const keyEnd = i + keyMatch[0].length - 1; // index of opening brace/bracket
+            const jsonStart = keyEnd; // position of { or [
+
+            // Find matching close using depth tracking (respecting quoted strings)
+            let depth = 0;
+            let inStr = false;
+            let escape = false;
+            let jsonEnd = -1;
+
+            for (let j = jsonStart; j < text.length; j++) {
+                const ch = text[j];
+                if (escape) { escape = false; continue; }
+                if (ch === '\\' && inStr) { escape = true; continue; }
+                if (ch === '"' && !escape) { inStr = !inStr; continue; }
+                if (inStr) continue;
+                if (ch === '{' || ch === '[') depth++;
+                else if (ch === '}' || ch === ']') {
+                    depth--;
+                    if (depth === 0) { jsonEnd = j; break; }
+                }
+            }
+
+            if (jsonEnd === -1) {
+                // No matching close found — output chars as-is
+                result.push(text[i]);
+                i++;
+                continue;
+            }
+
+            const jsonStr = text.slice(jsonStart, jsonEnd + 1);
+            const parsed = parsePossibleJsonObject(jsonStr);
+
+            if (parsed === null || parsed === undefined) {
+                // Not valid JSON — output chars as-is
+                result.push(text[i]);
+                i++;
+                continue;
+            }
+
+            // Expand the parsed JSON
+            const expanded = _jsonToIndented(parsed, key + ':', 0);
+            result.push(expanded);
+
+            // Check for trailing text after the close
+            const rest = text.slice(jsonEnd + 1);
+            const trailing = rest.match(/^[,\s]+(\S.*)$/);
+            if (trailing) {
+                result.push('\n' + trailing[1].trim());
+                i = jsonEnd + 1 + trailing[0].length;
+            } else {
+                i = jsonEnd + 1;
+            }
+        }
+
+        return result.join('');
+    }
+
+    /**
+     * Recursively format a parsed JSON value as indented lines.
+     * prefix: the "Key:" label for the top level (e.g. "Hashes:")
+     * level: nesting depth (0 = top level within the value)
+     */
+    function _jsonToIndented(val, prefix, level) {
+        const pad = '  '.repeat(level);
+        const innerPad = '  '.repeat(level + 1);
+
+        if (Array.isArray(val)) {
+            if (val.length === 0) return prefix + ' []';
+            const items = val.map((item, idx) => {
+                const sep = idx < val.length - 1 ? ',' : '';
+                if (typeof item === 'object' && item !== null) {
+                    return innerPad + _jsonToIndented(item, '', level + 1).trimStart() + sep;
+                }
+                return innerPad + JSON.stringify(item) + sep;
+            });
+            return prefix + ' [\n' + items.join('\n') + '\n' + pad + ']';
+        }
+
+        if (typeof val === 'object' && val !== null) {
+            const entries = Object.entries(val);
+            if (entries.length === 0) return prefix + ' {}';
+            const items = entries.map(([k, v], idx) => {
+                const sep = idx < entries.length - 1 ? ',' : '';
+                const displayVal = (typeof v === 'object' && v !== null)
+                    ? _jsonToIndented(v, '', level + 1).trimStart()
+                    : (typeof v === 'string' ? v : JSON.stringify(v));
+                return innerPad + k + ': ' + displayVal + sep;
+            });
+            return prefix + ' {\n' + items.join('\n') + '\n' + pad + '}';
+        }
+
+        return prefix + ' ' + JSON.stringify(val);
+    }
+
+    /**
+     * Split a comma-separated string of A1111 "Key: Value" pairs into
+     * individual lines, respecting nested braces and parentheses.
+     * Only called on the KV metadata section (after "Negative prompt:").
+     */
+    function _splitKVSegment(text) {
+        const parts = [];
+        let depth = 0;
+        let current = '';
+
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '{' || ch === '(' || ch === '[') depth++;
+            else if (ch === '}' || ch === ')' || ch === ']') depth--;
+
+            if (ch === ',' && depth === 0) {
+                const part = current.trim();
+                if (part) parts.push(part);
+                current = '';
+            } else {
+                current += ch;
+            }
+        }
+        const last = current.trim();
+        if (last) parts.push(last);
+        return parts;
+    }
+
+    /**
+     * Apply A1111-style formatting to string values within a parsed EXIF object.
+     * Only formats values that look like packed parameter strings.
+     */
+    function formatExifStringValues(obj) {
+        if (obj === null || obj === undefined) return obj;
+        if (typeof obj === 'string') return _formatA1111Parameters(obj);
+        if (Array.isArray(obj)) return obj.map(formatExifStringValues);
+        if (typeof obj === 'object') {
+            const result = {};
+            for (const key of Object.keys(obj)) {
+                result[key] = formatExifStringValues(obj[key]);
+            }
+            return result;
+        }
+        return obj;
+    }
+
+    /**
+     * Format a parsed EXIF object for display in a <pre> element.
+     * Like JSON.stringify with 2-space indent, but string values that contain
+     * A1111-style packed parameters are expanded with real newlines and
+     * indentation so the <pre> renders them readably.
+     */
+    function _formatExifForDisplay(obj, indent = 0) {
+        const pad = ' '.repeat(indent);
+        const inner = ' '.repeat(indent + 2);
+
+        if (obj === null) return 'null';
+        if (obj === undefined) return 'undefined';
+        if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
+        if (typeof obj === 'string') return JSON.stringify(obj);
+
+        if (Array.isArray(obj)) {
+            if (obj.length === 0) return '[]';
+            const items = obj.map(v => inner + _formatExifForDisplay(v, indent + 2));
+            return '[\n' + items.join(',\n') + '\n' + pad + ']';
+        }
+
+        if (typeof obj === 'object') {
+            const keys = Object.keys(obj);
+            if (keys.length === 0) return '{}';
+
+            const entries = keys.map(key => {
+                const val = obj[key];
+                // Apply A1111 formatting to string values before display
+                const displayVal = (typeof val === 'string')
+                    ? _formatA1111Parameters(val)
+                    : val;
+
+                if (typeof displayVal === 'string' && displayVal.includes('\n')) {
+                    // Multi-line string: show with real newlines.
+                    // The first line (e.g. A1111 positive prompt) starts on the next line
+                    // after the key. Continuation lines get extra indent.
+                    const valPad = inner + '  '; // indent for all lines of the value
+                    const valLines = displayVal.split('\n');
+                    const indentedVal = valLines
+                        .map(line => valPad + line)
+                        .join('\n');
+                    return inner + JSON.stringify(key) + ':\n' + indentedVal;
+                }
+                return inner + JSON.stringify(key) + ': ' + _formatExifForDisplay(displayVal, indent + 2);
+            });
+            return '{\n' + entries.join(',\n') + '\n' + pad + '}';
+        }
+
+        return String(obj);
+    }
+
     function isNonEmptyGenerationValue(value) {
         if (value == null) {
             return false;
@@ -4013,9 +4323,17 @@ document.addEventListener('DOMContentLoaded', () => {
             return false;
         }
 
-        // Tag filters with mode (include/exclude)
+        // Tag filters with mode (include/exclude).
+        // When serverFilterMode is active and the server config includes tag
+        // filters, the server already applied them — skip client-side tag
+        // matching to avoid false negatives for concept-observation matches
+        // that aren't available in the image's client-side tag data.
         const selectedTags = getAdvancedFilterValues('tags');
-        if (selectedTags.length) {
+        const serverHandledTags = Boolean(state.serverFilterMode
+            && state.activeServerFilterConfig
+            && (state.activeServerFilterConfig.includeTags?.length
+                || state.activeServerFilterConfig.excludeTags?.length));
+        if (selectedTags.length && !serverHandledTags) {
             const imageTags = getImageTagSet(image);
             for (const tagEntry of selectedTags) {
                 const { mode, name } = _parseModePrefixEntry(tagEntry);
@@ -4239,7 +4557,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchSuggestions(query) {
-        const response = await fetch(`/search/suggest?q=${encodeURIComponent(query)}&limit=15`);
+        const params = new URLSearchParams({ q: query, limit: '15' });
+        _appendNsfwVisibilityParams(params);
+        const response = await fetch(`/search/suggest?${params.toString()}`);
         if (!response.ok) return { collections: [], artists: [], tags: [] };
         return response.json();
     }
@@ -8106,8 +8426,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ];
         metaNodes.forEach((node) => detailMeta.appendChild(node));
 
-        detailExif.textContent = JSON.stringify(image.exif_data || {}, null, 2);
-        detailCivitai.textContent = JSON.stringify(image.civitai_data || image.civitai || {}, null, 2);
+        detailExif.textContent = _formatExifForDisplay(deepParseJsonStrings(parsePossibleJsonObject(image.exif_data) || {}));
+        detailCivitai.textContent = JSON.stringify(deepParseJsonStrings(parsePossibleJsonObject(image.civitai_data || image.civitai) || {}), null, 2);
         void renderDetailGenerationPanel(image);
         renderImageCollections(image);
 
@@ -8225,6 +8545,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 img.alt = safeText(caption);
                 img.src = mediaUrl;
                 wireImageDragPayload(img, () => image);
+
+                // BlurHash canvas placeholder
+                const blurhashValue = image.blurhash || image.civitai_hash;
+                if (blurhashValue && typeof BlurHashDecode !== 'undefined') {
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.className = 'blurhash-canvas';
+                        canvas.width = 32;
+                        canvas.height = 32;
+                        const ctx = canvas.getContext('2d');
+                        const pixels = BlurHashDecode.decode(blurhashValue, 32, 32);
+                        if (pixels) {
+                            const imageData = new ImageData(pixels, 32, 32);
+                            ctx.putImageData(imageData, 0, 0);
+                            tile.appendChild(canvas);
+                            img.classList.add('fade-in');
+                            img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+                        }
+                    } catch (_) { /* non-critical; skip placeholder */ }
+                }
+
                 mediaNode = img;
             }
 
@@ -8273,8 +8614,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function computeFilteredImages(query) {
+        // When serverFilterMode is active the server already applied tag-based
+        // filtering (tree tags + advanced filter tag pills), so skip client-side
+        // tag checks that would otherwise produce false negatives for concept-
+        // observation matches that aren't available in the image's client-side
+        // tag data.
+        const skipTagFilters = Boolean(state.serverFilterMode
+            && state.activeServerFilterConfig
+            && (state.activeServerFilterConfig.includeTags?.length
+                || state.activeServerFilterConfig.excludeTags?.length));
+
         return state.allImages.filter((image) => {
-            if (!imageMatchesTreeTagFilter(image)) {
+            if (!skipTagFilters && !imageMatchesTreeTagFilter(image)) {
                 return false;
             }
 
@@ -8944,8 +9295,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 refreshBtn.textContent = 'Refresh';
             }
 
-            renderSelectionState({ force: true });
             state.galleryRefreshInFlight = false;
+            renderSelectionState({ force: true });
         }
     }
 

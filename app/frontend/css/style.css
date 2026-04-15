@@ -1112,6 +1112,29 @@ h1 {
     display: block;
 }
 
+/* BlurHash canvas placeholder */
+.blurhash-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 0;
+    pointer-events: none;
+}
+
+/* Fade-in transition for images with blurhash canvas siblings */
+.tile img.fade-in {
+    opacity: 0;
+    transition: opacity 280ms ease;
+    position: relative;
+    z-index: 1;
+}
+
+.tile img.fade-in.loaded {
+    opacity: 1;
+}
+
 .tile.video-tile img,
 .tile.video-tile video {
     position: absolute;

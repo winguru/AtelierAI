@@ -29,6 +29,7 @@ class ImageModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     file_path = Column(Text, unique=True, index=True, nullable=False)
     file_name = Column(String, nullable=False)
+    original_file_name = Column(String, nullable=True)
     file_hash = Column(String, unique=True, index=True, nullable=False)
     file_size = Column(Integer)
     width = Column(Integer)
@@ -48,6 +49,7 @@ class ImageModel(Base):
     source_site = Column(String)
     civitai_uuid = Column(String, nullable=True, index=True)
     civitai_hash = Column(String, nullable=True, index=True)
+    blurhash = Column(String, nullable=True)
     artist_id = Column(Integer, ForeignKey("artists.id"), nullable=True)
     license_id = Column(Integer, ForeignKey("licenses.id"), nullable=True)
 

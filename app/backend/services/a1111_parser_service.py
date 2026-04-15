@@ -49,6 +49,10 @@ _A1111_LORA_TAG_RE: re.Pattern = re.compile(
     re.IGNORECASE,
 )
 
+_A1111_DOUBLE_COMMA_RE: re.Pattern = re.compile(
+    r"[,\s]{2,}",
+)
+
 A1111_RP_DIRECTIVE_RE: re.Pattern = re.compile(
     r"\b(ADDCOMM|ADDROW|ADDCOL)\b", re.IGNORECASE,
 )
@@ -273,7 +277,12 @@ def parse_a1111_user_comment(text: str) -> dict[str, Any]:
         else:
             positive_lines = lines
 
-    positive_prompt = "\n".join(positive_lines).strip()
+    # Join positive lines, then collapse internal newlines to commas.
+    # Civitai and similar generators embed \n within the positive prompt
+    # section of UserComment as formatting artifacts.  Collapsing them to
+    # commas normalises the output to standard A1111 comma-separated format.
+    positive_prompt = ", ".join(line.rstrip(", ") for line in positive_lines).strip()
+    positive_prompt = _A1111_DOUBLE_COMMA_RE.sub(", ", positive_prompt).strip(", ")
     metadata_blob = ", ".join(metadata_lines).strip(" ,")
     if not metadata_blob and positive_prompt.lower().startswith("steps:"):
         metadata_blob = positive_prompt

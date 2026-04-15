@@ -2639,12 +2639,21 @@ document.addEventListener('DOMContentLoaded', () => {
         let foundNegPrompt = false;
         let segmentIndex = 0;
 
+        // Collect positive-prompt segments so we can collapse Civitai-style
+        // internal newlines into a single comma-separated line.
+        const positiveParts = [];
+
         for (const segment of segments) {
             const trimmed = segment.trim();
             if (!trimmed) continue;
 
             // "Negative prompt:" starts the negative prompt section (kept as-is)
             if (/^Negative prompt:/i.test(trimmed)) {
+                // Flush accumulated positive parts as a single line
+                if (positiveParts.length) {
+                    formatted.push(positiveParts.map(p => p.replace(/,\s*$/, '')).join(', '));
+                    positiveParts.length = 0;
+                }
                 foundNegPrompt = true;
                 formatted.push(trimmed);
                 segmentIndex++;
@@ -2652,18 +2661,31 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // KV metadata section: either after "Negative prompt:" OR
-            // the second+ segment when there's no "Negative prompt:"
-            // (first segment is the positive prompt)
-            if (foundNegPrompt || segmentIndex > 0) {
+            // when the segment looks like "Key: value" parameter pairs.
+            // Detect KV by checking if the segment contains A1111-style keys.
+            const looksLikeKV = /^[A-Za-z][A-Za-z0-9 _\-]*:\s*\S/.test(trimmed)
+                && /\b(Steps|Sampler|CFG|Seed|Size|Clip skip|Denoising|Hashes|Version|Model|Schedule|Lora hashes|TI hashes|EMD)\b/i.test(trimmed);
+
+            if (foundNegPrompt || looksLikeKV) {
+                // Flush accumulated positive parts as a single line
+                if (positiveParts.length) {
+                    formatted.push(positiveParts.map(p => p.replace(/,\s*$/, '')).join(', '));
+                    positiveParts.length = 0;
+                }
                 const parts = _splitKVSegment(trimmed);
                 for (const part of parts) {
                     formatted.push(_expandInlineJsonFragments(part));
                 }
             } else {
-                // Positive prompt (first segment) — keep as-is (don't split on commas)
-                formatted.push(trimmed);
+                // Positive prompt segment — accumulate for collapsing
+                positiveParts.push(trimmed);
             }
             segmentIndex++;
+        }
+
+        // Flush any remaining positive parts
+        if (positiveParts.length) {
+            formatted.push(positiveParts.map(p => p.replace(/,\s*$/, '')).join(', '));
         }
 
         return formatted.join('\n');

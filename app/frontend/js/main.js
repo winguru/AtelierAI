@@ -8707,7 +8707,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const sourceUrl = String(image.source_url || '').trim().toLowerCase();
-        return sourceUrl.startsWith('https://civitai.com/') || sourceUrl.startsWith('http://civitai.com/');
+        return sourceUrl.startsWith('https://civitai.com/') || sourceUrl.startsWith('http://civitai.com/')
+            || sourceUrl.startsWith('https://civitai.red/') || sourceUrl.startsWith('http://civitai.red/');
     }
 
     function deriveArtistProfileUrl(image) {
@@ -8729,7 +8730,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return null;
         }
 
-        return `https://civitai.com/user/${encodeURIComponent(artistName)}`;
+        return `${window.__ATELIER_CONFIG?.civitai_web_base_url || 'https://civitai.red'}/user/${encodeURIComponent(artistName)}`;
     }
 
     function extractCivitaiImageIdFromUrl(sourceUrl) {
@@ -10670,10 +10671,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function updateImportInputPlaceholder() {
+        const webBase = window.__ATELIER_CONFIG?.civitai_web_base_url || 'https://civitai.red';
         if (importTypeSelect.value === 'image') {
-            importValueInput.placeholder = 'https://civitai.com/images/... or 123456';
+            importValueInput.placeholder = `${webBase}/images/... or 123456`;
         } else {
-            importValueInput.placeholder = 'https://civitai.com/collections/... or 123456';
+            importValueInput.placeholder = `${webBase}/collections/... or 123456`;
         }
     }
 

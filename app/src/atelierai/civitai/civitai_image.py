@@ -2,8 +2,26 @@
 """CivitaiImage class for consistent image data handling and URL construction."""
 
 import json
+from importlib import import_module
 from typing import Any, Dict, List, Optional
 from .console_utils import ConsoleFormatter
+
+
+def _get_config_value(name: str) -> Optional[str]:
+    """Load a config value from the runtime config module."""
+    for module_name in ("atelierai.config", "config", "backend.config"):
+        try:
+            mod = import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        value = getattr(mod, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+_CIVITAI_CDN_BASE = _get_config_value("CIVITAI_CDN_BASE_URL") or "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
+_CIVITAI_WEB_BASE = _get_config_value("CIVITAI_WEB_BASE_URL") or "https://civitai.red"
 
 
 class CivitaiImage:
@@ -75,7 +93,7 @@ class CivitaiImage:
             if str(self.mime_type or "").lower().startswith("video/"):
                 transform_segment = "transcode=true,original=true"
             return (
-                f"https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/"
+                f"{_CIVITAI_CDN_BASE}/"
                 f"{self.url_hash}/{transform_segment}/{safe_name}"
             )
         return self.url_hash or ""
@@ -425,7 +443,7 @@ class CivitaiImage:
         fmt.print_key_value("URL", image.image_url)
 
         if image.author and image.author != "Unknown":
-            author_url = f"https://civitai.com/user/{image.author}"
+            author_url = f"{_CIVITAI_WEB_BASE}/user/{image.author}"
             fmt.print_key_value("Author URL", author_url)
 
         fmt.print_key_value("Author", image.author)

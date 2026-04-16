@@ -71,7 +71,7 @@ Deleted/Unavailable Models
     Model ID: 871004
     Version ID: 1498821
     Usage Count: 3
-    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.red/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 
 💡 Tip: The archive site (civitaiarchive.com) may have backups of deleted models.
@@ -81,7 +81,7 @@ Deleted/Unavailable Models
 
 ### API Endpoint Used
 ```
-https://civitai.com/api/trpc/modelVersion.getById?input={"json":{"id":<version_id>,"authed":true}}
+https://civitai.red/api/trpc/modelVersion.getById?input={"json":{"id":<version_id>,"authed":true}}
 ```
 
 ### Status Detection

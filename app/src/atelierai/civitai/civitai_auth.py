@@ -14,6 +14,11 @@ import atelierai.config as app_config
 from urllib.parse import quote
 from playwright.async_api import async_playwright, BrowserContext
 
+# Derive CivitAI domain URLs from config (supports civitai.com / civitai.red split).
+_CIVITAI_WEB_BASE = getattr(app_config, "CIVITAI_WEB_BASE_URL", None) or "https://civitai.red"
+_CIVITAI_TRPC_BASE = getattr(app_config, "CIVITAI_TRPC_BASE_URL", None) or "https://civitai.red/api/trpc"
+_CIVITAI_BASE_DOMAIN = getattr(app_config, "CIVITAI_BASE_DOMAIN", None) or "civitai.red"
+
 
 # CivitAI token is typically a JWT/JWE-like compact string beginning with "eyJ"
 # and containing dot-separated base64url segments.
@@ -138,7 +143,11 @@ class CivitaiAuthenticator:
                         if "Google blocked automated OAuth" in str(e):
                             raise
 
-                if "civitai.com" in current_url and "accounts.google.com" not in current_url:
+                # Accept both civitai.com and civitai.red as valid redirect targets.
+                if (
+                    ("civitai.com" in current_url or "civitai.red" in current_url)
+                    and "accounts.google.com" not in current_url
+                ):
                     return
 
             await asyncio.sleep(poll_interval)
@@ -150,7 +159,7 @@ class CivitaiAuthenticator:
             )
 
         raise Exception(
-            "OAuth authentication timed out. Did not return to civitai.com within 2 minutes."
+            f"OAuth authentication timed out. Did not return to {_CIVITAI_BASE_DOMAIN} within 2 minutes."
         )
 
     # ------------------------------------------------------------------
@@ -440,7 +449,7 @@ class CivitaiAuthenticator:
                 await password_input.fill(CIVITAI_PASSWORD)
                 login_button = page.get_by_role("button", name=re.compile("sign in|login|continue|submit", re.IGNORECASE))
                 await login_button.click()
-                await page.wait_for_url("https://civitai.com/*", timeout=60000)
+                await page.wait_for_url(f"{_CIVITAI_WEB_BASE}/*", timeout=60000)
                 print("✅ Email/password login successful!")
                 await context.storage_state(path=self.persist_state_file)
                 print(f"✅ Browser state saved to {self.persist_state_file}")
@@ -564,7 +573,7 @@ class CivitaiAuthenticator:
                 page = context.pages[0] if context.pages else await context.new_page()
 
                 print("Navigating to CivitAI...")
-                await page.goto("https://civitai.com/", timeout=60000)
+                await page.goto(f"{_CIVITAI_WEB_BASE}/", timeout=60000)
                 await asyncio.sleep(2)
 
                 if extract_only:
@@ -583,14 +592,14 @@ class CivitaiAuthenticator:
 
                     print("=" * 60)
                     print("MANUAL LOGIN MODE")
-                    print("1. In the opened Chrome window, sign in to civitai.com")
+                    print(f"1. In the opened Chrome window, sign in to {_CIVITAI_BASE_DOMAIN}")
                     print("2. Confirm you can see your signed-in account")
                     print("3. Return here and press Enter to extract the cookie")
                     print("=" * 60)
                     await asyncio.to_thread(input, "Press Enter when ready to extract token... ")
 
-                    # Ensure we're on civitai.com before reading cookies.
-                    await page.goto("https://civitai.com/", timeout=60000)
+                    # Ensure we're on the configured domain before reading cookies.
+                    await page.goto(f"{_CIVITAI_WEB_BASE}/", timeout=60000)
                     await asyncio.sleep(1)
 
                     print("🔑 Extracting session token after manual login...")
@@ -758,12 +767,12 @@ def _open_chrome_for_manual_profile_signin() -> None:
         "--args",
         f"--user-data-dir={profile_dir}",
         "--new-window",
-        "https://civitai.com/",
+        f"{_CIVITAI_WEB_BASE}/",
     ]
 
     printable_cmd = (
         f'open -na "Google Chrome" --args --user-data-dir="{profile_dir}" '
-        "--new-window https://civitai.com/"
+        f"--new-window {_CIVITAI_WEB_BASE}/"
     )
     print("🔧 Profile bootstrap command:")
     print(f"   {printable_cmd}")
@@ -796,7 +805,7 @@ def _try_bootstrap_profile_then_retry_extract(
         return None
 
     _open_chrome_for_manual_profile_signin()
-    print("1. Sign in to Google and civitai.com in the opened Chrome window.")
+    print(f"1. Sign in to Google and {_CIVITAI_BASE_DOMAIN} in the opened Chrome window.")
     print("2. Close that Chrome window when finished.")
     try:
         input("Press Enter to retry extraction... ")
@@ -834,8 +843,8 @@ def _prompt_for_manual_token() -> str | None:
     """Prompt user for a one-time manual CivitAI session token."""
     print()
     print("Manual token fallback")
-    print("- In normal Chrome, sign in to civitai.com")
-    print("- Open DevTools -> Application -> Cookies -> https://civitai.com")
+    print(f"- In normal Chrome, sign in to {_CIVITAI_BASE_DOMAIN}")
+    print(f"- Open DevTools -> Application -> Cookies -> {_CIVITAI_WEB_BASE}")
     print("- Copy the value of '__Secure-civitai-token'")
     print("- Paste it here (visible input); press Enter")
     print("- Press Enter on an empty line to cancel")
@@ -920,7 +929,7 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
     input_payload_cleartext = '{"json":{"authed":true}}'
     input_payload_encoded = quote(input_payload_cleartext, safe="")
     url = (
-        "https://civitai.com/api/trpc/collection.getAllUser"
+        f"{_CIVITAI_TRPC_BASE}/collection.getAllUser"
         f"?input={input_payload_encoded}"
     )
     headers = {
@@ -929,7 +938,7 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/136.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://civitai.com/",
+        "Referer": f"{_CIVITAI_WEB_BASE}/",
         # Send both names because CivitAI auth naming has changed across flows.
         "Cookie": (
             f"__Secure-civitai-token={token}; "
@@ -1165,7 +1174,7 @@ Examples:
     parser.add_argument('--visible', action='store_true', help='Force visible browser mode')
     parser.add_argument('--force', action='store_true', help='Force re-authentication')
     parser.add_argument('--new-profile', action='store_true', help='Reset and use a fresh local .civitai_chrome_profile')
-    parser.add_argument('--manual-login-extract', action='store_true', help='Wait for manual civitai.com login then extract cookie')
+    parser.add_argument('--manual-login-extract', action='store_true', help=f'Wait for manual {_CIVITAI_BASE_DOMAIN} login then extract cookie')
     parser.add_argument('--extract-only', action='store_true', help='Skip OAuth/sign-in and only extract token from current profile cookies')
     args = parser.parse_args()
 

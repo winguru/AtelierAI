@@ -892,7 +892,9 @@ def _parse_civitai_collection_id(value: str) -> int:
 
     parsed = urlparse(cleaned)
     hostname = (parsed.hostname or "").lower()
-    if hostname not in {"civitai.com", "www.civitai.com"}:
+    base_domain = getattr(app_config, "CIVITAI_BASE_DOMAIN", "civitai.red")
+    valid_hosts = {"civitai.com", "www.civitai.com", base_domain, f"www.{base_domain}"}
+    if hostname not in valid_hosts:
         raise HTTPException(
             status_code=400,
             detail="Invalid CivitAI collection URL host.",
@@ -941,7 +943,9 @@ def _detect_civitai_url_type(value: str) -> tuple[str, int]:
     try:
         parsed = urlparse(cleaned)
         hostname = (parsed.hostname or "").lower()
-        if hostname in {"civitai.com", "www.civitai.com"}:
+        base_domain = getattr(app_config, "CIVITAI_BASE_DOMAIN", "civitai.red")
+        valid_hosts = {"civitai.com", "www.civitai.com", base_domain, f"www.{base_domain}"}
+        if hostname in valid_hosts:
             match = _CIVITAI_COLLECTION_PATH_RE.match(parsed.path or "")
             if match:
                 collection_id = int(match.group("collection_id"))
@@ -1567,7 +1571,8 @@ def _build_civitai_video_candidate_urls(target: dict[str, Any]) -> list[str]:
 
     civitai_uuid = str(target.get("civitai_uuid") or "").strip() or _extract_civitai_uuid_from_url_hash(url_hash)
     if civitai_uuid:
-        urls.append(f"https://image-b2.civitai.com/file/civitai-media-cache/{civitai_uuid}/original")
+        cdn_alt = getattr(app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com")
+        urls.append(f"{cdn_alt}/file/civitai-media-cache/{civitai_uuid}/original")
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -1683,8 +1688,8 @@ def _build_civitai_media_url(
     if use_video_transcode and str(mime_type or "").lower().startswith("video/"):
         transform_segment = "transcode=true,original=true"
     return (
-        f"https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/"
-        f"{clean_hash}/{transform_segment}/{safe_name}"
+        f"{getattr(app_config, 'CIVITAI_CDN_BASE_URL', 'https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA')}"
+        f"/{clean_hash}/{transform_segment}/{safe_name}"
     )
 
 
@@ -2161,7 +2166,7 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
         "preview_image_url": preview_image_url,
         "original_filename": original_filename,
         "artist_name": author_name,
-        "source_url": f"https://civitai.com/images/{image_id}",
+        "source_url": f"{getattr(app_config, 'CIVITAI_WEB_BASE_URL', 'https://civitai.red')}/images/{image_id}",
         "civitai_url_hash": url_hash,
         "civitai_uuid": civitai_uuid,
         "civitai_hash": perceptual_hash,
@@ -4343,7 +4348,7 @@ def _build_local_generation_validation_payload(
         warnings.append("No persisted normalized generation process records exist; showing a metadata-derived preview.")
     if not sidecar_payload and not db_json and not exif_payload:
         errors.append("No sidecar JSON, json_metadata, or EXIF payload is available for this image.")
-    if source_url and "civitai.com/images/" in source_url and not isinstance(sidecar_payload.get("civitai") or db_json.get("civitai"), dict):
+    if source_url and ("civitai.com/images/" in source_url or "civitai.red/images/" in source_url) and not isinstance(sidecar_payload.get("civitai") or db_json.get("civitai"), dict):
         warnings.append("Image has a CivitAI source URL but no cached CivitAI metadata payload is stored locally.")
     if not str(_read_generation_software_for_image(image) or "").strip():
         warnings.append("No generation_software summary is currently available for this image.")
@@ -6144,7 +6149,7 @@ def _import_single_civitai_image(
     *,
     force_reimport_on_missing_metadata: bool = False,
 ) -> dict:
-    source_url = f"https://civitai.com/images/{image_id}"
+    source_url = f"{getattr(app_config, 'CIVITAI_WEB_BASE_URL', 'https://civitai.red')}/images/{image_id}"
     recovered_existing = False
 
     # Fast path: if this exact CivitAI source URL is already in library,
@@ -6839,7 +6844,7 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
 
 
 def _build_civitai_image_source_url(image_id: int) -> str:
-    return f"https://civitai.com/images/{image_id}"
+    return f"{getattr(app_config, 'CIVITAI_WEB_BASE_URL', 'https://civitai.red')}/images/{image_id}"
 
 
 def _build_civitai_collection_fingerprint(image_ids: list[int]) -> str:
@@ -8391,7 +8396,7 @@ def _extract_civitai_playable_video_url(merged_payload: dict[str, Any]) -> str:
     if not media_uuid:
         return media_url
 
-    return f"https://image-b2.civitai.com/file/civitai-media-cache/{media_uuid}/original"
+    return f"{getattr(app_config, 'CIVITAI_CDN_ALT_BASE_URL', 'https://image-b2.civitai.com')}/file/civitai-media-cache/{media_uuid}/original"
 
 
 def _get_asset_category_from_mime(mime_type: Optional[str]) -> str:
@@ -9186,6 +9191,9 @@ def _load_display_image_items(
                 merged["video_thumbnail_url"] = f"/images/{image.file_hash}/video_thumbnail"
         merged["collection_names"] = [c.name for c in image.collections]
         merged["collection_ids"] = [c.id for c in image.collections]
+        # Inject artist_name from the already-joined relationship so the
+        # frontend has it for detail-panel display and client-side filtering.
+        merged["artist_name"] = image.artist.name if image.artist is not None else None
         nsfw_ratings = _read_nsfw_ratings_for_image(image)
         merged["nsfw_ratings"] = nsfw_ratings
         merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
@@ -10064,7 +10072,10 @@ def _run_civitai_nsfw_backfill_job(
         query = (
             db.query(ImageModel.id)
             .filter(_active_image_filter())
-            .filter(func.lower(ImageModel.source_url).like("%civitai.com/images/%"))
+            .filter(
+                func.lower(ImageModel.source_url).like("%civitai.com/images/%")
+                | func.lower(ImageModel.source_url).like("%civitai.red/images/%")
+            )
             .order_by(ImageModel.id.asc())
         )
         if limit is not None:
@@ -10630,6 +10641,20 @@ app.mount("/frontend/images", StaticFiles(directory="images"), name="frontend_im
 @app.get("/")
 async def read_index():
     return FileResponse("frontend/index.html")
+
+
+# ---------------------------------------------------------------------------
+# Frontend configuration endpoint — exposes safe, read-only settings to the UI.
+# ---------------------------------------------------------------------------
+@app.get("/api/config")
+async def get_frontend_config():
+    """Return CivitAI domain configuration for frontend URL construction."""
+    return {
+        "civitai_web_base_url": getattr(app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red"),
+        "civitai_base_domain": getattr(app_config, "CIVITAI_BASE_DOMAIN", "civitai.red"),
+        "civitai_cdn_base_url": getattr(app_config, "CIVITAI_CDN_BASE_URL", "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"),
+        "civitai_cdn_alt_base_url": getattr(app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"),
+    }
 
 
 @app.get("/tree")
@@ -15566,7 +15591,7 @@ def _get_civitai_search_client():
 
 
 # CivitAI image CDN base for constructing URLs from Meilisearch UUIDs.
-_CIVITAI_IMAGE_CDN = "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
+_CIVITAI_IMAGE_CDN = getattr(app_config, "CIVITAI_CDN_BASE_URL", "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA")
 
 
 def _normalize_meili_hit(hit: dict) -> dict:
@@ -16899,7 +16924,8 @@ def _build_default_example_url(authority_name: str, external_name: str, metadata
 
     if normalized_authority == "civitai":
         encoded = quote(name, safe="")
-        return f"https://civitai.com/search/images?tags={encoded}&sortBy=images_v6"
+        web_base = getattr(app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red")
+        return f"{web_base}/search/images?tags={encoded}&sortBy=images_v6"
 
     if normalized_authority == "danbooru":
         wiki_url = str(metadata.get("wiki_url") or "").strip() if isinstance(metadata, dict) else ""

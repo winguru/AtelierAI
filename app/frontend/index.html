@@ -401,7 +401,7 @@
                             type="text"
                             id="import-value"
                             name="value"
-                            placeholder="https://civitai.com/collections/... or 123456"
+                            placeholder="CivitAI URL or ID (e.g. 123456)"
                             required
                         >
                     </label>
@@ -709,6 +709,11 @@
         </aside>
     </div>
 
+    <script>
+      // Bootstrap frontend config from backend before other scripts load.
+      window.__ATELIER_CONFIG = window.__ATELIER_CONFIG || {};
+      fetch('/api/config').then(r => r.json()).then(cfg => { Object.assign(window.__ATELIER_CONFIG, cfg); }).catch(() => {});
+    </script>
     <script src="/frontend/js/shared/preferences.js"></script>
     <script src="/frontend/js/shared/ui-kit.js"></script>
     <script src="/frontend/js/vendor/blurhash-decode.js"></script>

@@ -1,5 +1,7 @@
 # CivitAI API Reference
 
+> **Domain note (2025):** CivitAI split into two domains: `civitai.com` (sanitized/PG-13) and `civitai.red` (all existing content, PG through XXX). Both domains expose the same tRPC/REST API surface. AtelierAI defaults to `civitai.red` via the `CIVITAI_BASE_DOMAIN` env var; the CDN domains (`image.civitai.com`, `image-b2.civitai.com`) and search service (`search-new.civitai.com`) are unchanged.
+
 ## Overview
 
 This document documents all known CivitAI API endpoints, request formats, and response structures based on reverse-engineering and testing with the CivitAI Private Scraper project.

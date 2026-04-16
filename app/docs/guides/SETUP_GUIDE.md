@@ -14,10 +14,10 @@ The scraper uses the cookie `__Secure-civitai-token`, NOT `__Secure-next-auth.se
 
 ### Step 1: Get Your Session Token
 
-1. **Open Civitai.com** in your browser (Chrome, Firefox, Edge)
+1. **Open CivitAI** (`civitai.red` for full content or `civitai.com` for sanitized) in your browser (Chrome, Firefox, Edge)
 2. **Sign in** with your CivitAI account
 3. **Open Developer Tools** (F12)
-4. **Go to Application tab** > **Cookies** > **https://civitai.com`
+4. **Go to Application tab** > **Cookies** > **https://civitai.red** (or **https://civitai.com**)
 5. **Find the cookie** named `__Secure-civitai-token`
 6. **Copy the Value** (it's a long string starting with `eyJ...`)
 
@@ -81,7 +81,7 @@ Deleted/Unavailable Models
 
   🗑️  Deepthroat slider Pony/IllustriousXL
     Status: Deleted
-    CivitAI URL: https://civitai.com/models/871004?modelVersionId=1498821
+    CivitAI URL: https://civitai.red/models/871004?modelVersionId=1498821
     📦 Archive URL: https://civitaiarchive.com/models/871004?modelVersionId=1498821
 ```
 

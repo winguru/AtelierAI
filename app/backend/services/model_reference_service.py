@@ -13,6 +13,15 @@ from sqlalchemy.orm import joinedload
 from models import GenerationProcess, GenerationStage, ImageModel
 
 
+def _civitai_web_base_url() -> str:
+    """Resolve the CivitAI web base URL from config."""
+    try:
+        import atelierai.config as cfg
+        return getattr(cfg, "CIVITAI_WEB_BASE_URL", "https://civitai.red") or "https://civitai.red"
+    except ImportError:
+        return "https://civitai.red"
+
+
 _HEX_HASH_RE = re.compile(r"\b[a-f0-9]{8,64}\b", flags=re.IGNORECASE)
 
 
@@ -519,7 +528,7 @@ class ModelReferenceService:
 
         civitai_url = None
         if model_id is not None:
-            civitai_url = f"https://civitai.com/models/{int(model_id)}"
+            civitai_url = f"{_civitai_web_base_url()}/models/{int(model_id)}"
             if version_id is not None:
                 civitai_url = f"{civitai_url}?modelVersionId={int(version_id)}"
 

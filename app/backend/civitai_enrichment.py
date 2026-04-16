@@ -3,8 +3,32 @@ from importlib import import_module
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+# Load configured base domain for URL construction.
+def _get_config_value(name: str, default: str = "") -> str:
+    for mod_name in ("atelierai.config", "config", "backend.config"):
+        try:
+            mod = import_module(mod_name)
+        except ModuleNotFoundError:
+            continue
+        val = getattr(mod, name, None)
+        if val is not None:
+            return val
+    return default
+
+_CIVITAI_BASE_DOMAIN = _get_config_value("CIVITAI_BASE_DOMAIN", "civitai.red")
+_CIVITAI_WEB_BASE_URL = _get_config_value("CIVITAI_WEB_BASE_URL", "https://civitai.red")
 
 _CIVITAI_IMAGE_PATH_RE = re.compile(r"^/images/(?P<image_id>\d+)(?:/.*)?$")
+
+
+def _valid_civitai_hosts() -> set[str]:
+    """Return the set of valid CivitAI hostnames for URL validation.
+
+    Accepts both legacy civitai.com and the configured base domain so that
+    existing DB records continue to resolve while new imports use the
+    current domain.
+    """
+    return {"civitai.com", "www.civitai.com", _CIVITAI_BASE_DOMAIN, f"www.{_CIVITAI_BASE_DOMAIN}"}
 
 
 def is_civitai_image_url(source_url: Optional[str]) -> bool:
@@ -17,7 +41,7 @@ def is_civitai_image_url(source_url: Optional[str]) -> bool:
         return False
 
     hostname = (parsed.hostname or "").lower()
-    if hostname not in {"civitai.com", "www.civitai.com"}:
+    if hostname not in _valid_civitai_hosts():
         return False
 
     return _CIVITAI_IMAGE_PATH_RE.match(parsed.path or "") is not None
@@ -169,7 +193,7 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
 
         if author_name:
             data["author_name"] = author_name
-            data["author_profile"] = f"https://civitai.com/user/{author_name}"
+            data["author_profile"] = f"{_CIVITAI_WEB_BASE_URL}/user/{author_name}"
         if author_id is not None:
             data["author_id"] = author_id
 

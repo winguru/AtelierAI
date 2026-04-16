@@ -556,7 +556,7 @@
     if (civitaiPreviewButton instanceof HTMLButtonElement) {
       civitaiPreviewButton.disabled = true;
     }
-    const expectedSourceUrl = `https://civitai.com/images/${imageId}`;
+    const expectedSourceUrl = `${window.__ATELIER_CONFIG?.civitai_web_base_url || 'https://civitai.red'}/images/${imageId}`;
     try {
       const localItems = await fetchGalleryItems(String(imageId), 40);
       const localCached = localItems.find((item) => {

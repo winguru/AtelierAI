@@ -19,6 +19,8 @@ import os
 import re
 import threading
 from importlib import import_module
+from typing import Optional
+from importlib import import_module
 from typing import Any, Optional
 
 import requests
@@ -53,7 +55,20 @@ def _get_config_value(name: str) -> Any:
 # Search client
 # ---------------------------------------------------------------------------
 
-_SEARCH_BASE_URL = "https://search-new.civitai.com"
+def _get_config_value(name: str) -> Optional[str]:
+    """Load a config value from the runtime config module."""
+    for module_name in ("atelierai.config", "config", "backend.config"):
+        try:
+            mod = import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        value = getattr(mod, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+_SEARCH_BASE_URL = _get_config_value("CIVITAI_SEARCH_BASE_URL") or "https://search-new.civitai.com"
 _DEFAULT_INDEX = "images_v6"
 _DEFAULT_FACETS = [
     "aspectRatio",
@@ -68,7 +83,7 @@ _DEFAULT_FACETS = [
 _DEFAULT_LIMIT = 51
 _DEFAULT_SORT = "stats.reactionCountAllTime:desc"
 
-_REST_API_BASE = "https://civitai.com/api/v1"
+_REST_API_BASE = _get_config_value("CIVITAI_REST_BASE_URL") or "https://civitai.red/api/v1"
 
 # Map Meilisearch sort keys to REST API sort param values.
 _SORT_MAP = {

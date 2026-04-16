@@ -6,7 +6,15 @@
   /* ── Constants ── */
   const API_SEARCH = '/civitai-search';
   const API_AUTH_STATUS = '/civitai-search/auth-status';
-  const CIVITAI_IMAGE_URL = 'https://civitai.com/images/';
+
+  // Fallback; overwritten once /api/config resolves.
+  let CIVITAI_IMAGE_URL = 'https://civitai.red/images/';
+
+  fetch('/api/config')
+    .then(r => r.json())
+    .then(cfg => { if (cfg.civitai_web_base_url) CIVITAI_IMAGE_URL = cfg.civitai_web_base_url + '/images/'; })
+    .catch(() => {});
+
   const THUMB_SIZE = 180;
   const PAGE_SIZE = 51;
   const STORAGE_KEYS = {

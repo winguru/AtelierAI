@@ -41,7 +41,7 @@
     const implies = idx > 0 ? [sourceSeedList[idx - 1]] : [];
     const examples =
       source === 'civitai'
-        ? [`https://civitai.com/images/${100000 + idx}`]
+        ? [`${window.__ATELIER_CONFIG?.civitai_web_base_url || 'https://civitai.red'}/images/${100000 + idx}`]
         : source === 'danbooru'
           ? [`https://danbooru.donmai.us/posts?tags=${encodeURIComponent(name)}`]
           : source === 'prompt'

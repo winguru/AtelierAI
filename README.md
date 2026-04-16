@@ -218,25 +218,25 @@ python scripts/crawl_getinfinite.py
 
 # Main gallery videos, weekly, top reactions
 python scripts/crawl_getinfinite.py \
-	--url https://civitai.com/videos \
+	--url https://civitai.red/videos \
 	--period week \
 	--order "Most Reactions"
 
 # User gallery (images)
 python scripts/crawl_getinfinite.py \
-	--url https://civitai.com/user/TheDreadMerchant/images
+	--url https://civitai.red/user/TheDreadMerchant/images
 
 # Collection gallery
 python scripts/crawl_getinfinite.py \
-	--url https://civitai.com/collections/12176069
+	--url https://civitai.red/collections/12176069
 
 # Model gallery with modelVersion filter
 python scripts/crawl_getinfinite.py \
-	--url "https://civitai.com/models/871004?modelVersionId=1498821"
+	--url "https://civitai.red/models/871004?modelVersionId=1498821"
 
 # Resume an interrupted crawl in an existing output directory
 python scripts/crawl_getinfinite.py \
-	--url https://civitai.com/videos \
+	--url https://civitai.red/videos \
 	--period week \
 	--order "Most Reactions" \
 	--output-dir /tmp/civitai_videos_week \
@@ -244,7 +244,7 @@ python scripts/crawl_getinfinite.py \
 ```
 
 CLI flags:
-- `--url`: starting CivitAI gallery URL. Default: `https://civitai.com/images`
+- `--url`: starting CivitAI gallery URL. Default: `https://civitai.red/images`
 - `--period`: `day`, `week`, `month`, `year`, or `alltime`
 - `--order`: one of the validated `image.getInfinite` sort values
 - `--max-pages`: stop after `N` pages instead of crawling to exhaustion
@@ -263,7 +263,7 @@ Example with explicit flags:
 
 ```bash
 python scripts/crawl_getinfinite.py \
-	--url https://civitai.com/videos \
+	--url https://civitai.red/videos \
 	--period week \
 	--order "Most Reactions" \
 	--max-pages 10 \
@@ -272,12 +272,12 @@ python scripts/crawl_getinfinite.py \
 ```
 
 Supported URL patterns:
-- `https://civitai.com/images`
-- `https://civitai.com/videos`
-- `https://civitai.com/user/<username>/images`
-- `https://civitai.com/user/<username>/videos`
-- `https://civitai.com/collections/<collection_id>`
-- `https://civitai.com/models/<model_id>?modelVersionId=<model_version_id>`
+- `https://civitai.red/images`
+- `https://civitai.red/videos`
+- `https://civitai.red/user/<username>/images`
+- `https://civitai.red/user/<username>/videos`
+- `https://civitai.red/collections/<collection_id>`
+- `https://civitai.red/models/<model_id>?modelVersionId=<model_version_id>`
 
 Supported order values (currently validated by live API responses):
 - `Newest`

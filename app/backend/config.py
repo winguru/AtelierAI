@@ -82,7 +82,34 @@ except OSError as e:
 CURRENT_SCHEMA_VERSION = "1.5"  # Increment this when you make schema changes
 ALLOW_SCHEMA_RESET = _env_bool("ALLOW_SCHEMA_RESET", default=False)
 
-# --- CivitAI Configuration ---
+# --- CivitAI Domain Configuration ---
+# CivitAI split into two domains: civitai.com (sanitized) and civitai.red (all existing content).
+# Set CIVITAI_BASE_DOMAIN to choose which domain to use for API, auth, and web URLs.
+CIVITAI_BASE_DOMAIN = os.getenv("CIVITAI_BASE_DOMAIN", "civitai.red").strip()
+CIVITAI_TRPC_BASE_URL = f"https://{CIVITAI_BASE_DOMAIN}/api/trpc"
+CIVITAI_REST_BASE_URL = f"https://{CIVITAI_BASE_DOMAIN}/api/v1"
+CIVITAI_WEB_BASE_URL = f"https://{CIVITAI_BASE_DOMAIN}"
+
+# CDN domains — unchanged in the civitai.com → civitai.red split, but configurable
+# in case they diverge in the future.
+CIVITAI_CDN_BASE_URL = os.getenv(
+    "CIVITAI_CDN_BASE_URL", "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
+).strip()
+CIVITAI_CDN_ALT_BASE_URL = os.getenv(
+    "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"
+).strip()
+
+# Search service — separate subdomain, may or may not follow the base domain.
+CIVITAI_SEARCH_BASE_URL = os.getenv(
+    "CIVITAI_SEARCH_BASE_URL", "https://search-new.civitai.com"
+).strip()
+
+# CivitAI Archive — third-party mirror, unaffected by the domain split.
+CIVITAIARCHIVE_BASE_URL = os.getenv(
+    "CIVITAIARCHIVE_BASE_URL", "https://civitaiarchive.com"
+).strip()
+
+# --- CivitAI Authentication Configuration ---
 CIVITAI_API_KEY = os.getenv("CIVITAI_API_KEY", "")
 
 # Meilisearch public search key (static, embedded in CivitAI frontend JS).

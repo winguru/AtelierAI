@@ -85,7 +85,12 @@ class CivitaiAPI:
             # Non-auto mode still prefers the current cache-file value.
             self.session_cookie = self._get_session_token_from_cache() or ""
 
-        self.base_url = "https://civitai.com/api/trpc"
+        config_trpc_url = _get_config_value("CIVITAI_TRPC_BASE_URL")
+        config_web_url = _get_config_value("CIVITAI_WEB_BASE_URL")
+        config_archive_url = _get_config_value("CIVITAIARCHIVE_BASE_URL")
+        self.base_url = config_trpc_url or "https://civitai.red/api/trpc"
+        self._web_base_url = config_web_url or "https://civitai.red"
+        self._archive_base_url = config_archive_url or "https://civitaiarchive.com"
         self.http_client = CivitaiHttpClient(headers_factory=self._get_headers)
 
         # Default parameters based on CivitAI API
@@ -625,8 +630,8 @@ class CivitaiAPI:
             "available": False,
             "model_id": model_id,
             "model_version_id": model_version_id,
-            "civitai_url": f"https://civitai.com/models/{model_id}",
-            "archive_url": f"https://civitaiarchive.com/models/{model_id}",
+            "civitai_url": f"{self._web_base_url}/models/{model_id}",
+            "archive_url": f"{self._archive_base_url}/models/{model_id}",
             "status_code": None,
             "error": None,
             "model_status": None,

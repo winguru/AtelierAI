@@ -438,11 +438,12 @@
     if (!Number.isFinite(model) || model <= 0) {
       return null;
     }
+    const webBase = window.__ATELIER_CONFIG?.civitai_web_base_url || 'https://civitai.red';
     const version = Number(versionId);
     if (Number.isFinite(version) && version > 0) {
-      return `https://civitai.com/models/${model}?modelVersionId=${version}`;
+      return `${webBase}/models/${model}?modelVersionId=${version}`;
     }
-    return `https://civitai.com/models/${model}`;
+    return `${webBase}/models/${model}`;
   }
 
   function appendReferenceLinkListField(container, label, links) {

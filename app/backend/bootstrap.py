@@ -8,6 +8,15 @@ from database import SessionLocal
 from models import License, TagAuthority, Tool
 
 
+def _civitai_web_base_url() -> str:
+    """Resolve the CivitAI web base URL from config."""
+    try:
+        import atelierai.config as cfg
+        return getattr(cfg, "CIVITAI_WEB_BASE_URL", "https://civitai.red") or "https://civitai.red"
+    except ImportError:
+        return "https://civitai.red"
+
+
 _INITIAL_TOOLS = [
     {
         "name": "WD14 Tagger",
@@ -67,7 +76,7 @@ _INITIAL_AUTHORITIES = [
         "name": "civitai",
         "description": "CivitAI native tag authority and IDs.",
         "is_external": True,
-        "base_url": "https://civitai.com",
+        "base_url": _civitai_web_base_url(),
     },
     {
         "name": "danbooru",

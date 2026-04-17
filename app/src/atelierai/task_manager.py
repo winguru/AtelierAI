@@ -37,12 +37,22 @@ class _TaskRecord:
     counters: Dict[str, int] = field(default_factory=dict)
     item_status_counts: Dict[str, int] = field(default_factory=dict)
     item_states: Dict[str, str] = field(default_factory=dict)
-    recent_items: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=60))
+    recent_items: Deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=60)
+    )
     recent_errors: Deque[str] = field(default_factory=lambda: deque(maxlen=20))
-    failed_items: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=120))
-    unavailable_items: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=120))
-    missing_failures: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=200))
-    temporary_failures: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=200))
+    failed_items: Deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=120)
+    )
+    unavailable_items: Deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=120)
+    )
+    missing_failures: Deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=200)
+    )
+    temporary_failures: Deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=200)
+    )
     result: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -103,17 +113,27 @@ class TaskContext:
     def add_error(self, message: str) -> None:
         self._manager._add_error(self.task_id, message)
 
-    def mark_item(self, item_key: str, status: str, message: Optional[str] = None) -> None:
+    def mark_item(
+        self, item_key: str, status: str, message: Optional[str] = None
+    ) -> None:
         self._manager._mark_item(self.task_id, item_key, status, message)
 
     def mark_unavailable(self, item_key: str, message: str) -> None:
         self._manager._mark_unavailable(self.task_id, item_key, message)
 
-    def mark_missing_failure(self, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
-        self._manager._mark_missing_failure(self.task_id, item_key, message, item_data=item_data)
+    def mark_missing_failure(
+        self, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._manager._mark_missing_failure(
+            self.task_id, item_key, message, item_data=item_data
+        )
 
-    def mark_temporary_failure(self, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
-        self._manager._mark_temporary_failure(self.task_id, item_key, message, item_data=item_data)
+    def mark_temporary_failure(
+        self, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._manager._mark_temporary_failure(
+            self.task_id, item_key, message, item_data=item_data
+        )
 
     def check_cancelled(self) -> None:
         if self._manager.is_cancel_requested(self.task_id):
@@ -123,10 +143,14 @@ class TaskContext:
     def cancel_requested(self) -> bool:
         return self._manager.is_cancel_requested(self.task_id)
 
-    def complete(self, result: Optional[dict[str, Any]] = None, message: Optional[str] = None) -> None:
+    def complete(
+        self, result: Optional[dict[str, Any]] = None, message: Optional[str] = None
+    ) -> None:
         self._manager._complete(self.task_id, result, message)
 
-    def cancel(self, result: Optional[dict[str, Any]] = None, message: Optional[str] = None) -> None:
+    def cancel(
+        self, result: Optional[dict[str, Any]] = None, message: Optional[str] = None
+    ) -> None:
         self._manager._cancel(self.task_id, message or "Cancelled", result)
 
     def heartbeat(self, message: Optional[str] = None) -> None:
@@ -141,7 +165,9 @@ class BackgroundTaskManager:
         self._lock = threading.RLock()
         self._tasks: Dict[str, _TaskRecord] = {}
         self._retain_completed = max(10, int(retain_completed))
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="atelier-task")
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="atelier-task"
+        )
 
     def create_task(
         self,
@@ -168,7 +194,9 @@ class BackgroundTaskManager:
             self._start(task_id)
             try:
                 result = runner(context)
-                if self.is_cancel_requested(task_id) and self._get_status(task_id) not in {"completed", "failed"}:
+                if self.is_cancel_requested(task_id) and self._get_status(
+                    task_id
+                ) not in {"completed", "failed"}:
                     self._cancel(task_id, "Cancelled", None)
                     return
                 if self._get_status(task_id) == "running":
@@ -294,7 +322,9 @@ class BackgroundTaskManager:
             record.recent_errors.appendleft(message)
             record.updated_at = _utc_now()
 
-    def _mark_item(self, task_id: str, item_key: str, status: str, message: Optional[str]) -> None:
+    def _mark_item(
+        self, task_id: str, item_key: str, status: str, message: Optional[str]
+    ) -> None:
         normalized_key = str(item_key)
         normalized_status = str(status)
         with self._lock:
@@ -305,7 +335,9 @@ class BackgroundTaskManager:
                 if previous_count > 0:
                     record.item_status_counts[previous_status] = previous_count - 1
             record.item_states[normalized_key] = normalized_status
-            record.item_status_counts[normalized_status] = int(record.item_status_counts.get(normalized_status, 0)) + 1
+            record.item_status_counts[normalized_status] = (
+                int(record.item_status_counts.get(normalized_status, 0)) + 1
+            )
             record.recent_items.appendleft(
                 {
                     "item_key": normalized_key,
@@ -337,11 +369,18 @@ class BackgroundTaskManager:
             )
             record.updated_at = _utc_now()
 
-    def _mark_missing_failure(self, task_id: str, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
+    def _mark_missing_failure(
+        self,
+        task_id: str,
+        item_key: str,
+        message: str,
+        *,
+        item_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
         normalized_key = str(item_key)
         with self._lock:
             record = self._tasks[task_id]
-            entry = {
+            entry: Dict[str, Any] = {
                 "item_key": normalized_key,
                 "message": message,
                 "failure_type": "missing",
@@ -352,11 +391,18 @@ class BackgroundTaskManager:
             record.missing_failures.appendleft(entry)
             record.updated_at = _utc_now()
 
-    def _mark_temporary_failure(self, task_id: str, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
+    def _mark_temporary_failure(
+        self,
+        task_id: str,
+        item_key: str,
+        message: str,
+        *,
+        item_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
         normalized_key = str(item_key)
         with self._lock:
             record = self._tasks[task_id]
-            entry = {
+            entry: Dict[str, Any] = {
                 "item_key": normalized_key,
                 "message": message,
                 "failure_type": "temporary",
@@ -367,7 +413,9 @@ class BackgroundTaskManager:
             record.temporary_failures.appendleft(entry)
             record.updated_at = _utc_now()
 
-    def _complete(self, task_id: str, result: Optional[dict[str, Any]], message: Optional[str]) -> None:
+    def _complete(
+        self, task_id: str, result: Optional[dict[str, Any]], message: Optional[str]
+    ) -> None:
         with self._lock:
             record = self._tasks[task_id]
             record.status = "completed"
@@ -376,7 +424,9 @@ class BackgroundTaskManager:
             record.message = message or record.message or "Completed"
             record.updated_at = _utc_now()
 
-    def _cancel(self, task_id: str, message: str, result: Optional[dict[str, Any]]) -> None:
+    def _cancel(
+        self, task_id: str, message: str, result: Optional[dict[str, Any]]
+    ) -> None:
         with self._lock:
             record = self._tasks[task_id]
             record.status = "cancelled"

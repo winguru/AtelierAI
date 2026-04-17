@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, Optional
 import requests
 import urllib3.util.connection as urllib3_conn
 from requests import PreparedRequest, Response
+from requests.adapters import HTTPAdapter
 
 
 # ---------------------------------------------------------------------------
@@ -53,12 +54,12 @@ def _udp_resolve_a(hostname: str, dns_server: str, timeout: float = 3.0) -> list
             while data[idx] != 0:
                 idx += data[idx] + 1
             idx += 1
-        rtype = struct.unpack(">H", data[idx:idx + 2])[0]
+        rtype = struct.unpack(">H", data[idx : idx + 2])[0]
         idx += 8  # type(2) + class(2) + ttl(4)
-        rdlen = struct.unpack(">H", data[idx:idx + 2])[0]
+        rdlen = struct.unpack(">H", data[idx : idx + 2])[0]
         idx += 2
         if rtype == 1 and rdlen == 4:
-            answers.append(".".join(str(b) for b in data[idx:idx + 4]))
+            answers.append(".".join(str(b) for b in data[idx : idx + 4]))
         idx += rdlen
     return answers
 
@@ -86,7 +87,7 @@ def _resolve_with_fallback(hostname: str) -> list[str] | None:
     return None
 
 
-class _DnsFallbackAdapter(requests.adapters.HTTPAdapter):
+class _DnsFallbackAdapter(HTTPAdapter):
     """HTTPAdapter that retries with manual DNS resolution on getaddrinfo failure."""
 
     def send(
@@ -109,9 +110,12 @@ class _DnsFallbackAdapter(requests.adapters.HTTPAdapter):
             )
         except requests.ConnectionError as exc:
             # Only intercept DNS-resolution failures
-            if "Failed to resolve" not in str(exc) and "nodename nor servname" not in str(exc):
+            if "Failed to resolve" not in str(
+                exc
+            ) and "nodename nor servname" not in str(exc):
                 raise
             from urllib3.util import parse_url
+
             request_url = request.url
             if request_url is None:
                 raise
@@ -149,7 +153,13 @@ class _DnsFallbackAdapter(requests.adapters.HTTPAdapter):
 
 
 class CivitaiRequestError(RuntimeError):
-    def __init__(self, message: str, *, status_code: Optional[int] = None, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        retryable: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
@@ -177,12 +187,16 @@ class CivitaiHttpClient:
         self._thread_local = threading.local()
 
     @classmethod
-    def activate_global_backoff(cls, cooldown_seconds: float, *, reason: str = "rate-limit") -> float:
+    def activate_global_backoff(
+        cls, cooldown_seconds: float, *, reason: str = "rate-limit"
+    ) -> float:
         cooldown = max(30.0, float(cooldown_seconds or 0.0))
         now = time.time()
         target_until = now + cooldown
         with cls._GLOBAL_BACKOFF_LOCK:
-            cls._GLOBAL_BACKOFF_UNTIL = max(float(cls._GLOBAL_BACKOFF_UNTIL or 0.0), target_until)
+            cls._GLOBAL_BACKOFF_UNTIL = max(
+                float(cls._GLOBAL_BACKOFF_UNTIL or 0.0), target_until
+            )
             if reason:
                 cls._GLOBAL_BACKOFF_REASON = str(reason)
             return max(0.0, cls._GLOBAL_BACKOFF_UNTIL - now)
@@ -203,7 +217,9 @@ class CivitaiHttpClient:
         reason = ""
         with self._GLOBAL_BACKOFF_LOCK:
             reason = str(self._GLOBAL_BACKOFF_REASON or "rate-limit")
-        print(f"⏸️  CivitAI backoff active ({reason}); waiting {remaining:.1f}s before next request...")
+        print(
+            f"⏸️  CivitAI backoff active ({reason}); waiting {remaining:.1f}s before next request..."
+        )
         while remaining > 0.0:
             time.sleep(min(1.0, remaining))
             remaining = self.get_global_backoff_remaining_seconds()
@@ -252,7 +268,9 @@ class CivitaiHttpClient:
                     retry_after_seconds,
                     reason="HTTP 429",
                 )
-                print(f"⏳ CivitAI rate limit reached; enforcing global backoff for {enforced_wait:.1f}s")
+                print(
+                    f"⏳ CivitAI rate limit reached; enforcing global backoff for {enforced_wait:.1f}s"
+                )
                 last_error = CivitaiRequestError(
                     "CivitAI rate limit reached (HTTP 429)",
                     status_code=429,
@@ -314,7 +332,9 @@ class CivitaiHttpClient:
         try:
             return response.json()
         except ValueError as exc:
-            raise CivitaiRequestError("CivitAI returned invalid JSON", retryable=False) from exc
+            raise CivitaiRequestError(
+                "CivitAI returned invalid JSON", retryable=False
+            ) from exc
 
     def download_to_temp(
         self,
@@ -376,7 +396,10 @@ class CivitaiHttpClient:
                             temp_file.write(chunk)
                             bytes_written += len(chunk)
 
-                if expected_content_length is not None and bytes_written != expected_content_length:
+                if (
+                    expected_content_length is not None
+                    and bytes_written != expected_content_length
+                ):
                     raise CivitaiRequestError(
                         (
                             "Downloaded byte count did not match Content-Length "
@@ -385,8 +408,14 @@ class CivitaiHttpClient:
                         retryable=True,
                     )
 
-                if normalized_expected_size is not None and bytes_written != normalized_expected_size:
-                    if expected_content_length is not None and bytes_written == expected_content_length:
+                if (
+                    normalized_expected_size is not None
+                    and bytes_written != normalized_expected_size
+                ):
+                    if (
+                        expected_content_length is not None
+                        and bytes_written == expected_content_length
+                    ):
                         # Some CivitAI metadata payloads report stale/variant sizes.
                         # If transport-level length matches the full response, trust the
                         # completed download and allow ingest to continue.
@@ -432,7 +461,9 @@ class CivitaiHttpClient:
             self._thread_local.session = session
         return session
 
-    def _retry_delay(self, attempt: int, response: Optional[requests.Response] = None) -> float:
+    def _retry_delay(
+        self, attempt: int, response: Optional[requests.Response] = None
+    ) -> float:
         if response is not None:
             retry_after = response.headers.get("Retry-After")
             if retry_after:

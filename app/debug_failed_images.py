@@ -19,7 +19,7 @@ try:
             print(f"File Name: {image.file_name}")
             
             # Get the EXIF prompt
-            exif = image.exif_data if isinstance(image.exif_data, dict) else (json.loads(image.exif_data) if image.exif_data else {})
+            exif = image.exif_data if isinstance(image.exif_data, dict) else (json.loads(str(image.exif_data)) if image.exif_data is not None else {})
             prompt = exif.get('Prompt', '')
             print(f"Raw Prompt Length: {len(prompt)}")
             print(f"Raw Prompt Preview: {str(prompt)[:200]}")

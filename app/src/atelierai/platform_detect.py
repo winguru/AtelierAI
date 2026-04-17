@@ -178,7 +178,11 @@ def _platform_binary_candidates(binary_name: str) -> list[Path]:
             Path(os.getenv("ProgramFiles", r"C:\Program Files")),
             Path(os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")),
         ]
-        exe_name = binary_name if binary_name.lower().endswith(".exe") else f"{binary_name}.exe"
+        exe_name = (
+            binary_name
+            if binary_name.lower().endswith(".exe")
+            else f"{binary_name}.exe"
+        )
         candidates: list[Path] = []
         for root in program_files:
             if binary_name in {"ffmpeg", "ffprobe"}:
@@ -334,7 +338,9 @@ def _binary_preference_bonus(binary_name: str, candidate_path: Path) -> int:
     return bonus
 
 
-def _candidate_priority(binary_name: str, candidate_path: Path, source: str, version: Optional[str]) -> int:
+def _candidate_priority(
+    binary_name: str, candidate_path: Path, source: str, version: Optional[str]
+) -> int:
     source_weights = {
         "env": 1000,
         "platform-default": 700,
@@ -346,7 +352,13 @@ def _candidate_priority(binary_name: str, candidate_path: Path, source: str, ver
 
     version_key = _parse_version_key(version)
     if version_key:
-        priority += min(sum(part * (100 // (index + 1)) for index, part in enumerate(version_key[:4])), 500)
+        priority += min(
+            sum(
+                part * (100 // (index + 1))
+                for index, part in enumerate(version_key[:4])
+            ),
+            500,
+        )
     return priority
 
 
@@ -366,7 +378,9 @@ def _collect_binary_candidates(
 
     attempted_paths.extend(_platform_binary_candidates(binary_name))
     if extra_candidates:
-        attempted_paths.extend(Path(raw_candidate).expanduser() for raw_candidate in extra_candidates)
+        attempted_paths.extend(
+            Path(raw_candidate).expanduser() for raw_candidate in extra_candidates
+        )
     attempted_paths.extend(_path_binary_candidates(binary_name))
 
     unique_attempted = _dedupe_paths(attempted_paths)
@@ -378,7 +392,10 @@ def _collect_binary_candidates(
         if env_value:
             env_source_path = str(Path(env_value).expanduser().resolve(strict=False))
 
-    platform_paths = {str(path.resolve(strict=False)) for path in _platform_binary_candidates(binary_name)}
+    platform_paths = {
+        str(path.resolve(strict=False))
+        for path in _platform_binary_candidates(binary_name)
+    }
     extra_paths = {
         str(Path(raw_candidate).expanduser().resolve(strict=False))
         for raw_candidate in (extra_candidates or [])
@@ -408,7 +425,9 @@ def _collect_binary_candidates(
                 path=resolved_text,
                 source=source,
                 version=version,
-                priority=_candidate_priority(binary_name, resolved_candidate, source, version),
+                priority=_candidate_priority(
+                    binary_name, resolved_candidate, source, version
+                ),
             )
         )
 
@@ -486,7 +505,9 @@ def resolve_library(
             )
 
     if extra_candidates:
-        existing = _first_existing_path(Path(raw).expanduser() for raw in extra_candidates)
+        existing = _first_existing_path(
+            Path(raw).expanduser() for raw in extra_candidates
+        )
         if existing is not None:
             return ResolvedPath(
                 name=library_name,

@@ -20,7 +20,10 @@ def _get_config_value(name: str) -> Optional[str]:
     return None
 
 
-_CIVITAI_CDN_BASE = _get_config_value("CIVITAI_CDN_BASE_URL") or "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
+_CIVITAI_CDN_BASE = (
+    _get_config_value("CIVITAI_CDN_BASE_URL")
+    or "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
+)
 _CIVITAI_WEB_BASE = _get_config_value("CIVITAI_WEB_BASE_URL") or "https://civitai.red"
 
 
@@ -32,7 +35,7 @@ class CivitaiImage:
         image_id: int,
         url_hash: Optional[str] = None,
         image_name: Optional[str] = None,
-        mime_type: Optional[str] = "image/jpeg"
+        mime_type: Optional[str] = "image/jpeg",
     ):
         """Initialize a CivitaiImage.
 
@@ -109,12 +112,18 @@ class CivitaiImage:
         # Get expected extension based on MIME type
         target_ext = self._get_extension_from_mime(self.mime_type)
 
-        image_name = self.image_name if isinstance(self.image_name, str) and self.image_name.strip() else None
+        image_name = (
+            self.image_name
+            if isinstance(self.image_name, str) and self.image_name.strip()
+            else None
+        )
         if not image_name:
             return f"image_{self.image_id}{target_ext}"
 
         # Split current name into root and extension
-        base_name, current_ext = image_name.rsplit(".", 1) if "." in image_name else (image_name, "")
+        base_name, current_ext = (
+            image_name.rsplit(".", 1) if "." in image_name else (image_name, "")
+        )
 
         # Normalize current extension to lowercase for comparison
         if current_ext:
@@ -204,17 +213,26 @@ class CivitaiImage:
         # Tags - fetch from API if provided
         if api:
             from .civitai_api import CivitaiAPI
+
             if not isinstance(api, CivitaiAPI):
                 api = CivitaiAPI.get_instance()
             self.tags = api.fetch_image_tags(self.image_id)
             if self.tags:
                 print(f"  [OK] Fetched {len(self.tags)} tags for image {self.image_id}")
             else:
-                if hasattr(api, "is_rate_limited") and callable(api.is_rate_limited) and api.is_rate_limited():
+                if (
+                    hasattr(api, "is_rate_limited")
+                    and callable(api.is_rate_limited)
+                    and api.is_rate_limited()
+                ):
                     remaining = 0.0
-                    if hasattr(api, "rate_limit_remaining_seconds") and callable(api.rate_limit_remaining_seconds):
+                    if hasattr(api, "rate_limit_remaining_seconds") and callable(
+                        api.rate_limit_remaining_seconds
+                    ):
                         remaining = float(api.rate_limit_remaining_seconds() or 0.0)
-                    print(f"  [INFO] Tag fetch deferred due to CivitAI rate limit backoff ({remaining:.1f}s remaining)")
+                    print(
+                        f"  [INFO] Tag fetch deferred due to CivitAI rate limit backoff ({remaining:.1f}s remaining)"
+                    )
                 else:
                     print(f"  [WARN] No tags found for image {self.image_id}")
 
@@ -297,23 +315,44 @@ class CivitaiImage:
 
         # Extract generation parameters from meta
         self.base_model = first_meta_value("baseModel", "base_model", default="Unknown")
-        self.sampler = first_meta_value("sampler", "samplerName", "sampler_name", default="Unknown")
-        self.steps = to_int(first_meta_value("steps", "numSteps", "step_count", default=0), default=0)
+        self.sampler = first_meta_value(
+            "sampler", "samplerName", "sampler_name", default="Unknown"
+        )
+        self.steps = to_int(
+            first_meta_value("steps", "numSteps", "step_count", default=0), default=0
+        )
         self.cfg_scale = to_float(
-            first_meta_value("cfgScale", "cfg_scale", "cfg", "guidanceScale", "guidance", default=0),
+            first_meta_value(
+                "cfgScale", "cfg_scale", "cfg", "guidanceScale", "guidance", default=0
+            ),
             default=0,
         )
-        self.seed = to_int(first_meta_value("seed", "seedValue", "seed_value", default=0), default=0)
-        self.width = to_int(first_meta_value("width", "imageWidth", "image_width", default=0), default=0)
-        self.height = to_int(first_meta_value("height", "imageHeight", "image_height", default=0), default=0)
+        self.seed = to_int(
+            first_meta_value("seed", "seedValue", "seed_value", default=0), default=0
+        )
+        self.width = to_int(
+            first_meta_value("width", "imageWidth", "image_width", default=0), default=0
+        )
+        self.height = to_int(
+            first_meta_value("height", "imageHeight", "image_height", default=0),
+            default=0,
+        )
         self.prompt = str(
-            first_meta_value("prompt", "Prompt", "positivePrompt", "positive_prompt", default="")
+            first_meta_value(
+                "prompt", "Prompt", "positivePrompt", "positive_prompt", default=""
+            )
         )
         self.negative_prompt = str(
-            first_meta_value("negativePrompt", "negative_prompt", "negative", default="")
+            first_meta_value(
+                "negativePrompt", "negative_prompt", "negative", default=""
+            )
         )
-        self.process = str(first_meta_value("process", "generationProcess", default="unknown"))
-        self.engine = str(first_meta_value("engine", "software", "tool", default="unknown"))
+        self.process = str(
+            first_meta_value("process", "generationProcess", default="unknown")
+        )
+        self.engine = str(
+            first_meta_value("engine", "software", "tool", default="unknown")
+        )
         self.clip_skip = first_meta_value("clipSkip", "clip_skip")
         self.workflow = first_meta_value("workflow", "Workflow")
         self.draft = first_meta_value("draft", "isDraft")
@@ -353,7 +392,7 @@ class CivitaiImage:
                     "modelId": resource.get("id", "Unknown"),
                     "modelVersionId": model_version_id,
                     "versionName": version_name,
-                    "baseModel": base_model
+                    "baseModel": base_model,
                 }
 
                 # Check for CLIP weight in resource (optional parameter)
@@ -365,22 +404,28 @@ class CivitaiImage:
             elif resource_type == "checkpoint":
                 self.model = model_name
                 self.model_version = version_name or "Unknown"
-                self.models.append({
-                    "name": model_name,
-                    "version": version_name,
-                    "modelId": resource.get("id", "Unknown"),
-                    "modelVersionId": model_version_id,
-                    "baseModel": base_model
-                })
-            elif resource_type == "textualinversion" or "embedding" in model_name.lower():
-                self.embeddings.append({
-                    "name": model_name,
-                    "weight": strength,
-                    "modelId": resource.get("id", "Unknown"),
-                    "modelVersionId": model_version_id,
-                    "versionName": version_name,
-                    "baseModel": base_model
-                })
+                self.models.append(
+                    {
+                        "name": model_name,
+                        "version": version_name,
+                        "modelId": resource.get("id", "Unknown"),
+                        "modelVersionId": model_version_id,
+                        "baseModel": base_model,
+                    }
+                )
+            elif (
+                resource_type == "textualinversion" or "embedding" in model_name.lower()
+            ):
+                self.embeddings.append(
+                    {
+                        "name": model_name,
+                        "weight": strength,
+                        "modelId": resource.get("id", "Unknown"),
+                        "modelVersionId": model_version_id,
+                        "versionName": version_name,
+                        "baseModel": base_model,
+                    }
+                )
 
         # If we have models, update main model from first checkpoint
         if not self.models and self.model == "Unknown":
@@ -435,7 +480,7 @@ class CivitaiImage:
         return {k: v for k, v in data.items() if v is not None and v != "Unknown"}
 
     @staticmethod
-    def _print_basic_info(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_basic_info(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print basic image information."""
         fmt.print_subheader("Basic Information")
         fmt.print_blank()
@@ -452,7 +497,7 @@ class CivitaiImage:
         fmt.print_blank()
 
     @staticmethod
-    def _print_model_info(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_model_info(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print model generation information."""
         fmt.print_subheader("Model Information")
         fmt.print_blank()
@@ -473,7 +518,7 @@ class CivitaiImage:
         fmt.print_blank()
 
     @staticmethod
-    def _print_loras(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_loras(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print LoRA information."""
         if not image.loras:
             return
@@ -493,7 +538,7 @@ class CivitaiImage:
         fmt.print_blank()
 
     @staticmethod
-    def _print_tags(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_tags(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print tags information."""
         if not image.tags:
             return
@@ -505,7 +550,7 @@ class CivitaiImage:
         fmt.print_blank()
 
     @staticmethod
-    def _print_prompts(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_prompts(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print positive and negative prompts."""
         if image.prompt:
             fmt.print_subheader("Positive Prompt")
@@ -520,7 +565,7 @@ class CivitaiImage:
             fmt.print_blank()
 
     @staticmethod
-    def _print_additional_params(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_additional_params(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print additional parameters."""
         fmt.print_subheader("Additional Parameters")
         fmt.print_blank()
@@ -529,25 +574,33 @@ class CivitaiImage:
             "workflow": image.workflow,
             "draft": image.draft,
             "process": image.process,
-            "engine": image.engine
+            "engine": image.engine,
         }
 
         for key, value in meta_params.items():
             if value is not None:
                 if isinstance(value, dict):
                     value_str = str(value)
-                    display_val = value_str[:80] + "..." if len(value_str) > 80 else value_str
+                    display_val = (
+                        value_str[:80] + "..." if len(value_str) > 80 else value_str
+                    )
                     fmt.print_key_value(key.capitalize(), display_val)
                 elif isinstance(value, list):
                     value_str = str(value)
-                    display_val = value_str[:80] + "..." if len(value_str) > 80 else value_str
+                    display_val = (
+                        value_str[:80] + "..." if len(value_str) > 80 else value_str
+                    )
                     fmt.print_key_value(key.capitalize(), display_val)
                 else:
-                    fmt.print_key_value(key.capitalize(), str(value) if value != "Unknown" else "N/A")
+                    fmt.print_key_value(
+                        key.capitalize(), str(value) if value != "Unknown" else "N/A"
+                    )
         fmt.print_blank()
 
     @staticmethod
-    def _print_resource_list(key: str, value: List[Dict], fmt: ConsoleFormatter) -> None:
+    def _print_resource_list(
+        key: str, value: List[Dict], fmt: ConsoleFormatter
+    ) -> None:
         """Print resource lists (loras, embeddings, models)."""
         if not value:
             fmt.print_key_value(key, "[] (empty list)", indent=2)
@@ -585,7 +638,7 @@ class CivitaiImage:
                 fmt.print_key_value(f"  [{idx}]", item_str, indent=4)
 
     @staticmethod
-    def _print_raw_data(image: 'CivitaiImage', fmt: ConsoleFormatter) -> None:
+    def _print_raw_data(image: "CivitaiImage", fmt: ConsoleFormatter) -> None:
         """Print raw scraped data."""
         fmt.print_subheader("Raw Scraped Data")
         fmt.print_blank()
@@ -619,7 +672,9 @@ class CivitaiImage:
         fmt.print_blank()
 
     @staticmethod
-    def print_details(image: 'CivitaiImage', fmt: Optional[ConsoleFormatter] = None) -> None:
+    def print_details(
+        image: "CivitaiImage", fmt: Optional[ConsoleFormatter] = None
+    ) -> None:
         """Print comprehensive details for a CivitaiImage instance.
 
         Args:
@@ -655,7 +710,7 @@ class CivitaiImage:
         )
 
     @classmethod
-    def from_collection_item(cls, item: Dict, generation_data: Dict) -> 'CivitaiImage':
+    def from_collection_item(cls, item: Dict, generation_data: Dict) -> "CivitaiImage":
         """Create CivitaiImage from collection item and generation data.
 
         This matches the current collection scraper workflow.
@@ -676,7 +731,7 @@ class CivitaiImage:
             image_id=item.get("id", 0),
             url_hash=item.get("url"),
             image_name=item.get("name"),
-            mime_type=item.get("mimeType", "image/jpeg")
+            mime_type=item.get("mimeType", "image/jpeg"),
         )
 
         # Merge basic info from collection item
@@ -699,7 +754,11 @@ class CivitaiImage:
                     image.nsfw_level = int(float(cleaned_nsfw_level))
                 except ValueError:
                     image.nsfw_level = None
-        image.nsfw = image.nsfw_level > 0 if image.nsfw_level is not None else bool(raw_nsfw_level)
+        image.nsfw = (
+            image.nsfw_level > 0
+            if image.nsfw_level is not None
+            else bool(raw_nsfw_level)
+        )
 
         # Merge generation data
         image.merge_generation_data(generation_data)
@@ -707,7 +766,9 @@ class CivitaiImage:
         return image
 
     @classmethod
-    def from_single_image(cls, basic_info: Dict, generation_data: Dict, api=None) -> 'CivitaiImage':
+    def from_single_image(
+        cls, basic_info: Dict, generation_data: Dict, api=None
+    ) -> "CivitaiImage":
         """Create CivitaiImage from separate API calls.
 
         For single image analysis where we call image.get and getGenerationData.
@@ -723,13 +784,17 @@ class CivitaiImage:
         basic_info = basic_info if isinstance(basic_info, dict) else {}
         generation_data = generation_data if isinstance(generation_data, dict) else {}
 
-        image_id = (basic_info.get("id") if basic_info else None) or (generation_data.get("id") if generation_data else None) or 0
+        image_id = (
+            (basic_info.get("id") if basic_info else None)
+            or (generation_data.get("id") if generation_data else None)
+            or 0
+        )
 
         image = cls(
             image_id=image_id,
             url_hash=basic_info.get("url") if basic_info else None,
             image_name=basic_info.get("name") if basic_info else None,
-            mime_type=basic_info.get("mimeType") if basic_info else "image/jpeg"
+            mime_type=basic_info.get("mimeType") if basic_info else "image/jpeg",
         )
 
         # Merge both data sources (pass API for tag fetching)
@@ -743,10 +808,11 @@ class CivitaiImage:
 
 # ===== Utility Functions =====
 
+
 def merge_image_data(
     collection_item: Optional[Dict],
     generation_data: Dict,
-    single_image_mode: bool = False
+    single_image_mode: bool = False,
 ) -> CivitaiImage:
     """Helper function to merge image data from different sources.
 
@@ -778,10 +844,7 @@ def format_loras(loras: List[Dict]) -> str:
     if not loras:
         return "No LoRAs used"
 
-    return ", ".join([
-        f"{lora['name']} (w:{lora['weight']:.2f})"
-        for lora in loras
-    ])
+    return ", ".join([f"{lora['name']} (w:{lora['weight']:.2f})" for lora in loras])
 
 
 if __name__ == "__main__":
@@ -796,7 +859,7 @@ if __name__ == "__main__":
         "mimeType": "image/png",
         "user": {"username": "TestUser"},
         "createdAt": "2026-01-15T12:00:00Z",
-        "nsfwLevel": 0
+        "nsfwLevel": 0,
     }
 
     generation_data = {
@@ -804,11 +867,9 @@ if __name__ == "__main__":
             "baseModel": "SDXL",
             "prompt": "test prompt",
             "steps": 30,
-            "sampler": "DPM++ 2M Karras"
+            "sampler": "DPM++ 2M Karras",
         },
-        "resources": [
-            {"modelType": "lora", "modelName": "Test LoRA", "strength": 0.8}
-        ]
+        "resources": [{"modelType": "lora", "modelName": "Test LoRA", "strength": 0.8}],
     }
 
     image = CivitaiImage.from_single_image(basic_info, generation_data)

@@ -59,7 +59,9 @@ class PngRepacker:
 
     @staticmethod
     def _is_valid_chunk_type(value: bytes) -> bool:
-        return len(value) == 4 and all((65 <= b <= 90) or (97 <= b <= 122) for b in value)
+        return len(value) == 4 and all(
+            (65 <= b <= 90) or (97 <= b <= 122) for b in value
+        )
 
     @staticmethod
     def _pack_chunk(chunk_type: bytes, data: bytes) -> bytes:
@@ -76,8 +78,8 @@ class PngRepacker:
             if offset + 12 > len(raw):
                 raise ValueError(f"Truncated chunk header at 0x{offset:x}")
 
-            length = struct.unpack(">I", raw[offset:offset + 4])[0]
-            chunk_type = raw[offset + 4:offset + 8]
+            length = struct.unpack(">I", raw[offset : offset + 4])[0]
+            chunk_type = raw[offset + 4 : offset + 8]
             if not self._is_valid_chunk_type(chunk_type):
                 raise ValueError(f"Invalid chunk type at 0x{offset + 4:x}")
 

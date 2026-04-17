@@ -19,8 +19,6 @@ import os
 import re
 import threading
 from importlib import import_module
-from typing import Optional
-from importlib import import_module
 from typing import Any, Optional
 
 import requests
@@ -31,7 +29,9 @@ from .http_client import CivitaiRequestError
 # Config helpers
 # ---------------------------------------------------------------------------
 
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+)
 
 
 def _get_config_value(name: str) -> Any:
@@ -51,24 +51,9 @@ def _get_config_value(name: str) -> Any:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Search client
-# ---------------------------------------------------------------------------
-
-def _get_config_value(name: str) -> Optional[str]:
-    """Load a config value from the runtime config module."""
-    for module_name in ("atelierai.config", "config", "backend.config"):
-        try:
-            mod = import_module(module_name)
-        except ModuleNotFoundError:
-            continue
-        value = getattr(mod, name, None)
-        if value is not None:
-            return value
-    return None
-
-
-_SEARCH_BASE_URL = _get_config_value("CIVITAI_SEARCH_BASE_URL") or "https://search-new.civitai.com"
+_SEARCH_BASE_URL = (
+    _get_config_value("CIVITAI_SEARCH_BASE_URL") or "https://search-new.civitai.com"
+)
 _DEFAULT_INDEX = "images_v6"
 _DEFAULT_FACETS = [
     "aspectRatio",
@@ -83,7 +68,9 @@ _DEFAULT_FACETS = [
 _DEFAULT_LIMIT = 51
 _DEFAULT_SORT = "stats.reactionCountAllTime:desc"
 
-_REST_API_BASE = _get_config_value("CIVITAI_REST_BASE_URL") or "https://civitai.red/api/v1"
+_REST_API_BASE = (
+    _get_config_value("CIVITAI_REST_BASE_URL") or "https://civitai.red/api/v1"
+)
 
 # Map Meilisearch sort keys to REST API sort param values.
 _SORT_MAP = {
@@ -94,9 +81,7 @@ _SORT_MAP = {
 }
 
 # Regex to extract NEXT_PUBLIC_SEARCH_CLIENT_KEY from Civitai's _app JS chunk.
-_MEILI_KEY_RE = re.compile(
-    r'NEXT_PUBLIC_SEARCH_CLIENT_KEY:"([0-9a-f]{64})"'
-)
+_MEILI_KEY_RE = re.compile(r'NEXT_PUBLIC_SEARCH_CLIENT_KEY:"([0-9a-f]{64})"')
 
 
 class CivitaiSearchClient:
@@ -152,9 +137,8 @@ class CivitaiSearchClient:
             return self._meili_key
 
         # Try config module or environment.
-        key = (
-            _get_config_value("CIVITAI_MEILISEARCH_KEY")
-            or os.environ.get("CIVITAI_MEILISEARCH_KEY")
+        key = _get_config_value("CIVITAI_MEILISEARCH_KEY") or os.environ.get(
+            "CIVITAI_MEILISEARCH_KEY"
         )
         if key:
             self._meili_key = key
@@ -302,11 +286,15 @@ class CivitaiSearchClient:
 
         try:
             resp = requests.post(
-                url, headers=headers, json=payload, timeout=self._timeout,
+                url,
+                headers=headers,
+                json=payload,
+                timeout=self._timeout,
             )
         except requests.RequestException as exc:
             raise CivitaiRequestError(
-                f"Meilisearch request failed: {exc}", retryable=True,
+                f"Meilisearch request failed: {exc}",
+                retryable=True,
             ) from exc
 
         if resp.status_code != 200:
@@ -374,7 +362,8 @@ class CivitaiSearchClient:
             resp = requests.get(url, params=params, timeout=self._timeout)
         except requests.RequestException as exc:
             raise CivitaiRequestError(
-                f"REST search request failed: {exc}", retryable=True,
+                f"REST search request failed: {exc}",
+                retryable=True,
             ) from exc
 
         if resp.status_code != 200:

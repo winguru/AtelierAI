@@ -15,8 +15,12 @@ from urllib.parse import quote
 from playwright.async_api import async_playwright, BrowserContext
 
 # Derive CivitAI domain URLs from config (supports civitai.com / civitai.red split).
-_CIVITAI_WEB_BASE = getattr(app_config, "CIVITAI_WEB_BASE_URL", None) or "https://civitai.red"
-_CIVITAI_TRPC_BASE = getattr(app_config, "CIVITAI_TRPC_BASE_URL", None) or "https://civitai.red/api/trpc"
+_CIVITAI_WEB_BASE = (
+    getattr(app_config, "CIVITAI_WEB_BASE_URL", None) or "https://civitai.red"
+)
+_CIVITAI_TRPC_BASE = (
+    getattr(app_config, "CIVITAI_TRPC_BASE_URL", None) or "https://civitai.red/api/trpc"
+)
 _CIVITAI_BASE_DOMAIN = getattr(app_config, "CIVITAI_BASE_DOMAIN", None) or "civitai.red"
 
 
@@ -36,17 +40,24 @@ def _default_local_profile_dir() -> str:
 def _default_browser_state_file() -> str:
     return str(_REPO_ROOT / ".civitai_browser_state")
 
+
 # Try to import stealth mode
 STEALTH_AVAILABLE = False
 stealth_obj = None
 try:
     from playwright_stealth.stealth import Stealth  # type: ignore[import-untyped]
+
     # Create Stealth instance with macOS-correct platform override.
     # The default (Win32) conflicts with real macOS browser fingerprints and
     # triggers Google's bot detection during OAuth.
     import sys as _sys
+
     _platform_override = "MacIntel" if _sys.platform == "darwin" else None
-    stealth_obj = Stealth(navigator_platform_override=_platform_override) if _platform_override else Stealth()
+    stealth_obj = (
+        Stealth(navigator_platform_override=_platform_override)
+        if _platform_override
+        else Stealth()
+    )
     STEALTH_AVAILABLE = True
     print(f"✅ playwright-stealth loaded (platform={_platform_override or 'default'})")
 except ImportError as e:
@@ -135,8 +146,12 @@ class CivitaiAuthenticator:
                                         "Use the manual token fallback prompt to continue."
                                     )
                                 if not blocked_warning_shown:
-                                    print("⚠️  Google may be blocking this OAuth session in the browser window.")
-                                    print("   If this page persists, use the manual token fallback when prompted.")
+                                    print(
+                                        "⚠️  Google may be blocking this OAuth session in the browser window."
+                                    )
+                                    print(
+                                        "   If this page persists, use the manual token fallback when prompted."
+                                    )
                                     blocked_warning_shown = True
                     except Exception as e:
                         # Surface explicit blocked message and ignore transient page errors.
@@ -145,9 +160,8 @@ class CivitaiAuthenticator:
 
                 # Accept both civitai.com and civitai.red as valid redirect targets.
                 if (
-                    ("civitai.com" in current_url or "civitai.red" in current_url)
-                    and "accounts.google.com" not in current_url
-                ):
+                    "civitai.com" in current_url or "civitai.red" in current_url
+                ) and "accounts.google.com" not in current_url:
                     return
 
             await asyncio.sleep(poll_interval)
@@ -295,6 +309,7 @@ class CivitaiAuthenticator:
             await asyncio.sleep(0.5)
             try:
                 import urllib.request
+
                 urllib.request.urlopen(f"{cdp_url}/json/version", timeout=1)
                 break
             except Exception:
@@ -310,7 +325,9 @@ class CivitaiAuthenticator:
         print(f"✅ Chrome ready (PID {proc.pid}). Connecting Playwright via CDP...")
 
         browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
-        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        context = (
+            browser.contexts[0] if browser.contexts else await browser.new_context()
+        )
 
         return proc, context
 
@@ -326,7 +343,9 @@ class CivitaiAuthenticator:
         Only used when no Chrome binary is found.
         """
         profile_dir = _default_local_profile_dir()
-        print("⚠️  Falling back to Playwright-managed Chromium (may trigger Google bot detection)")
+        print(
+            "⚠️  Falling back to Playwright-managed Chromium (may trigger Google bot detection)"
+        )
 
         launch_kwargs = {
             "user_data_dir": profile_dir,
@@ -410,7 +429,9 @@ class CivitaiAuthenticator:
             print("=" * 60)
 
         try:
-            timeout_ms = int(getattr(app_config, "CIVITAI_OAUTH_TIMEOUT_MS", 180000) or 180000)
+            timeout_ms = int(
+                getattr(app_config, "CIVITAI_OAUTH_TIMEOUT_MS", 180000) or 180000
+            )
             await self._wait_for_oauth_completion(
                 context,
                 timeout_ms=max(30000, timeout_ms),
@@ -437,17 +458,26 @@ class CivitaiAuthenticator:
         print("Email/password login detected")
         print("⚠️  Note: For Google OAuth users, please use OAuth sign-in method")
 
-        CIVITAI_USERNAME = str(getattr(app_config, "CIVITAI_USERNAME", "") or "").strip()
-        CIVITAI_PASSWORD = str(getattr(app_config, "CIVITAI_PASSWORD", "") or "").strip()
+        CIVITAI_USERNAME = str(
+            getattr(app_config, "CIVITAI_USERNAME", "") or ""
+        ).strip()
+        CIVITAI_PASSWORD = str(
+            getattr(app_config, "CIVITAI_PASSWORD", "") or ""
+        ).strip()
 
         if CIVITAI_USERNAME and CIVITAI_PASSWORD:
             print("Attempting email/password login...")
             email_input = page.locator('input[type="email"], input[name="email"]').first
             if await email_input.count() > 0:
                 await email_input.fill(CIVITAI_USERNAME)
-                password_input = page.locator('input[type="password"], input[name="password"]').first
+                password_input = page.locator(
+                    'input[type="password"], input[name="password"]'
+                ).first
                 await password_input.fill(CIVITAI_PASSWORD)
-                login_button = page.get_by_role("button", name=re.compile("sign in|login|continue|submit", re.IGNORECASE))
+                login_button = page.get_by_role(
+                    "button",
+                    name=re.compile("sign in|login|continue|submit", re.IGNORECASE),
+                )
                 await login_button.click()
                 await page.wait_for_url(f"{_CIVITAI_WEB_BASE}/*", timeout=60000)
                 print("✅ Email/password login successful!")
@@ -478,7 +508,9 @@ class CivitaiAuthenticator:
             value = str(c.get("value") or "")
             if name in preferred_cookie_names and value:
                 matched.append(c)
-                print(f"  📌 Found preferred cookie: {name} (value length: {len(value)})")
+                print(
+                    f"  📌 Found preferred cookie: {name} (value length: {len(value)})"
+                )
 
         if matched:
             session_cookie = max(matched, key=lambda c: len(str(c.get("value") or "")))
@@ -499,10 +531,14 @@ class CivitaiAuthenticator:
             normalized = _normalize_token(value)
             if normalized:
                 fallback_candidates.append(c)
-                print(f"  📌 Found JWT-like auth cookie: {name} (value length: {len(value)})")
+                print(
+                    f"  📌 Found JWT-like auth cookie: {name} (value length: {len(value)})"
+                )
 
         if fallback_candidates:
-            session_cookie = max(fallback_candidates, key=lambda c: len(str(c.get("value") or "")))
+            session_cookie = max(
+                fallback_candidates, key=lambda c: len(str(c.get("value") or ""))
+            )
             token_value = str(session_cookie.get("value") or "")
             print(
                 f"✅ Using fallback JWT-like cookie: {session_cookie.get('name')} "
@@ -592,11 +628,15 @@ class CivitaiAuthenticator:
 
                     print("=" * 60)
                     print("MANUAL LOGIN MODE")
-                    print(f"1. In the opened Chrome window, sign in to {_CIVITAI_BASE_DOMAIN}")
+                    print(
+                        f"1. In the opened Chrome window, sign in to {_CIVITAI_BASE_DOMAIN}"
+                    )
                     print("2. Confirm you can see your signed-in account")
                     print("3. Return here and press Enter to extract the cookie")
                     print("=" * 60)
-                    await asyncio.to_thread(input, "Press Enter when ready to extract token... ")
+                    await asyncio.to_thread(
+                        input, "Press Enter when ready to extract token... "
+                    )
 
                     # Ensure we're on the configured domain before reading cookies.
                     await page.goto(f"{_CIVITAI_WEB_BASE}/", timeout=60000)
@@ -621,8 +661,15 @@ class CivitaiAuthenticator:
                     current_url = page.url
                     print(f"Current URL: {current_url}")
 
-                    is_oauth = any(provider in current_url.lower()
-                                   for provider in ['accounts.google.com', 'discord.com', 'oauth', 'auth'])
+                    is_oauth = any(
+                        provider in current_url.lower()
+                        for provider in [
+                            "accounts.google.com",
+                            "discord.com",
+                            "oauth",
+                            "auth",
+                        ]
+                    )
 
                     if is_oauth:
                         await self._handle_oauth_login(page, context, headless)
@@ -630,7 +677,9 @@ class CivitaiAuthenticator:
                         await self._handle_email_password_login(page, context)
 
                 if await page.locator("text=Sign In").count() > 0:
-                    raise Exception("Login appears to have failed - 'Sign In' button still visible")
+                    raise Exception(
+                        "Login appears to have failed - 'Sign In' button still visible"
+                    )
 
                 print("Waiting for page to settle...")
                 await asyncio.sleep(2)
@@ -718,7 +767,7 @@ def _load_cached_token(cache_file: str):
     """Try to load session token from cache file."""
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, 'r') as f:
+            with open(cache_file, "r") as f:
                 token = f.read().strip()
                 if token:
                     print("✅ Using cached session token...")
@@ -740,7 +789,9 @@ def _adjust_headless_mode(headless: bool):
     """Adjust headless mode if browser state not found."""
     state_file = _default_browser_state_file()
     if not os.path.exists(state_file) and headless:
-        print("⚠️  No browser state found. Switching to visible browser for OAuth login...")
+        print(
+            "⚠️  No browser state found. Switching to visible browser for OAuth login..."
+        )
         return False
     return headless
 
@@ -748,7 +799,7 @@ def _adjust_headless_mode(headless: bool):
 def _save_token_to_cache(token: str, cache_file: str):
     """Save session token to cache file."""
     try:
-        with open(cache_file, 'w') as f:
+        with open(cache_file, "w") as f:
             f.write(token)
         print(f"💾 Session token cached to {cache_file}")
     except Exception as e:
@@ -796,7 +847,11 @@ def _try_bootstrap_profile_then_retry_extract(
     print()
     print("Could not extract a valid CivitAI session cookie automatically.")
     try:
-        choice = input("Open Chrome for manual profile sign-in and retry extract? [Y/n]: ").strip().lower()
+        choice = (
+            input("Open Chrome for manual profile sign-in and retry extract? [Y/n]: ")
+            .strip()
+            .lower()
+        )
     except KeyboardInterrupt:
         print("\n⚠️  Bootstrap prompt cancelled.")
         return None
@@ -805,7 +860,9 @@ def _try_bootstrap_profile_then_retry_extract(
         return None
 
     _open_chrome_for_manual_profile_signin()
-    print(f"1. Sign in to Google and {_CIVITAI_BASE_DOMAIN} in the opened Chrome window.")
+    print(
+        f"1. Sign in to Google and {_CIVITAI_BASE_DOMAIN} in the opened Chrome window."
+    )
     print("2. Close that Chrome window when finished.")
     try:
         input("Press Enter to retry extraction... ")
@@ -929,8 +986,7 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
     input_payload_cleartext = '{"json":{"authed":true}}'
     input_payload_encoded = quote(input_payload_cleartext, safe="")
     url = (
-        f"{_CIVITAI_TRPC_BASE}/collection.getAllUser"
-        f"?input={input_payload_encoded}"
+        f"{_CIVITAI_TRPC_BASE}/collection.getAllUser" f"?input={input_payload_encoded}"
     )
     headers = {
         "User-Agent": (
@@ -1122,17 +1178,13 @@ def get_cached_or_refresh_session_token(
                 print("ℹ️  No valid token found in clipboard.")
                 token = _prompt_for_manual_token()
         if not token:
-            raise RuntimeError(
-                "Authentication cancelled. No manual token provided."
-            )
+            raise RuntimeError("Authentication cancelled. No manual token provided.")
 
     valid, definitive, message = _validate_token_with_civitai(token)
     if valid:
         print(f"✅ {message}")
     elif definitive:
-        raise RuntimeError(
-            f"Token appears invalid and was not saved: {message}"
-        )
+        raise RuntimeError(f"Token appears invalid and was not saved: {message}")
     else:
         print(f"⚠️  Token validation was inconclusive: {message}")
         print("   Saving token anyway because failure appears transient/non-auth.")
@@ -1143,8 +1195,9 @@ def get_cached_or_refresh_session_token(
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(
-        description='Get CivitAI session token (supports Google OAuth)',
+        description="Get CivitAI session token (supports Google OAuth)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1168,14 +1221,32 @@ Examples:
 
   # Headless mode (only works if already logged in via browser state)
   python civitai_auth.py --headless
-        """
+        """,
     )
-    parser.add_argument('--headless', action='store_true', help='Run in headless mode (requires prior browser state)')
-    parser.add_argument('--visible', action='store_true', help='Force visible browser mode')
-    parser.add_argument('--force', action='store_true', help='Force re-authentication')
-    parser.add_argument('--new-profile', action='store_true', help='Reset and use a fresh local .civitai_chrome_profile')
-    parser.add_argument('--manual-login-extract', action='store_true', help=f'Wait for manual {_CIVITAI_BASE_DOMAIN} login then extract cookie')
-    parser.add_argument('--extract-only', action='store_true', help='Skip OAuth/sign-in and only extract token from current profile cookies')
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in headless mode (requires prior browser state)",
+    )
+    parser.add_argument(
+        "--visible", action="store_true", help="Force visible browser mode"
+    )
+    parser.add_argument("--force", action="store_true", help="Force re-authentication")
+    parser.add_argument(
+        "--new-profile",
+        action="store_true",
+        help="Reset and use a fresh local .civitai_chrome_profile",
+    )
+    parser.add_argument(
+        "--manual-login-extract",
+        action="store_true",
+        help=f"Wait for manual {_CIVITAI_BASE_DOMAIN} login then extract cookie",
+    )
+    parser.add_argument(
+        "--extract-only",
+        action="store_true",
+        help="Skip OAuth/sign-in and only extract token from current profile cookies",
+    )
     args = parser.parse_args()
 
     headless_mode = args.headless and not args.visible

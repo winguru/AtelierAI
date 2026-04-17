@@ -337,13 +337,18 @@ def merge_prompt_tag_records(records: List[dict[str, Any]]) -> List[dict[str, An
         if not isinstance(record, dict):
             continue
 
-        normalized_name = normalize_prompt_tag_name(str(record.get("normalized_name") or record.get("name") or ""))
+        normalized_name = normalize_prompt_tag_name(
+            str(record.get("normalized_name") or record.get("name") or "")
+        )
         if not normalized_name:
             continue
 
         current = dict(record)
         current["normalized_name"] = normalized_name
-        if not isinstance(current.get("name"), str) or not str(current.get("name") or "").strip():
+        if (
+            not isinstance(current.get("name"), str)
+            or not str(current.get("name") or "").strip()
+        ):
             current["name"] = normalized_name
 
         existing = merged.get(normalized_name)
@@ -355,21 +360,35 @@ def merge_prompt_tag_records(records: List[dict[str, Any]]) -> List[dict[str, An
         current_kind = str(current.get("kind") or "")
         if existing_kind != current_kind and current_kind:
             kinds = {kind for kind in (existing_kind, current_kind) if kind}
-            existing["kind"] = "concept_phrase" if kinds == {"concept", "phrase"} else current_kind or existing_kind
+            existing["kind"] = (
+                "concept_phrase"
+                if kinds == {"concept", "phrase"}
+                else current_kind or existing_kind
+            )
 
         if not existing.get("source_type") and current.get("source_type"):
             existing["source_type"] = current.get("source_type")
         if not existing.get("source_label") and current.get("source_label"):
             existing["source_label"] = current.get("source_label")
-        if existing.get("danbooru_tag_id") is None and current.get("danbooru_tag_id") is not None:
+        if (
+            existing.get("danbooru_tag_id") is None
+            and current.get("danbooru_tag_id") is not None
+        ):
             existing["danbooru_tag_id"] = current.get("danbooru_tag_id")
-        if existing.get("danbooru_term_id") is None and current.get("danbooru_term_id") is not None:
+        if (
+            existing.get("danbooru_term_id") is None
+            and current.get("danbooru_term_id") is not None
+        ):
             existing["danbooru_term_id"] = current.get("danbooru_term_id")
 
         existing_confidence = existing.get("confidence")
         current_confidence = current.get("confidence")
-        if isinstance(existing_confidence, (int, float)) and isinstance(current_confidence, (int, float)):
-            existing["confidence"] = max(float(existing_confidence), float(current_confidence))
+        if isinstance(existing_confidence, (int, float)) and isinstance(
+            current_confidence, (int, float)
+        ):
+            existing["confidence"] = max(
+                float(existing_confidence), float(current_confidence)
+            )
 
     return list(merged.values())
 

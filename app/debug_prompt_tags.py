@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import os, sys, json
+from typing import Any
 os.chdir('/Users/winguru/Sources/AtelierAI/app')
 sys.path.insert(0, 'backend')
 
@@ -22,7 +23,8 @@ try:
         print(f"Image ID {img_id}: {image.file_name}")
         
         # Get and trim the prompt
-        exif = image.exif_data if isinstance(image.exif_data, dict) else (json.loads(image.exif_data) if image.exif_data else {})
+        raw_exif: Any = image.exif_data
+        exif = raw_exif if isinstance(raw_exif, dict) else (json.loads(raw_exif) if raw_exif else {})
         prompt = exif.get('Prompt', '')
         
         collector = ImageCollection(db)

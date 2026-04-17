@@ -165,6 +165,7 @@ class CivitaiAPI:
         if cache_path:
             try:
                 from .civitai_auth import _save_token_to_cache
+
                 _save_token_to_cache(new_cookie, cache_path)
             except Exception as exc:
                 print(f"⚠️  Could not persist cookie to cache: {exc}")
@@ -218,7 +219,9 @@ class CivitaiAPI:
         Attempts to automatically retrieve a session token.
         Priority: cache file > Playwright auth refresh
         """
-        token = self._get_session_token_from_cache() or self._get_session_token_from_auth()
+        token = (
+            self._get_session_token_from_cache() or self._get_session_token_from_auth()
+        )
 
         if token:
             return token
@@ -272,11 +275,17 @@ class CivitaiAPI:
             return self.http_client.request_json("GET", url, params=params)
         except CivitaiRequestError as e:
             if e.status_code == 403:
-                backoff = self.http_client.activate_global_backoff(90.0, reason="HTTP 403 (Cloudflare)")
-                print(f"🚫 CivitAI returned HTTP 403 (Cloudflare challenge); pausing all requests for {backoff:.0f}s")
+                backoff = self.http_client.activate_global_backoff(
+                    90.0, reason="HTTP 403 (Cloudflare)"
+                )
+                print(
+                    f"🚫 CivitAI returned HTTP 403 (Cloudflare challenge); pausing all requests for {backoff:.0f}s"
+                )
             if strict:
                 raise
-            status_text = f" (HTTP {e.status_code})" if e.status_code is not None else ""
+            status_text = (
+                f" (HTTP {e.status_code})" if e.status_code is not None else ""
+            )
             print(f"❌ API request error{status_text}: {e}")
             return None
 
@@ -290,7 +299,9 @@ class CivitaiAPI:
         endpoint_key = str(endpoint or "unknown")
         status_key = str(status_code) if status_code is not None else "unknown"
         with self._retry_metrics_lock:
-            self._payload_retry_metrics["total"] = int(self._payload_retry_metrics.get("total", 0)) + 1
+            self._payload_retry_metrics["total"] = (
+                int(self._payload_retry_metrics.get("total", 0)) + 1
+            )
 
             by_status = self._payload_retry_metrics.get("by_status")
             if not isinstance(by_status, dict):
@@ -312,10 +323,14 @@ class CivitaiAPI:
             return {
                 "total": int(self._payload_retry_metrics.get("total", 0)),
                 "by_status": dict(by_status) if isinstance(by_status, dict) else {},
-                "by_endpoint": dict(by_endpoint) if isinstance(by_endpoint, dict) else {},
+                "by_endpoint": (
+                    dict(by_endpoint) if isinstance(by_endpoint, dict) else {}
+                ),
             }
 
-    def _make_request(self, endpoint: str, payload_data: Dict, *, strict: bool = False) -> Optional[Dict]:
+    def _make_request(
+        self, endpoint: str, payload_data: Dict, *, strict: bool = False
+    ) -> Optional[Dict]:
         """Make a request to CivitAI API.
 
         Args:
@@ -343,7 +358,11 @@ class CivitaiAPI:
                 raw_error_data = error_json.get("data")
                 error_data = raw_error_data if isinstance(raw_error_data, dict) else {}
                 status_code = error_data.get("httpStatus")
-                message = error_json.get("message") or error_payload.get("message") or "CivitAI tRPC request failed"
+                message = (
+                    error_json.get("message")
+                    or error_payload.get("message")
+                    or "CivitAI tRPC request failed"
+                )
 
                 detail = message
                 if status_code is not None:
@@ -351,7 +370,9 @@ class CivitaiAPI:
                 elif error_data.get("path"):
                     detail = f"{message} ({error_data.get('path')})"
 
-                normalized_status = status_code if isinstance(status_code, int) else None
+                normalized_status = (
+                    status_code if isinstance(status_code, int) else None
+                )
                 retryable = bool(normalized_status in self._TRPC_RETRYABLE_STATUS_CODES)
                 if normalized_status == 429:
                     backoff_seconds = self.http_client.activate_global_backoff(
@@ -371,7 +392,11 @@ class CivitaiAPI:
                 if retryable and attempt < max_attempts:
                     self._record_payload_retry(endpoint, normalized_status)
                     if not strict:
-                        status_text = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+                        status_text = (
+                            f" (HTTP {exc.status_code})"
+                            if exc.status_code is not None
+                            else ""
+                        )
                         print(
                             f"⚠️  API request retry {attempt}/{max_attempts - 1}{status_text}: {message}"
                         )
@@ -382,7 +407,9 @@ class CivitaiAPI:
                 if strict:
                     raise exc
 
-                status_text = f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+                status_text = (
+                    f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
+                )
                 print(f"❌ API request error{status_text}: {exc}")
                 return None
 
@@ -408,7 +435,9 @@ class CivitaiAPI:
         return None
 
     def _archive_root(self) -> Path:
-        image_resources_path = _get_config_value("IMAGE_RESOURCES_PATH") or "image_resources"
+        image_resources_path = (
+            _get_config_value("IMAGE_RESOURCES_PATH") or "image_resources"
+        )
         return Path(image_resources_path) / "civitai_api_responses"
 
     def _extract_uuid_from_hash(self, hash_value: Optional[str]) -> Optional[str]:
@@ -429,9 +458,15 @@ class CivitaiAPI:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
-    def _archive_metadata_response(self, *, endpoint: str, payload_data: Dict[str, Any], response_json: Any) -> None:
+    def _archive_metadata_response(
+        self, *, endpoint: str, payload_data: Dict[str, Any], response_json: Any
+    ) -> None:
         # Capture metadata fetches globally so import/check/probe paths all persist payloads.
-        if endpoint not in {"image.get", "image.getGenerationData", "image.getInfinite"}:
+        if endpoint not in {
+            "image.get",
+            "image.getGenerationData",
+            "image.getInfinite",
+        }:
             return
 
         try:
@@ -450,18 +485,26 @@ class CivitaiAPI:
                     if image_id is not None and uuid_value:
                         self._image_uuid_index[int(image_id)] = uuid_value
 
-                    self._archive_json_file(f"civitai_image_get_{key}.json", response_json)
+                    self._archive_json_file(
+                        f"civitai_image_get_{key}.json", response_json
+                    )
                     return
 
-                if endpoint == "image.getGenerationData" and isinstance(response_json, dict):
+                if endpoint == "image.getGenerationData" and isinstance(
+                    response_json, dict
+                ):
                     image_id = payload_data.get("id")
                     uuid_value = None
                     if image_id is not None:
                         uuid_value = self._image_uuid_index.get(int(image_id))
-                    key = uuid_value or (f"imageid_{int(image_id)}" if image_id is not None else None)
+                    key = uuid_value or (
+                        f"imageid_{int(image_id)}" if image_id is not None else None
+                    )
                     if key is None:
                         return
-                    self._archive_json_file(f"civitai_image_getGenerationData_{key}.json", response_json)
+                    self._archive_json_file(
+                        f"civitai_image_getGenerationData_{key}.json", response_json
+                    )
                     return
 
                 if endpoint == "image.getInfinite" and isinstance(response_json, dict):
@@ -473,12 +516,16 @@ class CivitaiAPI:
                             continue
                         item_id = item.get("id")
                         uuid_value = self._extract_uuid_from_hash(item.get("url"))
-                        key = uuid_value or (f"imageid_{int(item_id)}" if item_id is not None else None)
+                        key = uuid_value or (
+                            f"imageid_{int(item_id)}" if item_id is not None else None
+                        )
                         if key is None:
                             continue
                         if item_id is not None and uuid_value:
                             self._image_uuid_index[int(item_id)] = uuid_value
-                        self._archive_json_file(f"civitai_image_getInfinite_{key}.json", item)
+                        self._archive_json_file(
+                            f"civitai_image_getInfinite_{key}.json", item
+                        )
         except Exception:
             # Archival should never break API fetch behavior.
             pass
@@ -546,9 +593,13 @@ class CivitaiAPI:
         Compatibility wrapper over fetch_image_tag_records.
         """
         records = self.fetch_image_tag_records(image_id)
-        return [str(tag.get("name")) for tag in records if isinstance(tag.get("name"), str)]
+        return [
+            str(tag.get("name")) for tag in records if isinstance(tag.get("name"), str)
+        ]
 
-    def fetch_basic_info(self, image_id: int, *, strict: bool = False) -> Optional[Dict]:
+    def fetch_basic_info(
+        self, image_id: int, *, strict: bool = False
+    ) -> Optional[Dict]:
         """Fetch basic image information (URL, author, NSFW, created_at).
 
         Uses image.get endpoint.
@@ -565,7 +616,9 @@ class CivitaiAPI:
             strict=strict,
         )
 
-    def fetch_generation_data(self, image_id: int, *, strict: bool = False) -> Optional[Dict]:
+    def fetch_generation_data(
+        self, image_id: int, *, strict: bool = False
+    ) -> Optional[Dict]:
         """Fetch detailed generation data for a single image.
 
         Uses image.getGenerationData endpoint.
@@ -648,10 +701,14 @@ class CivitaiAPI:
 
         try:
             # Use modelVersion.getById endpoint to get model version details
-            response = self._make_request(
-                endpoint="modelVersion.getById",
-                payload_data={"id": int(model_version_id), "authed": True}
-            ) if model_version_id else None
+            response = (
+                self._make_request(
+                    endpoint="modelVersion.getById",
+                    payload_data={"id": int(model_version_id), "authed": True},
+                )
+                if model_version_id
+                else None
+            )
 
             if response:
                 # Check the model status
@@ -668,7 +725,9 @@ class CivitaiAPI:
             else:
                 # If no version_id provided, we can't check accurately
                 if not model_version_id:
-                    result["error"] = "No model_version_id provided - cannot verify availability"
+                    result["error"] = (
+                        "No model_version_id provided - cannot verify availability"
+                    )
                     result["available"] = None  # Unknown
                 else:
                     result["available"] = False
@@ -779,10 +838,7 @@ class CivitaiAPI:
             len(obj) > 0
             and isinstance(obj[0], dict)
             and "id" in obj[0]
-            and (
-                obj[0].get("type") in {"image", "video"}
-                or bool(obj[0].get("url"))
-            )
+            and (obj[0].get("type") in {"image", "video"} or bool(obj[0].get("url")))
         )
 
     def _search_list(self, obj: List, depth: int) -> Optional[List]:

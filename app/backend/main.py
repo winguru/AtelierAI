@@ -9946,6 +9946,19 @@ def _build_local_image_variant(
         ).strip()
         or "library"
     )
+
+    # Build a descriptive label — for CivitAI duplicates include the image ID
+    # so the user can tell variants apart in the picker.
+    civitai_image_id = (
+        extract_civitai_image_id(str(merged_payload.get("source_url") or ""))
+        or (merged_payload.get("json_metadata") or {}).get("original_civitai_image_id")
+        or None
+    )
+    if civitai_image_id:
+        variant_label = f"CivitAI #{civitai_image_id}"
+    else:
+        variant_label = "Library Asset"
+
     variant = {
         "variant_key": f"variant:local:{group_key}:{image.file_hash}:id:{image.id}",
         "variant_label": variant_label,

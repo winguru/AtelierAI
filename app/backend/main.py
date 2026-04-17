@@ -20,7 +20,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form, Query, Response, Request, status, Body
+from fastapi import (
+    FastAPI,
+    Depends,
+    HTTPException,
+    File,
+    UploadFile,
+    Form,
+    Query,
+    Response,
+    Request,
+    status,
+    Body,
+)
 from typing import Any, Callable, List, Optional, Literal
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlparse
@@ -39,12 +51,18 @@ import uvicorn
 import atelierai.config as app_config
 
 IMAGE_LIBRARY_PATH = str(getattr(app_config, "IMAGE_LIBRARY_PATH", "image_library"))
-IMAGE_RESOURCES_PATH = str(getattr(app_config, "IMAGE_RESOURCES_PATH", "image_resources"))
+IMAGE_RESOURCES_PATH = str(
+    getattr(app_config, "IMAGE_RESOURCES_PATH", "image_resources")
+)
 CURRENT_SCHEMA_VERSION = str(getattr(app_config, "CURRENT_SCHEMA_VERSION", "1.0"))
 DATABASE_URL = str(getattr(app_config, "DATABASE_URL", "sqlite:///image_db.sqlite"))
 ALLOW_SCHEMA_RESET = bool(getattr(app_config, "ALLOW_SCHEMA_RESET", False))
-ATELIER_COMFYUI_BASE_URL = str(getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "")).strip()
-ATELIER_COMFY_MATCH_THRESHOLD = float(getattr(app_config, "ATELIER_COMFY_MATCH_THRESHOLD", 0.95))
+ATELIER_COMFYUI_BASE_URL = str(
+    getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "")
+).strip()
+ATELIER_COMFY_MATCH_THRESHOLD = float(
+    getattr(app_config, "ATELIER_COMFY_MATCH_THRESHOLD", 0.95)
+)
 
 # Use absolute imports for consistency with our project structure
 from database import (
@@ -147,7 +165,9 @@ except Exception:  # pragma: no cover - runtime dependency guard
     blurhash = None
 
 
-_CIVITAI_COLLECTION_PATH_RE = re.compile(r"^/collections/(?P<collection_id>\d+)(?:/.*)?$")
+_CIVITAI_COLLECTION_PATH_RE = re.compile(
+    r"^/collections/(?P<collection_id>\d+)(?:/.*)?$"
+)
 _CIVITAI_IMPORT_NETWORK_CONCURRENCY = 3
 _CIVITAI_SOURCE_VARIANT_DIRNAME = "civitai_source_variants"
 _CIVITAI_COLLECTION_HEAD_PROBE_SIZE = 50
@@ -180,7 +200,9 @@ class _PreparedCivitaiImport:
     raw_basic_info: Optional[dict[str, Any]] = None
     raw_generation_data: Optional[dict[str, Any]] = None
     raw_infinite: Optional[dict[str, Any]] = None
-    api_response_paths: dict[str, str] = field(default_factory=dict)  # Pre-saved response file paths
+    api_response_paths: dict[str, str] = field(
+        default_factory=dict
+    )  # Pre-saved response file paths
     effective_image_url: Optional[str] = None
     mismatch_static_temp_path: Optional[Path] = None
     mismatch_source_url: Optional[str] = None
@@ -247,10 +269,16 @@ class _SearchCacheEntry:
     version: int
 
 
-_SEARCH_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ATELIER_SEARCH_CACHE_TTL_SECONDS", "30")))
-_SEARCH_CACHE_MAX_ITEMS = max(16, int(os.getenv("ATELIER_SEARCH_CACHE_MAX_ITEMS", "512")))
+_SEARCH_CACHE_TTL_SECONDS = max(
+    1.0, float(os.getenv("ATELIER_SEARCH_CACHE_TTL_SECONDS", "30"))
+)
+_SEARCH_CACHE_MAX_ITEMS = max(
+    16, int(os.getenv("ATELIER_SEARCH_CACHE_MAX_ITEMS", "512"))
+)
 _JSON_CACHE_SCHEMA_VERSION = int(os.getenv("ATELIER_JSON_CACHE_SCHEMA_VERSION", "2"))
-_FILTER_OPTIONS_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ATELIER_FILTER_OPTIONS_CACHE_TTL_SECONDS", "120")))
+_FILTER_OPTIONS_CACHE_TTL_SECONDS = max(
+    1.0, float(os.getenv("ATELIER_FILTER_OPTIONS_CACHE_TTL_SECONDS", "120"))
+)
 _search_cache_lock = threading.RLock()
 _search_cache_version = 0
 _gallery_cache_version = 0  # Only bumped on image-affecting changes
@@ -267,12 +295,11 @@ def _normalize_cache_list(values: Optional[list[str]]) -> list[str]:
 
 
 def _build_search_cache_key(kind: str, *, payload: dict[str, Any]) -> str:
-    canonical_payload = {
-        key: value
-        for key, value in payload.items()
-    }
+    canonical_payload = {key: value for key, value in payload.items()}
     canonical_payload["kind"] = kind
-    return json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(
+        canonical_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
 
 
 def _invalidate_search_cache(reason: str = "unspecified") -> None:
@@ -282,9 +309,16 @@ def _invalidate_search_cache(reason: str = "unspecified") -> None:
         _search_cache.clear()
     # Image-affecting changes also bump gallery version for ETag invalidation
     _image_affecting_reasons = {
-        "db_commit", "image_update", "image_delete", "image_add",
-        "collection_change", "scan_complete", "metadata_update",
-        "variant_update", "nsfw_update", "tags_update",
+        "db_commit",
+        "image_update",
+        "image_delete",
+        "image_add",
+        "collection_change",
+        "scan_complete",
+        "metadata_update",
+        "variant_update",
+        "nsfw_update",
+        "tags_update",
     }
     if reason in _image_affecting_reasons:
         with _search_cache_lock:
@@ -303,15 +337,22 @@ def _search_cache_get(key: str) -> Optional[Any]:
         return entry.value
 
 
-def _search_cache_put(key: str, value: Any, *, ttl_seconds: Optional[float] = None) -> None:
+def _search_cache_put(
+    key: str, value: Any, *, ttl_seconds: Optional[float] = None
+) -> None:
     now = time.monotonic()
-    effective_ttl = _SEARCH_CACHE_TTL_SECONDS if ttl_seconds is None else max(1.0, float(ttl_seconds))
+    effective_ttl = (
+        _SEARCH_CACHE_TTL_SECONDS
+        if ttl_seconds is None
+        else max(1.0, float(ttl_seconds))
+    )
     with _search_cache_lock:
         if len(_search_cache) >= _SEARCH_CACHE_MAX_ITEMS:
             stale_keys = [
                 cache_key
                 for cache_key, entry in _search_cache.items()
-                if entry.version != _search_cache_version or entry.expires_at_monotonic <= now
+                if entry.version != _search_cache_version
+                or entry.expires_at_monotonic <= now
             ]
             for cache_key in stale_keys:
                 _search_cache.pop(cache_key, None)
@@ -397,9 +438,13 @@ def _if_none_match_contains(if_none_match_header: str, etag: str) -> bool:
     return False
 
 
-def _should_return_not_modified(request: Request, path: Path, headers: dict[str, str]) -> bool:
+def _should_return_not_modified(
+    request: Request, path: Path, headers: dict[str, str]
+) -> bool:
     if_none_match = request.headers.get("if-none-match")
-    if if_none_match and _if_none_match_contains(if_none_match, headers.get("ETag", "")):
+    if if_none_match and _if_none_match_contains(
+        if_none_match, headers.get("ETag", "")
+    ):
         return True
 
     if_modified_since = request.headers.get("if-modified-since")
@@ -413,7 +458,9 @@ def _should_return_not_modified(request: Request, path: Path, headers: dict[str,
     if modified_since_dt.tzinfo is None:
         modified_since_dt = modified_since_dt.replace(tzinfo=timezone.utc)
 
-    file_modified_dt = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0)
+    file_modified_dt = datetime.fromtimestamp(
+        path.stat().st_mtime, tz=timezone.utc
+    ).replace(microsecond=0)
     return file_modified_dt <= modified_since_dt.astimezone(timezone.utc)
 
 
@@ -427,8 +474,12 @@ def _current_gallery_cache_version() -> int:
         return int(_gallery_cache_version)
 
 
-def _build_json_cache_headers(cache_key: str, *, max_age_seconds: int = 15, gallery: bool = False) -> dict[str, str]:
-    version = _current_gallery_cache_version() if gallery else _current_search_cache_version()
+def _build_json_cache_headers(
+    cache_key: str, *, max_age_seconds: int = 15, gallery: bool = False
+) -> dict[str, str]:
+    version = (
+        _current_gallery_cache_version() if gallery else _current_search_cache_version()
+    )
     digest = hashlib.sha1(
         f"{cache_key}|v={version}|schema={_JSON_CACHE_SCHEMA_VERSION}".encode("utf-8")
     ).hexdigest()
@@ -540,7 +591,6 @@ def _apply_image_list_filters(
     )
 
 
-
 def _read_env_flag(name: str, default: bool = False) -> bool:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -557,7 +607,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the AtelierAI FastAPI server.")
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind.")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind.")
-    parser.add_argument("--reload", action="store_true", help="Enable Uvicorn autoreload.")
+    parser.add_argument(
+        "--reload", action="store_true", help="Enable Uvicorn autoreload."
+    )
     parser.add_argument(
         "--log-level",
         default="info",
@@ -582,7 +634,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 def _main() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args()
-    _configure_uvicorn_access_logging(suppress_status_get_logs=args.suppress_status_get_logs)
+    _configure_uvicorn_access_logging(
+        suppress_status_get_logs=args.suppress_status_get_logs
+    )
     uvicorn.run(
         "backend.main:app",
         host=args.host,
@@ -605,10 +659,16 @@ def _commit_with_lock_retry(db: Session, context: str = "database write") -> Non
             db.commit()
             return
         except OperationalError as e:
-            locked_error = "database is locked" in str(e).lower() or "sqlite_busy" in str(e).lower()
+            locked_error = (
+                "database is locked" in str(e).lower()
+                or "sqlite_busy" in str(e).lower()
+            )
             if not locked_error or attempt >= max_attempts:
                 db.rollback()
-                raise HTTPException(status_code=503, detail=f"{context} failed due to database lock: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"{context} failed due to database lock: {e}",
+                )
             time.sleep(0.05 * attempt)
         except Exception:
             db.rollback()
@@ -625,15 +685,23 @@ def _ensure_image_lifecycle_columns() -> None:
 
         if "image_status" not in existing:
             connection.execute(
-                text("ALTER TABLE images ADD COLUMN image_status VARCHAR DEFAULT 'active' NOT NULL")
+                text(
+                    "ALTER TABLE images ADD COLUMN image_status VARCHAR DEFAULT 'active' NOT NULL"
+                )
             )
         if "status_reason" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN status_reason VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN status_reason VARCHAR")
+            )
         if "replaced_by_image_id" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN replaced_by_image_id INTEGER"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN replaced_by_image_id INTEGER")
+            )
 
         connection.execute(
-            text("UPDATE images SET image_status = 'active' WHERE image_status IS NULL OR image_status = ''")
+            text(
+                "UPDATE images SET image_status = 'active' WHERE image_status IS NULL OR image_status = ''"
+            )
         )
 
 
@@ -645,9 +713,13 @@ def _ensure_user_nsfw_columns() -> None:
             for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
         }
         if "user_nsfw_rating" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN user_nsfw_rating VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN user_nsfw_rating VARCHAR")
+            )
         if "user_nsfw_safety_class" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN user_nsfw_safety_class VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN user_nsfw_safety_class VARCHAR")
+            )
 
 
 def _ensure_collection_sync_columns() -> None:
@@ -655,21 +727,43 @@ def _ensure_collection_sync_columns() -> None:
     with engine.begin() as connection:
         existing = {
             row[1]
-            for row in connection.execute(text("PRAGMA table_info(collections)")).fetchall()
+            for row in connection.execute(
+                text("PRAGMA table_info(collections)")
+            ).fetchall()
         }
 
         if "civitai_head_fingerprint" not in existing:
-            connection.execute(text("ALTER TABLE collections ADD COLUMN civitai_head_fingerprint TEXT"))
+            connection.execute(
+                text("ALTER TABLE collections ADD COLUMN civitai_head_fingerprint TEXT")
+            )
         if "civitai_head_item_count" not in existing:
-            connection.execute(text("ALTER TABLE collections ADD COLUMN civitai_head_item_count INTEGER"))
+            connection.execute(
+                text(
+                    "ALTER TABLE collections ADD COLUMN civitai_head_item_count INTEGER"
+                )
+            )
         if "civitai_head_has_more" not in existing:
-            connection.execute(text("ALTER TABLE collections ADD COLUMN civitai_head_has_more BOOLEAN"))
+            connection.execute(
+                text("ALTER TABLE collections ADD COLUMN civitai_head_has_more BOOLEAN")
+            )
         if "civitai_last_full_item_count" not in existing:
-            connection.execute(text("ALTER TABLE collections ADD COLUMN civitai_last_full_item_count INTEGER"))
+            connection.execute(
+                text(
+                    "ALTER TABLE collections ADD COLUMN civitai_last_full_item_count INTEGER"
+                )
+            )
         if "civitai_last_synced_at" not in existing:
-            connection.execute(text("ALTER TABLE collections ADD COLUMN civitai_last_synced_at DATETIME"))
+            connection.execute(
+                text(
+                    "ALTER TABLE collections ADD COLUMN civitai_last_synced_at DATETIME"
+                )
+            )
         if "civitai_last_full_scan_at" not in existing:
-            connection.execute(text("ALTER TABLE collections ADD COLUMN civitai_last_full_scan_at DATETIME"))
+            connection.execute(
+                text(
+                    "ALTER TABLE collections ADD COLUMN civitai_last_full_scan_at DATETIME"
+                )
+            )
 
 
 def _ensure_civitai_uuid_column() -> None:
@@ -681,7 +775,9 @@ def _ensure_civitai_uuid_column() -> None:
         }
 
         if "civitai_uuid" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN civitai_uuid VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN civitai_uuid VARCHAR")
+            )
 
 
 def _ensure_civitai_hash_column() -> None:
@@ -693,7 +789,9 @@ def _ensure_civitai_hash_column() -> None:
         }
 
         if "civitai_hash" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN civitai_hash VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN civitai_hash VARCHAR")
+            )
 
 
 def _ensure_user_tags_column() -> None:
@@ -723,7 +821,9 @@ def _backfill_user_tags_from_sidecars() -> None:
         updated = 0
         for img_id, file_path in images_needing_backfill:
             try:
-                sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(file_path)).with_suffix(".json")
+                sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(file_path)).with_suffix(
+                    ".json"
+                )
                 if not sidecar_path.exists():
                     continue
                 with open(sidecar_path, "r", encoding="utf-8") as f:
@@ -753,11 +853,17 @@ def _ensure_image_variant_columns() -> None:
         }
 
         if "variant_group_key" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN variant_group_key VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN variant_group_key VARCHAR")
+            )
         if "variant_sort_index" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN variant_sort_index INTEGER"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN variant_sort_index INTEGER")
+            )
         if "variant_role" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN variant_role VARCHAR"))
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN variant_role VARCHAR")
+            )
 
         connection.execute(
             text(
@@ -834,9 +940,7 @@ def _ensure_blurhash_column() -> None:
         if "blurhash" in existing:
             return
 
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN blurhash VARCHAR")
-        )
+        connection.execute(text("ALTER TABLE images ADD COLUMN blurhash VARCHAR"))
         # Instant backfill: CivitAI's `hash` field IS a BlurHash string.
         connection.execute(
             text(
@@ -918,19 +1022,19 @@ def _parse_civitai_collection_id(value: str) -> int:
 
 def _detect_civitai_url_type(value: str) -> tuple[str, int]:
     """Detect whether a CivitAI URL/ID is an image or collection and return (type, id).
-    
+
     Returns: tuple of ("image" or "collection", numeric_id)
     Raises HTTPException if the URL/ID doesn't match either pattern.
     """
     cleaned = (value or "").strip()
-    
+
     # Try numeric ID first - if it's just a number, we can't auto-detect, so error
     if cleaned.isdigit():
         raise HTTPException(
             status_code=400,
             detail="Ambiguous numeric ID. Please provide a full CivitAI URL so we can detect if it's an image or collection.",
         )
-    
+
     # Try to extract image ID
     try:
         image_id = extract_civitai_image_id(cleaned)
@@ -938,13 +1042,18 @@ def _detect_civitai_url_type(value: str) -> tuple[str, int]:
             return ("image", image_id)
     except Exception:
         pass
-    
+
     # Try to extract collection ID
     try:
         parsed = urlparse(cleaned)
         hostname = (parsed.hostname or "").lower()
         base_domain = getattr(app_config, "CIVITAI_BASE_DOMAIN", "civitai.red")
-        valid_hosts = {"civitai.com", "www.civitai.com", base_domain, f"www.{base_domain}"}
+        valid_hosts = {
+            "civitai.com",
+            "www.civitai.com",
+            base_domain,
+            f"www.{base_domain}",
+        }
         if hostname in valid_hosts:
             match = _CIVITAI_COLLECTION_PATH_RE.match(parsed.path or "")
             if match:
@@ -952,7 +1061,7 @@ def _detect_civitai_url_type(value: str) -> tuple[str, int]:
                 return ("collection", collection_id)
     except Exception:
         pass
-    
+
     # If neither pattern matched
     raise HTTPException(
         status_code=400,
@@ -1014,10 +1123,7 @@ def _gallery_tag_names_by_source(db: Session) -> dict[str, list[str]]:
         for source, names in extracted.items():
             by_source[source].update(names)
 
-    return {
-        source: sorted(names)
-        for source, names in by_source.items()
-    }
+    return {source: sorted(names) for source, names in by_source.items()}
 
 
 def _gallery_tag_names_by_source_db_only(db: Session) -> dict[str, list[str]]:
@@ -1056,10 +1162,7 @@ def _gallery_tag_names_by_source_db_only(db: Session) -> dict[str, list[str]]:
         for source, names in extracted.items():
             by_source[source].update(names)
 
-    return {
-        source: sorted(names)
-        for source, names in by_source.items()
-    }
+    return {source: sorted(names) for source, names in by_source.items()}
 
 
 def _gallery_tag_usage_counts_by_source(db: Session) -> dict[str, dict[str, int]]:
@@ -1092,15 +1195,14 @@ def _gallery_tag_usage_counts_by_source(db: Session) -> dict[str, dict[str, int]
                 bucket[normalized_name] = int(bucket.get(normalized_name, 0)) + 1
 
     return {
-        source: {
-            name: counts[name]
-            for name in sorted(counts)
-        }
+        source: {name: counts[name] for name in sorted(counts)}
         for source, counts in by_source.items()
     }
 
 
-def _gallery_tag_usage_counts_by_source_db_only(db: Session) -> dict[str, dict[str, int]]:
+def _gallery_tag_usage_counts_by_source_db_only(
+    db: Session,
+) -> dict[str, dict[str, int]]:
     """DEPRECATED: Use _gallery_tag_usage_counts_by_source_from_observations instead.
 
     Reads usage counts from json_metadata JSON columns. Replaced by observation-based
@@ -1142,10 +1244,7 @@ def _gallery_tag_usage_counts_by_source_db_only(db: Session) -> dict[str, dict[s
                 bucket[normalized_name] = int(bucket.get(normalized_name, 0)) + 1
 
     return {
-        source: {
-            name: counts[name]
-            for name in sorted(counts)
-        }
+        source: {name: counts[name] for name in sorted(counts)}
         for source, counts in by_source.items()
     }
 
@@ -1176,7 +1275,10 @@ def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, lis
             AuthorityTerm.external_name,
         )
         .join(AuthorityTerm, AuthorityTerm.authority_id == TagAuthority.id)
-        .join(ImageConceptObservation, ImageConceptObservation.authority_term_id == AuthorityTerm.id)
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+        )
         .join(ImageModel, ImageModel.id == ImageConceptObservation.image_id)
         .filter(_active_image_filter())
         .distinct()
@@ -1189,11 +1291,7 @@ def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, lis
 
     # --- Supplemental: user_tags column not yet in authority_terms ---
     existing_user_term_names: set[str] = by_source.get("user", set())
-    user_rows = (
-        db.query(ImageModel.user_tags)
-        .filter(_active_image_filter())
-        .all()
-    )
+    user_rows = db.query(ImageModel.user_tags).filter(_active_image_filter()).all()
     for (user_tags_col,) in user_rows:
         if not isinstance(user_tags_col, list):
             continue
@@ -1208,7 +1306,9 @@ def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, lis
     }
 
 
-def _gallery_tag_usage_counts_by_source_from_observations(db: Session) -> dict[str, dict[str, int]]:
+def _gallery_tag_usage_counts_by_source_from_observations(
+    db: Session,
+) -> dict[str, dict[str, int]]:
     """Gallery tag usage counts sourced from DB observations.
 
     Returns ``{source: {tag_name: count}}`` where *count* is the number of
@@ -1233,7 +1333,10 @@ def _gallery_tag_usage_counts_by_source_from_observations(db: Session) -> dict[s
             func.count(func.distinct(ImageConceptObservation.image_id)),
         )
         .join(AuthorityTerm, AuthorityTerm.authority_id == TagAuthority.id)
-        .join(ImageConceptObservation, ImageConceptObservation.authority_term_id == AuthorityTerm.id)
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+        )
         .join(ImageModel, ImageModel.id == ImageConceptObservation.image_id)
         .filter(_active_image_filter())
         .group_by(TagAuthority.name, AuthorityTerm.external_name)
@@ -1248,11 +1351,7 @@ def _gallery_tag_usage_counts_by_source_from_observations(db: Session) -> dict[s
 
     # --- Supplemental: user_tags column not yet in authority_terms ---
     existing_user_term_names: set[str] = set(by_source.get("user", {}).keys())
-    user_rows = (
-        db.query(ImageModel.user_tags)
-        .filter(_active_image_filter())
-        .all()
-    )
+    user_rows = db.query(ImageModel.user_tags).filter(_active_image_filter()).all()
     user_tag_name_counts: dict[str, int] = {}
     for (user_tags_col,) in user_rows:
         if not isinstance(user_tags_col, list):
@@ -1260,15 +1359,14 @@ def _gallery_tag_usage_counts_by_source_from_observations(db: Session) -> dict[s
         for tag in user_tags_col:
             normalized = _normalize_gallery_tag_text(str(tag))
             if normalized and normalized not in existing_user_term_names:
-                user_tag_name_counts[normalized] = user_tag_name_counts.get(normalized, 0) + 1
+                user_tag_name_counts[normalized] = (
+                    user_tag_name_counts.get(normalized, 0) + 1
+                )
     for name, count in user_tag_name_counts.items():
         by_source["user"][name] = count
 
     return {
-        source: {
-            name: counts[name]
-            for name in sorted(counts)
-        }
+        source: {name: counts[name] for name in sorted(counts)}
         for source, counts in by_source.items()
     }
 
@@ -1339,24 +1437,36 @@ def _execute_taxonomy_bootstrap_import(
     for idx, row in enumerate(rows, start=1):
         try:
             with db.begin_nested():
-                raw_name = str((row or {}).get("name") or (row or {}).get("external_name") or "").strip()
+                raw_name = str(
+                    (row or {}).get("name") or (row or {}).get("external_name") or ""
+                ).strip()
                 if not raw_name:
                     continue
 
                 normalized_name = _normalize_taxonomy_text(raw_name)
                 raw_tag_id = (row or {}).get("external_tag_id")
                 try:
-                    external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                    external_tag_id = (
+                        int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                    )
                 except (TypeError, ValueError):
                     external_tag_id = None
 
                 mapped_concept_name = str((row or {}).get("concept_name") or "").strip()
                 concept_name = mapped_concept_name or normalized_name
 
-                concept = db.query(Concept).filter(Concept.canonical_name == _normalize_taxonomy_text(concept_name)).first()
+                concept = (
+                    db.query(Concept)
+                    .filter(
+                        Concept.canonical_name == _normalize_taxonomy_text(concept_name)
+                    )
+                    .first()
+                )
                 if concept is None:
                     if not create_missing_concepts:
-                        stats["errors"].append(f"row {idx}: concept '{concept_name}' not found")
+                        stats["errors"].append(
+                            f"row {idx}: concept '{concept_name}' not found"
+                        )
                         continue
                     concept = _get_or_create_concept(db, concept_name)
                     stats["concepts_created"] += 1
@@ -1444,7 +1554,9 @@ def _is_descendant(db: Session, ancestor_id: int, candidate_descendant_id: int) 
         seen.add(current_id)
         if int(current.parent_concept_id) == ancestor_id:
             return True
-        current = db.query(Concept).filter(Concept.id == current.parent_concept_id).first()
+        current = (
+            db.query(Concept).filter(Concept.id == current.parent_concept_id).first()
+        )
     return False
 
 
@@ -1457,7 +1569,9 @@ def _authority_display_name(authority_name: str) -> str:
         "user": "User",
         "ai_agent": "AI",
     }
-    return mapping.get(normalized, authority_name.title() if authority_name else "Unknown")
+    return mapping.get(
+        normalized, authority_name.title() if authority_name else "Unknown"
+    )
 
 
 def _concept_source_map(db: Session, concept_ids: list[int]) -> dict[int, list[str]]:
@@ -1569,9 +1683,13 @@ def _build_civitai_video_candidate_urls(target: dict[str, Any]) -> list[str]:
     if original_url:
         urls.append(original_url)
 
-    civitai_uuid = str(target.get("civitai_uuid") or "").strip() or _extract_civitai_uuid_from_url_hash(url_hash)
+    civitai_uuid = str(
+        target.get("civitai_uuid") or ""
+    ).strip() or _extract_civitai_uuid_from_url_hash(url_hash)
     if civitai_uuid:
-        cdn_alt = getattr(app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com")
+        cdn_alt = getattr(
+            app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"
+        )
         urls.append(f"{cdn_alt}/file/civitai-media-cache/{civitai_uuid}/original")
 
     deduped: list[str] = []
@@ -1594,10 +1712,17 @@ def _download_civitai_image_with_validation(
     declared_video = declared_mime.startswith("video/")
     declared_file_size = target.get("declared_file_size")
 
-    candidate_urls = _build_civitai_video_candidate_urls(target) if declared_video else [str(target.get("image_url") or "").strip()]
+    candidate_urls = (
+        _build_civitai_video_candidate_urls(target)
+        if declared_video
+        else [str(target.get("image_url") or "").strip()]
+    )
     candidate_urls = [url for url in candidate_urls if url]
     if not candidate_urls:
-        raise HTTPException(status_code=502, detail=f"CivitAI image {image_id} did not include a downloadable URL.")
+        raise HTTPException(
+            status_code=502,
+            detail=f"CivitAI image {image_id} did not include a downloadable URL.",
+        )
 
     mismatch_temp_path: Optional[Path] = None
     mismatch_source_url: Optional[str] = None
@@ -1750,7 +1875,9 @@ def _url_looks_like_video(url: Optional[str]) -> bool:
     return suffix in _VIDEO_FILE_SUFFIXES
 
 
-def _get_civitai_source_variant_path(image_id: int, actual_path: Path, actual_mime_type: Optional[str]) -> Path:
+def _get_civitai_source_variant_path(
+    image_id: int, actual_path: Path, actual_mime_type: Optional[str]
+) -> Path:
     variant_root = Path(IMAGE_RESOURCES_PATH) / _CIVITAI_SOURCE_VARIANT_DIRNAME
     variant_root.mkdir(parents=True, exist_ok=True)
     suffix = _guess_suffix(actual_mime_type) or actual_path.suffix.lower()
@@ -1775,7 +1902,9 @@ def _preserve_civitai_source_variant(
     declared_mime_type = _normalize_mime_type(prepared.mime_type)
     # Some CivitAI payloads provide a video URL but an image MIME declaration.
     # Preserve static variants whenever the source appears video-like.
-    declared_video_like = declared_mime_type.startswith("video/") or _url_looks_like_video(prepared.image_url)
+    declared_video_like = declared_mime_type.startswith(
+        "video/"
+    ) or _url_looks_like_video(prepared.image_url)
     if not declared_video_like:
         return
 
@@ -1792,18 +1921,30 @@ def _preserve_civitai_source_variant(
     variant_path: Optional[Path] = None
 
     if actual_mime_type.startswith("image/"):
-        variant_path = _get_civitai_source_variant_path(prepared.image_id, actual_path, actual_mime_type)
-        if not variant_path.exists() or actual_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns:
+        variant_path = _get_civitai_source_variant_path(
+            prepared.image_id, actual_path, actual_mime_type
+        )
+        if (
+            not variant_path.exists()
+            or actual_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns
+        ):
             shutil.copy2(actual_path, variant_path)
         variant_file_hash = _sha256_file(variant_path)
         variant_original_file_name = _build_civitai_original_filename(
             prepared.image_id,
             None,
-            str(prepared.effective_image_url or prepared.image_url or prepared.source_url or ""),
+            str(
+                prepared.effective_image_url
+                or prepared.image_url
+                or prepared.source_url
+                or ""
+            ),
             actual_mime_type or prepared.mime_type,
         )
         if Path(variant_original_file_name).suffix.lower() in _VIDEO_FILE_SUFFIXES:
-            variant_original_file_name = f"{prepared.image_id}{_guess_suffix(actual_mime_type)}"
+            variant_original_file_name = (
+                f"{prepared.image_id}{_guess_suffix(actual_mime_type)}"
+            )
         variant_metadata = {
             "image_id": prepared.image_id,
             "image_db_id": image_db_id,
@@ -1813,7 +1954,9 @@ def _preserve_civitai_source_variant(
             "original_variant_file_name": variant_original_file_name,
             "library_file_path": str(image.file_path),
             "library_file_hash": image.file_hash,
-            "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
+            "variant_file_path": str(
+                variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            ),
             "variant_file_hash": variant_file_hash,
             "image_url": prepared.image_url,
             "source_url": prepared.source_url,
@@ -1831,27 +1974,44 @@ def _preserve_civitai_source_variant(
         client = CivitaiAPI.get_instance().http_client
         response = client.request("GET", prepared.preview_image_url, stream=True)
         try:
-            preview_mime_type = _normalize_mime_type(response.headers.get("Content-Type"))
+            preview_mime_type = _normalize_mime_type(
+                response.headers.get("Content-Type")
+            )
             if preview_mime_type.startswith("image/"):
                 preview_extension = _guess_suffix(preview_mime_type)
-                variant_root = Path(IMAGE_RESOURCES_PATH) / _CIVITAI_SOURCE_VARIANT_DIRNAME
+                variant_root = (
+                    Path(IMAGE_RESOURCES_PATH) / _CIVITAI_SOURCE_VARIANT_DIRNAME
+                )
                 variant_root.mkdir(parents=True, exist_ok=True)
-                temp_preview_path = variant_root / f"temp_preview_{prepared.image_id}{preview_extension}"
+                temp_preview_path = (
+                    variant_root
+                    / f"temp_preview_{prepared.image_id}{preview_extension}"
+                )
                 with open(temp_preview_path, "wb") as handle:
                     for chunk in response.iter_content(chunk_size=1024 * 256):
                         if chunk:
                             handle.write(chunk)
 
                 _, detected_preview_mime = _detect_downloaded_media(temp_preview_path)
-                resolved_preview_mime = _normalize_mime_type(detected_preview_mime or preview_mime_type)
+                resolved_preview_mime = _normalize_mime_type(
+                    detected_preview_mime or preview_mime_type
+                )
                 resolved_preview_extension = _guess_suffix(resolved_preview_mime)
-                if resolved_preview_extension and resolved_preview_extension != temp_preview_path.suffix.lower():
-                    temp_with_resolved_extension = temp_preview_path.with_suffix(resolved_preview_extension)
+                if (
+                    resolved_preview_extension
+                    and resolved_preview_extension != temp_preview_path.suffix.lower()
+                ):
+                    temp_with_resolved_extension = temp_preview_path.with_suffix(
+                        resolved_preview_extension
+                    )
                     temp_preview_path.rename(temp_with_resolved_extension)
                     temp_preview_path = temp_with_resolved_extension
 
                 variant_file_hash = _sha256_file(temp_preview_path)
-                variant_path = variant_root / f"{variant_file_hash}{temp_preview_path.suffix.lower()}"
+                variant_path = (
+                    variant_root
+                    / f"{variant_file_hash}{temp_preview_path.suffix.lower()}"
+                )
                 if variant_path.exists():
                     temp_preview_path.unlink(missing_ok=True)
                 else:
@@ -1860,11 +2020,21 @@ def _preserve_civitai_source_variant(
                 variant_original_file_name = _build_civitai_original_filename(
                     prepared.image_id,
                     None,
-                    str(prepared.preview_image_url or prepared.image_url or prepared.source_url or ""),
+                    str(
+                        prepared.preview_image_url
+                        or prepared.image_url
+                        or prepared.source_url
+                        or ""
+                    ),
                     resolved_preview_mime,
                 )
-                if Path(variant_original_file_name).suffix.lower() in _VIDEO_FILE_SUFFIXES:
-                    variant_original_file_name = f"{prepared.image_id}{_guess_suffix(resolved_preview_mime)}"
+                if (
+                    Path(variant_original_file_name).suffix.lower()
+                    in _VIDEO_FILE_SUFFIXES
+                ):
+                    variant_original_file_name = (
+                        f"{prepared.image_id}{_guess_suffix(resolved_preview_mime)}"
+                    )
                 variant_metadata = {
                     "image_id": prepared.image_id,
                     "image_db_id": image_db_id,
@@ -1874,7 +2044,9 @@ def _preserve_civitai_source_variant(
                     "original_variant_file_name": variant_original_file_name,
                     "library_file_path": str(image.file_path),
                     "library_file_hash": image.file_hash,
-                    "variant_file_path": str(variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))),
+                    "variant_file_path": str(
+                        variant_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+                    ),
                     "variant_file_hash": variant_file_hash,
                     "civitai_uuid": prepared.civitai_uuid,
                     "image_url": prepared.image_url,
@@ -1896,7 +2068,9 @@ def _preserve_civitai_source_variant(
     with open(metadata_path, "w", encoding="utf-8") as handle:
         json.dump(variant_metadata, handle, indent=2)
 
-    merged_json = dict(image.json_metadata) if isinstance(image.json_metadata, dict) else {}
+    merged_json = (
+        dict(image.json_metadata) if isinstance(image.json_metadata, dict) else {}
+    )
     merged_json["civitai_source_variant"] = variant_metadata
     image.json_metadata = merged_json
 
@@ -1926,19 +2100,31 @@ def _persist_mismatch_static_variant(
     if category != "image":
         return
 
-    variant_path = _get_civitai_source_variant_path(prepared.image_id, mismatch_path, detected_mime)
-    if not variant_path.exists() or mismatch_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns:
+    variant_path = _get_civitai_source_variant_path(
+        prepared.image_id, mismatch_path, detected_mime
+    )
+    if (
+        not variant_path.exists()
+        or mismatch_path.stat().st_mtime_ns > variant_path.stat().st_mtime_ns
+    ):
         shutil.copy2(mismatch_path, variant_path)
 
     variant_file_hash = _sha256_file(variant_path)
     variant_original_file_name = _build_civitai_original_filename(
         prepared.image_id,
         None,
-        str(prepared.mismatch_source_url or prepared.image_url or prepared.source_url or ""),
+        str(
+            prepared.mismatch_source_url
+            or prepared.image_url
+            or prepared.source_url
+            or ""
+        ),
         detected_mime,
     )
     if Path(variant_original_file_name).suffix.lower() in _VIDEO_FILE_SUFFIXES:
-        variant_original_file_name = f"{prepared.image_id}{_guess_suffix(detected_mime)}"
+        variant_original_file_name = (
+            f"{prepared.image_id}{_guess_suffix(detected_mime)}"
+        )
     variant_metadata = {
         "image_id": prepared.image_id,
         "image_db_id": image_db_id,
@@ -1964,7 +2150,9 @@ def _persist_mismatch_static_variant(
     with open(metadata_path, "w", encoding="utf-8") as handle:
         json.dump(variant_metadata, handle, indent=2)
 
-    merged_json = dict(image.json_metadata) if isinstance(image.json_metadata, dict) else {}
+    merged_json = (
+        dict(image.json_metadata) if isinstance(image.json_metadata, dict) else {}
+    )
     merged_json["civitai_source_variant_static"] = variant_metadata
     image.json_metadata = merged_json
 
@@ -1985,39 +2173,54 @@ def _save_civitai_api_responses(
     raw_infinite: Optional[dict] = None,
 ) -> dict[str, str]:
     """Save raw CivitAI API responses to disk for debugging and audit.
-    
+
     Returns dict with keys like 'raw_basic_info_path', 'raw_generation_data_path', 'raw_infinite_path'.
     """
     saved_paths: dict[str, str] = {}
-    
+
     if not civitai_uuid:
         return saved_paths
-    
+
     try:
         api_response_dir = Path(IMAGE_RESOURCES_PATH) / "civitai_api_responses"
         api_response_dir.mkdir(parents=True, exist_ok=True)
-        
+
         if isinstance(raw_basic_info, dict):
-            basic_info_path = api_response_dir / f"civitai_image_get_{civitai_uuid}.json"
+            basic_info_path = (
+                api_response_dir / f"civitai_image_get_{civitai_uuid}.json"
+            )
             with open(basic_info_path, "w", encoding="utf-8") as f:
                 json.dump(raw_basic_info, f, indent=2)
-            saved_paths["raw_basic_info_path"] = str(basic_info_path.relative_to(Path(IMAGE_RESOURCES_PATH)))
-        
+            saved_paths["raw_basic_info_path"] = str(
+                basic_info_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            )
+
         if isinstance(raw_generation_data, dict):
-            gen_data_path = api_response_dir / f"civitai_image_getGenerationData_{civitai_uuid}.json"
+            gen_data_path = (
+                api_response_dir
+                / f"civitai_image_getGenerationData_{civitai_uuid}.json"
+            )
             with open(gen_data_path, "w", encoding="utf-8") as f:
                 json.dump(raw_generation_data, f, indent=2)
-            saved_paths["raw_generation_data_path"] = str(gen_data_path.relative_to(Path(IMAGE_RESOURCES_PATH)))
-        
+            saved_paths["raw_generation_data_path"] = str(
+                gen_data_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            )
+
         if isinstance(raw_infinite, dict):
-            infinite_path = api_response_dir / f"civitai_image_getInfinite_{civitai_uuid}.json"
+            infinite_path = (
+                api_response_dir / f"civitai_image_getInfinite_{civitai_uuid}.json"
+            )
             with open(infinite_path, "w", encoding="utf-8") as f:
                 json.dump(raw_infinite, f, indent=2)
-            saved_paths["raw_infinite_path"] = str(infinite_path.relative_to(Path(IMAGE_RESOURCES_PATH)))
+            saved_paths["raw_infinite_path"] = str(
+                infinite_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            )
     except Exception as exc:
         # If saving fails, log but don't crash the import
-        print(f"[ERROR] Failed to save CivitAI API responses for UUID {civitai_uuid}: {exc}")
-    
+        print(
+            f"[ERROR] Failed to save CivitAI API responses for UUID {civitai_uuid}: {exc}"
+        )
+
     return saved_paths
 
 
@@ -2033,7 +2236,9 @@ def _archive_civitai_collection_items(items: list[dict[str, Any]]) -> None:
         if not isinstance(item, dict):
             continue
         raw_url = item.get("url")
-        uuid_value = _extract_civitai_uuid_from_url_hash(raw_url if isinstance(raw_url, str) else None)
+        uuid_value = _extract_civitai_uuid_from_url_hash(
+            raw_url if isinstance(raw_url, str) else None
+        )
         key = uuid_value
         if not key:
             raw_id = item.get("id")
@@ -2053,7 +2258,9 @@ def _archive_civitai_collection_items(items: list[dict[str, Any]]) -> None:
             continue
 
 
-def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: bool = False) -> dict:
+def _resolve_civitai_image_target(
+    api: CivitaiAPI, image_id: int, *, strict: bool = False
+) -> dict:
     try:
         basic_info = api.fetch_basic_info(image_id, strict=strict)
     except CivitaiRequestError as exc:
@@ -2093,7 +2300,9 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
     )
     image_data = image.to_dict(include_full_url=True)
 
-    mime_type = (basic_info or {}).get("mimeType") if isinstance(basic_info, dict) else None
+    mime_type = (
+        (basic_info or {}).get("mimeType") if isinstance(basic_info, dict) else None
+    )
     declared_file_size = None
     if isinstance(basic_info, dict):
         metadata = basic_info.get("metadata")
@@ -2103,7 +2312,9 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
                 declared_file_size = int(raw_size) if raw_size is not None else None
             except (TypeError, ValueError):
                 declared_file_size = None
-    preferred_name = (basic_info or {}).get("name") if isinstance(basic_info, dict) else None
+    preferred_name = (
+        (basic_info or {}).get("name") if isinstance(basic_info, dict) else None
+    )
     original_filename = _build_civitai_original_filename(
         image_id=image_id,
         preferred_name=preferred_name,
@@ -2111,7 +2322,9 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
         mime_type=mime_type,
     )
     url_hash = (basic_info or {}).get("url") if isinstance(basic_info, dict) else None
-    perceptual_hash = (basic_info or {}).get("hash") if isinstance(basic_info, dict) else None
+    perceptual_hash = (
+        (basic_info or {}).get("hash") if isinstance(basic_info, dict) else None
+    )
     if not isinstance(perceptual_hash, str) or not perceptual_hash.strip():
         if isinstance(basic_info, dict):
             metadata = basic_info.get("metadata")
@@ -2126,7 +2339,7 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
     else:
         perceptual_hash = perceptual_hash.strip()
     civitai_uuid = _extract_civitai_uuid_from_url_hash(url_hash)
-    
+
     # Save API responses immediately upon successful fetch, before any download/import attempts
     # This ensures we capture metadata even if the image later fails to download
     api_response_paths = _save_civitai_api_responses(
@@ -2134,7 +2347,7 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
         raw_basic_info=basic_info,
         raw_generation_data=generation_data,
     )
-    
+
     image_url = _build_civitai_media_url(
         url_hash,
         original_filename,
@@ -2146,12 +2359,16 @@ def _resolve_civitai_image_target(api: CivitaiAPI, image_id: int, *, strict: boo
             status_code=502,
             detail=f"CivitAI image {image_id} did not include a downloadable URL.",
         )
-    preview_image_url = _build_civitai_media_url(
-        url_hash,
-        original_filename,
-        mime_type,
-        use_video_transcode=False,
-    ) if _normalize_mime_type(mime_type).startswith("video/") else None
+    preview_image_url = (
+        _build_civitai_media_url(
+            url_hash,
+            original_filename,
+            mime_type,
+            use_video_transcode=False,
+        )
+        if _normalize_mime_type(mime_type).startswith("video/")
+        else None
+    )
 
     basic_user = basic_info.get("user", {}) if isinstance(basic_info, dict) else {}
     author_name = image_data.get("author")
@@ -2207,9 +2424,22 @@ def _first_meaningful_civitai_value(*values: Any, allow_zero: bool = False) -> A
     return None
 
 
-def _normalize_civitai_platform_name(generation_data: dict, image_data: dict, basic_info: dict, meta: dict) -> str:
-    process_value = str(_first_meaningful_civitai_value(generation_data.get("process"), image_data.get("process")) or "").strip().lower()
-    engine_value = _first_meaningful_civitai_value(image_data.get("engine"), meta.get("engine"))
+def _normalize_civitai_platform_name(
+    generation_data: dict, image_data: dict, basic_info: dict, meta: dict
+) -> str:
+    process_value = (
+        str(
+            _first_meaningful_civitai_value(
+                generation_data.get("process"), image_data.get("process")
+            )
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    engine_value = _first_meaningful_civitai_value(
+        image_data.get("engine"), meta.get("engine")
+    )
     tools = _list_payload(generation_data.get("tools"))
     first_tool = tools[0] if tools and isinstance(tools[0], dict) else {}
     tool_name = _first_meaningful_civitai_value(first_tool.get("name"))
@@ -2227,11 +2457,26 @@ def _normalize_civitai_platform_name(generation_data: dict, image_data: dict, ba
     return "CivitAI"
 
 
-def _normalize_civitai_method_family(generation_data: dict, image_data: dict, meta: dict) -> Optional[str]:
-    process_value = str(_first_meaningful_civitai_value(generation_data.get("process"), image_data.get("process")) or "").strip().lower()
-    workflow_value = _first_meaningful_civitai_value(meta.get("workflow"), image_data.get("workflow"))
+def _normalize_civitai_method_family(
+    generation_data: dict, image_data: dict, meta: dict
+) -> Optional[str]:
+    process_value = (
+        str(
+            _first_meaningful_civitai_value(
+                generation_data.get("process"), image_data.get("process")
+            )
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    workflow_value = _first_meaningful_civitai_value(
+        meta.get("workflow"), image_data.get("workflow")
+    )
     techniques = _list_payload(generation_data.get("techniques"))
-    first_technique = techniques[0] if techniques and isinstance(techniques[0], dict) else {}
+    first_technique = (
+        techniques[0] if techniques and isinstance(techniques[0], dict) else {}
+    )
     technique_name = _first_meaningful_civitai_value(first_technique.get("name"))
 
     if isinstance(meta.get("comfy"), dict) or process_value in {"comfy", "comfyui"}:
@@ -2252,10 +2497,14 @@ def _resolve_civitai_workflow_payload(meta: dict, image_data: dict) -> Any:
         if workflow_graph is not None:
             return workflow_graph
         return comfy_payload
-    return _first_meaningful_civitai_value(meta.get("workflow"), image_data.get("workflow"), image_data.get("process"))
+    return _first_meaningful_civitai_value(
+        meta.get("workflow"), image_data.get("workflow"), image_data.get("process")
+    )
 
 
-def _resolve_civitai_generation_dimensions(meta: dict, image_data: dict, generation_data: dict, basic_info: dict) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+def _resolve_civitai_generation_dimensions(
+    meta: dict, image_data: dict, generation_data: dict, basic_info: dict
+) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
     generation_width = _first_meaningful_civitai_value(
         meta.get("width"),
         generation_data.get("width"),
@@ -2346,11 +2595,19 @@ def _build_generation_resource_preview(
     raw_resource_json: Any = None,
 ) -> dict:
     normalized_type = str(resource_type or "other").strip().lower() or "other"
-    normalized_name = display_name.lower() if isinstance(display_name, str) and display_name.strip() else None
+    normalized_name = (
+        display_name.lower()
+        if isinstance(display_name, str) and display_name.strip()
+        else None
+    )
     resolved_model_id = _coerce_optional_int(civitai_model_id)
     resolved_model_version_id = _coerce_optional_int(civitai_model_version_id)
-    resolved_identifier = str(source_identifier or resolved_model_id or "").strip() or None
-    resolved_is_primary = normalized_type == "checkpoint" if is_primary is None else bool(is_primary)
+    resolved_identifier = (
+        str(source_identifier or resolved_model_id or "").strip() or None
+    )
+    resolved_is_primary = (
+        normalized_type == "checkpoint" if is_primary is None else bool(is_primary)
+    )
     resolved_role = resource_role or ("primary" if resolved_is_primary else "reference")
     return {
         "id": None,
@@ -2391,12 +2648,24 @@ def _extract_comfy_prompt_graph(workflow_payload: Any, meta: dict) -> dict:
     comfy_payload = meta.get("comfy") if isinstance(meta.get("comfy"), dict) else None
     candidate_payloads = []
     if comfy_payload:
-        candidate_payloads.extend([comfy_payload.get("prompt"), comfy_payload.get("workflow"), comfy_payload])
-    candidate_payloads.extend([
-        workflow_payload,
-        workflow_payload.get("prompt") if isinstance(workflow_payload, dict) else None,
-        workflow_payload.get("workflow") if isinstance(workflow_payload, dict) else None,
-    ])
+        candidate_payloads.extend(
+            [comfy_payload.get("prompt"), comfy_payload.get("workflow"), comfy_payload]
+        )
+    candidate_payloads.extend(
+        [
+            workflow_payload,
+            (
+                workflow_payload.get("prompt")
+                if isinstance(workflow_payload, dict)
+                else None
+            ),
+            (
+                workflow_payload.get("workflow")
+                if isinstance(workflow_payload, dict)
+                else None
+            ),
+        ]
+    )
     for candidate in candidate_payloads:
         if _looks_like_comfy_prompt_graph(candidate):
             return candidate
@@ -2433,7 +2702,9 @@ def _get_comfy_node_title(node: dict) -> Optional[str]:
     return str(meta.get("title") or node.get("title") or "").strip() or None
 
 
-def _collect_comfy_upstream_node_ids(graph: dict, start_node_id: str, input_names: Optional[set[str]] = None) -> set[str]:
+def _collect_comfy_upstream_node_ids(
+    graph: dict, start_node_id: str, input_names: Optional[set[str]] = None
+) -> set[str]:
     visited: set[str] = set()
 
     def walk_value(value: Any) -> None:
@@ -2468,14 +2739,18 @@ def _collect_comfy_upstream_node_ids(graph: dict, start_node_id: str, input_name
     return visited
 
 
-def _count_upstream_comfy_sampler_nodes(graph: dict, node_id: str, memo: dict[str, int]) -> int:
+def _count_upstream_comfy_sampler_nodes(
+    graph: dict, node_id: str, memo: dict[str, int]
+) -> int:
     normalized_id = str(node_id)
     if normalized_id in memo:
         return memo[normalized_id]
     total = 0
     for upstream_id in _collect_comfy_upstream_node_ids(graph, normalized_id):
         upstream_node = _get_comfy_node(graph, upstream_id)
-        if _is_comfy_generation_stage_node_class(_get_comfy_node_class(upstream_node).lower()):
+        if _is_comfy_generation_stage_node_class(
+            _get_comfy_node_class(upstream_node).lower()
+        ):
             total += 1 + _count_upstream_comfy_sampler_nodes(graph, upstream_id, memo)
     memo[normalized_id] = total
     return total
@@ -2487,7 +2762,14 @@ def _is_comfy_generation_stage_node_class(node_class_lower: str) -> bool:
 
 def _unwrap_workflow_resource_identifier(value: Any) -> Any:
     if isinstance(value, dict):
-        for key in ("content", "name", "model_name", "ckpt_name", "vae_name", "lora_name"):
+        for key in (
+            "content",
+            "name",
+            "model_name",
+            "ckpt_name",
+            "vae_name",
+            "lora_name",
+        ):
             candidate = value.get(key)
             if candidate not in {None, ""}:
                 return candidate
@@ -2575,7 +2857,9 @@ def _merge_resource_preview(existing: dict, incoming: dict) -> dict:
         "source_identifier",
         "raw_resource_json",
     ):
-        if is_empty_value(merged.get(field_name)) and not is_empty_value(incoming.get(field_name)):
+        if is_empty_value(merged.get(field_name)) and not is_empty_value(
+            incoming.get(field_name)
+        ):
             merged[field_name] = incoming.get(field_name)
     merged["is_primary"] = bool(merged.get("is_primary") or incoming.get("is_primary"))
     if merged.get("is_primary"):
@@ -2617,7 +2901,12 @@ def _build_workflow_resource_preview(
         base_model_name=air_details.get("base_model_name"),
         civitai_model_id=air_details.get("civitai_model_id"),
         civitai_model_version_id=air_details.get("civitai_model_version_id"),
-        source_identifier=air_details.get("source_identifier") or (str(resolved_identifier).strip() if resolved_identifier is not None else None),
+        source_identifier=air_details.get("source_identifier")
+        or (
+            str(resolved_identifier).strip()
+            if resolved_identifier is not None
+            else None
+        ),
         strength_model=strength_model,
         strength_clip=strength_clip,
         strength_text_encoder=strength_text_encoder,
@@ -2661,7 +2950,10 @@ def _collect_comfy_prompt_texts(graph: dict, reference: Any) -> list[dict]:
             return
         node_class = _get_comfy_node_class(node)
         inputs = _get_comfy_node_inputs(node)
-        if "cliptextencode" in node_class.lower() and str(inputs.get("text") or "").strip():
+        if (
+            "cliptextencode" in node_class.lower()
+            and str(inputs.get("text") or "").strip()
+        ):
             prompt_nodes.append(
                 {
                     "node_id": normalized_id,
@@ -2713,7 +3005,13 @@ def _collect_comfy_image_sources(graph: dict, sampler_node_id: str) -> list[dict
     return sources
 
 
-def _resolve_comfy_image_dimensions(graph: dict, reference: Any, fallback_width: Optional[int], fallback_height: Optional[int], visited: Optional[set[str]] = None) -> tuple[Optional[int], Optional[int]]:
+def _resolve_comfy_image_dimensions(
+    graph: dict,
+    reference: Any,
+    fallback_width: Optional[int],
+    fallback_height: Optional[int],
+    visited: Optional[set[str]] = None,
+) -> tuple[Optional[int], Optional[int]]:
     node_id = _comfy_node_id_from_reference(reference)
     if not node_id:
         return fallback_width, fallback_height
@@ -2728,17 +3026,29 @@ def _resolve_comfy_image_dimensions(graph: dict, reference: Any, fallback_width:
     node_class = _get_comfy_node_class(node).lower()
     inputs = _get_comfy_node_inputs(node)
     if node_class == "imagescale":
-        return _coerce_optional_int(inputs.get("width")), _coerce_optional_int(inputs.get("height"))
+        return _coerce_optional_int(inputs.get("width")), _coerce_optional_int(
+            inputs.get("height")
+        )
     if node_class == "loadimage":
         return fallback_width, fallback_height
     if node_class == "imageupscalewithmodel":
-        return _resolve_comfy_image_dimensions(graph, inputs.get("image"), fallback_width, fallback_height, visited)
+        return _resolve_comfy_image_dimensions(
+            graph, inputs.get("image"), fallback_width, fallback_height, visited
+        )
     if node_class == "vaedecode":
-        return _resolve_comfy_latent_dimensions(graph, inputs.get("samples"), fallback_width, fallback_height, visited)
+        return _resolve_comfy_latent_dimensions(
+            graph, inputs.get("samples"), fallback_width, fallback_height, visited
+        )
     return fallback_width, fallback_height
 
 
-def _resolve_comfy_latent_dimensions(graph: dict, reference: Any, fallback_width: Optional[int], fallback_height: Optional[int], visited: Optional[set[str]] = None) -> tuple[Optional[int], Optional[int]]:
+def _resolve_comfy_latent_dimensions(
+    graph: dict,
+    reference: Any,
+    fallback_width: Optional[int],
+    fallback_height: Optional[int],
+    visited: Optional[set[str]] = None,
+) -> tuple[Optional[int], Optional[int]]:
     node_id = _comfy_node_id_from_reference(reference)
     if not node_id:
         return fallback_width, fallback_height
@@ -2752,24 +3062,45 @@ def _resolve_comfy_latent_dimensions(graph: dict, reference: Any, fallback_width
         return fallback_width, fallback_height
     node_class = _get_comfy_node_class(node).lower()
     inputs = _get_comfy_node_inputs(node)
-    if node_class in {"emptylatentimage", "emptysd3latentimage", "emptyhunyuanlatentvideo"}:
-        return _coerce_optional_int(inputs.get("width")), _coerce_optional_int(inputs.get("height"))
+    if node_class in {
+        "emptylatentimage",
+        "emptysd3latentimage",
+        "emptyhunyuanlatentvideo",
+    }:
+        return _coerce_optional_int(inputs.get("width")), _coerce_optional_int(
+            inputs.get("height")
+        )
     if node_class == "latentupscale":
-        return _coerce_optional_int(inputs.get("width")), _coerce_optional_int(inputs.get("height"))
+        return _coerce_optional_int(inputs.get("width")), _coerce_optional_int(
+            inputs.get("height")
+        )
     if node_class == "latentupscaleby":
-        source_width, source_height = _resolve_comfy_latent_dimensions(graph, inputs.get("samples"), fallback_width, fallback_height, visited)
+        source_width, source_height = _resolve_comfy_latent_dimensions(
+            graph, inputs.get("samples"), fallback_width, fallback_height, visited
+        )
         scale_by = _coerce_optional_float(inputs.get("scale_by"))
         if source_width is not None and source_height is not None and scale_by:
-            return int(round(source_width * scale_by)), int(round(source_height * scale_by))
+            return int(round(source_width * scale_by)), int(
+                round(source_height * scale_by)
+            )
         return source_width, source_height
     if "ksampler" in node_class:
-        return _resolve_comfy_latent_dimensions(graph, inputs.get("latent_image"), fallback_width, fallback_height, visited)
+        return _resolve_comfy_latent_dimensions(
+            graph, inputs.get("latent_image"), fallback_width, fallback_height, visited
+        )
     if node_class == "vaeencode":
-        return _resolve_comfy_image_dimensions(graph, inputs.get("pixels"), fallback_width, fallback_height, visited)
+        return _resolve_comfy_image_dimensions(
+            graph, inputs.get("pixels"), fallback_width, fallback_height, visited
+        )
     return fallback_width, fallback_height
 
 
-def _collect_comfy_model_resources(graph: dict, reference: Any, inherited_weight: Any = None, visited: Optional[set[str]] = None) -> list[dict]:
+def _collect_comfy_model_resources(
+    graph: dict,
+    reference: Any,
+    inherited_weight: Any = None,
+    visited: Optional[set[str]] = None,
+) -> list[dict]:
     node_id = _comfy_node_id_from_reference(reference)
     if not node_id:
         return []
@@ -2789,7 +3120,10 @@ def _collect_comfy_model_resources(graph: dict, reference: Any, inherited_weight
     inputs = _get_comfy_node_inputs(node)
     title = _get_comfy_node_title(node)
 
-    if node_class_lower.startswith("checkpointloader") or "checkpointloader" in node_class_lower:
+    if (
+        node_class_lower.startswith("checkpointloader")
+        or "checkpointloader" in node_class_lower
+    ):
         return [
             _build_workflow_resource_preview(
                 "checkpoint",
@@ -2807,21 +3141,37 @@ def _collect_comfy_model_resources(graph: dict, reference: Any, inherited_weight
         ]
 
     if node_class_lower == "av_checkpointmerge":
-        model1_weight = _first_meaningful_civitai_value(inputs.get("model1_weight"), inputs.get("weight1"), allow_zero=True)
-        model2_weight = _first_meaningful_civitai_value(inputs.get("model2_weight"), inputs.get("weight2"), allow_zero=True)
+        model1_weight = _first_meaningful_civitai_value(
+            inputs.get("model1_weight"), inputs.get("weight1"), allow_zero=True
+        )
+        model2_weight = _first_meaningful_civitai_value(
+            inputs.get("model2_weight"), inputs.get("weight2"), allow_zero=True
+        )
         merged_resources = []
-        merged_resources.extend(_collect_comfy_model_resources(graph, inputs.get("model1"), model1_weight, visited))
-        merged_resources.extend(_collect_comfy_model_resources(graph, inputs.get("model2"), model2_weight, visited))
+        merged_resources.extend(
+            _collect_comfy_model_resources(
+                graph, inputs.get("model1"), model1_weight, visited
+            )
+        )
+        merged_resources.extend(
+            _collect_comfy_model_resources(
+                graph, inputs.get("model2"), model2_weight, visited
+            )
+        )
         return merged_resources
 
     if node_class_lower in {"cr apply lora stack", "reroute"}:
         for input_name in ("model", "input", "", "source"):
             if input_name in inputs:
-                nested_resources = _collect_comfy_model_resources(graph, inputs.get(input_name), inherited_weight, visited)
+                nested_resources = _collect_comfy_model_resources(
+                    graph, inputs.get(input_name), inherited_weight, visited
+                )
                 if nested_resources:
                     return nested_resources
         for input_value in inputs.values():
-            nested_resources = _collect_comfy_model_resources(graph, input_value, inherited_weight, visited)
+            nested_resources = _collect_comfy_model_resources(
+                graph, input_value, inherited_weight, visited
+            )
             if nested_resources:
                 return nested_resources
         return []
@@ -2829,11 +3179,15 @@ def _collect_comfy_model_resources(graph: dict, reference: Any, inherited_weight
     return []
 
 
-def _collect_comfy_stage_resources(graph: dict, sampler_node_id: str, prompt_nodes: list[dict]) -> list[dict]:
+def _collect_comfy_stage_resources(
+    graph: dict, sampler_node_id: str, prompt_nodes: list[dict]
+) -> list[dict]:
     resource_nodes: list[dict] = []
     sampler_node = _get_comfy_node(graph, sampler_node_id)
     sampler_inputs = _get_comfy_node_inputs(sampler_node)
-    resource_nodes.extend(_collect_comfy_model_resources(graph, sampler_inputs.get("model")))
+    resource_nodes.extend(
+        _collect_comfy_model_resources(graph, sampler_inputs.get("model"))
+    )
     upstream_ids = _collect_comfy_upstream_node_ids(graph, sampler_node_id)
     for upstream_id in upstream_ids:
         node = _get_comfy_node(graph, upstream_id)
@@ -2841,12 +3195,20 @@ def _collect_comfy_stage_resources(graph: dict, sampler_node_id: str, prompt_nod
         node_class_lower = node_class.lower()
         inputs = _get_comfy_node_inputs(node)
         title = _get_comfy_node_title(node)
-        if node_class_lower.startswith("checkpointloader") or "checkpointloader" in node_class_lower:
+        if (
+            node_class_lower.startswith("checkpointloader")
+            or "checkpointloader" in node_class_lower
+        ):
             resource_nodes.append(
                 _build_workflow_resource_preview(
                     "checkpoint",
                     inputs.get("ckpt_name") or inputs.get("model_name"),
-                    {"node_id": upstream_id, "node_class": node_class, "node_title": title, "inputs": inputs},
+                    {
+                        "node_id": upstream_id,
+                        "node_class": node_class,
+                        "node_title": title,
+                        "inputs": inputs,
+                    },
                 )
             )
         elif node_class_lower == "loraloader":
@@ -2854,7 +3216,12 @@ def _collect_comfy_stage_resources(graph: dict, sampler_node_id: str, prompt_nod
                 _build_workflow_resource_preview(
                     "lora",
                     inputs.get("lora_name"),
-                    {"node_id": upstream_id, "node_class": node_class, "node_title": title, "inputs": inputs},
+                    {
+                        "node_id": upstream_id,
+                        "node_class": node_class,
+                        "node_title": title,
+                        "inputs": inputs,
+                    },
                     strength_model=inputs.get("strength_model"),
                     strength_clip=inputs.get("strength_clip"),
                 )
@@ -2864,7 +3231,12 @@ def _collect_comfy_stage_resources(graph: dict, sampler_node_id: str, prompt_nod
                 _build_workflow_resource_preview(
                     "vae",
                     inputs.get("vae_name"),
-                    {"node_id": upstream_id, "node_class": node_class, "node_title": title, "inputs": inputs},
+                    {
+                        "node_id": upstream_id,
+                        "node_class": node_class,
+                        "node_title": title,
+                        "inputs": inputs,
+                    },
                 )
             )
         elif node_class_lower == "upscalemodelloader":
@@ -2872,7 +3244,12 @@ def _collect_comfy_stage_resources(graph: dict, sampler_node_id: str, prompt_nod
                 _build_workflow_resource_preview(
                     "upscaler",
                     inputs.get("model_name"),
-                    {"node_id": upstream_id, "node_class": node_class, "node_title": title, "inputs": inputs},
+                    {
+                        "node_id": upstream_id,
+                        "node_class": node_class,
+                        "node_title": title,
+                        "inputs": inputs,
+                    },
                 )
             )
         elif node_class_lower == "cr lora stack":
@@ -2899,7 +3276,9 @@ def _collect_comfy_stage_resources(graph: dict, sampler_node_id: str, prompt_nod
                 )
 
     for prompt_node in prompt_nodes:
-        for embedding_token in _extract_embedding_tokens_from_prompt(prompt_node.get("text") or ""):
+        for embedding_token in _extract_embedding_tokens_from_prompt(
+            prompt_node.get("text") or ""
+        ):
             resource_nodes.append(
                 _build_workflow_resource_preview(
                     "textualinversion",
@@ -2937,7 +3316,11 @@ def _build_comfy_workflow_stages(
     sampler_ids.sort(
         key=lambda item: (
             _count_upstream_comfy_sampler_nodes(graph, item, sampler_depths),
-            _coerce_optional_int(item) if _coerce_optional_int(item) is not None else 10**9,
+            (
+                _coerce_optional_int(item)
+                if _coerce_optional_int(item) is not None
+                else 10**9
+            ),
             str(item),
         )
     )
@@ -2947,8 +3330,12 @@ def _build_comfy_workflow_stages(
         sampler_node = _get_comfy_node(graph, sampler_id)
         sampler_class_lower = _get_comfy_node_class(sampler_node).lower()
         sampler_inputs = _get_comfy_node_inputs(sampler_node)
-        prompt_nodes_positive = _collect_comfy_prompt_texts(graph, sampler_inputs.get("positive"))
-        prompt_nodes_negative = _collect_comfy_prompt_texts(graph, sampler_inputs.get("negative"))
+        prompt_nodes_positive = _collect_comfy_prompt_texts(
+            graph, sampler_inputs.get("positive")
+        )
+        prompt_nodes_negative = _collect_comfy_prompt_texts(
+            graph, sampler_inputs.get("negative")
+        )
         prompt_nodes_all = prompt_nodes_positive + prompt_nodes_negative
         source_assets = _collect_comfy_image_sources(graph, sampler_id)
         if sampler_class_lower == "ultimatesdupscale":
@@ -2977,9 +3364,14 @@ def _build_comfy_workflow_stages(
             allow_zero=True,
         )
         upstream_ids = _collect_comfy_upstream_node_ids(graph, sampler_id)
-        upstream_classes = {_get_comfy_node_class(_get_comfy_node(graph, upstream_id)).lower() for upstream_id in upstream_ids}
+        upstream_classes = {
+            _get_comfy_node_class(_get_comfy_node(graph, upstream_id)).lower()
+            for upstream_id in upstream_ids
+        }
         has_loaded_input = bool(source_assets)
-        has_latent_upscale = any(node_class.startswith("latentupscale") for node_class in upstream_classes)
+        has_latent_upscale = any(
+            node_class.startswith("latentupscale") for node_class in upstream_classes
+        )
         if sampler_class_lower == "ultimatesdupscale":
             stage_role = "upscale"
             stage_method_family = "img2img_upscale"
@@ -3001,7 +3393,10 @@ def _build_comfy_workflow_stages(
                 stage_method_family = "img2img"
 
         prompts: list[dict] = []
-        for prompt_role, prompt_nodes in (("positive", prompt_nodes_positive), ("negative", prompt_nodes_negative)):
+        for prompt_role, prompt_nodes in (
+            ("positive", prompt_nodes_positive),
+            ("negative", prompt_nodes_negative),
+        ):
             seen_prompt_texts: set[str] = set()
             for prompt_node in prompt_nodes:
                 prompt_text = str(prompt_node.get("text") or "").strip()
@@ -3033,10 +3428,15 @@ def _build_comfy_workflow_stages(
                     }
                 )
 
-        stage_resources = _collect_comfy_stage_resources(graph, sampler_id, prompt_nodes_all)
+        stage_resources = _collect_comfy_stage_resources(
+            graph, sampler_id, prompt_nodes_all
+        )
         output_dimensions = None
         if stage_index == len(sampler_ids) - 1 and output_width and output_height:
-            output_dimensions = {"output_width": output_width, "output_height": output_height}
+            output_dimensions = {
+                "output_width": output_width,
+                "output_height": output_height,
+            }
 
         stages.append(
             {
@@ -3049,16 +3449,28 @@ def _build_comfy_workflow_stages(
                 "method_family": stage_method_family,
                 "method_variant": _get_comfy_node_class(sampler_node) or None,
                 "input_image_id": None,
-                "input_asset_ref": source_assets[0]["encoded_payload_ref"] if source_assets else None,
+                "input_asset_ref": (
+                    source_assets[0]["encoded_payload_ref"] if source_assets else None
+                ),
                 "width": stage_width,
                 "height": stage_height,
                 "base_width": generation_width if stage_index == 0 else stage_width,
                 "base_height": generation_height if stage_index == 0 else stage_height,
-                "sampler_name": str(sampler_inputs.get("sampler_name") or "").strip() or None,
-                "scheduler_name": str(sampler_inputs.get("scheduler") or "").strip() or None,
+                "sampler_name": str(sampler_inputs.get("sampler_name") or "").strip()
+                or None,
+                "scheduler_name": str(sampler_inputs.get("scheduler") or "").strip()
+                or None,
                 "steps": _first_meaningful_civitai_value(sampler_inputs.get("steps")),
-                "cfg_scale": _round_preview_float(_first_meaningful_civitai_value(sampler_inputs.get("cfg"), sampler_inputs.get("cfg_scale"))),
-                "seed": None if sampler_inputs.get("seed") in {None, ""} else str(sampler_inputs.get("seed")),
+                "cfg_scale": _round_preview_float(
+                    _first_meaningful_civitai_value(
+                        sampler_inputs.get("cfg"), sampler_inputs.get("cfg_scale")
+                    )
+                ),
+                "seed": (
+                    None
+                    if sampler_inputs.get("seed") in {None, ""}
+                    else str(sampler_inputs.get("seed"))
+                ),
                 "clip_skip": sampler_inputs.get("clip_skip"),
                 "strength": _round_preview_float(sampler_inputs.get("strength")),
                 "denoise_strength": _round_preview_float(denoise_strength),
@@ -3067,7 +3479,9 @@ def _build_comfy_workflow_stages(
                     "node_id": sampler_id,
                     "node_class": _get_comfy_node_class(sampler_node),
                     "node_title": _get_comfy_node_title(sampler_node),
-                    "upstream_sampler_count": _count_upstream_comfy_sampler_nodes(graph, sampler_id, sampler_depths),
+                    "upstream_sampler_count": _count_upstream_comfy_sampler_nodes(
+                        graph, sampler_id, sampler_depths
+                    ),
                     **(output_dimensions or {}),
                 },
                 "raw_stage_json": {
@@ -3087,7 +3501,9 @@ def _build_comfy_workflow_stages(
 
 
 def _read_image_sidecar_payload(image: ImageModel) -> dict:
-    sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
+    sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(
+        ".json"
+    )
     if not sidecar_path.exists():
         return {}
     try:
@@ -3114,7 +3530,9 @@ def _get_perceptual_hash_algorithms() -> dict[str, Callable[..., Any]]:
             status_code=503,
             detail="Perceptual hashing requires the ImageHash package. Install dependencies and retry.",
         )
-    average_hash_builder = getattr(ih, "average_hash", None) or getattr(ih, "ahash", None)
+    average_hash_builder = getattr(ih, "average_hash", None) or getattr(
+        ih, "ahash", None
+    )
     if average_hash_builder is None:
         raise HTTPException(
             status_code=500,
@@ -3228,7 +3646,9 @@ def _hash_object_to_bits(hash_obj: Any) -> tuple[int, int]:
     return int(bits_str, 2), len(bits_str)
 
 
-def _compute_bit_distance(local_int: int, local_bits: int, candidate_int: int, candidate_bits: int) -> tuple[int, int, bool]:
+def _compute_bit_distance(
+    local_int: int, local_bits: int, candidate_int: int, candidate_bits: int
+) -> tuple[int, int, bool]:
     compare_bits = min(local_bits, candidate_bits)
     if compare_bits <= 0:
         return 0, 0, False
@@ -3250,10 +3670,17 @@ def _hash_hex_to_encodings(hex_str: str) -> dict[str, str]:
     uu_lines: list[str] = []
     for i in range(0, len(raw), 45):
         uu_lines.append(binascii.b2a_uu(raw[i : i + 45]).decode("ascii").rstrip("\n"))
-    return {"base16": b16, "base32": b32, "base64": b64, "uuencode": "\n".join(uu_lines)}
+    return {
+        "base16": b16,
+        "base32": b32,
+        "base64": b64,
+        "uuencode": "\n".join(uu_lines),
+    }
 
 
-def _extract_primary_civitai_image_hash(image: ImageModel, civitai_payload: dict[str, Any]) -> Optional[str]:
+def _extract_primary_civitai_image_hash(
+    image: ImageModel, civitai_payload: dict[str, Any]
+) -> Optional[str]:
     db_hash = str(getattr(image, "civitai_hash", "") or "").strip()
     if db_hash:
         return db_hash
@@ -3282,7 +3709,9 @@ def _extract_primary_civitai_image_hash(image: ImageModel, civitai_payload: dict
     return None
 
 
-def _suggest_blurhash_component_pairs(target_hash: Optional[str]) -> list[tuple[int, int]]:
+def _suggest_blurhash_component_pairs(
+    target_hash: Optional[str],
+) -> list[tuple[int, int]]:
     default_pairs: list[tuple[int, int]] = [(4, 3), (4, 4), (7, 7), (8, 8), (9, 9)]
     pairs: list[tuple[int, int]] = []
     target_text = str(target_hash or "").strip()
@@ -3323,10 +3752,18 @@ def _encode_blurhash_with_fallbacks(
         return None
 
     attempts = (
-        lambda: encode_fn(image_rgb, x_components=x_components, y_components=y_components),
-        lambda: encode_fn(image_rgb, components_x=x_components, components_y=y_components),
-        lambda: encode_fn(pixel_rows, x_components=x_components, y_components=y_components),
-        lambda: encode_fn(pixel_rows, components_x=x_components, components_y=y_components),
+        lambda: encode_fn(
+            image_rgb, x_components=x_components, y_components=y_components
+        ),
+        lambda: encode_fn(
+            image_rgb, components_x=x_components, components_y=y_components
+        ),
+        lambda: encode_fn(
+            pixel_rows, x_components=x_components, y_components=y_components
+        ),
+        lambda: encode_fn(
+            pixel_rows, components_x=x_components, components_y=y_components
+        ),
     )
 
     for attempt in attempts:
@@ -3339,7 +3776,9 @@ def _encode_blurhash_with_fallbacks(
     return None
 
 
-def _decode_blurhash_pixels(blurhash_value: Optional[str], *, width: int = 32, height: int = 32) -> Optional[list[list[list[int]]]]:
+def _decode_blurhash_pixels(
+    blurhash_value: Optional[str], *, width: int = 32, height: int = 32
+) -> Optional[list[list[list[int]]]]:
     text_value = str(blurhash_value or "").strip()
     bh: Any = blurhash
     if not text_value or bh is None:
@@ -3359,7 +3798,9 @@ def _decode_blurhash_pixels(blurhash_value: Optional[str], *, width: int = 32, h
     return decoded
 
 
-def _blurhash_preview_data_url(blurhash_value: Optional[str], *, width: int = 32, height: int = 32) -> Optional[str]:
+def _blurhash_preview_data_url(
+    blurhash_value: Optional[str], *, width: int = 32, height: int = 32
+) -> Optional[str]:
     decoded = _decode_blurhash_pixels(blurhash_value, width=width, height=height)
     if not decoded:
         return None
@@ -3387,9 +3828,19 @@ def _blurhash_preview_data_url(blurhash_value: Optional[str], *, width: int = 32
     return f"data:image/png;base64,{encoded_png}"
 
 
-def _blurhash_preview_distance(candidate_hash: Optional[str], reference_hash: Optional[str], *, width: int = 32, height: int = 32) -> Optional[dict[str, Any]]:
-    candidate_pixels = _decode_blurhash_pixels(candidate_hash, width=width, height=height)
-    reference_pixels = _decode_blurhash_pixels(reference_hash, width=width, height=height)
+def _blurhash_preview_distance(
+    candidate_hash: Optional[str],
+    reference_hash: Optional[str],
+    *,
+    width: int = 32,
+    height: int = 32,
+) -> Optional[dict[str, Any]]:
+    candidate_pixels = _decode_blurhash_pixels(
+        candidate_hash, width=width, height=height
+    )
+    reference_pixels = _decode_blurhash_pixels(
+        reference_hash, width=width, height=height
+    )
     if not candidate_pixels or not reference_pixels:
         return None
 
@@ -3403,7 +3854,9 @@ def _blurhash_preview_distance(candidate_hash: Optional[str], reference_hash: Op
             candidate_pixel = candidate_row[col_index]
             reference_pixel = reference_row[col_index]
             for channel_index in range(3):
-                delta = float(candidate_pixel[channel_index]) - float(reference_pixel[channel_index])
+                delta = float(candidate_pixel[channel_index]) - float(
+                    reference_pixel[channel_index]
+                )
                 total_abs += abs(delta)
                 total_sq += delta * delta
                 sample_count += 1
@@ -3422,7 +3875,9 @@ def _blurhash_preview_distance(candidate_hash: Optional[str], reference_hash: Op
     }
 
 
-def _build_blurhash_report(image_path: Path, *, civitai_hash: Optional[str]) -> dict[str, Any]:
+def _build_blurhash_report(
+    image_path: Path, *, civitai_hash: Optional[str]
+) -> dict[str, Any]:
     civitai_hash_text = str(civitai_hash or "").strip()
     max_dimension = 128
     max_runtime_seconds = 8.0
@@ -3441,10 +3896,14 @@ def _build_blurhash_report(image_path: Path, *, civitai_hash: Optional[str]) -> 
     }
 
     if blurhash is None:
-        report["reason"] = "BlurHash package is not installed. Install blurhash to enable this comparison."
+        report["reason"] = (
+            "BlurHash package is not installed. Install blurhash to enable this comparison."
+        )
         return report
 
-    target_preview = _blurhash_preview_data_url(civitai_hash_text, width=preview_width, height=preview_height)
+    target_preview = _blurhash_preview_data_url(
+        civitai_hash_text, width=preview_width, height=preview_height
+    )
     report["target_preview"] = {
         "hash": civitai_hash_text or None,
         "image_data_url": target_preview,
@@ -3456,19 +3915,34 @@ def _build_blurhash_report(image_path: Path, *, civitai_hash: Optional[str]) -> 
             normalized_image = handle.convert("RGB")
             original_size = normalized_image.size
             resized_image = normalized_image.copy()
-            resized_image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+            resized_image.thumbnail(
+                (max_dimension, max_dimension), Image.Resampling.LANCZOS
+            )
             resized_size = resized_image.size
             width, height = resized_image.size
             flat_pixels = list(resized_image.getdata())
             pixel_rows = [
-                [tuple(pixel) for pixel in flat_pixels[row_index * width : (row_index + 1) * width]]
+                [
+                    tuple(pixel)
+                    for pixel in flat_pixels[
+                        row_index * width : (row_index + 1) * width
+                    ]
+                ]
                 for row_index in range(height)
             ]
-            report["analysis_size"] = {"width": resized_size[0], "height": resized_size[1]}
-            report["source_size"] = {"width": original_size[0], "height": original_size[1]}
+            report["analysis_size"] = {
+                "width": resized_size[0],
+                "height": resized_size[1],
+            }
+            report["source_size"] = {
+                "width": original_size[0],
+                "height": original_size[1],
+            }
             report["was_resized"] = original_size != resized_size
             run_started = time.monotonic()
-            for x_components, y_components in _suggest_blurhash_component_pairs(civitai_hash_text):
+            for x_components, y_components in _suggest_blurhash_component_pairs(
+                civitai_hash_text
+            ):
                 if time.monotonic() - run_started > max_runtime_seconds:
                     report["truncated"] = True
                     break
@@ -3541,11 +4015,15 @@ def _build_blurhash_report(image_path: Path, *, civitai_hash: Optional[str]) -> 
             best_candidate_score = float(score)
             best_candidate_key = key
     report["best_candidate_key"] = best_candidate_key
-    report["best_candidate"] = report["candidates"].get(best_candidate_key) if best_candidate_key else None
+    report["best_candidate"] = (
+        report["candidates"].get(best_candidate_key) if best_candidate_key else None
+    )
     return report
 
 
-def _build_perceptual_hash_suite(image_path: Path, hash_size: int = 8) -> dict[str, dict[str, Any]]:
+def _build_perceptual_hash_suite(
+    image_path: Path, hash_size: int = 8
+) -> dict[str, dict[str, Any]]:
     algorithms = _get_perceptual_hash_algorithms()
     clamped_hash_size = max(4, min(int(hash_size), 32))
     with Image.open(image_path) as handle:
@@ -3567,7 +4045,9 @@ def _build_perceptual_hash_suite(image_path: Path, hash_size: int = 8) -> dict[s
 
 def _extract_local_blurhash_4x4(image: ImageModel) -> Optional[str]:
     db_json = _coerce_json_object(getattr(image, "json_metadata", None))
-    db_blurhash = db_json.get("blurhash") if isinstance(db_json.get("blurhash"), dict) else None
+    db_blurhash = (
+        db_json.get("blurhash") if isinstance(db_json.get("blurhash"), dict) else None
+    )
     if isinstance(db_blurhash, dict):
         db_value = str(db_blurhash.get("4x4") or "").strip()
         if db_value:
@@ -3587,7 +4067,9 @@ def _extract_local_blurhash_4x4(image: ImageModel) -> Optional[str]:
     return None
 
 
-def _compute_blurhash_4x4(image_path: Path, *, max_dimension: int = 128) -> Optional[str]:
+def _compute_blurhash_4x4(
+    image_path: Path, *, max_dimension: int = 128
+) -> Optional[str]:
     if blurhash is None:
         return None
 
@@ -3601,7 +4083,10 @@ def _compute_blurhash_4x4(image_path: Path, *, max_dimension: int = 128) -> Opti
 
         flat_pixels = list(resized.getdata())
         pixel_rows = [
-            [tuple(pixel) for pixel in flat_pixels[row_index * width : (row_index + 1) * width]]
+            [
+                tuple(pixel)
+                for pixel in flat_pixels[row_index * width : (row_index + 1) * width]
+            ]
             for row_index in range(height)
         ]
         return _encode_blurhash_with_fallbacks(
@@ -3612,7 +4097,9 @@ def _compute_blurhash_4x4(image_path: Path, *, max_dimension: int = 128) -> Opti
         )
 
 
-def _resolve_local_blurhash_4x4(image: ImageModel, image_path: Path) -> tuple[Optional[str], str]:
+def _resolve_local_blurhash_4x4(
+    image: ImageModel, image_path: Path
+) -> tuple[Optional[str], str]:
     metadata_hash = _extract_local_blurhash_4x4(image)
     if metadata_hash:
         return metadata_hash, "metadata"
@@ -3641,7 +4128,9 @@ def _get_image_or_404(db: Session, file_hash: str) -> ImageModel:
     return image
 
 
-def _build_civitai_hash_comparison_payload(local_hashes: dict[str, dict[str, Any]], civitai_payload: dict) -> dict:
+def _build_civitai_hash_comparison_payload(
+    local_hashes: dict[str, dict[str, Any]], civitai_payload: dict
+) -> dict:
     candidates = []
     seen_values: set[str] = set()
     for item in _iter_hash_strings(civitai_payload):
@@ -3649,10 +4138,12 @@ def _build_civitai_hash_comparison_payload(local_hashes: dict[str, dict[str, Any
         if not value_text or value_text in seen_values:
             continue
         seen_values.add(value_text)
-        candidates.append({
-            "path": str(item.get("path") or "civitai"),
-            "value": value_text,
-        })
+        candidates.append(
+            {
+                "path": str(item.get("path") or "civitai"),
+                "value": value_text,
+            }
+        )
         if len(candidates) >= 32:
             break
 
@@ -3847,9 +4338,15 @@ def _serialize_generation_stage(stage) -> dict:
         "updated_at": _isoformat_or_none(stage.updated_at),
         "prompts": [_serialize_generation_prompt(item) for item in stage.prompts],
         "resources": [_serialize_generation_resource(item) for item in stage.resources],
-        "source_assets": [_serialize_generation_source_asset(item) for item in stage.source_assets],
-        "field_values": [_serialize_generation_field_value(item) for item in stage.field_values],
-        "provenance_records": [_serialize_generation_provenance(item) for item in stage.provenance_records],
+        "source_assets": [
+            _serialize_generation_source_asset(item) for item in stage.source_assets
+        ],
+        "field_values": [
+            _serialize_generation_field_value(item) for item in stage.field_values
+        ],
+        "provenance_records": [
+            _serialize_generation_provenance(item) for item in stage.provenance_records
+        ],
     }
 
 
@@ -3875,11 +4372,31 @@ def _serialize_generation_process(process) -> dict:
         "created_at": _isoformat_or_none(process.created_at),
         "updated_at": _isoformat_or_none(process.updated_at),
         "stages": [_serialize_generation_stage(item) for item in process.stages],
-        "prompts": [_serialize_generation_prompt(item) for item in process.prompts if item.stage_id is None],
-        "resources": [_serialize_generation_resource(item) for item in process.resources if item.stage_id is None],
-        "source_assets": [_serialize_generation_source_asset(item) for item in process.source_assets if item.stage_id is None],
-        "field_values": [_serialize_generation_field_value(item) for item in process.field_values if item.stage_id is None],
-        "provenance_records": [_serialize_generation_provenance(item) for item in process.provenance_records if item.stage_id is None],
+        "prompts": [
+            _serialize_generation_prompt(item)
+            for item in process.prompts
+            if item.stage_id is None
+        ],
+        "resources": [
+            _serialize_generation_resource(item)
+            for item in process.resources
+            if item.stage_id is None
+        ],
+        "source_assets": [
+            _serialize_generation_source_asset(item)
+            for item in process.source_assets
+            if item.stage_id is None
+        ],
+        "field_values": [
+            _serialize_generation_field_value(item)
+            for item in process.field_values
+            if item.stage_id is None
+        ],
+        "provenance_records": [
+            _serialize_generation_provenance(item)
+            for item in process.provenance_records
+            if item.stage_id is None
+        ],
     }
 
 
@@ -3899,11 +4416,20 @@ def _summarize_validation(warnings: list[str], errors: list[str]) -> dict:
 
 
 def _normalize_civitai_resource_preview(resource: dict) -> dict:
-    resource_type = str(resource.get("modelType") or resource.get("type") or "other").strip().lower() or "other"
-    display_name = str(resource.get("modelName") or resource.get("name") or "").strip() or None
+    resource_type = (
+        str(resource.get("modelType") or resource.get("type") or "other")
+        .strip()
+        .lower()
+        or "other"
+    )
+    display_name = (
+        str(resource.get("modelName") or resource.get("name") or "").strip() or None
+    )
     version_name = str(resource.get("versionName") or "").strip() or None
     base_model_name = str(resource.get("baseModel") or "").strip() or None
-    model_id = _first_meaningful_civitai_value(resource.get("modelId"), resource.get("id"))
+    model_id = _first_meaningful_civitai_value(
+        resource.get("modelId"), resource.get("id")
+    )
     return _build_generation_resource_preview(
         resource_type,
         display_name,
@@ -3934,7 +4460,10 @@ def _build_civitai_image_data_resource_previews(image_data: dict) -> list[dict]:
             _build_generation_resource_preview(
                 "checkpoint",
                 str(item.get("name") or item.get("modelName") or "").strip() or None,
-                version_name=str(item.get("version") or item.get("versionName") or "").strip() or None,
+                version_name=str(
+                    item.get("version") or item.get("versionName") or ""
+                ).strip()
+                or None,
                 base_model_name=str(item.get("baseModel") or "").strip() or None,
                 civitai_model_id=model_id,
                 civitai_model_version_id=item.get("modelVersionId"),
@@ -3944,7 +4473,11 @@ def _build_civitai_image_data_resource_previews(image_data: dict) -> list[dict]:
             )
         )
 
-    primary_model_name = str(image_data.get("model") or "").strip() if isinstance(image_data, dict) else ""
+    primary_model_name = (
+        str(image_data.get("model") or "").strip()
+        if isinstance(image_data, dict)
+        else ""
+    )
     if primary_model_name:
         primary_model_id = _first_meaningful_civitai_value(
             image_data.get("modelId"),
@@ -3954,15 +4487,22 @@ def _build_civitai_image_data_resource_previews(image_data: dict) -> list[dict]:
             _build_generation_resource_preview(
                 "checkpoint",
                 primary_model_name,
-                version_name=str(image_data.get("modelVersion") or image_data.get("model_version") or "").strip() or None,
+                version_name=str(
+                    image_data.get("modelVersion")
+                    or image_data.get("model_version")
+                    or ""
+                ).strip()
+                or None,
                 base_model_name=str(image_data.get("baseModel") or "").strip() or None,
                 civitai_model_id=primary_model_id,
-                civitai_model_version_id=image_data.get("modelVersionId") or image_data.get("model_version_id"),
+                civitai_model_version_id=image_data.get("modelVersionId")
+                or image_data.get("model_version_id"),
                 source_identifier=str(primary_model_id or "").strip() or None,
                 is_primary=True,
                 raw_resource_json={
                     "model": image_data.get("model"),
-                    "modelVersion": image_data.get("modelVersion") or image_data.get("model_version"),
+                    "modelVersion": image_data.get("modelVersion")
+                    or image_data.get("model_version"),
                 },
             )
         )
@@ -3978,7 +4518,10 @@ def _build_civitai_image_data_resource_previews(image_data: dict) -> list[dict]:
             _build_generation_resource_preview(
                 "lora",
                 str(item.get("name") or item.get("modelName") or "").strip() or None,
-                version_name=str(item.get("version") or item.get("versionName") or "").strip() or None,
+                version_name=str(
+                    item.get("version") or item.get("versionName") or ""
+                ).strip()
+                or None,
                 base_model_name=str(item.get("baseModel") or "").strip() or None,
                 strength_model=item.get("strength"),
                 strength_clip=item.get("clipWeight"),
@@ -4003,18 +4546,24 @@ def _build_civitai_normalized_preview(
     meta = generation_data.get("meta") if isinstance(generation_data, dict) else {}
     if not isinstance(meta, dict):
         meta = {}
-    raw_resources = generation_data.get("resources") if isinstance(generation_data, dict) else []
+    raw_resources = (
+        generation_data.get("resources") if isinstance(generation_data, dict) else []
+    )
     if not isinstance(raw_resources, list):
         raw_resources = []
     method_family = _normalize_civitai_method_family(generation_data, image_data, meta)
-    platform_name = _normalize_civitai_platform_name(generation_data, image_data, basic_info, meta)
+    platform_name = _normalize_civitai_platform_name(
+        generation_data, image_data, basic_info, meta
+    )
     workflow_value = _resolve_civitai_workflow_payload(meta, image_data)
     comfy_prompt_graph = _extract_comfy_prompt_graph(workflow_value, meta)
-    generation_width, generation_height, output_width, output_height = _resolve_civitai_generation_dimensions(
-        meta,
-        image_data,
-        generation_data,
-        basic_info,
+    generation_width, generation_height, output_width, output_height = (
+        _resolve_civitai_generation_dimensions(
+            meta,
+            image_data,
+            generation_data,
+            basic_info,
+        )
     )
 
     prompts: list[dict] = []
@@ -4061,24 +4610,46 @@ def _build_civitai_normalized_preview(
             }
         )
 
-    raw_stage_resources = [_normalize_civitai_resource_preview(item) for item in raw_resources if isinstance(item, dict)]
+    raw_stage_resources = [
+        _normalize_civitai_resource_preview(item)
+        for item in raw_resources
+        if isinstance(item, dict)
+    ]
     if not raw_stage_resources:
         raw_stage_resources = _build_civitai_image_data_resource_previews(image_data)
-    compatibility_json = {"draft": image_data.get("draft")} if image_data.get("draft") is not None else None
-    has_generation_payload = bool(meta or raw_resources or raw_stage_resources or positive_prompt or negative_prompt)
-    normalized_seed = _first_meaningful_civitai_value(meta.get("seed"), image_data.get("seed"))
-    stages = _build_comfy_workflow_stages(
-        comfy_prompt_graph,
-        generation_data,
-        generation_width,
-        generation_height,
-        output_width,
-        output_height,
-    ) if comfy_prompt_graph else []
+    compatibility_json = (
+        {"draft": image_data.get("draft")}
+        if image_data.get("draft") is not None
+        else None
+    )
+    has_generation_payload = bool(
+        meta
+        or raw_resources
+        or raw_stage_resources
+        or positive_prompt
+        or negative_prompt
+    )
+    normalized_seed = _first_meaningful_civitai_value(
+        meta.get("seed"), image_data.get("seed")
+    )
+    stages = (
+        _build_comfy_workflow_stages(
+            comfy_prompt_graph,
+            generation_data,
+            generation_width,
+            generation_height,
+            output_width,
+            output_height,
+        )
+        if comfy_prompt_graph
+        else []
+    )
 
     if stages:
         stages = [dict(stage) for stage in stages]
-        stages[0]["resources"] = _dedupe_resource_previews(raw_stage_resources + _list_payload(stages[0].get("resources")))
+        stages[0]["resources"] = _dedupe_resource_previews(
+            raw_stage_resources + _list_payload(stages[0].get("resources"))
+        )
         if not stages[0].get("prompts"):
             stages[0]["prompts"] = prompts
         for stage in stages:
@@ -4103,17 +4674,38 @@ def _build_civitai_normalized_preview(
                 "base_height": generation_height,
                 "sampler_name": str(image_data.get("sampler") or "").strip() or None,
                 "scheduler_name": str(meta.get("scheduler") or "").strip() or None,
-                "steps": _first_meaningful_civitai_value(meta.get("steps"), image_data.get("steps")),
-                "cfg_scale": _round_preview_float(_first_meaningful_civitai_value(meta.get("cfgScale"), image_data.get("cfg_scale"))),
+                "steps": _first_meaningful_civitai_value(
+                    meta.get("steps"), image_data.get("steps")
+                ),
+                "cfg_scale": _round_preview_float(
+                    _first_meaningful_civitai_value(
+                        meta.get("cfgScale"), image_data.get("cfg_scale")
+                    )
+                ),
                 "seed": None if normalized_seed is None else str(normalized_seed),
-                "clip_skip": meta.get("clipSkip") if meta.get("clipSkip") is not None else image_data.get("clip_skip"),
+                "clip_skip": (
+                    meta.get("clipSkip")
+                    if meta.get("clipSkip") is not None
+                    else image_data.get("clip_skip")
+                ),
                 "strength": _round_preview_float(meta.get("strength")),
-                "denoise_strength": _round_preview_float(_first_meaningful_civitai_value(meta.get("denoise"), meta.get("denoiseStrength"), allow_zero=True)),
+                "denoise_strength": _round_preview_float(
+                    _first_meaningful_civitai_value(
+                        meta.get("denoise"),
+                        meta.get("denoiseStrength"),
+                        allow_zero=True,
+                    )
+                ),
                 "guidance_notes": None,
                 "compatibility_json": {
                     **(compatibility_json or {}),
-                    **({"output_width": output_width, "output_height": output_height} if output_width and output_height else {}),
-                } or None,
+                    **(
+                        {"output_width": output_width, "output_height": output_height}
+                        if output_width and output_height
+                        else {}
+                    ),
+                }
+                or None,
                 "raw_stage_json": generation_data,
                 "created_at": None,
                 "updated_at": None,
@@ -4128,7 +4720,9 @@ def _build_civitai_normalized_preview(
     process_method_family = method_family
     if stages and not method_family:
         process_method_family = stages[0].get("method_family")
-    stage_source_assets = any(_list_payload(stage.get("source_assets")) for stage in stages)
+    stage_source_assets = any(
+        _list_payload(stage.get("source_assets")) for stage in stages
+    )
 
     return {
         "processes": [
@@ -4145,12 +4739,15 @@ def _build_civitai_normalized_preview(
                 "method_variant": None,
                 "stage_count": len(stages) if has_generation_payload else 0,
                 "has_embedded_sources": stage_source_assets,
-                "has_refiners": len(stages) > 1 or any(
+                "has_refiners": len(stages) > 1
+                or any(
                     item.get("resource_type") == "refiner"
                     for stage in stages
                     for item in _list_payload(stage.get("resources"))
                 ),
-                "has_video_generation": str(basic_info.get("mimeType") or "").lower().startswith("video/"),
+                "has_video_generation": str(basic_info.get("mimeType") or "")
+                .lower()
+                .startswith("video/"),
                 "raw_payload_json": {
                     "basic_info": basic_info,
                     "generation_data": generation_data,
@@ -4159,7 +4756,8 @@ def _build_civitai_normalized_preview(
                 "compatibility_json": {
                     **(compatibility_json or {}),
                     **({"workflow_stage_count": len(stages)} if stages else {}),
-                } or None,
+                }
+                or None,
                 "created_at": None,
                 "updated_at": None,
                 "stages": stages,
@@ -4205,7 +4803,9 @@ def _build_local_fallback_normalized_preview(
     def _read_exif(*keys: str) -> Any:
         if not isinstance(exif_payload, dict):
             return None
-        lowered = {str(key).strip().lower(): value for key, value in exif_payload.items()}
+        lowered = {
+            str(key).strip().lower(): value for key, value in exif_payload.items()
+        }
         for key in keys:
             value = lowered.get(str(key).strip().lower())
             if value not in (None, ""):
@@ -4214,20 +4814,44 @@ def _build_local_fallback_normalized_preview(
 
     image_data = _dict_payload(merged_payload.get("civitai_data"))
     if not image_data:
-        image_data = _dict_payload(_dict_payload(merged_payload.get("civitai")).get("image"))
+        image_data = _dict_payload(
+            _dict_payload(merged_payload.get("civitai")).get("image")
+        )
     image_data = dict(image_data)
 
-    image_data.setdefault("prompt", _pick_value(_read_exif("Prompt", "prompt"), merged_payload.get("prompt")))
+    image_data.setdefault(
+        "prompt",
+        _pick_value(_read_exif("Prompt", "prompt"), merged_payload.get("prompt")),
+    )
     image_data.setdefault(
         "negative_prompt",
-        _pick_value(_read_exif("Negative prompt", "NegativePrompt", "negative prompt"), merged_payload.get("negative_prompt")),
+        _pick_value(
+            _read_exif("Negative prompt", "NegativePrompt", "negative prompt"),
+            merged_payload.get("negative_prompt"),
+        ),
     )
     image_data.setdefault("sampler", _read_exif("Sampler", "sampler"))
-    image_data.setdefault("steps", _pick_value(_read_exif("Steps", "steps"), merged_payload.get("steps")))
-    image_data.setdefault("cfg_scale", _pick_value(_read_exif("CFG scale", "cfg scale", "cfg"), merged_payload.get("cfg_scale")))
-    image_data.setdefault("seed", _pick_value(_read_exif("Seed", "seed"), merged_payload.get("seed")))
-    image_data.setdefault("clip_skip", _pick_value(_read_exif("Clip skip", "clip skip"), merged_payload.get("clip_skip")))
-    image_data.setdefault("model", _pick_value(_read_exif("Model", "model"), merged_payload.get("model")))
+    image_data.setdefault(
+        "steps", _pick_value(_read_exif("Steps", "steps"), merged_payload.get("steps"))
+    )
+    image_data.setdefault(
+        "cfg_scale",
+        _pick_value(
+            _read_exif("CFG scale", "cfg scale", "cfg"), merged_payload.get("cfg_scale")
+        ),
+    )
+    image_data.setdefault(
+        "seed", _pick_value(_read_exif("Seed", "seed"), merged_payload.get("seed"))
+    )
+    image_data.setdefault(
+        "clip_skip",
+        _pick_value(
+            _read_exif("Clip skip", "clip skip"), merged_payload.get("clip_skip")
+        ),
+    )
+    image_data.setdefault(
+        "model", _pick_value(_read_exif("Model", "model"), merged_payload.get("model"))
+    )
     image_data.setdefault(
         "model_version",
         _pick_value(
@@ -4236,7 +4860,12 @@ def _build_local_fallback_normalized_preview(
             merged_payload.get("modelVersion"),
         ),
     )
-    image_data.setdefault("baseModel", _pick_value(_read_exif("Base model", "base model"), merged_payload.get("base_model")))
+    image_data.setdefault(
+        "baseModel",
+        _pick_value(
+            _read_exif("Base model", "base model"), merged_payload.get("base_model")
+        ),
+    )
 
     generation_data = _dict_payload(merged_payload.get("raw_generation_data"))
     generation_data = dict(generation_data)
@@ -4275,7 +4904,9 @@ def _build_local_fallback_normalized_preview(
         generation_data,
         image_data,
     )
-    processes = _list_payload(normalized.get("processes") if isinstance(normalized, dict) else [])
+    processes = _list_payload(
+        normalized.get("processes") if isinstance(normalized, dict) else []
+    )
 
     for process in processes:
         if not isinstance(process, dict):
@@ -4291,20 +4922,26 @@ def _build_local_fallback_normalized_preview(
     return processes
 
 
-def _build_civitai_validation_payload(basic_info: dict, generation_data: dict, normalized: dict) -> dict:
+def _build_civitai_validation_payload(
+    basic_info: dict, generation_data: dict, normalized: dict
+) -> dict:
     warnings: list[str] = []
     errors: list[str] = []
     meta = generation_data.get("meta") if isinstance(generation_data, dict) else {}
     if not isinstance(meta, dict):
         meta = {}
-    processes = _list_payload(normalized.get("processes") if isinstance(normalized, dict) else [])
+    processes = _list_payload(
+        normalized.get("processes") if isinstance(normalized, dict) else []
+    )
     first_process = processes[0] if processes else {}
     stages = _list_payload(first_process.get("stages"))
     first_stage = stages[0] if stages else {}
     compatibility_json = {}
     for stage in reversed(stages):
         stage_compatibility = _dict_payload(stage.get("compatibility_json"))
-        if stage_compatibility.get("output_width") and stage_compatibility.get("output_height"):
+        if stage_compatibility.get("output_width") and stage_compatibility.get(
+            "output_height"
+        ):
             compatibility_json = stage_compatibility
             break
     if not basic_info:
@@ -4312,16 +4949,29 @@ def _build_civitai_validation_payload(basic_info: dict, generation_data: dict, n
     if not generation_data:
         warnings.append("The image.getGenerationData endpoint returned no payload.")
     if not str(meta.get("prompt") or "").strip():
-        warnings.append("Positive prompt is missing from the fetched generation metadata.")
+        warnings.append(
+            "Positive prompt is missing from the fetched generation metadata."
+        )
     if meta.get("seed") in {None, ""} and not first_stage.get("seed"):
         warnings.append("Seed is missing from the fetched generation metadata.")
-    has_generation_dimensions = bool(first_stage.get("width") and first_stage.get("height"))
-    has_output_dimensions = bool(compatibility_json.get("output_width") and compatibility_json.get("output_height"))
+    has_generation_dimensions = bool(
+        first_stage.get("width") and first_stage.get("height")
+    )
+    has_output_dimensions = bool(
+        compatibility_json.get("output_width")
+        and compatibility_json.get("output_height")
+    )
     if not has_generation_dimensions and not has_output_dimensions:
-        warnings.append("Width and height are incomplete in the fetched generation metadata.")
-    raw_resources = generation_data.get("resources") if isinstance(generation_data, dict) else []
+        warnings.append(
+            "Width and height are incomplete in the fetched generation metadata."
+        )
+    raw_resources = (
+        generation_data.get("resources") if isinstance(generation_data, dict) else []
+    )
     if not isinstance(raw_resources, list) or not raw_resources:
-        warnings.append("No generation resources were returned by CivitAI for this item.")
+        warnings.append(
+            "No generation resources were returned by CivitAI for this item."
+        )
     if not processes:
         errors.append("The prototype could not build a normalized generation preview.")
     return _summarize_validation(warnings, errors)
@@ -4340,23 +4990,47 @@ def _build_local_generation_validation_payload(
     db_json = _dict_payload(image.json_metadata)
     exif_payload = _dict_payload(image.exif_data)
     source_url = str(image.source_url or "").strip()
-    source_variant = sidecar_payload.get("civitai_source_variant") or db_json.get("civitai_source_variant")
+    source_variant = sidecar_payload.get("civitai_source_variant") or db_json.get(
+        "civitai_source_variant"
+    )
 
     if not serialized_processes and not used_fallback_preview:
-        warnings.append("No normalized generation process records have been stored for this image yet.")
+        warnings.append(
+            "No normalized generation process records have been stored for this image yet."
+        )
     if used_fallback_preview:
-        warnings.append("No persisted normalized generation process records exist; showing a metadata-derived preview.")
+        warnings.append(
+            "No persisted normalized generation process records exist; showing a metadata-derived preview."
+        )
     if not sidecar_payload and not db_json and not exif_payload:
-        errors.append("No sidecar JSON, json_metadata, or EXIF payload is available for this image.")
-    if source_url and ("civitai.com/images/" in source_url or "civitai.red/images/" in source_url) and not isinstance(sidecar_payload.get("civitai") or db_json.get("civitai"), dict):
-        warnings.append("Image has a CivitAI source URL but no cached CivitAI metadata payload is stored locally.")
+        errors.append(
+            "No sidecar JSON, json_metadata, or EXIF payload is available for this image."
+        )
+    if (
+        source_url
+        and ("civitai.com/images/" in source_url or "civitai.red/images/" in source_url)
+        and not isinstance(
+            sidecar_payload.get("civitai") or db_json.get("civitai"), dict
+        )
+    ):
+        warnings.append(
+            "Image has a CivitAI source URL but no cached CivitAI metadata payload is stored locally."
+        )
     if not str(_read_generation_software_for_image(image) or "").strip():
-        warnings.append("No generation_software summary is currently available for this image.")
+        warnings.append(
+            "No generation_software summary is currently available for this image."
+        )
     if isinstance(source_variant, dict):
-        variant_reason = str(source_variant.get("reason") or "source_variant_present").strip()
-        warnings.append(f"CivitAI source variant metadata is present: {variant_reason}.")
+        variant_reason = str(
+            source_variant.get("reason") or "source_variant_present"
+        ).strip()
+        warnings.append(
+            f"CivitAI source variant metadata is present: {variant_reason}."
+        )
     if not isinstance(merged_payload.get("civitai"), dict) and not serialized_processes:
-        warnings.append("Prototype view has no API-derived generation block to compare against persisted records.")
+        warnings.append(
+            "Prototype view has no API-derived generation block to compare against persisted records."
+        )
 
     return _summarize_validation(warnings, errors)
 
@@ -4366,7 +5040,9 @@ def _build_local_generation_overview(
     sidecar_payload: dict,
     serialized_processes: list[dict],
 ) -> dict:
-    stage_count = sum(len(process.get("stages", [])) for process in serialized_processes)
+    stage_count = sum(
+        len(process.get("stages", [])) for process in serialized_processes
+    )
     return {
         "image_db_id": image.id,
         "file_hash": image.file_hash,
@@ -4385,15 +5061,21 @@ def _build_local_generation_overview(
     }
 
 
-def _build_civitai_generation_overview(image_id: int, prepared: dict, normalized: dict) -> dict:
-    processes = _list_payload(normalized.get("processes") if isinstance(normalized, dict) else [])
+def _build_civitai_generation_overview(
+    image_id: int, prepared: dict, normalized: dict
+) -> dict:
+    processes = _list_payload(
+        normalized.get("processes") if isinstance(normalized, dict) else []
+    )
     first_process = processes[0] if processes else {}
     stages = _list_payload(first_process.get("stages"))
     first_stage = stages[0] if stages else {}
     compatibility_json = {}
     for stage in reversed(stages):
         stage_compatibility = _dict_payload(stage.get("compatibility_json"))
-        if stage_compatibility.get("output_width") and stage_compatibility.get("output_height"):
+        if stage_compatibility.get("output_width") and stage_compatibility.get(
+            "output_height"
+        ):
             compatibility_json = stage_compatibility
             break
     stage_count = 0
@@ -4415,7 +5097,8 @@ def _build_civitai_generation_overview(image_id: int, prepared: dict, normalized
         "sampler_name": first_stage.get("sampler_name"),
         "output_dimensions": (
             f"{compatibility_json.get('output_width')}x{compatibility_json.get('output_height')}"
-            if compatibility_json.get("output_width") and compatibility_json.get("output_height")
+            if compatibility_json.get("output_width")
+            and compatibility_json.get("output_height")
             else None
         ),
         "dimensions": (
@@ -4432,7 +5115,9 @@ def _build_generation_prototype_civitai_payload(image_id: int) -> dict:
         prepared = _resolve_civitai_image_target(api, image_id)
     except _CivitaiImageUnavailableError as exc:
         validation = _summarize_validation(
-            warnings=[f"CivitAI could not resolve image {image_id} via {exc.endpoint}."],
+            warnings=[
+                f"CivitAI could not resolve image {image_id} via {exc.endpoint}."
+            ],
             errors=[exc.reason],
         )
         return {
@@ -4470,8 +5155,12 @@ def _build_generation_prototype_civitai_payload(image_id: int) -> dict:
         generation_data=generation_data,
         api=api,
     ).to_dict(include_full_url=True)
-    normalized = _build_civitai_normalized_preview(image_id, basic_info, generation_data, image_data)
-    validation = _build_civitai_validation_payload(basic_info, generation_data, normalized)
+    normalized = _build_civitai_normalized_preview(
+        image_id, basic_info, generation_data, image_data
+    )
+    validation = _build_civitai_validation_payload(
+        basic_info, generation_data, normalized
+    )
 
     return {
         "ok": validation.get("status") != "error",
@@ -4501,7 +5190,9 @@ def _build_generation_prototype_local_payload(image: ImageModel) -> dict:
         db_payload=db_payload,
         merged_payload={**db_payload, **sidecar_payload},
     )
-    serialized_processes = [_serialize_generation_process(item) for item in image.generation_processes]
+    serialized_processes = [
+        _serialize_generation_process(item) for item in image.generation_processes
+    ]
     used_fallback_preview = False
     if not serialized_processes:
         fallback_processes = _build_local_fallback_normalized_preview(
@@ -4527,7 +5218,9 @@ def _build_generation_prototype_local_payload(image: ImageModel) -> dict:
             "image_db_id": image.id,
             "source_url": image.source_url,
         },
-        "overview": _build_local_generation_overview(image, sidecar_payload, serialized_processes),
+        "overview": _build_local_generation_overview(
+            image, sidecar_payload, serialized_processes
+        ),
         "raw": {
             "db": db_payload,
             "merged": merged_payload,
@@ -4552,7 +5245,10 @@ def _parse_json_container(value: Any) -> Any:
     text = value.strip()
     if not text:
         return None
-    if not ((text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]"))):
+    if not (
+        (text.startswith("{") and text.endswith("}"))
+        or (text.startswith("[") and text.endswith("]"))
+    ):
         return None
     try:
         return json.loads(text)
@@ -4627,7 +5323,9 @@ def _looks_like_comfy_workflow_ui(payload: Any) -> bool:
     return False
 
 
-def _normalize_comfy_workflow_ui_graph(payload: Any) -> tuple[Optional[dict], list[str]]:
+def _normalize_comfy_workflow_ui_graph(
+    payload: Any,
+) -> tuple[Optional[dict], list[str]]:
     warnings: list[str] = []
     if not isinstance(payload, dict):
         return None, warnings
@@ -4669,11 +5367,14 @@ def _normalize_comfy_workflow_ui_graph(payload: Any) -> tuple[Optional[dict], li
         numeric_node_ids = [
             int(node.get("id"))
             for node in normalized_nodes
-            if isinstance(node, dict) and _coerce_optional_int(node.get("id")) is not None
+            if isinstance(node, dict)
+            and _coerce_optional_int(node.get("id")) is not None
         ]
         if numeric_node_ids:
             normalized["last_node_id"] = max(numeric_node_ids)
-            warnings.append("Comfy workflow missing last_node_id; inferred from node ids.")
+            warnings.append(
+                "Comfy workflow missing last_node_id; inferred from node ids."
+            )
 
     if normalized.get("last_link_id") is None:
         numeric_link_ids: list[int] = []
@@ -4684,25 +5385,37 @@ def _normalize_comfy_workflow_ui_graph(payload: Any) -> tuple[Optional[dict], li
                     numeric_link_ids.append(first)
         if numeric_link_ids:
             normalized["last_link_id"] = max(numeric_link_ids)
-            warnings.append("Comfy workflow missing last_link_id; inferred from link ids.")
+            warnings.append(
+                "Comfy workflow missing last_link_id; inferred from link ids."
+            )
 
     return normalized, warnings
 
 
-def _extract_comfy_workflow_ui_graph(workflow_payload: Any, meta: dict) -> Optional[dict]:
+def _extract_comfy_workflow_ui_graph(
+    workflow_payload: Any, meta: dict
+) -> Optional[dict]:
     comfy_payload = meta.get("comfy") if isinstance(meta.get("comfy"), dict) else None
     candidates: list[Any] = []
     if comfy_payload:
-        candidates.extend([
-            comfy_payload.get("workflow"),
-            comfy_payload.get("ui"),
-            comfy_payload,
-        ])
-    candidates.extend([
-        workflow_payload,
-        workflow_payload.get("workflow") if isinstance(workflow_payload, dict) else None,
-        workflow_payload.get("ui") if isinstance(workflow_payload, dict) else None,
-    ])
+        candidates.extend(
+            [
+                comfy_payload.get("workflow"),
+                comfy_payload.get("ui"),
+                comfy_payload,
+            ]
+        )
+    candidates.extend(
+        [
+            workflow_payload,
+            (
+                workflow_payload.get("workflow")
+                if isinstance(workflow_payload, dict)
+                else None
+            ),
+            workflow_payload.get("ui") if isinstance(workflow_payload, dict) else None,
+        ]
+    )
     candidates.extend(_collect_nested_comfy_candidates(workflow_payload, max_depth=3))
     candidates.extend(_collect_nested_comfy_candidates(meta, max_depth=3))
 
@@ -4714,7 +5427,9 @@ def _extract_comfy_workflow_ui_graph(workflow_payload: Any, meta: dict) -> Optio
     return None
 
 
-def _extract_comfy_graphs_from_generation_payload(generation_payload: dict) -> tuple[Optional[dict], Optional[dict], list[str]]:
+def _extract_comfy_graphs_from_generation_payload(
+    generation_payload: dict,
+) -> tuple[Optional[dict], Optional[dict], list[str]]:
     warnings: list[str] = []
     mode = str(generation_payload.get("mode") or "inspection").strip().lower()
 
@@ -4728,7 +5443,9 @@ def _extract_comfy_graphs_from_generation_payload(generation_payload: dict) -> t
         workflow_ui = _extract_comfy_workflow_ui_graph(workflow_payload, meta)
         return (prompt_graph or None, workflow_ui, warnings)
 
-    processes = _list_payload(_dict_payload(generation_payload.get("normalized")).get("processes"))
+    processes = _list_payload(
+        _dict_payload(generation_payload.get("normalized")).get("processes")
+    )
     raw = _dict_payload(generation_payload.get("raw"))
     merged = _dict_payload(raw.get("merged"))
     civitai_merged = _dict_payload(merged.get("civitai"))
@@ -4741,32 +5458,36 @@ def _extract_comfy_graphs_from_generation_payload(generation_payload: dict) -> t
         raw_payload = _dict_payload(process.get("raw_payload_json"))
         generation_data = _dict_payload(raw_payload.get("generation_data"))
         meta = _dict_payload(generation_data.get("meta"))
-        candidates.extend([
-            raw_payload.get("workflow"),
-            raw_payload.get("prompt"),
-            generation_data.get("workflow"),
-            meta.get("workflow"),
-            meta.get("comfy"),
-        ])
+        candidates.extend(
+            [
+                raw_payload.get("workflow"),
+                raw_payload.get("prompt"),
+                generation_data.get("workflow"),
+                meta.get("workflow"),
+                meta.get("comfy"),
+            ]
+        )
 
     raw_db = _dict_payload(raw.get("db"))
     raw_sidecar = _dict_payload(raw.get("sidecar"))
     raw_json_metadata = _dict_payload(raw.get("json_metadata"))
     raw_exif = _dict_payload(raw.get("exif_data"))
 
-    candidates.extend([
-        merged.get("workflow"),
-        merged.get("prompt"),
-        merged.get("Prompt"),
-        merged.get("UserComment"),
-        merged.get("comfy"),
-        civitai_merged.get("workflow"),
-        _dict_payload(civitai_merged.get("meta")).get("comfy"),
-        raw_db,
-        raw_sidecar,
-        raw_json_metadata,
-        raw_exif,
-    ])
+    candidates.extend(
+        [
+            merged.get("workflow"),
+            merged.get("prompt"),
+            merged.get("Prompt"),
+            merged.get("UserComment"),
+            merged.get("comfy"),
+            civitai_merged.get("workflow"),
+            _dict_payload(civitai_merged.get("meta")).get("comfy"),
+            raw_db,
+            raw_sidecar,
+            raw_json_metadata,
+            raw_exif,
+        ]
+    )
     candidates.extend(_collect_nested_comfy_candidates(merged, max_depth=4))
     candidates.extend(_collect_nested_comfy_candidates(raw_db, max_depth=4))
     candidates.extend(_collect_nested_comfy_candidates(raw_sidecar, max_depth=4))
@@ -4801,23 +5522,43 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
     normalized = _dict_payload(generation_payload.get("normalized"))
     processes = _list_payload(normalized.get("processes"))
     if not processes or not isinstance(processes[0], dict):
-        return None, ["No normalized process rows were available to synthesize a Comfy prompt graph."]
+        return None, [
+            "No normalized process rows were available to synthesize a Comfy prompt graph."
+        ]
 
     process = processes[0]
     stages = _list_payload(process.get("stages"))
     stage = stages[0] if stages and isinstance(stages[0], dict) else {}
 
-    resources = _list_payload(stage.get("resources")) + _list_payload(process.get("resources"))
+    resources = _list_payload(stage.get("resources")) + _list_payload(
+        process.get("resources")
+    )
     resources = [item for item in resources if isinstance(item, dict)]
-    checkpoint = next((item for item in resources if str(item.get("resource_type") or "").strip().lower() == "checkpoint"), None)
+    checkpoint = next(
+        (
+            item
+            for item in resources
+            if str(item.get("resource_type") or "").strip().lower() == "checkpoint"
+        ),
+        None,
+    )
     loras = [
         item
         for item in resources
         if str(item.get("resource_type") or "").strip().lower() == "lora"
     ]
-    vae_resource = next((item for item in resources if str(item.get("resource_type") or "").strip().lower() == "vae"), None)
+    vae_resource = next(
+        (
+            item
+            for item in resources
+            if str(item.get("resource_type") or "").strip().lower() == "vae"
+        ),
+        None,
+    )
 
-    stage_prompts = _list_payload(stage.get("prompts")) + _list_payload(process.get("prompts"))
+    stage_prompts = _list_payload(stage.get("prompts")) + _list_payload(
+        process.get("prompts")
+    )
     positive_prompt = ""
     negative_prompt = ""
     for prompt in stage_prompts:
@@ -4832,7 +5573,9 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
 
     prompt_lora_names: list[str] = []
     if positive_prompt:
-        for match in re.finditer(r"<lora:([^:>]+)(?::[^>]+)?>", positive_prompt, flags=re.IGNORECASE):
+        for match in re.finditer(
+            r"<lora:([^:>]+)(?::[^>]+)?>", positive_prompt, flags=re.IGNORECASE
+        ):
             candidate = str(match.group(1) or "").strip()
             if not candidate:
                 continue
@@ -4840,7 +5583,9 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
                 candidate = f"{candidate}.safetensors"
             prompt_lora_names.append(candidate)
 
-    sanitized_positive_prompt, removed_rp_directives = _sanitize_a1111_positive_prompt_for_comfy(positive_prompt)
+    sanitized_positive_prompt, removed_rp_directives = (
+        _sanitize_a1111_positive_prompt_for_comfy(positive_prompt)
+    )
     if removed_rp_directives:
         warnings.append(
             "Removed A1111 Regional Prompter directives from fallback Comfy positive prompt because RP emulation is not enabled: "
@@ -4888,6 +5633,7 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
     seed_value = _coerce_optional_int(stage.get("seed")) or 0
     steps_value = _coerce_optional_int(stage.get("steps")) or 24
     cfg_value = _coerce_optional_float(stage.get("cfg_scale")) or 7.0
+
     def normalize_sampler_name(value: Any) -> str:
         text = str(value or "").strip().lower()
         if not text:
@@ -4932,15 +5678,24 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
         lowered = text.lower()
         if re.fullmatch(r"\d+", lowered):
             return False
-        if any(token in lowered for token in (".safetensors", ".ckpt", ".pt", ".pth", "/", "\\")):
+        if any(
+            token in lowered
+            for token in (".safetensors", ".ckpt", ".pt", ".pth", "/", "\\")
+        ):
             return True
         return False
 
-    sampler_name = normalize_sampler_name(stage.get("sampler_name") or first_exif_value("Sampler"))
-    scheduler_name = normalize_scheduler_name(stage.get("scheduler_name") or first_exif_value("Scheduler", "Schedule type"))
+    sampler_name = normalize_sampler_name(
+        stage.get("sampler_name") or first_exif_value("Sampler")
+    )
+    scheduler_name = normalize_scheduler_name(
+        stage.get("scheduler_name") or first_exif_value("Scheduler", "Schedule type")
+    )
 
     catalog_entries = [
-        item for item in _list_payload(_dict_payload(local_catalog).get("entries")) if isinstance(item, dict)
+        item
+        for item in _list_payload(_dict_payload(local_catalog).get("entries"))
+        if isinstance(item, dict)
     ]
 
     def _catalog_source_identifier(entry: dict) -> Optional[str]:
@@ -4967,7 +5722,9 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
 
         type_key = str(resource_type or "").strip().lower()
         normalized_candidates = {
-            str(model_reference_service.normalize_name_key(candidate) or "").strip().lower()
+            str(model_reference_service.normalize_name_key(candidate) or "")
+            .strip()
+            .lower()
             for candidate in name_candidates
             if str(candidate or "").strip()
         }
@@ -4983,12 +5740,17 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
         compatible_entries = [
             entry
             for entry in catalog_entries
-            if model_reference_service._types_match(type_key, str(entry.get("resource_type") or "other"))
+            if model_reference_service._types_match(
+                type_key, str(entry.get("resource_type") or "other")
+            )
         ]
 
         if version_id is not None:
             for entry in compatible_entries:
-                if _coerce_optional_int(entry.get("civitai_model_version_id")) == version_id:
+                if (
+                    _coerce_optional_int(entry.get("civitai_model_version_id"))
+                    == version_id
+                ):
                     resolved = _catalog_source_identifier(entry)
                     if resolved:
                         return resolved
@@ -5012,8 +5774,22 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
             for entry in compatible_entries:
                 entry_candidates = {
                     str(entry.get("normalized_name") or "").strip().lower(),
-                    str(model_reference_service.normalize_name_key(entry.get("display_name")) or "").strip().lower(),
-                    str(model_reference_service.normalize_name_key(entry.get("source_identifier")) or "").strip().lower(),
+                    str(
+                        model_reference_service.normalize_name_key(
+                            entry.get("display_name")
+                        )
+                        or ""
+                    )
+                    .strip()
+                    .lower(),
+                    str(
+                        model_reference_service.normalize_name_key(
+                            entry.get("source_identifier")
+                        )
+                        or ""
+                    )
+                    .strip()
+                    .lower(),
                 }
                 entry_candidates = {item for item in entry_candidates if item}
                 entry_compact_candidates = {
@@ -5021,7 +5797,9 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
                     for item in entry_candidates
                     if item
                 }
-                entry_compact_candidates = {item for item in entry_compact_candidates if item}
+                entry_compact_candidates = {
+                    item for item in entry_compact_candidates if item
+                }
                 if compact_candidates & entry_compact_candidates:
                     resolved = _catalog_source_identifier(entry)
                     if resolved:
@@ -5041,7 +5819,12 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
         for candidate in preferred_candidates:
             if looks_like_model_filename(candidate):
                 return str(candidate).strip()
-        for key in ("display_name", "normalized_name", "version_name", "source_identifier"):
+        for key in (
+            "display_name",
+            "normalized_name",
+            "version_name",
+            "source_identifier",
+        ):
             value = str(resource.get(key) or "").strip()
             if value and not re.fullmatch(r"\d+", value):
                 return value if "." in value else f"{value}.safetensors"
@@ -5050,12 +5833,18 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
     checkpoint_name = resolve_identifier(checkpoint, "MISSING_CHECKPOINT.safetensors")
     exif_model = str(first_exif_value("Model") or "").strip()
     if exif_model:
-        checkpoint_name = exif_model if "." in exif_model else f"{exif_model}.safetensors"
+        checkpoint_name = (
+            exif_model if "." in exif_model else f"{exif_model}.safetensors"
+        )
 
     checkpoint_catalog_identifier = resolve_catalog_identifier(
         resource_type="checkpoint",
-        version_id=_coerce_optional_int(_dict_payload(checkpoint).get("civitai_model_version_id")),
-        model_id=_coerce_optional_int(_dict_payload(checkpoint).get("civitai_model_id")),
+        version_id=_coerce_optional_int(
+            _dict_payload(checkpoint).get("civitai_model_version_id")
+        ),
+        model_id=_coerce_optional_int(
+            _dict_payload(checkpoint).get("civitai_model_id")
+        ),
         name_candidates=[
             checkpoint_name,
             exif_model,
@@ -5073,7 +5862,9 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
     if re.fullmatch(r"\d+", checkpoint_name):
         checkpoint_name = f"{checkpoint_name}.safetensors"
     if not checkpoint:
-        warnings.append("No checkpoint reference was extracted; using placeholder checkpoint in fallback prompt graph.")
+        warnings.append(
+            "No checkpoint reference was extracted; using placeholder checkpoint in fallback prompt graph."
+        )
 
     node_counter = 1
     nodes: dict[str, Any] = {}
@@ -5098,7 +5889,9 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
 
         lora_catalog_identifier = resolve_catalog_identifier(
             resource_type="lora",
-            version_id=_coerce_optional_int(_dict_payload(lora).get("civitai_model_version_id")),
+            version_id=_coerce_optional_int(
+                _dict_payload(lora).get("civitai_model_version_id")
+            ),
             model_id=_coerce_optional_int(_dict_payload(lora).get("civitai_model_id")),
             name_candidates=[
                 lora_name,
@@ -5212,11 +6005,15 @@ def _build_fallback_comfy_prompt_graph_from_generation_payload(
         },
     }
 
-    warnings.append("Comfy prompt graph was synthesized from normalized generation fields because no embedded prompt graph was found.")
+    warnings.append(
+        "Comfy prompt graph was synthesized from normalized generation fields because no embedded prompt graph was found."
+    )
     return nodes, warnings
 
 
-def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> tuple[Optional[dict], list[str]]:
+def _build_fallback_comfy_workflow_ui_from_prompt_graph(
+    prompt_graph: dict,
+) -> tuple[Optional[dict], list[str]]:
     warnings: list[str] = []
     if not isinstance(prompt_graph, dict) or not prompt_graph:
         return None, warnings
@@ -5227,10 +6024,14 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
         if coerced is not None:
             normalized_node_ids.append(coerced)
     if not normalized_node_ids:
-        return None, ["Prompt graph node ids were not numeric; could not synthesize Comfy workflow UI graph."]
+        return None, [
+            "Prompt graph node ids were not numeric; could not synthesize Comfy workflow UI graph."
+        ]
 
     sorted_node_ids = sorted(set(normalized_node_ids))
-    node_id_to_col: dict[int, int] = {node_id: index for index, node_id in enumerate(sorted_node_ids)}
+    node_id_to_col: dict[int, int] = {
+        node_id: index for index, node_id in enumerate(sorted_node_ids)
+    }
 
     links: list[list[Any]] = []
     next_link_id = 1
@@ -5238,8 +6039,17 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
 
     workflow_nodes: list[dict[str, Any]] = []
     for order_index, node_id in enumerate(sorted_node_ids):
-        node_payload = _dict_payload(prompt_graph.get(str(node_id)) or prompt_graph.get(node_id))
-        class_type = str(node_payload.get("class_type") or node_payload.get("type") or "UnknownNode").strip() or "UnknownNode"
+        node_payload = _dict_payload(
+            prompt_graph.get(str(node_id)) or prompt_graph.get(node_id)
+        )
+        class_type = (
+            str(
+                node_payload.get("class_type")
+                or node_payload.get("type")
+                or "UnknownNode"
+            ).strip()
+            or "UnknownNode"
+        )
         raw_inputs = _dict_payload(node_payload.get("inputs"))
 
         input_ports: list[dict[str, Any]] = []
@@ -5264,15 +6074,19 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
                         "link": link_id,
                     }
                 )
-                links.append([
-                    link_id,
-                    source_node_id,
-                    source_slot,
-                    node_id,
-                    target_input_index,
-                    "*",
-                ])
-                outgoing_by_node_slot.setdefault((source_node_id, source_slot), []).append(link_id)
+                links.append(
+                    [
+                        link_id,
+                        source_node_id,
+                        source_slot,
+                        node_id,
+                        target_input_index,
+                        "*",
+                    ]
+                )
+                outgoing_by_node_slot.setdefault(
+                    (source_node_id, source_slot), []
+                ).append(link_id)
             else:
                 literal_inputs[input_name_text] = input_value
 
@@ -5282,8 +6096,16 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
         elif class_key == "loraloader":
             widget_values = [
                 literal_inputs.get("lora_name", ""),
-                _coerce_optional_float(literal_inputs.get("strength_model")) if literal_inputs.get("strength_model") is not None else 1.0,
-                _coerce_optional_float(literal_inputs.get("strength_clip")) if literal_inputs.get("strength_clip") is not None else 1.0,
+                (
+                    _coerce_optional_float(literal_inputs.get("strength_model"))
+                    if literal_inputs.get("strength_model") is not None
+                    else 1.0
+                ),
+                (
+                    _coerce_optional_float(literal_inputs.get("strength_clip"))
+                    if literal_inputs.get("strength_clip") is not None
+                    else 1.0
+                ),
             ]
         elif class_key == "cliptextencode":
             widget_values = [literal_inputs.get("text", "")]
@@ -5303,7 +6125,11 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
                 _coerce_optional_float(literal_inputs.get("cfg")) or 7.0,
                 sampler,
                 scheduler,
-                _coerce_optional_float(literal_inputs.get("denoise")) if literal_inputs.get("denoise") is not None else 1.0,
+                (
+                    _coerce_optional_float(literal_inputs.get("denoise"))
+                    if literal_inputs.get("denoise") is not None
+                    else 1.0
+                ),
             ]
         elif class_key == "saveimage":
             widget_values = [literal_inputs.get("filename_prefix", "AtelierAI")]
@@ -5345,7 +6171,11 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
             continue
         output_ports: list[dict[str, Any]] = []
         slot_indices = sorted(
-            {slot for (source_id, slot), _ in outgoing_by_node_slot.items() if source_id == node_id}
+            {
+                slot
+                for (source_id, slot), _ in outgoing_by_node_slot.items()
+                if source_id == node_id
+            }
         )
         for slot_index in slot_indices:
             output_ports.append(
@@ -5371,20 +6201,32 @@ def _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph: dict) -> t
         },
         "version": 0.4,
     }
-    warnings.append("Comfy workflow UI graph was synthesized from prompt graph because no embedded workflow UI graph was found.")
+    warnings.append(
+        "Comfy workflow UI graph was synthesized from prompt graph because no embedded workflow UI graph was found."
+    )
     return workflow_payload, warnings
 
 
-def _build_comfy_reference_validation(generation_payload: dict, local_catalog: dict) -> dict:
-    references = model_reference_service.extract_references_from_generation_payload(generation_payload)
-    matched_references = model_reference_service.apply_local_catalog_matches(references, local_catalog)
+def _build_comfy_reference_validation(
+    generation_payload: dict, local_catalog: dict
+) -> dict:
+    references = model_reference_service.extract_references_from_generation_payload(
+        generation_payload
+    )
+    matched_references = model_reference_service.apply_local_catalog_matches(
+        references, local_catalog
+    )
 
     available_count = 0
     missing_count = 0
     enriched_references: list[dict] = []
     for reference in matched_references:
         local_matches = _list_payload(reference.get("local_matches"))
-        first_match = local_matches[0] if local_matches and isinstance(local_matches[0], dict) else {}
+        first_match = (
+            local_matches[0]
+            if local_matches and isinstance(local_matches[0], dict)
+            else {}
+        )
         local_installed = bool(reference.get("local_installed"))
         if local_installed:
             available_count += 1
@@ -5401,11 +6243,15 @@ def _build_comfy_reference_validation(generation_payload: dict, local_catalog: d
         )
 
     summary = {
-        **model_reference_service._summarize_references(enriched_references, local_catalog),
+        **model_reference_service._summarize_references(
+            enriched_references, local_catalog
+        ),
         "available_reference_count": available_count,
         "missing_reference_count": missing_count,
     }
-    validation = model_reference_service._build_validation(enriched_references, local_catalog, catalog_expected=True)
+    validation = model_reference_service._build_validation(
+        enriched_references, local_catalog, catalog_expected=True
+    )
 
     return {
         "references": enriched_references,
@@ -5420,38 +6266,58 @@ def _build_comfy_reference_validation(generation_payload: dict, local_catalog: d
     }
 
 
-def _build_generation_comfy_workspace_export_payload(generation_payload: dict, *, local_catalog: dict) -> dict:
-    prompt_graph, workflow_ui, extraction_warnings = _extract_comfy_graphs_from_generation_payload(generation_payload)
-    workflow_ui, workflow_normalization_warnings = _normalize_comfy_workflow_ui_graph(workflow_ui)
+def _build_generation_comfy_workspace_export_payload(
+    generation_payload: dict, *, local_catalog: dict
+) -> dict:
+    prompt_graph, workflow_ui, extraction_warnings = (
+        _extract_comfy_graphs_from_generation_payload(generation_payload)
+    )
+    workflow_ui, workflow_normalization_warnings = _normalize_comfy_workflow_ui_graph(
+        workflow_ui
+    )
     extraction_warnings.extend(workflow_normalization_warnings)
     synthesized_prompt_graph = False
     if not prompt_graph:
-        prompt_graph, fallback_warnings = _build_fallback_comfy_prompt_graph_from_generation_payload(
-            generation_payload,
-            local_catalog=local_catalog,
+        prompt_graph, fallback_warnings = (
+            _build_fallback_comfy_prompt_graph_from_generation_payload(
+                generation_payload,
+                local_catalog=local_catalog,
+            )
         )
         extraction_warnings.extend(fallback_warnings)
         synthesized_prompt_graph = bool(prompt_graph)
 
     synthesized_workflow_ui_graph = False
     if not workflow_ui and prompt_graph:
-        workflow_ui, workflow_fallback_warnings = _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph)
+        workflow_ui, workflow_fallback_warnings = (
+            _build_fallback_comfy_workflow_ui_from_prompt_graph(prompt_graph)
+        )
         extraction_warnings.extend(workflow_fallback_warnings)
-        workflow_ui, workflow_normalization_warnings = _normalize_comfy_workflow_ui_graph(workflow_ui)
+        workflow_ui, workflow_normalization_warnings = (
+            _normalize_comfy_workflow_ui_graph(workflow_ui)
+        )
         extraction_warnings.extend(workflow_normalization_warnings)
         synthesized_workflow_ui_graph = bool(workflow_ui)
 
-    model_validation = _build_comfy_reference_validation(generation_payload, local_catalog)
+    model_validation = _build_comfy_reference_validation(
+        generation_payload, local_catalog
+    )
     summary = _dict_payload(model_validation.get("summary"))
 
     warnings = list(extraction_warnings)
     errors: list[str] = []
     if not prompt_graph:
-        errors.append("Unable to build a Comfy prompt API graph from available generation data.")
+        errors.append(
+            "Unable to build a Comfy prompt API graph from available generation data."
+        )
     if not workflow_ui:
-        warnings.append("No Comfy UI workflow graph was found; export still includes prompt API graph.")
+        warnings.append(
+            "No Comfy UI workflow graph was found; export still includes prompt API graph."
+        )
     if int(summary.get("missing_reference_count") or 0) > 0:
-        warnings.append("Some referenced models are missing from the configured LoRA Manager catalog.")
+        warnings.append(
+            "Some referenced models are missing from the configured LoRA Manager catalog."
+        )
     if local_catalog.get("error"):
         warnings.append(str(local_catalog.get("error")))
 
@@ -5459,7 +6325,12 @@ def _build_generation_comfy_workspace_export_payload(generation_payload: dict, *
 
     mode = str(generation_payload.get("mode") or "inspection")
     target = _dict_payload(generation_payload.get("target"))
-    target_key = str(target.get("file_hash") or target.get("image_id") or target.get("image_db_id") or "unknown")
+    target_key = str(
+        target.get("file_hash")
+        or target.get("image_id")
+        or target.get("image_db_id")
+        or "unknown"
+    )
 
     workspace_bundle = {
         "schema": "atelierai.comfy_workspace_bundle.v1",
@@ -5514,7 +6385,9 @@ def _clone_json_value(value: Any) -> Any:
         return value
 
 
-def _serialize_generation_template(template: GenerationTemplate, *, include_workflow: bool) -> dict[str, Any]:
+def _serialize_generation_template(
+    template: GenerationTemplate, *, include_workflow: bool
+) -> dict[str, Any]:
     workflow_json = _dict_payload(template.workflow_json)
     return {
         "id": template.id,
@@ -5579,17 +6452,28 @@ def _tokenize_template_path(path: str) -> list[tuple[str, Any]]:
                 selector_key = selector_key.strip()
                 if not selector_key:
                     raise ValueError(f"Invalid keyed selector in segment: {segment}")
-                operations.append(("filter", (selector_key, _template_parse_selector_value(selector_value))))
+                operations.append(
+                    (
+                        "filter",
+                        (selector_key, _template_parse_selector_value(selector_value)),
+                    )
+                )
                 continue
 
-            raise ValueError(f"Unsupported selector '{selector_text}' in segment: {segment}")
+            raise ValueError(
+                f"Unsupported selector '{selector_text}' in segment: {segment}"
+            )
 
     return operations
 
 
-def _select_template_list_index(items: Any, selector: tuple[str, Any], *, path: str) -> int:
+def _select_template_list_index(
+    items: Any, selector: tuple[str, Any], *, path: str
+) -> int:
     if not isinstance(items, list):
-        raise ValueError(f"Path '{path}' expected a list for selector [{selector[0]}={selector[1]}].")
+        raise ValueError(
+            f"Path '{path}' expected a list for selector [{selector[0]}={selector[1]}]."
+        )
     key, expected = selector
     for index, item in enumerate(items):
         if not isinstance(item, dict):
@@ -5597,7 +6481,9 @@ def _select_template_list_index(items: Any, selector: tuple[str, Any], *, path: 
         candidate = item.get(key)
         if candidate == expected or str(candidate) == str(expected):
             return index
-    raise ValueError(f"Path '{path}' could not find selector [{key}={expected}] in target list.")
+    raise ValueError(
+        f"Path '{path}' could not find selector [{key}={expected}] in target list."
+    )
 
 
 def _read_template_path_value(payload: Any, path: str) -> Any:
@@ -5650,8 +6536,14 @@ def _write_template_path_value(payload: Any, path: str, value: Any) -> None:
         current[final_operand] = value
         return
     if final_operation == "index":
-        if not isinstance(current, list) or final_operand < 0 or final_operand >= len(current):
-            raise ValueError(f"Path '{path}' has invalid terminal list index [{final_operand}].")
+        if (
+            not isinstance(current, list)
+            or final_operand < 0
+            or final_operand >= len(current)
+        ):
+            raise ValueError(
+                f"Path '{path}' has invalid terminal list index [{final_operand}]."
+            )
         current[final_operand] = value
         return
     if final_operation == "filter":
@@ -5702,7 +6594,9 @@ def _coerce_template_value(value: Any, value_type: str, *, token: str) -> Any:
     raise ValueError(f"Unsupported value_type '{value_type}' for token '{token}'.")
 
 
-def _replace_template_placeholders_in_string(text: str, token_values: dict[str, Any], unresolved: set[str]) -> Any:
+def _replace_template_placeholders_in_string(
+    text: str, token_values: dict[str, Any], unresolved: set[str]
+) -> Any:
     full_match = _TEMPLATE_PLACEHOLDER_RE.fullmatch(text)
     if full_match:
         token = full_match.group(1).strip()
@@ -5726,20 +6620,27 @@ def _replace_template_placeholders_in_string(text: str, token_values: dict[str, 
     return _TEMPLATE_PLACEHOLDER_RE.sub(replacer, text)
 
 
-def _replace_template_placeholders(value: Any, token_values: dict[str, Any], unresolved: set[str]) -> Any:
+def _replace_template_placeholders(
+    value: Any, token_values: dict[str, Any], unresolved: set[str]
+) -> Any:
     if isinstance(value, dict):
         return {
             key: _replace_template_placeholders(item, token_values, unresolved)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_replace_template_placeholders(item, token_values, unresolved) for item in value]
+        return [
+            _replace_template_placeholders(item, token_values, unresolved)
+            for item in value
+        ]
     if isinstance(value, str):
         return _replace_template_placeholders_in_string(value, token_values, unresolved)
     return value
 
 
-def _build_generation_template_token_values(generation_payload: dict, local_catalog: dict) -> dict[str, Any]:
+def _build_generation_template_token_values(
+    generation_payload: dict, local_catalog: dict
+) -> dict[str, Any]:
     token_values: dict[str, Any] = {}
 
     mode = str(generation_payload.get("mode") or "unknown")
@@ -5755,26 +6656,47 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
 
     normalized = _dict_payload(generation_payload.get("normalized"))
     processes = _list_payload(normalized.get("processes"))
-    process = next((item for item in processes if isinstance(item, dict) and item.get("is_preferred")), None)
+    process = next(
+        (
+            item
+            for item in processes
+            if isinstance(item, dict) and item.get("is_preferred")
+        ),
+        None,
+    )
     if process is None and processes:
         process = processes[0] if isinstance(processes[0], dict) else None
     process = _dict_payload(process)
 
     stages = _list_payload(process.get("stages"))
-    stage = next((item for item in stages if isinstance(item, dict) and str(item.get("stage_role") or "").lower() in {"base", "primary"}), None)
+    stage = next(
+        (
+            item
+            for item in stages
+            if isinstance(item, dict)
+            and str(item.get("stage_role") or "").lower() in {"base", "primary"}
+        ),
+        None,
+    )
     if stage is None and stages:
         stage = stages[0] if isinstance(stages[0], dict) else None
     stage = _dict_payload(stage)
 
     process_prompts = _list_payload(process.get("prompts"))
     stage_prompts = _list_payload(stage.get("prompts"))
-    all_prompts = [item for item in [*stage_prompts, *process_prompts] if isinstance(item, dict)]
-    for prompt_role, token_name in (("positive", "prompt.positive"), ("negative", "prompt.negative")):
+    all_prompts = [
+        item for item in [*stage_prompts, *process_prompts] if isinstance(item, dict)
+    ]
+    for prompt_role, token_name in (
+        ("positive", "prompt.positive"),
+        ("negative", "prompt.negative"),
+    ):
         prompt_value = next(
             (
                 str(item.get("prompt_text") or "").strip()
                 for item in all_prompts
-                if str(item.get("prompt_role") or "").strip().lower() == prompt_role and str(item.get("prompt_text") or "").strip()
+                if str(item.get("prompt_role") or "").strip().lower() == prompt_role
+                and str(item.get("prompt_text") or "").strip()
             ),
             "",
         )
@@ -5804,9 +6726,17 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
     for stage_item in stages:
         if isinstance(stage_item, dict):
             stage_resources.extend(
-                [resource for resource in _list_payload(stage_item.get("resources")) if isinstance(resource, dict)]
+                [
+                    resource
+                    for resource in _list_payload(stage_item.get("resources"))
+                    if isinstance(resource, dict)
+                ]
             )
-    all_resources = [resource for resource in [*stage_resources, *process_resources] if isinstance(resource, dict)]
+    all_resources = [
+        resource
+        for resource in [*stage_resources, *process_resources]
+        if isinstance(resource, dict)
+    ]
 
     def pick_resource(resource_type: str) -> Optional[dict[str, Any]]:
         typed = [
@@ -5816,7 +6746,9 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
         ]
         if not typed:
             return None
-        primary = next((resource for resource in typed if bool(resource.get("is_primary"))), None)
+        primary = next(
+            (resource for resource in typed if bool(resource.get("is_primary"))), None
+        )
         return primary or typed[0]
 
     checkpoint_resource = pick_resource("checkpoint")
@@ -5827,7 +6759,9 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
             or checkpoint_resource.get("source_identifier")
             or ""
         ).strip()
-        checkpoint_path = str(checkpoint_resource.get("source_identifier") or "").strip()
+        checkpoint_path = str(
+            checkpoint_resource.get("source_identifier") or ""
+        ).strip()
         if checkpoint_name:
             token_values["model.checkpoint_name"] = checkpoint_name
         if checkpoint_path:
@@ -5848,23 +6782,34 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
             ).strip()
             for resource in lora_resources
         ]
-        lora_paths = [str(resource.get("source_identifier") or "").strip() for resource in lora_resources]
+        lora_paths = [
+            str(resource.get("source_identifier") or "").strip()
+            for resource in lora_resources
+        ]
         lora_model_strengths = [
-            resource.get("weight")
-            if resource.get("weight") not in (None, "")
-            else resource.get("strength")
+            (
+                resource.get("weight")
+                if resource.get("weight") not in (None, "")
+                else resource.get("strength")
+            )
             for resource in lora_resources
         ]
         lora_clip_strengths = [
-            resource.get("clip_weight")
-            if resource.get("clip_weight") not in (None, "")
-            else resource.get("clipStrength")
+            (
+                resource.get("clip_weight")
+                if resource.get("clip_weight") not in (None, "")
+                else resource.get("clipStrength")
+            )
             for resource in lora_resources
         ]
         lora_names = [value for value in lora_names if value]
         lora_paths = [value for value in lora_paths if value]
-        lora_model_strengths = [value for value in lora_model_strengths if value not in (None, "")]
-        lora_clip_strengths = [value for value in lora_clip_strengths if value not in (None, "")]
+        lora_model_strengths = [
+            value for value in lora_model_strengths if value not in (None, "")
+        ]
+        lora_clip_strengths = [
+            value for value in lora_clip_strengths if value not in (None, "")
+        ]
         if lora_names:
             token_values["model.lora_names"] = lora_names
             token_values["model.lora_name"] = lora_names[0]
@@ -5879,19 +6824,26 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
             token_values["model.lora_clip_strength"] = lora_clip_strengths[0]
 
     if bool(local_catalog.get("configured")):
-        references = model_reference_service.extract_references_from_generation_payload(generation_payload)
-        matched = model_reference_service.apply_local_catalog_matches(references, local_catalog)
+        references = model_reference_service.extract_references_from_generation_payload(
+            generation_payload
+        )
+        matched = model_reference_service.apply_local_catalog_matches(
+            references, local_catalog
+        )
         checkpoint_match = next(
             (
                 reference
                 for reference in matched
-                if str(reference.get("resource_type") or "").strip().lower() == "checkpoint"
+                if str(reference.get("resource_type") or "").strip().lower()
+                == "checkpoint"
                 and _list_payload(reference.get("local_matches"))
             ),
             None,
         )
         if checkpoint_match:
-            first_match = _dict_payload(_list_payload(checkpoint_match.get("local_matches"))[0])
+            first_match = _dict_payload(
+                _list_payload(checkpoint_match.get("local_matches"))[0]
+            )
             match_path = str(first_match.get("source_identifier") or "").strip()
             if match_path:
                 token_values["model.checkpoint_path"] = match_path
@@ -5912,15 +6864,26 @@ def _build_generation_template_token_values(generation_payload: dict, local_cata
     return token_values
 
 
-def _build_generation_template_step_token_groups(generation_payload: dict) -> list[dict[str, Any]]:
+def _build_generation_template_step_token_groups(
+    generation_payload: dict,
+) -> list[dict[str, Any]]:
     normalized = _dict_payload(generation_payload.get("normalized"))
     processes = _list_payload(normalized.get("processes"))
-    process = next((item for item in processes if isinstance(item, dict) and item.get("is_preferred")), None)
+    process = next(
+        (
+            item
+            for item in processes
+            if isinstance(item, dict) and item.get("is_preferred")
+        ),
+        None,
+    )
     if process is None and processes:
         process = processes[0] if isinstance(processes[0], dict) else None
     process = _dict_payload(process)
 
-    stages = [item for item in _list_payload(process.get("stages")) if isinstance(item, dict)]
+    stages = [
+        item for item in _list_payload(process.get("stages")) if isinstance(item, dict)
+    ]
     step_groups: list[dict[str, Any]] = []
 
     for step_index, stage in enumerate(stages):
@@ -5945,7 +6908,11 @@ def _build_generation_template_step_token_groups(generation_payload: dict) -> li
             if value not in (None, ""):
                 step_tokens[f"{token_prefix}.{token_key}"] = value
 
-        stage_prompts = [item for item in _list_payload(stage.get("prompts")) if isinstance(item, dict)]
+        stage_prompts = [
+            item
+            for item in _list_payload(stage.get("prompts"))
+            if isinstance(item, dict)
+        ]
         for prompt_role in ("positive", "negative"):
             prompt_text = next(
                 (
@@ -5959,7 +6926,11 @@ def _build_generation_template_step_token_groups(generation_payload: dict) -> li
             if prompt_text:
                 step_tokens[f"{token_prefix}.prompt.{prompt_role}"] = prompt_text
 
-        stage_resources = [item for item in _list_payload(stage.get("resources")) if isinstance(item, dict)]
+        stage_resources = [
+            item
+            for item in _list_payload(stage.get("resources"))
+            if isinstance(item, dict)
+        ]
         checkpoint_resources = [
             item
             for item in stage_resources
@@ -6037,8 +7008,12 @@ def _build_generation_template_step_token_groups(generation_payload: dict) -> li
     return step_groups
 
 
-def _build_generation_template_token_preview(generation_payload: dict, local_catalog: dict) -> dict[str, Any]:
-    global_tokens = _build_generation_template_token_values(generation_payload, local_catalog)
+def _build_generation_template_token_preview(
+    generation_payload: dict, local_catalog: dict
+) -> dict[str, Any]:
+    global_tokens = _build_generation_template_token_values(
+        generation_payload, local_catalog
+    )
     step_groups = _build_generation_template_step_token_groups(generation_payload)
     flattened_step_tokens: dict[str, Any] = {}
     for group in step_groups:
@@ -6065,13 +7040,23 @@ def _resolve_generation_template_workflow(
 
     workflow_json = _dict_payload(_clone_json_value(template.workflow_json))
     if not workflow_json:
-        raise HTTPException(status_code=422, detail="Template has no workflow JSON payload.")
+        raise HTTPException(
+            status_code=422, detail="Template has no workflow JSON payload."
+        )
 
     template_defaults = _dict_payload(template.default_tokens_json)
-    derived_tokens = _build_generation_template_token_values(generation_payload, local_catalog)
-    resolved_tokens: dict[str, Any] = {**template_defaults, **derived_tokens, **_dict_payload(token_overrides)}
+    derived_tokens = _build_generation_template_token_values(
+        generation_payload, local_catalog
+    )
+    resolved_tokens: dict[str, Any] = {
+        **template_defaults,
+        **derived_tokens,
+        **_dict_payload(token_overrides),
+    }
 
-    mappings = [item for item in _list_payload(template.mappings_json) if isinstance(item, dict)]
+    mappings = [
+        item for item in _list_payload(template.mappings_json) if isinstance(item, dict)
+    ]
     for mapping in mappings:
         token_name = str(mapping.get("token") or "").strip()
         target_path = str(mapping.get("target_path") or "").strip()
@@ -6080,10 +7065,15 @@ def _resolve_generation_template_workflow(
         default_value = mapping.get("default_value")
 
         if not token_name or not target_path:
-            warnings.append("Skipped template mapping with missing token or target_path.")
+            warnings.append(
+                "Skipped template mapping with missing token or target_path."
+            )
             continue
 
-        has_value = token_name in resolved_tokens and resolved_tokens.get(token_name) is not None
+        has_value = (
+            token_name in resolved_tokens
+            and resolved_tokens.get(token_name) is not None
+        )
         if not has_value and default_value is not None:
             resolved_tokens[token_name] = default_value
             has_value = True
@@ -6097,7 +7087,9 @@ def _resolve_generation_template_workflow(
             continue
 
         try:
-            coerced_value = _coerce_template_value(resolved_tokens.get(token_name), value_type, token=token_name)
+            coerced_value = _coerce_template_value(
+                resolved_tokens.get(token_name), value_type, token=token_name
+            )
         except ValueError as exc:
             errors.append(str(exc))
             continue
@@ -6109,7 +7101,9 @@ def _resolve_generation_template_workflow(
             continue
 
     unresolved_placeholders: set[str] = set()
-    workflow_json = _replace_template_placeholders(workflow_json, resolved_tokens, unresolved_placeholders)
+    workflow_json = _replace_template_placeholders(
+        workflow_json, resolved_tokens, unresolved_placeholders
+    )
     if unresolved_placeholders:
         warnings.append(
             "Unresolved placeholder tokens remain in workflow JSON: "
@@ -6123,7 +7117,9 @@ def _resolve_generation_template_workflow(
         if not token_name or not target_path:
             continue
         try:
-            extracted_tokens[token_name] = _read_template_path_value(workflow_json, target_path)
+            extracted_tokens[token_name] = _read_template_path_value(
+                workflow_json, target_path
+            )
         except ValueError:
             continue
 
@@ -6156,7 +7152,9 @@ def _import_single_civitai_image(
     # skip download and only attempt metadata repair.
     existing_by_source = _find_existing_image_by_source_url(db, source_url)
     if existing_by_source is not None:
-        existing_status = (getattr(existing_by_source, "image_status", None) or "active").lower()
+        existing_status = (
+            getattr(existing_by_source, "image_status", None) or "active"
+        ).lower()
         if existing_status == "placeholder":
             return {
                 "image_id": image_id,
@@ -6378,7 +7376,9 @@ def _get_media_capabilities() -> dict[str, Any]:
     }
 
 
-def _find_existing_image_by_source_url(db: Session, source_url: str) -> Optional[ImageModel]:
+def _find_existing_image_by_source_url(
+    db: Session, source_url: str
+) -> Optional[ImageModel]:
     """Find existing image by DB source_url, then by sidecar source_url fallback."""
     direct_matches = (
         db.query(ImageModel)
@@ -6411,7 +7411,10 @@ def _find_existing_image_by_source_url(db: Session, source_url: str) -> Optional
         try:
             with open(sidecar_path, "r", encoding="utf-8") as f:
                 sidecar_data = json.load(f)
-            if isinstance(sidecar_data, dict) and sidecar_data.get("source_url") == source_url:
+            if (
+                isinstance(sidecar_data, dict)
+                and sidecar_data.get("source_url") == source_url
+            ):
                 fallback_matches.append(candidate)
         except (OSError, json.JSONDecodeError):
             continue
@@ -6509,7 +7512,9 @@ def _ensure_civitai_source_attribution_for_existing_image(
         changed = True
 
     current_source_site = str(image.source_site or "").strip().lower()
-    if not current_source_site and is_civitai_image_url(str(image.source_url or "").strip()):
+    if not current_source_site and is_civitai_image_url(
+        str(image.source_url or "").strip()
+    ):
         image.source_site = "civitai"
         changed = True
 
@@ -6557,8 +7562,17 @@ def _ensure_civitai_metadata_for_existing_image(
     # filled in from sidecar data (backfills legacy terms that were
     # imported without numeric IDs).  Must commit here because the
     # fast-path caller does not commit when we return False.
-    if sidecar_has_civitai and db_has_civitai and sidecar_has_nsfw_level and db_has_nsfw_level:
-        sidecar_tags = sidecar_civitai_payload.get("tags") if isinstance(sidecar_civitai_payload, dict) else None
+    if (
+        sidecar_has_civitai
+        and db_has_civitai
+        and sidecar_has_nsfw_level
+        and db_has_nsfw_level
+    ):
+        sidecar_tags = (
+            sidecar_civitai_payload.get("tags")
+            if isinstance(sidecar_civitai_payload, dict)
+            else None
+        )
         if isinstance(sidecar_tags, list) and sidecar_tags:
             try:
                 _upsert_civitai_authority_terms(db, {"tags": sidecar_tags})
@@ -6713,7 +7727,9 @@ def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
                 term.normalized_external_name = normalized_name
                 changed = True
             if tag_meta:
-                existing_meta = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+                existing_meta = (
+                    term.metadata_json if isinstance(term.metadata_json, dict) else {}
+                )
                 merged_meta = {**existing_meta, **tag_meta}
                 if merged_meta != existing_meta:
                     term.metadata_json = merged_meta
@@ -6754,7 +7770,9 @@ def _serialize_collection(collection: CollectionModel) -> dict:
         "source": collection.source,
         "civitai_collection_id": collection.civitai_collection_id,
         "civitai_last_synced_at": _isoformat_or_none(collection.civitai_last_synced_at),
-        "civitai_last_full_scan_at": _isoformat_or_none(collection.civitai_last_full_scan_at),
+        "civitai_last_full_scan_at": _isoformat_or_none(
+            collection.civitai_last_full_scan_at
+        ),
         "civitai_last_full_item_count": collection.civitai_last_full_item_count,
     }
 
@@ -6830,7 +7848,9 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
             continue
 
         seen_ids.add(collection_id)
-        name = str(row.get("name") or "").strip() or f"CivitAI Collection {collection_id}"
+        name = (
+            str(row.get("name") or "").strip() or f"CivitAI Collection {collection_id}"
+        )
         collections.append(
             {
                 "id": collection_id,
@@ -6859,7 +7879,9 @@ def _probe_civitai_collection_head(
 ) -> _CivitaiCollectionProbe:
     data, next_cursor = scraper._make_collection_request(collection_id, None, False)
     if data is None:
-        raise RuntimeError(f"Could not fetch CivitAI collection {collection_id} head page.")
+        raise RuntimeError(
+            f"Could not fetch CivitAI collection {collection_id} head page."
+        )
 
     page_items = scraper._find_deep_image_list(data) or []
     seen_ids: set[int] = set()
@@ -6942,7 +7964,11 @@ def _civitai_collection_requires_full_verify(
         return True, "local_media_incomplete"
 
     raw_last_full_item_count = getattr(collection, "civitai_last_full_item_count", None)
-    last_full_item_count = int(raw_last_full_item_count) if isinstance(raw_last_full_item_count, int) else None
+    last_full_item_count = (
+        int(raw_last_full_item_count)
+        if isinstance(raw_last_full_item_count, int)
+        else None
+    )
     if last_full_item_count is None:
         return True, "missing_full_snapshot"
     if local_membership_count != last_full_item_count:
@@ -6956,7 +7982,10 @@ def _civitai_collection_requires_full_verify(
     if head_has_more != probe.has_more:
         return True, "remote_page_shape_changed"
 
-    if last_full_item_count <= _CIVITAI_COLLECTION_HEAD_PROBE_SIZE and not probe.has_more:
+    if (
+        last_full_item_count <= _CIVITAI_COLLECTION_HEAD_PROBE_SIZE
+        and not probe.has_more
+    ):
         return False, "head_matches_complete_collection"
 
     last_full_scan_at = getattr(collection, "civitai_last_full_scan_at", None)
@@ -7012,14 +8041,22 @@ def _build_civitai_empty_collection_sync_summary(
     return summary
 
 
-def _summarize_civitai_collection_item_stub(collection_item: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+def _summarize_civitai_collection_item_stub(
+    collection_item: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
     if not isinstance(collection_item, dict):
         return None
 
     item: dict[str, Any] = collection_item
-    metadata: dict[str, Any] = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    user: dict[str, Any] = item.get("user") if isinstance(item.get("user"), dict) else {}
-    account: dict[str, Any] = item.get("account") if isinstance(item.get("account"), dict) else {}
+    metadata: dict[str, Any] = (
+        item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    )
+    user: dict[str, Any] = (
+        item.get("user") if isinstance(item.get("user"), dict) else {}
+    )
+    account: dict[str, Any] = (
+        item.get("account") if isinstance(item.get("account"), dict) else {}
+    )
     return {
         "id": item.get("id"),
         "name": item.get("name"),
@@ -7030,7 +8067,9 @@ def _summarize_civitai_collection_item_stub(collection_item: Optional[dict[str, 
         "published_at": item.get("publishedAt"),
         "post_id": item.get("postId"),
         "user_id": item.get("userId") or user.get("id") or account.get("id"),
-        "username": item.get("username") or user.get("username") or account.get("username"),
+        "username": item.get("username")
+        or user.get("username")
+        or account.get("username"),
         "nsfw_level": item.get("nsfwLevel"),
         "has_meta": item.get("hasMeta"),
         "has_positive_prompt": item.get("hasPositivePrompt"),
@@ -7045,9 +8084,13 @@ def _summarize_civitai_collection_item_stub(collection_item: Optional[dict[str, 
     }
 
 
-def _probe_civitai_endpoint_status(api: CivitaiAPI, endpoint: str, payload_data: dict[str, Any]) -> dict[str, Any]:
+def _probe_civitai_endpoint_status(
+    api: CivitaiAPI, endpoint: str, payload_data: dict[str, Any]
+) -> dict[str, Any]:
     try:
-        response = api._make_request(endpoint=endpoint, payload_data=payload_data, strict=True)
+        response = api._make_request(
+            endpoint=endpoint, payload_data=payload_data, strict=True
+        )
         return {
             "status_code": 200,
             "available": response is not None,
@@ -7100,18 +8143,42 @@ def _probe_civitai_media_status(api: CivitaiAPI, media_url: str) -> dict[str, An
 
 
 def _classify_civitai_unavailable_diagnostics(diagnostics: dict[str, Any]) -> str:
-    collection_stub: dict[str, Any] = diagnostics.get("collection_stub") if isinstance(diagnostics.get("collection_stub"), dict) else {}
-    endpoint_status: dict[str, Any] = diagnostics.get("endpoint_status") if isinstance(diagnostics.get("endpoint_status"), dict) else {}
-    image_get: dict[str, Any] = endpoint_status.get("image.get") if isinstance(endpoint_status.get("image.get"), dict) else {}
-    generation_get: dict[str, Any] = endpoint_status.get("image.getGenerationData") if isinstance(endpoint_status.get("image.getGenerationData"), dict) else {}
-    media_probe: dict[str, Any] = diagnostics.get("media_probe") if isinstance(diagnostics.get("media_probe"), dict) else {}
+    collection_stub: dict[str, Any] = (
+        diagnostics.get("collection_stub")
+        if isinstance(diagnostics.get("collection_stub"), dict)
+        else {}
+    )
+    endpoint_status: dict[str, Any] = (
+        diagnostics.get("endpoint_status")
+        if isinstance(diagnostics.get("endpoint_status"), dict)
+        else {}
+    )
+    image_get: dict[str, Any] = (
+        endpoint_status.get("image.get")
+        if isinstance(endpoint_status.get("image.get"), dict)
+        else {}
+    )
+    generation_get: dict[str, Any] = (
+        endpoint_status.get("image.getGenerationData")
+        if isinstance(endpoint_status.get("image.getGenerationData"), dict)
+        else {}
+    )
+    media_probe: dict[str, Any] = (
+        diagnostics.get("media_probe")
+        if isinstance(diagnostics.get("media_probe"), dict)
+        else {}
+    )
     image_get_status = image_get.get("status_code")
     generation_status = generation_get.get("status_code")
     media_status = media_probe.get("status_code")
 
     ingestion = str(collection_stub.get("ingestion") or "").strip().lower()
     blocked_for = str(collection_stub.get("blocked_for") or "").strip()
-    if blocked_for or ingestion == "blocked" or bool(collection_stub.get("tos_violation")):
+    if (
+        blocked_for
+        or ingestion == "blocked"
+        or bool(collection_stub.get("tos_violation"))
+    ):
         return "collection_reference_blocked_or_moderated"
     if image_get_status == 404 and generation_status == 404 and media_status == 404:
         if diagnostics.get("collection_reference_present"):
@@ -7141,11 +8208,15 @@ def _diagnose_civitai_unavailable_item(
         "collection_stub": _summarize_civitai_collection_item_stub(collection_item),
     }
     if api is None:
-        diagnostics["classification"] = _classify_civitai_unavailable_diagnostics(diagnostics)
+        diagnostics["classification"] = _classify_civitai_unavailable_diagnostics(
+            diagnostics
+        )
         return diagnostics
 
     diagnostics["endpoint_status"] = {
-        "image.get": _probe_civitai_endpoint_status(api, "image.get", {"id": int(image_id), "authed": True}),
+        "image.get": _probe_civitai_endpoint_status(
+            api, "image.get", {"id": int(image_id), "authed": True}
+        ),
         "image.getGenerationData": _probe_civitai_endpoint_status(
             api,
             "image.getGenerationData",
@@ -7154,9 +8225,17 @@ def _diagnose_civitai_unavailable_item(
     }
 
     if isinstance(collection_item, dict):
-        preferred_name = collection_item.get("name") if isinstance(collection_item.get("name"), str) else None
+        preferred_name = (
+            collection_item.get("name")
+            if isinstance(collection_item.get("name"), str)
+            else None
+        )
         url_hash = collection_item.get("url")
-        mime_type = collection_item.get("mimeType") if isinstance(collection_item.get("mimeType"), str) else None
+        mime_type = (
+            collection_item.get("mimeType")
+            if isinstance(collection_item.get("mimeType"), str)
+            else None
+        )
         original_filename = _build_civitai_original_filename(
             image_id=image_id,
             preferred_name=preferred_name,
@@ -7172,7 +8251,9 @@ def _diagnose_civitai_unavailable_item(
         if media_url:
             diagnostics["media_probe"] = _probe_civitai_media_status(api, media_url)
 
-    diagnostics["classification"] = _classify_civitai_unavailable_diagnostics(diagnostics)
+    diagnostics["classification"] = _classify_civitai_unavailable_diagnostics(
+        diagnostics
+    )
     return diagnostics
 
 
@@ -7208,12 +8289,19 @@ def _get_or_create_collection(
                 exclude_collection_id=existing_by_remote_id.id,
             ):
                 existing_by_remote_id.name = normalized_name
-            if source == "civitai" and str(existing_by_remote_id.source or "") != "civitai":
+            if (
+                source == "civitai"
+                and str(existing_by_remote_id.source or "") != "civitai"
+            ):
                 existing_by_remote_id.source = "civitai"
             db.flush()
             return existing_by_remote_id
 
-    existing = db.query(CollectionModel).filter(CollectionModel.name == normalized_name).first()
+    existing = (
+        db.query(CollectionModel)
+        .filter(CollectionModel.name == normalized_name)
+        .first()
+    )
     if existing:
         if civitai_collection_id is not None and existing.civitai_collection_id is None:
             existing.civitai_collection_id = civitai_collection_id
@@ -7224,7 +8312,11 @@ def _get_or_create_collection(
         ):
             normalized_name = f"{normalized_name} (CivitAI {civitai_collection_id})"
             existing = None
-        if existing is not None and source == "civitai" and str(existing.source or "") == "user":
+        if (
+            existing is not None
+            and source == "civitai"
+            and str(existing.source or "") == "user"
+        ):
             existing.source = "civitai"
         if existing is not None:
             db.flush()
@@ -7289,7 +8381,12 @@ def _parse_retry_failed_item(item_key: str) -> Optional[_RetryFailedItem]:
 
     # Retry jobs can produce standalone keys in the form
     # retry:standalone:image:<image_id>.
-    if len(parts) == 4 and parts[0] == "retry" and parts[1] == "standalone" and parts[2] == "image":
+    if (
+        len(parts) == 4
+        and parts[0] == "retry"
+        and parts[1] == "standalone"
+        and parts[2] == "image"
+    ):
         try:
             return _RetryFailedItem(image_id=int(parts[3]), civitai_collection_id=None)
         except ValueError:
@@ -7323,7 +8420,9 @@ def _parse_retry_failed_item(item_key: str) -> Optional[_RetryFailedItem]:
     return None
 
 
-def _get_retry_failed_items_from_task(task_payload: dict[str, Any]) -> tuple[list[_RetryFailedItem], list[str]]:
+def _get_retry_failed_items_from_task(
+    task_payload: dict[str, Any],
+) -> tuple[list[_RetryFailedItem], list[str]]:
     failed_items = task_payload.get("failed_items")
     if not isinstance(failed_items, list):
         return [], []
@@ -7360,7 +8459,9 @@ def _ensure_local_civitai_collection_for_retry(
             source="civitai",
             civitai_collection_id=civitai_collection_id,
         )
-        _commit_with_lock_retry(db, context=f"Collection setup commit for retry {civitai_collection_id}")
+        _commit_with_lock_retry(
+            db, context=f"Collection setup commit for retry {civitai_collection_id}"
+        )
         return _serialize_collection(local_collection), int(local_collection.id)
 
 
@@ -7467,7 +8568,9 @@ def _format_civitai_unavailable_skip_message(detail: dict[str, Any]) -> str:
         qualifiers.append(classification)
 
     if qualifiers:
-        prefix = f"Remote CivitAI image {image_id} is unavailable ({', '.join(qualifiers)})"
+        prefix = (
+            f"Remote CivitAI image {image_id} is unavailable ({', '.join(qualifiers)})"
+        )
     else:
         prefix = f"Remote CivitAI image {image_id} is unavailable"
 
@@ -7485,9 +8588,19 @@ def _log_civitai_unavailable_item(detail: dict[str, Any]) -> None:
     source_url = detail.get("source_url")
     reason = detail.get("reason")
     classification = detail.get("classification")
-    diagnostics: dict[str, Any] = detail.get("diagnostics") if isinstance(detail.get("diagnostics"), dict) else {}
-    collection_stub: dict[str, Any] = diagnostics.get("collection_stub") if isinstance(diagnostics.get("collection_stub"), dict) else {}
-    media_probe: dict[str, Any] = diagnostics.get("media_probe") if isinstance(diagnostics.get("media_probe"), dict) else {}
+    diagnostics: dict[str, Any] = (
+        detail.get("diagnostics") if isinstance(detail.get("diagnostics"), dict) else {}
+    )
+    collection_stub: dict[str, Any] = (
+        diagnostics.get("collection_stub")
+        if isinstance(diagnostics.get("collection_stub"), dict)
+        else {}
+    )
+    media_probe: dict[str, Any] = (
+        diagnostics.get("media_probe")
+        if isinstance(diagnostics.get("media_probe"), dict)
+        else {}
+    )
 
     if collection_id is not None:
         parts.append(f"collection_id={collection_id}")
@@ -7543,14 +8656,29 @@ def _build_civitai_unavailable_result(
     placeholder_image_id: Optional[int] = None
     placeholder_created = False
     if db is not None:
-        source_url = str(detail.get("source_url") or _build_civitai_image_source_url(image_id)).strip()
+        source_url = str(
+            detail.get("source_url") or _build_civitai_image_source_url(image_id)
+        ).strip()
         existing = _find_existing_image_by_source_url(db, source_url)
-        existing_status = (getattr(existing, "image_status", None) or "active").lower() if existing is not None else ""
+        existing_status = (
+            (getattr(existing, "image_status", None) or "active").lower()
+            if existing is not None
+            else ""
+        )
 
         if existing is None or existing_status == "placeholder":
-            placeholder_hash = hashlib.sha256(f"civitai-placeholder:{source_url}".encode("utf-8")).hexdigest()
-            placeholder_path = f"placeholders/{placeholder_hash[:2]}/{placeholder_hash}.placeholder"
-            placeholder_reason = str(detail.get("classification") or "civitai_remote_unavailable").strip() or "civitai_remote_unavailable"
+            placeholder_hash = hashlib.sha256(
+                f"civitai-placeholder:{source_url}".encode("utf-8")
+            ).hexdigest()
+            placeholder_path = (
+                f"placeholders/{placeholder_hash[:2]}/{placeholder_hash}.placeholder"
+            )
+            placeholder_reason = (
+                str(
+                    detail.get("classification") or "civitai_remote_unavailable"
+                ).strip()
+                or "civitai_remote_unavailable"
+            )
 
             civitai_unavailable_payload = {
                 "unavailable_detail": detail,
@@ -7584,8 +8712,16 @@ def _build_civitai_unavailable_result(
                 placeholder_image_id = int(placeholder.id)
                 placeholder_created = True
             else:
-                merged_json = dict(existing.json_metadata) if isinstance(existing.json_metadata, dict) else {}
-                civitai_json = merged_json.get("civitai") if isinstance(merged_json.get("civitai"), dict) else {}
+                merged_json = (
+                    dict(existing.json_metadata)
+                    if isinstance(existing.json_metadata, dict)
+                    else {}
+                )
+                civitai_json = (
+                    merged_json.get("civitai")
+                    if isinstance(merged_json.get("civitai"), dict)
+                    else {}
+                )
                 civitai_json.update(civitai_unavailable_payload)
                 merged_json["civitai"] = civitai_json
 
@@ -7594,15 +8730,22 @@ def _build_civitai_unavailable_result(
                 existing.replaced_by_image_id = None
                 existing.source_url = source_url
                 existing.source_site = "civitai"
-                existing.mimetype = existing.mimetype or "application/x-civitai-placeholder"
+                existing.mimetype = (
+                    existing.mimetype or "application/x-civitai-placeholder"
+                )
                 existing.json_metadata = merged_json
                 existing.date_modified = datetime.utcnow()
                 placeholder_image_id = int(existing.id)
 
             if attach_collection_id is not None and placeholder_image_id is not None:
-                _ensure_image_in_collection(db, placeholder_image_id, attach_collection_id)
+                _ensure_image_in_collection(
+                    db, placeholder_image_id, attach_collection_id
+                )
 
-            _commit_with_lock_retry(db, context=f"Unavailable placeholder commit for CivitAI image {image_id}")
+            _commit_with_lock_retry(
+                db,
+                context=f"Unavailable placeholder commit for CivitAI image {image_id}",
+            )
 
     result["unavailable_detail"] = detail
     result["placeholder_image_id"] = placeholder_image_id
@@ -7611,7 +8754,9 @@ def _build_civitai_unavailable_result(
     return result
 
 
-def _collect_civitai_unavailable_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _collect_civitai_unavailable_items(
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     unavailable_items: list[dict[str, Any]] = []
     for result in results:
         detail = result.get("unavailable_detail")
@@ -7650,7 +8795,12 @@ def _apply_civitai_task_result(
         task_context.advance()
         return
 
-    for key in ("images_added", "images_skipped", "images_recovered", "json_files_created"):
+    for key in (
+        "images_added",
+        "images_skipped",
+        "images_recovered",
+        "json_files_created",
+    ):
         value = int(result.get(key, 0) or 0)
         if value:
             task_context.increment_counter(key, value)
@@ -7663,11 +8813,17 @@ def _apply_civitai_task_result(
     elif int(result.get("images_skipped", 0) or 0) > 0:
         unavailable_detail = result.get("unavailable_detail")
         if isinstance(unavailable_detail, dict):
-            task_context.add_error(_format_civitai_unavailable_skip_message(unavailable_detail))
+            task_context.add_error(
+                _format_civitai_unavailable_skip_message(unavailable_detail)
+            )
         task_context.mark_item(
             item_key,
             "skipped",
-            str(result.get("skip_message") or result.get("skip_reason") or "Already present"),
+            str(
+                result.get("skip_message")
+                or result.get("skip_reason")
+                or "Already present"
+            ),
         )
     else:
         task_context.mark_item(item_key, "completed", "Processed")
@@ -7685,12 +8841,16 @@ def _snapshot_civitai_payload_retry_metrics(api: CivitaiAPI) -> dict[str, Any]:
     by_endpoint_raw = snapshot.get("by_endpoint") if isinstance(snapshot, dict) else {}
     by_status = {
         str(key): int(value or 0)
-        for key, value in (by_status_raw.items() if isinstance(by_status_raw, dict) else [])
+        for key, value in (
+            by_status_raw.items() if isinstance(by_status_raw, dict) else []
+        )
         if int(value or 0) >= 0
     }
     by_endpoint = {
         str(key): int(value or 0)
-        for key, value in (by_endpoint_raw.items() if isinstance(by_endpoint_raw, dict) else [])
+        for key, value in (
+            by_endpoint_raw.items() if isinstance(by_endpoint_raw, dict) else []
+        )
         if int(value or 0) >= 0
     }
     return {
@@ -7725,7 +8885,9 @@ def _diff_civitai_payload_retry_metrics(
     }
 
 
-def _record_civitai_payload_retry_metrics(task_context: TaskContext, metrics: dict[str, Any]) -> None:
+def _record_civitai_payload_retry_metrics(
+    task_context: TaskContext, metrics: dict[str, Any]
+) -> None:
     total = int(metrics.get("total", 0) or 0)
     if total <= 0:
         return
@@ -7750,7 +8912,9 @@ def _record_civitai_payload_retry_metrics(task_context: TaskContext, metrics: di
         normalized_count = int(count or 0)
         if normalized_count <= 0:
             continue
-        normalized_endpoint = re.sub(r"[^0-9a-zA-Z_]+", "_", str(endpoint or "")).strip("_").lower()
+        normalized_endpoint = (
+            re.sub(r"[^0-9a-zA-Z_]+", "_", str(endpoint or "")).strip("_").lower()
+        )
         if not normalized_endpoint:
             normalized_endpoint = "unknown"
         task_context.increment_counter(
@@ -7775,9 +8939,13 @@ def _build_civitai_import_summary(
         "requested": requested,
         "images_added": sum(int(r.get("images_added", 0) or 0) for r in results),
         "images_skipped": sum(int(r.get("images_skipped", 0) or 0) for r in results),
-        "images_recovered": sum(int(r.get("images_recovered", 0) or 0) for r in results),
+        "images_recovered": sum(
+            int(r.get("images_recovered", 0) or 0) for r in results
+        ),
         "images_cancelled": sum(1 for r in results if r.get("cancelled")),
-        "json_files_created": sum(int(r.get("json_files_created", 0) or 0) for r in results),
+        "json_files_created": sum(
+            int(r.get("json_files_created", 0) or 0) for r in results
+        ),
         "errors": [
             f"Image {r.get('image_id')}: {r['error']}"
             for r in results
@@ -7786,7 +8954,8 @@ def _build_civitai_import_summary(
         "unavailable_items": unavailable_items,
         "warnings": _get_runtime_warnings(),
         "results": results,
-        "civitai_payload_retry_metrics": civitai_payload_retry_metrics or {
+        "civitai_payload_retry_metrics": civitai_payload_retry_metrics
+        or {
             "total": 0,
             "by_status": {},
             "by_endpoint": {},
@@ -7819,7 +8988,9 @@ def _sync_civitai_tags_from_sidecar(db: Session, image_path: Path) -> None:
         if stats.get("terms_updated"):
             db.commit()
     except Exception as exc:
-        logging.getLogger(__name__).debug("Sidecar tag sync failed for %s: %s", image_path.name, exc)
+        logging.getLogger(__name__).debug(
+            "Sidecar tag sync failed for %s: %s", image_path.name, exc
+        )
         try:
             db.rollback()
         except Exception:
@@ -7838,7 +9009,9 @@ def _handle_existing_civitai_image(
     if existing_by_source is None:
         return None, False
 
-    existing_status = (getattr(existing_by_source, "image_status", None) or "active").lower()
+    existing_status = (
+        getattr(existing_by_source, "image_status", None) or "active"
+    ).lower()
     if existing_status == "placeholder":
         if attach_collection_id is not None:
             _ensure_image_in_collection(db, existing_by_source.id, attach_collection_id)
@@ -7953,10 +9126,10 @@ def _prepare_civitai_download(
         target=target,
     )
     temp_path = download_result.temp_path
-    
+
     # Extract collection item (get.Infinite metadata) if available
     collection_item = _collection_context_item(collection_context, image_id)
-    
+
     # Save collection metadata immediately if available (before download attempt)
     collection_paths = {}
     if collection_item and target.get("civitai_uuid"):
@@ -7964,7 +9137,7 @@ def _prepare_civitai_download(
             civitai_uuid=target.get("civitai_uuid"),
             raw_infinite=collection_item,
         )
-    
+
     return _PreparedCivitaiImport(
         image_id=image_id,
         image_url=target["image_url"],
@@ -8004,8 +9177,12 @@ def _ingest_prepared_civitai_import(
         license_id=None,
     )
 
-    resolved_image_db_id = ingest_result.get("image_id") or ingest_result.get("existing_image_id")
-    image_db_id = resolved_image_db_id if isinstance(resolved_image_db_id, int) else None
+    resolved_image_db_id = ingest_result.get("image_id") or ingest_result.get(
+        "existing_image_id"
+    )
+    image_db_id = (
+        resolved_image_db_id if isinstance(resolved_image_db_id, int) else None
+    )
     metadata_backfilled = False
 
     if isinstance(image_db_id, int):
@@ -8016,7 +9193,7 @@ def _ingest_prepared_civitai_import(
                 image,
                 prepared.source_url,
             )
-            
+
             # Store UUID and pre-saved API response paths
             civitai_metadata_info: dict[str, Any] = {}
 
@@ -8031,25 +9208,34 @@ def _ingest_prepared_civitai_import(
             # Add pre-saved API response file paths (includes basic_info, generation_data, and infinite)
             if prepared.api_response_paths:
                 civitai_metadata_info.update(prepared.api_response_paths)
-            
+
             # Update image metadata with UUID and paths
             if civitai_metadata_info:
-                merged_json = dict(image.json_metadata) if isinstance(image.json_metadata, dict) else {}
+                merged_json = (
+                    dict(image.json_metadata)
+                    if isinstance(image.json_metadata, dict)
+                    else {}
+                )
                 if "civitai" not in merged_json:
                     merged_json["civitai"] = {}
                 if isinstance(merged_json["civitai"], dict):
                     merged_json["civitai"].update(civitai_metadata_info)
                 image.json_metadata = merged_json
-                
+
                 # Save sidecar JSON with UUID and metadata paths
                 image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
                 if image_path.exists():
                     processor = ImageProcessor(str(image_path), db, IMAGE_LIBRARY_PATH)
                     processor.save_json_metadata(image_path, image)
-            
-            is_existing_hash_match = str(ingest_result.get("skip_reason") or "").strip() == "existing_file_hash"
+
+            is_existing_hash_match = (
+                str(ingest_result.get("skip_reason") or "").strip()
+                == "existing_file_hash"
+            )
             if is_existing_hash_match:
-                effective_source_url = str(image.source_url or prepared.source_url or "").strip()
+                effective_source_url = str(
+                    image.source_url or prepared.source_url or ""
+                ).strip()
                 if effective_source_url and is_civitai_image_url(effective_source_url):
                     metadata_backfilled = _ensure_civitai_metadata_for_existing_image(
                         db,
@@ -8131,7 +9317,9 @@ def _looks_like_hashed_display_name(
 
     return (
         candidate == file_path_name
-        or (_is_sha256_hex(candidate_stem) and candidate_stem.lower() == normalized_hash)
+        or (
+            _is_sha256_hex(candidate_stem) and candidate_stem.lower() == normalized_hash
+        )
         or (_is_sha256_hex(candidate) and candidate.lower() == normalized_hash)
     )
 
@@ -8157,7 +9345,9 @@ def _derive_preferred_file_name(
     actual_extension: str,
     civitai_target: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
-    current_name = sanitize_display_filename(image.file_name, fallback_ext=actual_extension) or ""
+    current_name = (
+        sanitize_display_filename(image.file_name, fallback_ext=actual_extension) or ""
+    )
     if civitai_target and isinstance(civitai_target.get("original_filename"), str):
         candidate = sanitize_display_filename(
             str(civitai_target["original_filename"]),
@@ -8166,7 +9356,9 @@ def _derive_preferred_file_name(
         if candidate:
             return candidate
 
-    source_name = sanitize_display_filename(image.source_url, fallback_ext=actual_extension) or ""
+    source_name = (
+        sanitize_display_filename(image.source_url, fallback_ext=actual_extension) or ""
+    )
     if source_name and not _looks_like_hashed_display_name(
         source_name,
         file_hash=image.file_hash,
@@ -8201,9 +9393,13 @@ def _normalize_merged_image_payload(
     if sanitized_merged_file_name:
         normalized["file_name"] = sanitized_merged_file_name
 
-    db_file_name = sanitize_display_filename(db_payload.get("file_name"), fallback_ext=fallback_ext)
+    db_file_name = sanitize_display_filename(
+        db_payload.get("file_name"), fallback_ext=fallback_ext
+    )
     merged_file_name = normalized.get("file_name")
-    file_path = normalized.get("file_path") or db_payload.get("file_path") or image.file_path
+    file_path = (
+        normalized.get("file_path") or db_payload.get("file_path") or image.file_path
+    )
 
     if _looks_like_hashed_display_name(
         merged_file_name,
@@ -8221,7 +9417,9 @@ def _normalize_merged_image_payload(
         if normalized.get(key) in (None, "") and db_payload.get(key):
             normalized[key] = db_payload.get(key)
 
-    if isinstance(normalized.get("civitai"), dict) and isinstance(db_payload.get("civitai"), dict):
+    if isinstance(normalized.get("civitai"), dict) and isinstance(
+        db_payload.get("civitai"), dict
+    ):
         merged_civitai = dict(normalized.get("civitai") or {})
         db_civitai = dict(db_payload.get("civitai") or {})
         for key in ("uuid", "hash"):
@@ -8232,7 +9430,9 @@ def _normalize_merged_image_payload(
     return normalized
 
 
-def _variant_group_key_for_image(image: ImageModel, merged_payload: dict[str, Any]) -> str:
+def _variant_group_key_for_image(
+    image: ImageModel, merged_payload: dict[str, Any]
+) -> str:
     explicit_key = str(
         getattr(image, "variant_group_key", None)
         or merged_payload.get("variant_group_key")
@@ -8283,7 +9483,9 @@ def _first_non_empty_string(payloads: list[Any], paths: list[tuple[str, ...]]) -
     return ""
 
 
-def _first_positive_int(payloads: list[Any], paths: list[tuple[str, ...]]) -> Optional[int]:
+def _first_positive_int(
+    payloads: list[Any], paths: list[tuple[str, ...]]
+) -> Optional[int]:
     for payload in payloads:
         for path in paths:
             parsed = _coerce_positive_int(_get_nested_value(payload, path))
@@ -8292,7 +9494,9 @@ def _first_positive_int(payloads: list[Any], paths: list[tuple[str, ...]]) -> Op
     return None
 
 
-def _extract_civitai_variant_payloads(merged_payload: dict[str, Any], *, include_merged: bool = True) -> list[Any]:
+def _extract_civitai_variant_payloads(
+    merged_payload: dict[str, Any], *, include_merged: bool = True
+) -> list[Any]:
     payloads: list[Any] = [merged_payload] if include_merged else []
     json_metadata = merged_payload.get("json_metadata")
     if isinstance(json_metadata, dict):
@@ -8323,7 +9527,9 @@ def _extract_civitai_variant_payloads(merged_payload: dict[str, Any], *, include
     return payloads
 
 
-def _extract_civitai_media_name(payloads: list[Any], *, image_id: int, media_url: str, mime_type: Optional[str]) -> str:
+def _extract_civitai_media_name(
+    payloads: list[Any], *, image_id: int, media_url: str, mime_type: Optional[str]
+) -> str:
     preferred_name = _first_non_empty_string(
         payloads,
         [
@@ -8335,7 +9541,9 @@ def _extract_civitai_media_name(payloads: list[Any], *, image_id: int, media_url
             ("image", "name"),
         ],
     )
-    return _build_civitai_original_filename(image_id, preferred_name, media_url, mime_type)
+    return _build_civitai_original_filename(
+        image_id, preferred_name, media_url, mime_type
+    )
 
 
 def _extract_civitai_media_mime_type(payloads: list[Any]) -> str:
@@ -8365,9 +9573,15 @@ def _extract_civitai_media_size(payloads: list[Any]) -> Optional[int]:
     )
 
 
-def _extract_civitai_media_dimensions(payloads: list[Any], fallback_width: Any, fallback_height: Any) -> tuple[Optional[int], Optional[int]]:
-    width = _first_positive_int(payloads, [("width",), ("meta", "width"), ("image", "width")])
-    height = _first_positive_int(payloads, [("height",), ("meta", "height"), ("image", "height")])
+def _extract_civitai_media_dimensions(
+    payloads: list[Any], fallback_width: Any, fallback_height: Any
+) -> tuple[Optional[int], Optional[int]]:
+    width = _first_positive_int(
+        payloads, [("width",), ("meta", "width"), ("image", "width")]
+    )
+    height = _first_positive_int(
+        payloads, [("height",), ("meta", "height"), ("image", "height")]
+    )
     if width is None:
         width = _coerce_positive_int(fallback_width)
     if height is None:
@@ -8423,10 +9637,12 @@ def _get_asset_category_from_path(file_path: Optional[str]) -> str:
     return "unknown"
 
 
-def _get_local_asset_category(local_file_path: Optional[str], db_mime_type: Optional[str]) -> str:
+def _get_local_asset_category(
+    local_file_path: Optional[str], db_mime_type: Optional[str]
+) -> str:
     """
     Determine asset category (video/image/unknown) using MIME type first, then extension.
-    
+
     Returns 'video', 'image', or 'unknown'.
     """
     category_from_mime = _get_asset_category_from_mime(db_mime_type)
@@ -8435,10 +9651,12 @@ def _get_local_asset_category(local_file_path: Optional[str], db_mime_type: Opti
     return _get_asset_category_from_path(local_file_path)
 
 
-def _get_civitai_asset_category(civitai_url: Optional[str], civitai_mime_type: Optional[str]) -> str:
+def _get_civitai_asset_category(
+    civitai_url: Optional[str], civitai_mime_type: Optional[str]
+) -> str:
     """
     Determine CivitAI asset category (video/image/unknown) from URL or MIME type.
-    
+
     Returns 'video', 'image', or 'unknown'.
     """
     category_from_mime = _get_asset_category_from_mime(civitai_mime_type)
@@ -8450,14 +9668,14 @@ def _get_civitai_asset_category(civitai_url: Optional[str], civitai_mime_type: O
 def _validate_local_file_health(file_path_obj: Path) -> tuple[bool, Optional[str]]:
     """
     Validate local file exists and is not corrupted.
-    
+
     Returns: (is_healthy, error_message)
     - is_healthy: True if file is valid and readable
     - error_message: None if healthy, otherwise description of issue
     """
     if not file_path_obj.exists():
         return False, f"File does not exist: {file_path_obj}"
-    
+
     try:
         file_size = file_path_obj.stat().st_size
         if file_size == 0:
@@ -8466,48 +9684,58 @@ def _validate_local_file_health(file_path_obj: Path) -> tuple[bool, Optional[str
             return False, "File too small to be valid media"
     except OSError as e:
         return False, f"Cannot stat file: {e}"
-    
+
     # Check file magic bytes for known formats
     suffix = file_path_obj.suffix.lower()
     try:
         with open(file_path_obj, "rb") as f:
             header = f.read(12)
-            
+
             if suffix == ".png":
                 # PNG files start with specific magic bytes: 89 50 4E 47 0D 0A 1A 0A
-                if header[:8] != b'\x89PNG\r\n\x1a\n':
+                if header[:8] != b"\x89PNG\r\n\x1a\n":
                     return False, "PNG file has invalid magic bytes (corrupted)"
-            
+
             elif suffix in {".jpg", ".jpeg"}:
                 # JPEG files start with FFD8
-                if header[:2] != b'\xff\xd8':
+                if header[:2] != b"\xff\xd8":
                     return False, "JPEG file has invalid magic bytes (corrupted)"
-            
+
             elif suffix == ".webp":
                 # WEBP files start with RIFF...WEBP
-                if not header.startswith(b'RIFF') or header[8:12] != b'WEBP':
+                if not header.startswith(b"RIFF") or header[8:12] != b"WEBP":
                     return False, "WEBP file has invalid structure (corrupted)"
-            
+
             elif suffix == ".mp4":
                 # MP4 is more complex - just check it's not empty
                 if len(header) == 0:
                     return False, "MP4 file appears empty"
-    
+
     except IOError as e:
         return False, f"Cannot read file: {e}"
-    
+
     return True, None
 
 
-def _build_local_image_variant(image: ImageModel, merged_payload: dict[str, Any], *, group_key: str) -> dict[str, Any]:
-    variant_role = str(getattr(image, "variant_role", None) or merged_payload.get("variant_role") or "library").strip() or "library"
+def _build_local_image_variant(
+    image: ImageModel, merged_payload: dict[str, Any], *, group_key: str
+) -> dict[str, Any]:
+    variant_role = (
+        str(
+            getattr(image, "variant_role", None)
+            or merged_payload.get("variant_role")
+            or "library"
+        ).strip()
+        or "library"
+    )
     variant = {
         "variant_key": f"variant:local:{group_key}:{image.file_hash}",
         "variant_label": "Library Asset",
         "variant_role": variant_role,
         "variant_sort_index": _variant_sort_index_for_image(image, 100),
         "file_name": merged_payload.get("file_name"),
-        "original_file_name": merged_payload.get("original_file_name") or merged_payload.get("file_name"),
+        "original_file_name": merged_payload.get("original_file_name")
+        or merged_payload.get("file_name"),
         "file_hash": image.file_hash,
         "file_size": merged_payload.get("file_size"),
         "width": merged_payload.get("width"),
@@ -8515,10 +9743,12 @@ def _build_local_image_variant(image: ImageModel, merged_payload: dict[str, Any]
         "mimetype": merged_payload.get("mimetype"),
         "file_path": merged_payload.get("file_path"),
         "display_url": None,
-        "poster_url": merged_payload.get("video_poster_url") or merged_payload.get("poster_url"),
+        "poster_url": merged_payload.get("video_poster_url")
+        or merged_payload.get("poster_url"),
         "video_poster_url": merged_payload.get("video_poster_url"),
         "video_thumbnail_url": merged_payload.get("video_thumbnail_url"),
-        "preview_image_url": merged_payload.get("preview_image_url") or merged_payload.get("video_poster_url"),
+        "preview_image_url": merged_payload.get("preview_image_url")
+        or merged_payload.get("video_poster_url"),
         "source_url": merged_payload.get("source_url"),
         "civitai_uuid": merged_payload.get("civitai_uuid") or image.civitai_uuid,
         "civitai_hash": merged_payload.get("civitai_hash") or image.civitai_hash,
@@ -8541,26 +9771,26 @@ def _build_civitai_video_variant(
 ) -> Optional[dict[str, Any]]:
     """
     Build a CivitAI remote video variant.
-    
+
     Only creates a variant if:
     1. CivitAI payload points to a video URL
     2. Local asset is NOT already a video (to avoid duplicates)
        - If local is image and remote is video, we have a genuine multi-variant resource
        - If local is video and remote points to video, it's the same asset via different access path
-    
+
     Args:
         image: ImageModel record
         merged_payload: Combined DB + sidecar metadata
         group_key: Variant grouping key
         poster_url: Optional poster/thumbnail URL from local asset
         local_asset_category: Category of local asset ('video', 'image', 'unknown')
-    
+
     Returns: Dict representing variant, or None if variant should not be created
     """
     playable_url = _extract_civitai_playable_video_url(merged_payload)
     if not playable_url:
         return None
-    
+
     # Skip remote video variant if local asset is already a video
     # This prevents duplicate variants of the same asset
     if local_asset_category == "video":
@@ -8574,9 +9804,15 @@ def _build_civitai_video_variant(
         guessed_mime_type = "video/webm"
     elif lower_url.endswith(".mov"):
         guessed_mime_type = "video/quicktime"
-    mime_type = extracted_mime_type if extracted_mime_type.startswith("video/") else guessed_mime_type
+    mime_type = (
+        extracted_mime_type
+        if extracted_mime_type.startswith("video/")
+        else guessed_mime_type
+    )
     image_id = extract_civitai_image_id(str(image.source_url or "")) or int(image.id)
-    file_name = _extract_civitai_media_name(payloads, image_id=image_id, media_url=playable_url, mime_type=mime_type)
+    file_name = _extract_civitai_media_name(
+        payloads, image_id=image_id, media_url=playable_url, mime_type=mime_type
+    )
     width, height = _extract_civitai_media_dimensions(payloads, None, None)
     file_size = _extract_civitai_media_size(payloads)
     media_uuid = _extract_civitai_uuid_from_url_hash(playable_url)
@@ -8606,10 +9842,11 @@ def _build_civitai_video_variant(
         "is_remote": True,
         "is_local": False,
         "editable_file_hash": image.file_hash,
-        "civitai_uuid": merged_payload.get("civitai_uuid") or image.civitai_uuid or media_uuid,
+        "civitai_uuid": merged_payload.get("civitai_uuid")
+        or image.civitai_uuid
+        or media_uuid,
         "civitai_hash": merged_payload.get("civitai_hash") or image.civitai_hash,
     }
-
 
 
 def _build_static_resource_variant(
@@ -8627,7 +9864,9 @@ def _build_static_resource_variant(
         return None
 
     file_name = Path(relative_path).name
-    original_file_name = str(variant_metadata.get("original_variant_file_name") or "").strip() or None
+    original_file_name = (
+        str(variant_metadata.get("original_variant_file_name") or "").strip() or None
+    )
     if not original_file_name:
         declared_filename = str(variant_metadata.get("declared_filename") or "").strip()
         if declared_filename:
@@ -8638,7 +9877,10 @@ def _build_static_resource_variant(
             original_file_name = Path(variant_file_path).name
     resource_path = Path(IMAGE_RESOURCES_PATH) / relative_path
     resources_root = Path(IMAGE_RESOURCES_PATH)
-    metadata_mime = _normalize_mime_type(variant_metadata.get("actual_mimetype") or variant_metadata.get("declared_mimetype"))
+    metadata_mime = _normalize_mime_type(
+        variant_metadata.get("actual_mimetype")
+        or variant_metadata.get("declared_mimetype")
+    )
     metadata_size = _coerce_positive_int(variant_metadata.get("actual_file_size"))
     metadata_hash = str(variant_metadata.get("variant_file_hash") or "").strip() or None
 
@@ -8655,14 +9897,20 @@ def _build_static_resource_variant(
             suffix_candidates.append(guessed_suffix)
 
         for suffix in suffix_candidates:
-            candidate = resources_root / "civitai_source_variants" / f"{normalized_hash}{suffix}"
+            candidate = (
+                resources_root
+                / "civitai_source_variants"
+                / f"{normalized_hash}{suffix}"
+            )
             if candidate.exists() and candidate.is_file():
                 resource_path = candidate
                 relative_path = str(resource_path.relative_to(resources_root))
                 file_name = resource_path.name
                 break
         else:
-            glob_pattern = str(resources_root / "civitai_source_variants" / f"{normalized_hash}.*")
+            glob_pattern = str(
+                resources_root / "civitai_source_variants" / f"{normalized_hash}.*"
+            )
             for candidate_path in glob.glob(glob_pattern):
                 candidate = Path(candidate_path)
                 if candidate.suffix.lower() == ".json":
@@ -8716,7 +9964,9 @@ def _build_static_resource_variant(
             ]
             civitai_image_id: Optional[int] = None
             for source_candidate in source_candidates:
-                candidate_id = extract_civitai_image_id(str(source_candidate or "").strip())
+                candidate_id = extract_civitai_image_id(
+                    str(source_candidate or "").strip()
+                )
                 if candidate_id is not None:
                     civitai_image_id = int(candidate_id)
                     break
@@ -8745,7 +9995,10 @@ def _build_static_resource_variant(
         "video_poster_url": None,
         "video_thumbnail_url": None,
         "preview_image_url": display_url,
-        "source_url": str(variant_metadata.get("source_url") or image.source_url or "").strip() or None,
+        "source_url": str(
+            variant_metadata.get("source_url") or image.source_url or ""
+        ).strip()
+        or None,
         "resource_origin": "image_resources",
         "resource_status": "archived",
         "is_remote": False,
@@ -8761,7 +10014,13 @@ def _dedupe_image_variants(variants: list[dict[str, Any]]) -> list[dict[str, Any
     seen_display_urls: set[str] = set()
     seen_archived_hashes: set[str] = set()
     deduped: list[dict[str, Any]] = []
-    for variant in sorted(variants, key=lambda item: (int(item.get("variant_sort_index") or 0), str(item.get("variant_key") or ""))):
+    for variant in sorted(
+        variants,
+        key=lambda item: (
+            int(item.get("variant_sort_index") or 0),
+            str(item.get("variant_key") or ""),
+        ),
+    ):
         variant_key = str(variant.get("variant_key") or "").strip()
         display_url = str(variant.get("display_url") or "").strip()
         variant_hash = str(variant.get("file_hash") or "").strip().lower()
@@ -8782,17 +10041,20 @@ def _dedupe_image_variants(variants: list[dict[str, Any]]) -> list[dict[str, Any
     return deduped
 
 
-def _build_image_variants(image: ImageModel, merged_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_image_variants(
+    image: ImageModel, merged_payload: dict[str, Any]
+) -> list[dict[str, Any]]:
     group_key = _variant_group_key_for_image(image, merged_payload)
-    local_variant = _build_local_image_variant(image, merged_payload, group_key=group_key)
+    local_variant = _build_local_image_variant(
+        image, merged_payload, group_key=group_key
+    )
     variants: list[dict[str, Any]] = []
 
     # Determine local asset category to help decide which variants to create
     local_asset_category = _get_local_asset_category(
-        merged_payload.get("file_path"),
-        merged_payload.get("mimetype")
+        merged_payload.get("file_path"), merged_payload.get("mimetype")
     )
-    
+
     # Validate local file health (if it should exist)
     local_file_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
     if local_file_path.exists():
@@ -8807,7 +10069,8 @@ def _build_image_variants(image: ImageModel, merged_payload: dict[str, Any]) -> 
         image,
         merged_payload,
         group_key=group_key,
-        poster_url=local_variant.get("poster_url") or local_variant.get("preview_image_url"),
+        poster_url=local_variant.get("poster_url")
+        or local_variant.get("preview_image_url"),
         local_asset_category=local_asset_category,
     )
     if remote_video_variant is not None:
@@ -8827,9 +10090,13 @@ def _build_image_variants(image: ImageModel, merged_payload: dict[str, Any]) -> 
         if isinstance(candidate_archived, dict):
             archived_variant_meta = candidate_archived
 
-    if static_variant_meta is None and isinstance(merged_payload.get("civitai_source_variant_static"), dict):
+    if static_variant_meta is None and isinstance(
+        merged_payload.get("civitai_source_variant_static"), dict
+    ):
         static_variant_meta = merged_payload.get("civitai_source_variant_static")
-    if archived_variant_meta is None and isinstance(merged_payload.get("civitai_source_variant"), dict):
+    if archived_variant_meta is None and isinstance(
+        merged_payload.get("civitai_source_variant"), dict
+    ):
         archived_variant_meta = merged_payload.get("civitai_source_variant")
 
     if isinstance(static_variant_meta, dict):
@@ -8861,8 +10128,9 @@ def _build_image_variants(image: ImageModel, merged_payload: dict[str, Any]) -> 
     return _dedupe_image_variants(variants)
 
 
-
-def _merge_display_item_variant(base_payload: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
+def _merge_display_item_variant(
+    base_payload: dict[str, Any], variant: dict[str, Any]
+) -> dict[str, Any]:
     display_item = dict(base_payload)
     for field_name in (
         "file_name",
@@ -8893,11 +10161,15 @@ def _merge_display_item_variant(base_payload: dict[str, Any], variant: dict[str,
     display_item["resource_status"] = variant.get("resource_status")
     display_item["is_remote_resource"] = bool(variant.get("is_remote"))
     display_item["is_local_resource"] = bool(variant.get("is_local"))
-    display_item["editable_file_hash"] = variant.get("editable_file_hash") or base_payload.get("editable_file_hash")
+    display_item["editable_file_hash"] = variant.get(
+        "editable_file_hash"
+    ) or base_payload.get("editable_file_hash")
     return display_item
 
 
-def _build_grouped_display_item(image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_grouped_display_item(
+    image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]
+) -> dict[str, Any]:
     group_key = _variant_group_key_for_image(image, merged_payload)
     default_variant = variants[0] if variants else {}
     base_payload = dict(merged_payload)
@@ -8915,7 +10187,9 @@ def _build_grouped_display_item(image: ImageModel, merged_payload: dict[str, Any
     return _merge_display_item_variant(base_payload, default_variant)
 
 
-def _build_flat_variant_display_items(image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_flat_variant_display_items(
+    image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     group_key = _variant_group_key_for_image(image, merged_payload)
     flat_items: list[dict[str, Any]] = []
     for variant_index, variant in enumerate(variants):
@@ -8935,7 +10209,9 @@ def _build_flat_variant_display_items(image: ImageModel, merged_payload: dict[st
     return flat_items
 
 
-def _build_display_items_for_image(image: ImageModel, merged_payload: dict[str, Any], *, group_variants: bool) -> list[dict[str, Any]]:
+def _build_display_items_for_image(
+    image: ImageModel, merged_payload: dict[str, Any], *, group_variants: bool
+) -> list[dict[str, Any]]:
     variants = _build_image_variants(image, merged_payload)
     if not variants:
         return []
@@ -8977,9 +10253,13 @@ def _load_filtered_image_keys(
         exclude_collection_names=exclude_collection_name,
     )
 
-    generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
+    generation_filtered_ids = _filter_image_ids_by_generation_software(
+        images_query, generation_software
+    )
     nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
-    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
+    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(
+        images_query, nsfw_safety
+    )
     a1111_filtered_ids = _filter_image_ids_by_a1111_features(
         images_query,
         a1111_hires=a1111_hires,
@@ -9003,7 +10283,11 @@ def _load_filtered_image_keys(
         if filtered_ids is None:
             continue
         filtered_set = set(filtered_ids)
-        constrained_ids = filtered_set if constrained_ids is None else constrained_ids.intersection(filtered_set)
+        constrained_ids = (
+            filtered_set
+            if constrained_ids is None
+            else constrained_ids.intersection(filtered_set)
+        )
 
     if constrained_ids is not None:
         if constrained_ids:
@@ -9012,8 +10296,7 @@ def _load_filtered_image_keys(
             return []
 
     rows = (
-        images_query
-        .with_entities(ImageModel.file_hash, ImageModel.variant_group_key)
+        images_query.with_entities(ImageModel.file_hash, ImageModel.variant_group_key)
         .order_by(ImageModel.id.asc())
         .all()
     )
@@ -9085,13 +10368,18 @@ def _load_display_image_items(
         return cached_result["items"], cached_result["filtered_count"]
 
     import time as _time
+
     _t0 = _time.perf_counter()
 
-    images_query = db.query(ImageModel).options(
-        joinedload(ImageModel.artist),
-        joinedload(ImageModel.license),
-        joinedload(ImageModel.collections),
-    ).filter(_active_image_filter())
+    images_query = (
+        db.query(ImageModel)
+        .options(
+            joinedload(ImageModel.artist),
+            joinedload(ImageModel.license),
+            joinedload(ImageModel.collections),
+        )
+        .filter(_active_image_filter())
+    )
     images_query = _apply_image_list_filters(
         images_query,
         search=search,
@@ -9105,17 +10393,27 @@ def _load_display_image_items(
     _t1 = _time.perf_counter()
     print(f"[PERF] query build: {_t1-_t0:.3f}s")
 
-    generation_filtered_ids = _filter_image_ids_by_generation_software(images_query, generation_software)
+    generation_filtered_ids = _filter_image_ids_by_generation_software(
+        images_query, generation_software
+    )
     _t2 = _time.perf_counter()
-    print(f"[PERF] gen_sw filter: {_t2-_t1:.3f}s  ids={len(generation_filtered_ids) if generation_filtered_ids else 'skip'}")
+    print(
+        f"[PERF] gen_sw filter: {_t2-_t1:.3f}s  ids={len(generation_filtered_ids) if generation_filtered_ids else 'skip'}"
+    )
 
     nsfw_filtered_ids = _filter_image_ids_by_nsfw_ratings(images_query, nsfw_rating)
     _t3 = _time.perf_counter()
-    print(f"[PERF] nsfw_rating filter: {_t3-_t2:.3f}s  ids={len(nsfw_filtered_ids) if nsfw_filtered_ids else 'skip'}")
+    print(
+        f"[PERF] nsfw_rating filter: {_t3-_t2:.3f}s  ids={len(nsfw_filtered_ids) if nsfw_filtered_ids else 'skip'}"
+    )
 
-    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(images_query, nsfw_safety)
+    nsfw_safety_filtered_ids = _filter_image_ids_by_nsfw_safety_classes(
+        images_query, nsfw_safety
+    )
     _t4 = _time.perf_counter()
-    print(f"[PERF] nsfw_safety filter: {_t4-_t3:.3f}s  ids={len(nsfw_safety_filtered_ids) if nsfw_safety_filtered_ids else 'skip'}")
+    print(
+        f"[PERF] nsfw_safety filter: {_t4-_t3:.3f}s  ids={len(nsfw_safety_filtered_ids) if nsfw_safety_filtered_ids else 'skip'}"
+    )
 
     a1111_filtered_ids = _filter_image_ids_by_a1111_features(
         images_query,
@@ -9124,7 +10422,9 @@ def _load_display_image_items(
         a1111_adetailer=a1111_adetailer,
     )
     _t5 = _time.perf_counter()
-    print(f"[PERF] a1111 filter: {_t5-_t4:.3f}s  ids={len(a1111_filtered_ids) if a1111_filtered_ids else 'skip'}")
+    print(
+        f"[PERF] a1111 filter: {_t5-_t4:.3f}s  ids={len(a1111_filtered_ids) if a1111_filtered_ids else 'skip'}"
+    )
 
     tag_filtered_ids = _filter_image_ids_by_tag_names(
         images_query,
@@ -9132,7 +10432,9 @@ def _load_display_image_items(
         exclude_tags=exclude_tag,
     )
     _t5b = _time.perf_counter()
-    print(f"[PERF] tag filter: {_t5b-_t5:.3f}s  ids={len(tag_filtered_ids) if tag_filtered_ids is not None else 'skip'}")
+    print(
+        f"[PERF] tag filter: {_t5b-_t5:.3f}s  ids={len(tag_filtered_ids) if tag_filtered_ids is not None else 'skip'}"
+    )
 
     constrained_ids: Optional[set[int]] = None
     for filtered_ids in (
@@ -9145,7 +10447,11 @@ def _load_display_image_items(
         if filtered_ids is None:
             continue
         filtered_set = set(filtered_ids)
-        constrained_ids = filtered_set if constrained_ids is None else constrained_ids.intersection(filtered_set)
+        constrained_ids = (
+            filtered_set
+            if constrained_ids is None
+            else constrained_ids.intersection(filtered_set)
+        )
 
     if constrained_ids is not None:
         if constrained_ids:
@@ -9188,7 +10494,9 @@ def _load_display_image_items(
             if poster_path.exists() and poster_path.is_file():
                 merged["video_poster_url"] = f"/images/{image.file_hash}/video_poster"
             if thumbnail_path.exists() and thumbnail_path.is_file():
-                merged["video_thumbnail_url"] = f"/images/{image.file_hash}/video_thumbnail"
+                merged["video_thumbnail_url"] = (
+                    f"/images/{image.file_hash}/video_thumbnail"
+                )
         merged["collection_names"] = [c.name for c in image.collections]
         merged["collection_ids"] = [c.id for c in image.collections]
         # Inject artist_name from the already-joined relationship so the
@@ -9202,13 +10510,17 @@ def _load_display_image_items(
         db_user_tags = getattr(image, "user_tags", None)
         if isinstance(db_user_tags, list) and db_user_tags:
             merged["user_tags"] = db_user_tags
-        display_items.extend(_build_display_items_for_image(image, merged, group_variants=group_variants))
+        display_items.extend(
+            _build_display_items_for_image(image, merged, group_variants=group_variants)
+        )
 
     _t7 = _time.perf_counter()
     print(f"[PERF] display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
     print(f"[PERF] TOTAL: {_t7-_t0:.3f}s")
 
-    _search_cache_put(display_cache_key, {"items": display_items, "filtered_count": total_count})
+    _search_cache_put(
+        display_cache_key, {"items": display_items, "filtered_count": total_count}
+    )
     return display_items, total_count
 
 
@@ -9232,10 +10544,14 @@ def _replace_image_with_uploaded_file(
         license_id=license_id,
     )
 
-    repaired_image_id = ingest_result.get("image_id") or ingest_result.get("existing_image_id")
+    repaired_image_id = ingest_result.get("image_id") or ingest_result.get(
+        "existing_image_id"
+    )
     repaired_image = None
     if isinstance(repaired_image_id, int):
-        repaired_image = db.query(ImageModel).filter(ImageModel.id == repaired_image_id).first()
+        repaired_image = (
+            db.query(ImageModel).filter(ImageModel.id == repaired_image_id).first()
+        )
 
     created_new_image = False
     if repaired_image is not None and int(repaired_image.id) != int(image.id):
@@ -9371,7 +10687,9 @@ def _process_civitai_image_ids(
     with SessionLocal() as db:
         for image_id in image_ids:
             item_key = _task_item_key(item_key_prefix, image_id)
-            task_context.mark_item(item_key, "checking_existing", "Checking local library")
+            task_context.mark_item(
+                item_key, "checking_existing", "Checking local library"
+            )
             try:
                 result, recovered_existing = _handle_existing_civitai_image(
                     db,
@@ -9380,7 +10698,9 @@ def _process_civitai_image_ids(
                     backfill_metadata=False,
                 )
                 if result is not None:
-                    _commit_with_lock_retry(db, context=f"Existing image update for {image_id}")
+                    _commit_with_lock_retry(
+                        db, context=f"Existing image update for {image_id}"
+                    )
                     image_db_id = result.get("image_db_id")
                     if isinstance(image_db_id, int):
                         desired_image_db_ids.add(image_db_id)
@@ -9396,10 +10716,16 @@ def _process_civitai_image_ids(
                     continue
 
                 if recovered_existing:
-                    _commit_with_lock_retry(db, context=f"Stale record cleanup for {image_id}")
+                    _commit_with_lock_retry(
+                        db, context=f"Stale record cleanup for {image_id}"
+                    )
                 download_candidates.append((image_id, recovered_existing))
                 task_context.mark_item(item_key, "queued", "Queued for remote fetch")
             except Exception as exc:
+                if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
+                    import traceback
+
+                    traceback.print_exc()
                 db.rollback()
                 if _is_civitai_remote_not_found_error(exc):
                     result = _build_civitai_unavailable_result(
@@ -9409,8 +10735,12 @@ def _process_civitai_image_ids(
                         db=db,
                         attach_collection_id=attach_collection_id,
                         collection_id=(collection_context or {}).get("collection_id"),
-                        collection_name=(collection_context or {}).get("collection_name"),
-                        collection_item=_collection_context_item(collection_context, image_id),
+                        collection_name=(collection_context or {}).get(
+                            "collection_name"
+                        ),
+                        collection_item=_collection_context_item(
+                            collection_context, image_id
+                        ),
                     )
                 else:
                     result = _build_failed_civitai_import_result(image_id, str(exc))
@@ -9427,7 +10757,9 @@ def _process_civitai_image_ids(
     if not download_candidates:
         return results, desired_image_db_ids
 
-    max_workers = max(1, min(_CIVITAI_IMPORT_NETWORK_CONCURRENCY, len(download_candidates)))
+    max_workers = max(
+        1, min(_CIVITAI_IMPORT_NETWORK_CONCURRENCY, len(download_candidates))
+    )
     next_index = 0
     futures: dict[Any, tuple[int, bool, str]] = {}
     last_heartbeat_at = time.monotonic()
@@ -9435,7 +10767,11 @@ def _process_civitai_image_ids(
 
     def submit_available(executor: ThreadPoolExecutor) -> None:
         nonlocal next_index
-        while next_index < len(download_candidates) and len(futures) < max_workers and not task_context.cancel_requested:
+        while (
+            next_index < len(download_candidates)
+            and len(futures) < max_workers
+            and not task_context.cancel_requested
+        ):
             image_id, recovered_existing = download_candidates[next_index]
             next_index += 1
             item_key = _task_item_key(item_key_prefix, image_id)
@@ -9456,7 +10792,9 @@ def _process_civitai_image_ids(
             total_count=total_count,
         )
 
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="civitai-fetch") as executor:
+    with ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="civitai-fetch"
+    ) as executor:
         submit_available(executor)
 
         while futures:
@@ -9474,7 +10812,9 @@ def _process_civitai_image_ids(
                         result=result,
                     )
 
-            done, _ = wait(list(futures.keys()), timeout=0.25, return_when=FIRST_COMPLETED)
+            done, _ = wait(
+                list(futures.keys()), timeout=0.25, return_when=FIRST_COMPLETED
+            )
             if not done:
                 now = time.monotonic()
                 if now - last_heartbeat_at >= 2.0:
@@ -9499,7 +10839,9 @@ def _process_civitai_image_ids(
                         task_context.set_message(
                             f"Ingesting image {image_id}; completed {len(results)}/{total_count}"
                         )
-                        task_context.mark_item(item_key, "ingesting", "Importing into local library")
+                        task_context.mark_item(
+                            item_key, "ingesting", "Importing into local library"
+                        )
                         with SessionLocal() as db:
                             result = _ingest_prepared_civitai_import(
                                 db,
@@ -9511,6 +10853,10 @@ def _process_civitai_image_ids(
                             if isinstance(image_db_id, int):
                                 desired_image_db_ids.add(image_db_id)
                 except Exception as exc:
+                    if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
+                        import traceback
+
+                        traceback.print_exc()
                     if _is_civitai_remote_not_found_error(exc):
                         with SessionLocal() as db:
                             result = _build_civitai_unavailable_result(
@@ -9519,9 +10865,15 @@ def _process_civitai_image_ids(
                                 api=api,
                                 db=db,
                                 attach_collection_id=attach_collection_id,
-                                collection_id=(collection_context or {}).get("collection_id"),
-                                collection_name=(collection_context or {}).get("collection_name"),
-                                collection_item=_collection_context_item(collection_context, image_id),
+                                collection_id=(collection_context or {}).get(
+                                    "collection_id"
+                                ),
+                                collection_name=(collection_context or {}).get(
+                                    "collection_name"
+                                ),
+                                collection_item=_collection_context_item(
+                                    collection_context, image_id
+                                ),
                             )
                     else:
                         result = _build_failed_civitai_import_result(image_id, str(exc))
@@ -9576,10 +10928,14 @@ def _run_civitai_collection_import_pipeline(
 
     def _format_collection_prefix() -> str:
         if collection_index is not None and collection_count is not None:
-            return f"Collection {collection_index}/{collection_count}: {collection_label}"
+            return (
+                f"Collection {collection_index}/{collection_count}: {collection_label}"
+            )
         return f"Collection: {collection_label}"
 
-    def _on_collection_page(page_number: int, page_items: int, discovered_count: int) -> None:
+    def _on_collection_page(
+        page_number: int, page_items: int, discovered_count: int
+    ) -> None:
         overall_discovered = overall_discovered_before + discovered_count
         _set_collection_state(
             current_collection_page=page_number,
@@ -9649,7 +11005,9 @@ def _run_civitai_collection_import_pipeline(
             source="civitai",
             civitai_collection_id=collection_id,
         )
-        _commit_with_lock_retry(db, context=f"Collection setup commit for {collection_id}")
+        _commit_with_lock_retry(
+            db, context=f"Collection setup commit for {collection_id}"
+        )
         local_collection_snapshot = _serialize_collection(local_collection)
         local_collection_id = int(local_collection.id)
 
@@ -9688,7 +11046,11 @@ def _run_civitai_collection_import_pipeline(
             local_collection_id,
             desired_image_db_ids,
         )
-        local_collection = db.query(CollectionModel).filter(CollectionModel.id == local_collection_id).first()
+        local_collection = (
+            db.query(CollectionModel)
+            .filter(CollectionModel.id == local_collection_id)
+            .first()
+        )
         if local_collection is not None:
             _apply_civitai_collection_probe_state(
                 local_collection,
@@ -9718,9 +11080,13 @@ def _run_civitai_collection_import_pipeline(
         "requested": len(image_ids),
         "images_added": sum(int(r.get("images_added", 0) or 0) for r in results),
         "images_skipped": sum(int(r.get("images_skipped", 0) or 0) for r in results),
-        "images_recovered": sum(int(r.get("images_recovered", 0) or 0) for r in results),
+        "images_recovered": sum(
+            int(r.get("images_recovered", 0) or 0) for r in results
+        ),
         "images_cancelled": sum(1 for r in results if r.get("cancelled")),
-        "json_files_created": sum(int(r.get("json_files_created", 0) or 0) for r in results),
+        "json_files_created": sum(
+            int(r.get("json_files_created", 0) or 0) for r in results
+        ),
         "memberships_removed": memberships_removed,
         "errors": [
             f"Image {r.get('image_id')}: {r['error']}"
@@ -9796,7 +11162,9 @@ def _run_civitai_collection_import_job(
     return result
 
 
-def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Optional[int]) -> dict:
+def _run_civitai_collection_sync_job(
+    task_context: TaskContext, *, limit: Optional[int]
+) -> dict:
     api = CivitaiAPI.get_instance()
     retry_metrics_before = _snapshot_civitai_payload_retry_metrics(api)
     task_context.set_total(0)
@@ -9805,12 +11173,16 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
         remote_collections = _fetch_civitai_user_image_collections(api)
     except HTTPException as exc:
         detail = str(exc.detail) if exc.detail else ""
-        is_auth_error = exc.status_code == 502 and "401" in detail and "Unauthorized" in detail
+        is_auth_error = (
+            exc.status_code == 502 and "401" in detail and "Unauthorized" in detail
+        )
         if is_auth_error:
             task_context.set_metadata("auth_required", True)
             task_context.fail(f"CivitAI authentication expired. {detail}")
         else:
-            task_context.fail(detail or f"Could not fetch collections (HTTP {exc.status_code}).")
+            task_context.fail(
+                detail or f"Could not fetch collections (HTTP {exc.status_code})."
+            )
         return {
             "message": detail,
             "collections_requested": 0,
@@ -9860,7 +11232,9 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
         collection_id = int(remote["id"])
         collection_name = str(remote["name"])
         collection_item_key = f"collection:{collection_id}"
-        task_context.mark_item(collection_item_key, "running", f"Syncing {collection_name}")
+        task_context.mark_item(
+            collection_item_key, "running", f"Syncing {collection_name}"
+        )
         task_context.set_message(
             f"Syncing collection {index}/{len(remote_collections)}: {collection_name}"
         )
@@ -9892,18 +11266,24 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
                     .first()
                 )
                 if collection_row is None:
-                    raise RuntimeError(f"Local collection {local_collection_id} disappeared during sync.")
+                    raise RuntimeError(
+                        f"Local collection {local_collection_id} disappeared during sync."
+                    )
 
-                local_membership_count, local_media_incomplete = _inspect_local_civitai_collection_health(
-                    db,
-                    local_collection_id=local_collection_id,
+                local_membership_count, local_media_incomplete = (
+                    _inspect_local_civitai_collection_health(
+                        db,
+                        local_collection_id=local_collection_id,
+                    )
                 )
-                needs_full_verify, sync_state = _civitai_collection_requires_full_verify(
-                    collection_row,
-                    probe=probe,
-                    local_membership_count=local_membership_count,
-                    local_media_incomplete=local_media_incomplete,
-                    force_full_verify=limit is not None,
+                needs_full_verify, sync_state = (
+                    _civitai_collection_requires_full_verify(
+                        collection_row,
+                        probe=probe,
+                        local_membership_count=local_membership_count,
+                        local_media_incomplete=local_media_incomplete,
+                        force_full_verify=limit is not None,
+                    )
                 )
 
                 if not probe.image_ids and not probe.has_more:
@@ -9925,7 +11305,9 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
                         context=f"Empty collection sync commit for {collection_id}",
                     )
                     task_context.increment_counter("collections_synced", 1)
-                    task_context.increment_counter("memberships_removed", memberships_removed)
+                    task_context.increment_counter(
+                        "memberships_removed", memberships_removed
+                    )
                     summary = _build_civitai_empty_collection_sync_summary(
                         collection_id=collection_id,
                         collection_name=collection_name,
@@ -10018,13 +11400,28 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
     summary = {
         "message": "CivitAI collection sync complete.",
         "collections_requested": len(remote_collections),
-        "collections_synced": len([item for item in collection_summaries if not item.get("errors")]),
-        "images_added": sum(int(item.get("images_added", 0) or 0) for item in collection_summaries),
-        "images_skipped": sum(int(item.get("images_skipped", 0) or 0) for item in collection_summaries),
-        "images_recovered": sum(int(item.get("images_recovered", 0) or 0) for item in collection_summaries),
-        "images_cancelled": sum(int(item.get("images_cancelled", 0) or 0) for item in collection_summaries),
-        "json_files_created": sum(int(item.get("json_files_created", 0) or 0) for item in collection_summaries),
-        "memberships_removed": sum(int(item.get("memberships_removed", 0) or 0) for item in collection_summaries),
+        "collections_synced": len(
+            [item for item in collection_summaries if not item.get("errors")]
+        ),
+        "images_added": sum(
+            int(item.get("images_added", 0) or 0) for item in collection_summaries
+        ),
+        "images_skipped": sum(
+            int(item.get("images_skipped", 0) or 0) for item in collection_summaries
+        ),
+        "images_recovered": sum(
+            int(item.get("images_recovered", 0) or 0) for item in collection_summaries
+        ),
+        "images_cancelled": sum(
+            int(item.get("images_cancelled", 0) or 0) for item in collection_summaries
+        ),
+        "json_files_created": sum(
+            int(item.get("json_files_created", 0) or 0) for item in collection_summaries
+        ),
+        "memberships_removed": sum(
+            int(item.get("memberships_removed", 0) or 0)
+            for item in collection_summaries
+        ),
         "errors": [
             f"Collection {item.get('civitai_collection_id')}: {error}"
             for item in collection_summaries
@@ -10055,8 +11452,12 @@ def _image_has_civitai_nsfw_level(image: ImageModel) -> bool:
     db_json = image.json_metadata if isinstance(image.json_metadata, dict) else {}
     db_civitai_payload = db_json.get("civitai")
     sidecar_payload = _read_image_sidecar_payload(image)
-    sidecar_civitai_payload = sidecar_payload.get("civitai") if isinstance(sidecar_payload, dict) else None
-    return _payload_has_nsfw_level(db_civitai_payload) or _payload_has_nsfw_level(sidecar_civitai_payload)
+    sidecar_civitai_payload = (
+        sidecar_payload.get("civitai") if isinstance(sidecar_payload, dict) else None
+    )
+    return _payload_has_nsfw_level(db_civitai_payload) or _payload_has_nsfw_level(
+        sidecar_civitai_payload
+    )
 
 
 def _run_civitai_nsfw_backfill_job(
@@ -10102,7 +11503,9 @@ def _run_civitai_nsfw_backfill_job(
         with SessionLocal() as db:
             image = db.query(ImageModel).filter(ImageModel.id == image_db_id).first()
             if image is None:
-                task_context.mark_item(f"nsfw-backfill:{image_db_id}", "skipped", "Image no longer exists")
+                task_context.mark_item(
+                    f"nsfw-backfill:{image_db_id}", "skipped", "Image no longer exists"
+                )
                 task_context.increment_counter("images_skipped", 1)
                 skipped_count += 1
                 processed_count += 1
@@ -10116,7 +11519,9 @@ def _run_civitai_nsfw_backfill_job(
             )
 
             if not source_url or not is_civitai_image_url(source_url):
-                task_context.mark_item(item_key, "skipped", "Not a CivitAI image source")
+                task_context.mark_item(
+                    item_key, "skipped", "Not a CivitAI image source"
+                )
                 task_context.increment_counter("images_skipped", 1)
                 skipped_count += 1
                 processed_count += 1
@@ -10138,8 +11543,13 @@ def _run_civitai_nsfw_backfill_job(
                     source_url=source_url,
                 )
                 if metadata_backfilled:
-                    _commit_with_lock_retry(db, context=f"NSFW metadata backfill commit for image {image.id}")
-                    task_context.mark_item(item_key, "completed", "Backfilled nsfwLevel metadata")
+                    _commit_with_lock_retry(
+                        db,
+                        context=f"NSFW metadata backfill commit for image {image.id}",
+                    )
+                    task_context.mark_item(
+                        item_key, "completed", "Backfilled nsfwLevel metadata"
+                    )
                     task_context.increment_counter("metadata_backfilled", 1)
                     metadata_backfilled_count += 1
                     processed_count += 1
@@ -10157,7 +11567,11 @@ def _run_civitai_nsfw_backfill_job(
                 if reimport_if_missing:
                     parsed_image_id = extract_civitai_image_id(source_url)
                     if parsed_image_id is None:
-                        task_context.mark_item(item_key, "failed", "Could not parse CivitAI image id for reimport")
+                        task_context.mark_item(
+                            item_key,
+                            "failed",
+                            "Could not parse CivitAI image id for reimport",
+                        )
                         task_context.increment_counter("images_failed", 1)
                         failed_count += 1
                         processed_count += 1
@@ -10179,7 +11593,9 @@ def _run_civitai_nsfw_backfill_job(
                         force_reimport_on_missing_metadata=True,
                     )
                     if reimport_result.get("error"):
-                        task_context.mark_item(item_key, "failed", str(reimport_result.get("error")))
+                        task_context.mark_item(
+                            item_key, "failed", str(reimport_result.get("error"))
+                        )
                         task_context.increment_counter("images_failed", 1)
                         failed_count += 1
                         processed_count += 1
@@ -10198,10 +11614,16 @@ def _run_civitai_nsfw_backfill_job(
                         )
                         continue
 
-                    _commit_with_lock_retry(db, context=f"NSFW reimport commit for image {parsed_image_id}")
+                    _commit_with_lock_retry(
+                        db, context=f"NSFW reimport commit for image {parsed_image_id}"
+                    )
                     refreshed = _find_existing_image_by_source_url(db, source_url)
-                    if refreshed is not None and _image_has_civitai_nsfw_level(refreshed):
-                        task_context.mark_item(item_key, "completed", "Recovered via reimport")
+                    if refreshed is not None and _image_has_civitai_nsfw_level(
+                        refreshed
+                    ):
+                        task_context.mark_item(
+                            item_key, "completed", "Recovered via reimport"
+                        )
                         task_context.increment_counter("reimport_recovered", 1)
                         reimport_recovered_count += 1
                         processed_count += 1
@@ -10216,7 +11638,9 @@ def _run_civitai_nsfw_backfill_job(
                         )
                         continue
 
-                task_context.mark_item(item_key, "skipped", "Remote nsfwLevel unavailable")
+                task_context.mark_item(
+                    item_key, "skipped", "Remote nsfwLevel unavailable"
+                )
                 task_context.increment_counter("remote_unavailable", 1)
                 remote_unavailable_count += 1
                 processed_count += 1
@@ -10269,7 +11693,9 @@ def _run_retry_failed_items_job(
 ) -> dict:
     retry_items, skipped_items = _get_retry_failed_items_from_task(source_task)
     if not retry_items:
-        raise RuntimeError("No retryable failed CivitAI items were found in the selected job.")
+        raise RuntimeError(
+            "No retryable failed CivitAI items were found in the selected job."
+        )
 
     api = CivitaiAPI.get_instance()
     retry_metrics_before = _snapshot_civitai_payload_retry_metrics(api)
@@ -10279,7 +11705,9 @@ def _run_retry_failed_items_job(
         if entry.civitai_collection_id is None:
             standalone_image_ids.append(entry.image_id)
             continue
-        grouped_collection_items.setdefault(entry.civitai_collection_id, []).append(entry.image_id)
+        grouped_collection_items.setdefault(entry.civitai_collection_id, []).append(
+            entry.image_id
+        )
 
     task_context.set_total(len(retry_items))
     task_context.set_metadata("source_task_id", source_task.get("id"))
@@ -10291,7 +11719,9 @@ def _run_retry_failed_items_job(
     group_summaries: list[dict] = []
 
     if standalone_image_ids:
-        task_context.set_message(f"Retrying {len(standalone_image_ids)} standalone failed image(s)")
+        task_context.set_message(
+            f"Retrying {len(standalone_image_ids)} standalone failed image(s)"
+        )
         results, _ = _process_civitai_image_ids(
             task_context,
             api=api,
@@ -10309,9 +11739,11 @@ def _run_retry_failed_items_job(
         )
 
     for civitai_collection_id, image_ids in grouped_collection_items.items():
-        collection_snapshot, local_collection_id = _ensure_local_civitai_collection_for_retry(
-            api,
-            civitai_collection_id=civitai_collection_id,
+        collection_snapshot, local_collection_id = (
+            _ensure_local_civitai_collection_for_retry(
+                api,
+                civitai_collection_id=civitai_collection_id,
+            )
         )
         task_context.set_message(
             f"Retrying {len(image_ids)} failed item(s) for collection {civitai_collection_id}"
@@ -10344,10 +11776,16 @@ def _run_retry_failed_items_job(
         "requested": len(retry_items),
         "skipped_item_keys": skipped_items,
         "images_added": sum(int(r.get("images_added", 0) or 0) for r in all_results),
-        "images_skipped": sum(int(r.get("images_skipped", 0) or 0) for r in all_results),
-        "images_recovered": sum(int(r.get("images_recovered", 0) or 0) for r in all_results),
+        "images_skipped": sum(
+            int(r.get("images_skipped", 0) or 0) for r in all_results
+        ),
+        "images_recovered": sum(
+            int(r.get("images_recovered", 0) or 0) for r in all_results
+        ),
         "images_cancelled": sum(1 for r in all_results if r.get("cancelled")),
-        "json_files_created": sum(int(r.get("json_files_created", 0) or 0) for r in all_results),
+        "json_files_created": sum(
+            int(r.get("json_files_created", 0) or 0) for r in all_results
+        ),
         "errors": [
             f"Image {r.get('image_id')}: {r['error']}"
             for r in all_results
@@ -10423,7 +11861,9 @@ def _sync_single_civitai_collection(
                 desired_image_db_ids.add(image_db_id)
                 _ensure_image_in_collection(db, image_db_id, local_collection.id)
             try:
-                _commit_with_lock_retry(db, context=f"Import commit for image {image_id}")
+                _commit_with_lock_retry(
+                    db, context=f"Import commit for image {image_id}"
+                )
             except HTTPException as e:
                 result["images_added"] = 0
                 result["images_skipped"] = 0
@@ -10471,7 +11911,9 @@ def create_initial_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _configure_uvicorn_access_logging(
-        suppress_status_get_logs=_read_env_flag("ATELIER_SUPPRESS_STATUS_GET_LOGS", False)
+        suppress_status_get_logs=_read_env_flag(
+            "ATELIER_SUPPRESS_STATUS_GET_LOGS", False
+        )
     )
     print("Starting AtelierAI API...")
 
@@ -10498,28 +11940,40 @@ async def lifespan(app: FastAPI):
                     )
                     # Non-destructive migration path for additive schema changes.
                     migrated = False
-                    if str(version_result or "") == "1.3" and str(CURRENT_SCHEMA_VERSION) == "1.4":
+                    if (
+                        str(version_result or "") == "1.3"
+                        and str(CURRENT_SCHEMA_VERSION) == "1.4"
+                    ):
                         print("   Attempting in-place schema upgrade 1.3 -> 1.4...")
                         try:
                             Base.metadata.create_all(bind=engine, checkfirst=True)
                             with SessionLocal() as db:
                                 db.query(SchemaVersion).delete()
-                                db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+                                db.add(
+                                    SchemaVersion(version_num=CURRENT_SCHEMA_VERSION)
+                                )
                                 db.commit()
                             migrated = True
                             print("✅ In-place schema upgrade complete.")
                         except Exception as migrate_exc:
                             print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
 
-                    if str(version_result or "") == "1.4" and str(CURRENT_SCHEMA_VERSION) == "1.5":
-                        print("   Attempting in-place schema upgrade 1.4 -> 1.5 (user_tags column)...")
+                    if (
+                        str(version_result or "") == "1.4"
+                        and str(CURRENT_SCHEMA_VERSION) == "1.5"
+                    ):
+                        print(
+                            "   Attempting in-place schema upgrade 1.4 -> 1.5 (user_tags column)..."
+                        )
                         try:
                             _ensure_user_tags_column()
                             # Backfill user_tags from sidecar JSON files into DB column
                             _backfill_user_tags_from_sidecars()
                             with SessionLocal() as db:
                                 db.query(SchemaVersion).delete()
-                                db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+                                db.add(
+                                    SchemaVersion(version_num=CURRENT_SCHEMA_VERSION)
+                                )
                                 db.commit()
                             migrated = True
                             print("✅ In-place schema upgrade complete.")
@@ -10553,7 +12007,9 @@ async def lifespan(app: FastAPI):
             print(f"⚠️ Could not check schema version (table might not exist): {e}")
             if db_file_path and os.path.exists(db_file_path):
                 if ALLOW_SCHEMA_RESET:
-                    print("   Recreating database to be safe (ALLOW_SCHEMA_RESET=true)...")
+                    print(
+                        "   Recreating database to be safe (ALLOW_SCHEMA_RESET=true)..."
+                    )
                     os.remove(db_file_path)
                     db_exists = False
                 else:
@@ -10632,8 +12088,14 @@ app.add_middleware(
 # This will serve files from the 'frontend' directory under the '/frontend/' URL path
 app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
 # Expose processed images so the gallery can render thumbnails/full previews.
-app.mount("/image_library", StaticFiles(directory=IMAGE_LIBRARY_PATH), name="image_library")
-app.mount("/image_resources", StaticFiles(directory=IMAGE_RESOURCES_PATH), name="image_resources")
+app.mount(
+    "/image_library", StaticFiles(directory=IMAGE_LIBRARY_PATH), name="image_library"
+)
+app.mount(
+    "/image_resources",
+    StaticFiles(directory=IMAGE_RESOURCES_PATH),
+    name="image_resources",
+)
 app.mount("/frontend/images", StaticFiles(directory="images"), name="frontend_images")
 
 
@@ -10650,10 +12112,20 @@ async def read_index():
 async def get_frontend_config():
     """Return CivitAI domain configuration for frontend URL construction."""
     return {
-        "civitai_web_base_url": getattr(app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red"),
-        "civitai_base_domain": getattr(app_config, "CIVITAI_BASE_DOMAIN", "civitai.red"),
-        "civitai_cdn_base_url": getattr(app_config, "CIVITAI_CDN_BASE_URL", "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"),
-        "civitai_cdn_alt_base_url": getattr(app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"),
+        "civitai_web_base_url": getattr(
+            app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red"
+        ),
+        "civitai_base_domain": getattr(
+            app_config, "CIVITAI_BASE_DOMAIN", "civitai.red"
+        ),
+        "civitai_cdn_base_url": getattr(
+            app_config,
+            "CIVITAI_CDN_BASE_URL",
+            "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA",
+        ),
+        "civitai_cdn_alt_base_url": getattr(
+            app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"
+        ),
     }
 
 
@@ -10708,11 +12180,13 @@ async def read_expression_lab():
 async def list_expression_sets():
     """Return the list of expression image files in /images/expressions."""
     from pathlib import Path
+
     expr_dir = Path("images") / "expressions"
     if not expr_dir.is_dir():
         return {"files": []}
     files = sorted(
-        f.name for f in expr_dir.iterdir()
+        f.name
+        for f in expr_dir.iterdir()
         if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
     )
     return {"files": files}
@@ -10760,7 +12234,9 @@ def get_local_generation_prototype(file_hash: str, db: Session = Depends(get_db)
     return _build_generation_prototype_local_payload(image)
 
 
-@app.get("/generation-prototype/civitai/{image_id}/comfy-workspace", response_model=dict)
+@app.get(
+    "/generation-prototype/civitai/{image_id}/comfy-workspace", response_model=dict
+)
 def get_civitai_generation_comfy_workspace(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -10781,11 +12257,21 @@ def get_civitai_generation_comfy_workspace(
     )
 
 
-def _extract_required_comfy_raw_payload(export_payload: dict, *, payload_kind: str) -> dict:
+def _extract_required_comfy_raw_payload(
+    export_payload: dict, *, payload_kind: str
+) -> dict:
     workspace_bundle = _dict_payload(export_payload.get("workspace_bundle"))
     validation = _dict_payload(export_payload.get("validation"))
-    warnings = [str(item) for item in _list_payload(validation.get("warnings")) if str(item).strip()]
-    errors = [str(item) for item in _list_payload(validation.get("errors")) if str(item).strip()]
+    warnings = [
+        str(item)
+        for item in _list_payload(validation.get("warnings"))
+        if str(item).strip()
+    ]
+    errors = [
+        str(item)
+        for item in _list_payload(validation.get("errors"))
+        if str(item).strip()
+    ]
 
     if payload_kind == "workflow":
         key = "comfy_workflow_ui"
@@ -10794,7 +12280,9 @@ def _extract_required_comfy_raw_payload(export_payload: dict, *, payload_kind: s
         key = "comfy_prompt_api"
         label = "Comfy API prompt"
     else:
-        raise HTTPException(status_code=500, detail=f"Unsupported raw payload kind: {payload_kind}")
+        raise HTTPException(
+            status_code=500, detail=f"Unsupported raw payload kind: {payload_kind}"
+        )
 
     raw_payload = workspace_bundle.get(key)
     if isinstance(raw_payload, dict):
@@ -10816,10 +12304,14 @@ def _inject_fresh_local_exif_metadata_for_comfy(
     try:
         image_path = _resolve_image_library_path(image)
     except Exception as exc:
-        return generation_payload, [f"Could not resolve image path for fresh EXIF refresh: {exc}"]
+        return generation_payload, [
+            f"Could not resolve image path for fresh EXIF refresh: {exc}"
+        ]
 
     if not image_path.exists() or not image_path.is_file():
-        return generation_payload, ["Local image file is unavailable for fresh EXIF refresh."]
+        return generation_payload, [
+            "Local image file is unavailable for fresh EXIF refresh."
+        ]
 
     try:
         processor = ImageProcessor(str(image_path), db, IMAGE_LIBRARY_PATH)
@@ -10828,7 +12320,9 @@ def _inject_fresh_local_exif_metadata_for_comfy(
 
     fresh_exif = _dict_payload(processor.exif_data)
     if not fresh_exif:
-        return generation_payload, ["Fresh EXIF refresh did not yield any metadata fields."]
+        return generation_payload, [
+            "Fresh EXIF refresh did not yield any metadata fields."
+        ]
 
     raw = _dict_payload(generation_payload.get("raw"))
     merged = _dict_payload(raw.get("merged"))
@@ -10840,18 +12334,24 @@ def _inject_fresh_local_exif_metadata_for_comfy(
 
     if not isinstance(sidecar.get("exif_data"), dict) or not sidecar.get("exif_data"):
         sidecar["exif_data"] = fresh_exif
-    if not isinstance(db_payload.get("exif_data"), dict) or not db_payload.get("exif_data"):
+    if not isinstance(db_payload.get("exif_data"), dict) or not db_payload.get(
+        "exif_data"
+    ):
         db_payload["exif_data"] = fresh_exif
 
     raw["merged"] = merged
     raw["sidecar"] = sidecar
     raw["db"] = db_payload
     generation_payload["raw"] = raw
-    warnings.append("Included fresh EXIF metadata from the local media file for Comfy graph extraction.")
+    warnings.append(
+        "Included fresh EXIF metadata from the local media file for Comfy graph extraction."
+    )
     return generation_payload, warnings
 
 
-@app.get("/generation-prototype/civitai/{image_id}/comfy-workflow-raw", response_model=dict)
+@app.get(
+    "/generation-prototype/civitai/{image_id}/comfy-workflow-raw", response_model=dict
+)
 def get_civitai_generation_comfy_workflow_raw(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -10873,7 +12373,9 @@ def get_civitai_generation_comfy_workflow_raw(
     return _extract_required_comfy_raw_payload(export_payload, payload_kind="workflow")
 
 
-@app.get("/generation-prototype/civitai/{image_id}/comfy-prompt-raw", response_model=dict)
+@app.get(
+    "/generation-prototype/civitai/{image_id}/comfy-prompt-raw", response_model=dict
+)
 def get_civitai_generation_comfy_prompt_raw(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -10895,7 +12397,9 @@ def get_civitai_generation_comfy_prompt_raw(
     return _extract_required_comfy_raw_payload(export_payload, payload_kind="prompt")
 
 
-@app.get("/images/{file_hash}/generation-prototype/comfy-workspace", response_model=dict)
+@app.get(
+    "/images/{file_hash}/generation-prototype/comfy-workspace", response_model=dict
+)
 def get_local_generation_comfy_workspace(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -10919,23 +12423,33 @@ def get_local_generation_comfy_workspace(
         include_full_raw=include_full_catalog_raw,
     )
     generation_payload = _build_generation_prototype_local_payload(image)
-    generation_payload, refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    generation_payload, refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(
+        generation_payload, image, db
+    )
     export_payload = _build_generation_comfy_workspace_export_payload(
         generation_payload,
         local_catalog=local_catalog,
     )
     if refresh_warnings:
         validation = _dict_payload(export_payload.get("validation"))
-        warnings = [str(item) for item in _list_payload(validation.get("warnings")) if str(item).strip()]
+        warnings = [
+            str(item)
+            for item in _list_payload(validation.get("warnings"))
+            if str(item).strip()
+        ]
         warnings.extend(refresh_warnings)
         validation["warnings"] = warnings
         validation.setdefault("errors", _list_payload(validation.get("errors")))
-        validation["status"] = _summarize_validation(warnings, _list_payload(validation.get("errors"))).get("status")
+        validation["status"] = _summarize_validation(
+            warnings, _list_payload(validation.get("errors"))
+        ).get("status")
         export_payload["validation"] = validation
     return export_payload
 
 
-@app.get("/images/{file_hash}/generation-prototype/comfy-workflow-raw", response_model=dict)
+@app.get(
+    "/images/{file_hash}/generation-prototype/comfy-workflow-raw", response_model=dict
+)
 def get_local_generation_comfy_workflow_raw(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -10960,7 +12474,9 @@ def get_local_generation_comfy_workflow_raw(
         include_full_raw=include_full_catalog_raw,
     )
     generation_payload = _build_generation_prototype_local_payload(image)
-    generation_payload, _ = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    generation_payload, _ = _inject_fresh_local_exif_metadata_for_comfy(
+        generation_payload, image, db
+    )
     export_payload = _build_generation_comfy_workspace_export_payload(
         generation_payload,
         local_catalog=local_catalog,
@@ -10968,7 +12484,9 @@ def get_local_generation_comfy_workflow_raw(
     return _extract_required_comfy_raw_payload(export_payload, payload_kind="workflow")
 
 
-@app.get("/images/{file_hash}/generation-prototype/comfy-prompt-raw", response_model=dict)
+@app.get(
+    "/images/{file_hash}/generation-prototype/comfy-prompt-raw", response_model=dict
+)
 def get_local_generation_comfy_prompt_raw(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -10993,7 +12511,9 @@ def get_local_generation_comfy_prompt_raw(
         include_full_raw=include_full_catalog_raw,
     )
     generation_payload = _build_generation_prototype_local_payload(image)
-    generation_payload, _ = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    generation_payload, _ = _inject_fresh_local_exif_metadata_for_comfy(
+        generation_payload, image, db
+    )
     export_payload = _build_generation_comfy_workspace_export_payload(
         generation_payload,
         local_catalog=local_catalog,
@@ -11005,7 +12525,9 @@ def _coerce_a1111_parameter_value(key: str, value: Any) -> Any:
     return _a1111_svc._coerce_a1111_parameter_value(key, value)
 
 
-def _extract_a1111_user_comment_candidates(generation_payload: dict) -> list[dict[str, str]]:
+def _extract_a1111_user_comment_candidates(
+    generation_payload: dict,
+) -> list[dict[str, str]]:
     return _a1111_svc.extract_a1111_user_comment_candidates(generation_payload)
 
 
@@ -11013,11 +12535,15 @@ def _a1111_candidate_source_priority(source: Any) -> int:
     return _a1111_svc._a1111_candidate_source_priority(source)
 
 
-def _select_preferred_a1111_user_comment_candidate(candidates: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+def _select_preferred_a1111_user_comment_candidate(
+    candidates: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
     return _a1111_svc.select_preferred_a1111_user_comment_candidate(candidates)
 
 
-def _build_authoritative_a1111_parse_payload(candidates: list[dict[str, Any]]) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+def _build_authoritative_a1111_parse_payload(
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     return _a1111_svc.build_authoritative_a1111_parse_payload(candidates)
 
 
@@ -11025,7 +12551,9 @@ def _build_a1111_capability_signals(parse_payload: dict[str, Any]) -> dict[str, 
     return _a1111_svc.build_a1111_capability_signals(parse_payload)
 
 
-def _sanitize_a1111_positive_prompt_for_comfy(prompt_text: Any) -> tuple[str, list[str]]:
+def _sanitize_a1111_positive_prompt_for_comfy(
+    prompt_text: Any,
+) -> tuple[str, list[str]]:
     return _a1111_svc.sanitize_a1111_positive_prompt_for_comfy(prompt_text)
 
 
@@ -11041,20 +12569,37 @@ def _normalize_scalar_for_lookup(value: Any) -> Optional[str]:
     return _a1111_svc._normalize_scalar_for_lookup(value)
 
 
-def _flatten_json_scalars(value: Any, *, prefix: str = "", output: Optional[dict[str, Any]] = None, depth: int = 0, max_depth: int = 20) -> dict[str, Any]:
-    return _a1111_svc._flatten_json_scalars(value, prefix=prefix, output=output, depth=depth, max_depth=max_depth)
+def _flatten_json_scalars(
+    value: Any,
+    *,
+    prefix: str = "",
+    output: Optional[dict[str, Any]] = None,
+    depth: int = 0,
+    max_depth: int = 20,
+) -> dict[str, Any]:
+    return _a1111_svc._flatten_json_scalars(
+        value, prefix=prefix, output=output, depth=depth, max_depth=max_depth
+    )
 
 
 def _build_scalar_lookup(flattened: dict[str, Any]) -> dict[str, list[str]]:
     return _a1111_svc._build_scalar_lookup(flattened)
 
 
-def _compare_json_scalar_structures(left: Any, right: Any, *, sample_limit: int = 25) -> dict[str, Any]:
-    return _a1111_svc._compare_json_scalar_structures(left, right, sample_limit=sample_limit)
+def _compare_json_scalar_structures(
+    left: Any, right: Any, *, sample_limit: int = 25
+) -> dict[str, Any]:
+    return _a1111_svc._compare_json_scalar_structures(
+        left, right, sample_limit=sample_limit
+    )
 
 
-def _build_a1111_field_alignment(parsed_fields: dict[str, Any], workflow_payload: Any, *, sample_limit: int = 10) -> dict[str, Any]:
-    return _a1111_svc.build_a1111_field_alignment(parsed_fields, workflow_payload, sample_limit=sample_limit)
+def _build_a1111_field_alignment(
+    parsed_fields: dict[str, Any], workflow_payload: Any, *, sample_limit: int = 10
+) -> dict[str, Any]:
+    return _a1111_svc.build_a1111_field_alignment(
+        parsed_fields, workflow_payload, sample_limit=sample_limit
+    )
 
 
 def _normalize_sampler_name_for_comfy(value: Any) -> dict[str, Any]:
@@ -11077,15 +12622,21 @@ def _hash_token_sets_match(left_tokens: set[str], right_tokens: set[str]) -> boo
     return _a1111_svc._hash_token_sets_match(left_tokens, right_tokens)
 
 
-def _normalize_prompt_text_for_match(value: Any, *, strip_lora_tags: bool = False) -> str:
-    return _a1111_svc._normalize_prompt_text_for_match(value, strip_lora_tags=strip_lora_tags)
+def _normalize_prompt_text_for_match(
+    value: Any, *, strip_lora_tags: bool = False
+) -> str:
+    return _a1111_svc._normalize_prompt_text_for_match(
+        value, strip_lora_tags=strip_lora_tags
+    )
 
 
 def _find_first_text_diff(left: str, right: str) -> Optional[dict[str, Any]]:
     return _a1111_svc._find_first_text_diff(left, right)
 
 
-def _build_prompt_mismatch_diagnostics(local_value: Any, parameter_scalars: list[tuple[str, Any]]) -> dict[str, Any]:
+def _build_prompt_mismatch_diagnostics(
+    local_value: Any, parameter_scalars: list[tuple[str, Any]]
+) -> dict[str, Any]:
     return _a1111_svc.build_prompt_mismatch_diagnostics(local_value, parameter_scalars)
 
 
@@ -11093,11 +12644,17 @@ def _is_parameter_like_workflow_path(path: str) -> bool:
     return _a1111_svc._is_parameter_like_workflow_path(path)
 
 
-def _field_value_matches_expected(field_name: str, local_value: Any, expected_value: Any) -> bool:
-    return _a1111_svc._field_value_matches_expected(field_name, local_value, expected_value)
+def _field_value_matches_expected(
+    field_name: str, local_value: Any, expected_value: Any
+) -> bool:
+    return _a1111_svc._field_value_matches_expected(
+        field_name, local_value, expected_value
+    )
 
 
-def _extract_expected_workflow_parameters(workflow_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _extract_expected_workflow_parameters(
+    workflow_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     return _a1111_svc._extract_expected_workflow_parameters(workflow_payload)
 
 
@@ -11159,7 +12716,11 @@ def _build_parity_candidate_audit(
         if _is_missing_process_value(canonical_fields.get(field_name))
     ]
 
-    warnings = [str(item) for item in _list_payload(parse_payload.get("warnings")) if str(item).strip()]
+    warnings = [
+        str(item)
+        for item in _list_payload(parse_payload.get("warnings"))
+        if str(item).strip()
+    ]
     capability_signals = _build_a1111_capability_signals(parse_payload)
     mapping_notes = _list_payload(sampler_info.get("notes"))
     conflicts: list[dict[str, Any]] = []
@@ -11168,8 +12729,12 @@ def _build_parity_candidate_audit(
     structural = None
     semantic_workflow_match = None
     if provided_workflow_supplied and provided_workflow_json:
-        field_alignment = _build_a1111_field_alignment(canonical_fields, provided_workflow_json)
-        structural = _compare_json_scalar_structures(parsed_fields, provided_workflow_json)
+        field_alignment = _build_a1111_field_alignment(
+            canonical_fields, provided_workflow_json
+        )
+        structural = _compare_json_scalar_structures(
+            parsed_fields, provided_workflow_json
+        )
         semantic_workflow_match = _build_semantic_workflow_match_buckets(
             canonical_fields,
             provided_workflow_json,
@@ -11177,11 +12742,13 @@ def _build_parity_candidate_audit(
         )
         alignment_score = float(field_alignment.get("alignment_score") or 0.0)
         if alignment_score < 0.35:
-            conflicts.append({
-                "type": "low_alignment",
-                "message": "Parsed A1111 fields align weakly with provided workflow values.",
-                "alignment_score": alignment_score,
-            })
+            conflicts.append(
+                {
+                    "type": "low_alignment",
+                    "message": "Parsed A1111 fields align weakly with provided workflow values.",
+                    "alignment_score": alignment_score,
+                }
+            )
 
     classification = "generatable_now"
     if not positive_prompt and not parsed_fields:
@@ -11193,11 +12760,15 @@ def _build_parity_candidate_audit(
 
     if _list_payload(capability_signals.get("unsupported_features")):
         classification = "needs_manual_intervention"
-        conflicts.append({
-            "type": "unsupported_a1111_processing",
-            "message": "Detected A1111 processing that is not currently emulated in Comfy parity workflows.",
-            "unsupported_features": _list_payload(capability_signals.get("unsupported_features")),
-        })
+        conflicts.append(
+            {
+                "type": "unsupported_a1111_processing",
+                "message": "Detected A1111 processing that is not currently emulated in Comfy parity workflows.",
+                "unsupported_features": _list_payload(
+                    capability_signals.get("unsupported_features")
+                ),
+            }
+        )
 
     # Build readiness_score and action_items
     readiness_score = 0
@@ -11208,7 +12779,9 @@ def _build_parity_candidate_audit(
         readiness_score = int((present_count / len(required_field_names)) * 100)
 
     # Readiness modifiers
-    if isinstance(model_hash_evidence, dict) and model_hash_evidence.get("confirmed_exact_match"):
+    if isinstance(model_hash_evidence, dict) and model_hash_evidence.get(
+        "confirmed_exact_match"
+    ):
         tier = str(model_hash_evidence.get("confirmation_tier") or "")
         if tier == "same_source":
             readiness_score = min(100, readiness_score + 10)
@@ -11236,16 +12809,29 @@ def _build_parity_candidate_audit(
 
     # Action items
     if missing_fields:
-        action_items.append(f"Set {', '.join(missing_fields)} — missing from extracted metadata")
+        action_items.append(
+            f"Set {', '.join(missing_fields)} — missing from extracted metadata"
+        )
     if classification == "needs_manual_intervention":
         action_items.append("Resolve blocking issues before attempting generation")
-    if isinstance(model_hash_evidence, dict) and not model_hash_evidence.get("confirmed_exact_match"):
-        action_items.append("Verify model — local checkpoint could not be confirmed by hash")
+    if isinstance(model_hash_evidence, dict) and not model_hash_evidence.get(
+        "confirmed_exact_match"
+    ):
+        action_items.append(
+            "Verify model — local checkpoint could not be confirmed by hash"
+        )
     if _list_payload(capability_signals.get("unsupported_features")):
-        unsupported_names = [str(f) for f in _list_payload(capability_signals.get("unsupported_features"))]
-        action_items.append(f"Unsupported A1111 features detected: {', '.join(unsupported_names)}")
+        unsupported_names = [
+            str(f)
+            for f in _list_payload(capability_signals.get("unsupported_features"))
+        ]
+        action_items.append(
+            f"Unsupported A1111 features detected: {', '.join(unsupported_names)}"
+        )
     if not provided_workflow_supplied:
-        action_items.append("Provide a workflow JSON to enable field alignment checking")
+        action_items.append(
+            "Provide a workflow JSON to enable field alignment checking"
+        )
 
     # Build unified_field_status
     unified_field_status: dict[str, dict[str, Any]] = {}
@@ -11271,7 +12857,9 @@ def _build_parity_candidate_audit(
             fname = str(entry.get("field") or "")
             if fname in unified_field_status:
                 unified_field_status[fname]["status"] = "mismatched"
-                unified_field_status[fname]["workflow_value"] = entry.get("expected_value")
+                unified_field_status[fname]["workflow_value"] = entry.get(
+                    "expected_value"
+                )
                 unified_field_status[fname]["detail"] = entry.get("reason")
         for entry in _list_payload(semantic_workflow_match.get("local_only")):
             fname = str(entry.get("field") or "")
@@ -11282,7 +12870,9 @@ def _build_parity_candidate_audit(
             fname = str(entry.get("field") or "")
             if fname in unified_field_status:
                 unified_field_status[fname]["status"] = "workflow_only"
-                unified_field_status[fname]["workflow_value"] = entry.get("expected_value")
+                unified_field_status[fname]["workflow_value"] = entry.get(
+                    "expected_value"
+                )
                 unified_field_status[fname]["detail"] = entry.get("reason")
 
     # Override model_hash with verification tier
@@ -11294,13 +12884,24 @@ def _build_parity_candidate_audit(
             if tier == "same_source":
                 mh_status["confidence"] = "verified"
                 sources = _list_payload(model_hash_evidence.get("sources"))
-                src_labels = [str(s.get("source", "")) for s in sources if isinstance(s, dict)]
-                mh_status["detail"] = f"Hash confirmed via {', '.join(src_labels[:3]) or 'external sources'}"
+                src_labels = [
+                    str(s.get("source", "")) for s in sources if isinstance(s, dict)
+                ]
+                mh_status["detail"] = (
+                    f"Hash confirmed via {', '.join(src_labels[:3]) or 'external sources'}"
+                )
             elif tier == "cross_source":
                 mh_status["confidence"] = "probable"
                 cross_detail = model_hash_evidence.get("cross_source_detail")
-                detail_str = ", ".join(str(d) for d in (_list_payload(cross_detail) if cross_detail else []))
-                mh_status["detail"] = f"Cross-source verification: {detail_str}" if detail_str else "Cross-source hash match"
+                detail_str = ", ".join(
+                    str(d)
+                    for d in (_list_payload(cross_detail) if cross_detail else [])
+                )
+                mh_status["detail"] = (
+                    f"Cross-source verification: {detail_str}"
+                    if detail_str
+                    else "Cross-source hash match"
+                )
         else:
             mh_status["status"] = "local_only"
             mh_status["detail"] = "No external hash confirmation found"
@@ -11350,11 +12951,7 @@ def _build_model_hash_evidence_for_parity(
         right_key = _normalize_model_name_key(right)
         if not left_key or not right_key:
             return False
-        return (
-            left_key == right_key
-            or left_key in right_key
-            or right_key in left_key
-        )
+        return left_key == right_key or left_key in right_key or right_key in left_key
 
     civitai_image_id: Optional[int] = None
     source_url = str(image.source_url or "").strip()
@@ -11368,7 +12965,9 @@ def _build_model_hash_evidence_for_parity(
 
     if civitai_image_id is not None:
         try:
-            civitai_payload = _build_generation_prototype_civitai_payload(civitai_image_id)
+            civitai_payload = _build_generation_prototype_civitai_payload(
+                civitai_image_id
+            )
 
             raw_payload = _dict_payload(civitai_payload.get("raw"))
             generation_data = _dict_payload(raw_payload.get("generation_data"))
@@ -11377,8 +12976,14 @@ def _build_model_hash_evidence_for_parity(
             civitai_hash_tokens: set[str] = set()
             civitai_model_name_candidates: set[str] = set()
 
-            civitai_hash_tokens.update(_extract_hex_hash_tokens(meta_payload.get("Model hash")))
-            civitai_hash_tokens.update(_extract_hex_hash_tokens(_dict_payload(meta_payload.get("hashes")).get("model")))
+            civitai_hash_tokens.update(
+                _extract_hex_hash_tokens(meta_payload.get("Model hash"))
+            )
+            civitai_hash_tokens.update(
+                _extract_hex_hash_tokens(
+                    _dict_payload(meta_payload.get("hashes")).get("model")
+                )
+            )
 
             meta_model_name = str(meta_payload.get("Model") or "").strip()
             if meta_model_name:
@@ -11393,7 +12998,9 @@ def _build_model_hash_evidence_for_parity(
                 resource_type = str(resource.get("type") or "").strip().lower()
                 if resource_type and resource_type not in {"model", "checkpoint"}:
                     continue
-                civitai_hash_tokens.update(_extract_hex_hash_tokens(resource.get("hash")))
+                civitai_hash_tokens.update(
+                    _extract_hex_hash_tokens(resource.get("hash"))
+                )
                 resource_name = str(resource.get("name") or "").strip()
                 if resource_name:
                     civitai_model_name_candidates.add(resource_name)
@@ -11410,7 +13017,9 @@ def _build_model_hash_evidence_for_parity(
                 if air_ids.get("civitai_model_id") is not None:
                     civitai_model_id_candidates.add(air_ids["civitai_model_id"])
                 if air_ids.get("civitai_model_version_id") is not None:
-                    civitai_model_version_id_candidates.add(air_ids["civitai_model_version_id"])
+                    civitai_model_version_id_candidates.add(
+                        air_ids["civitai_model_version_id"]
+                    )
 
             # Extract IDs from civitaiResources entries (modelVersionId only)
             for civ_res in _list_payload(meta_payload.get("civitaiResources")):
@@ -11425,18 +13034,28 @@ def _build_model_hash_evidence_for_parity(
 
             # Fallback: parse user-comment style metadata if direct meta extraction is sparse.
             if not civitai_hash_tokens:
-                civitai_candidates = _extract_a1111_user_comment_candidates(civitai_payload)
+                civitai_candidates = _extract_a1111_user_comment_candidates(
+                    civitai_payload
+                )
                 civitai_preferred = next(
                     (
                         candidate
                         for candidate in civitai_candidates
-                        if _looks_like_a1111_user_comment(str(candidate.get("text") or ""))
+                        if _looks_like_a1111_user_comment(
+                            str(candidate.get("text") or "")
+                        )
                     ),
                     civitai_candidates[0] if civitai_candidates else None,
                 )
-                civitai_parse = _parse_a1111_user_comment(str(civitai_preferred.get("text") or "")) if civitai_preferred else {}
+                civitai_parse = (
+                    _parse_a1111_user_comment(str(civitai_preferred.get("text") or ""))
+                    if civitai_preferred
+                    else {}
+                )
                 civitai_fields = _dict_payload(civitai_parse.get("parsed_fields"))
-                civitai_hash_tokens.update(_extract_hex_hash_tokens(civitai_fields.get("model_hash")))
+                civitai_hash_tokens.update(
+                    _extract_hex_hash_tokens(civitai_fields.get("model_hash"))
+                )
                 parsed_model_name = str(civitai_fields.get("model") or "").strip()
                 if parsed_model_name:
                     civitai_model_name_candidates.add(parsed_model_name)
@@ -11454,42 +13073,70 @@ def _build_model_hash_evidence_for_parity(
                     model_name_compatible = True
                     break
 
-            source_evidence.append({
-                "source": "civitai_metadata",
-                "model": sorted(civitai_model_name_candidates)[0] if civitai_model_name_candidates else None,
-                "hash_tokens": sorted(civitai_hash_tokens),
-                "model_name_candidates": sorted(civitai_model_name_candidates),
-                "model_name_compatible": model_name_compatible,
-                "hash_prefix_match": _hash_token_sets_match(local_hash_tokens, civitai_hash_tokens),
-                "civitai_model_ids": sorted(civitai_model_id_candidates) if civitai_model_id_candidates else None,
-                "civitai_model_version_ids": sorted(civitai_model_version_id_candidates) if civitai_model_version_id_candidates else None,
-                "evidence_paths": [
-                    "raw.generation_data.meta.Model hash",
-                    "raw.generation_data.meta.hashes.model",
-                    "raw.generation_data.meta.resources[*].hash",
-                    "raw.generation_data.meta.resources[*].modelId",
-                    "raw.generation_data.meta.resources[*].modelVersionId",
-                    "raw.generation_data.meta.Model",
-                    "raw.generation_data.meta.civitaiResources[*].modelVersionId",
-                ],
-            })
+            source_evidence.append(
+                {
+                    "source": "civitai_metadata",
+                    "model": (
+                        sorted(civitai_model_name_candidates)[0]
+                        if civitai_model_name_candidates
+                        else None
+                    ),
+                    "hash_tokens": sorted(civitai_hash_tokens),
+                    "model_name_candidates": sorted(civitai_model_name_candidates),
+                    "model_name_compatible": model_name_compatible,
+                    "hash_prefix_match": _hash_token_sets_match(
+                        local_hash_tokens, civitai_hash_tokens
+                    ),
+                    "civitai_model_ids": (
+                        sorted(civitai_model_id_candidates)
+                        if civitai_model_id_candidates
+                        else None
+                    ),
+                    "civitai_model_version_ids": (
+                        sorted(civitai_model_version_id_candidates)
+                        if civitai_model_version_id_candidates
+                        else None
+                    ),
+                    "evidence_paths": [
+                        "raw.generation_data.meta.Model hash",
+                        "raw.generation_data.meta.hashes.model",
+                        "raw.generation_data.meta.resources[*].hash",
+                        "raw.generation_data.meta.resources[*].modelId",
+                        "raw.generation_data.meta.resources[*].modelVersionId",
+                        "raw.generation_data.meta.Model",
+                        "raw.generation_data.meta.civitaiResources[*].modelVersionId",
+                    ],
+                }
+            )
         except Exception as exc:
-            source_evidence.append({
-                "source": "civitai_metadata",
-                "error": str(exc),
-            })
+            source_evidence.append(
+                {
+                    "source": "civitai_metadata",
+                    "error": str(exc),
+                }
+            )
 
     try:
         local_catalog = model_reference_service.fetch_local_catalog()
-        if isinstance(local_catalog, dict) and isinstance(local_catalog.get("entries"), list):
+        if isinstance(local_catalog, dict) and isinstance(
+            local_catalog.get("entries"), list
+        ):
             local_generation_payload = _build_generation_prototype_local_payload(image)
-            extracted_references = model_reference_service.extract_references_from_generation_payload(local_generation_payload)
-            matched_references = model_reference_service.apply_local_catalog_matches(extracted_references, local_catalog)
+            extracted_references = (
+                model_reference_service.extract_references_from_generation_payload(
+                    local_generation_payload
+                )
+            )
+            matched_references = model_reference_service.apply_local_catalog_matches(
+                extracted_references, local_catalog
+            )
 
             for reference in matched_references:
                 if not isinstance(reference, dict):
                     continue
-                reference_type = str(reference.get("resource_type") or "").strip().lower()
+                reference_type = (
+                    str(reference.get("resource_type") or "").strip().lower()
+                )
                 if reference_type not in {"checkpoint", "model"}:
                     continue
                 local_matches = _list_payload(reference.get("local_matches"))
@@ -11512,8 +13159,13 @@ def _build_model_hash_evidence_for_parity(
                     if not match_hash_tokens:
                         continue
 
-                    hash_prefix_match = _hash_token_sets_match(local_hash_tokens, match_hash_tokens)
-                    if not hash_prefix_match and not include_non_prefix_local_reference_matches:
+                    hash_prefix_match = _hash_token_sets_match(
+                        local_hash_tokens, match_hash_tokens
+                    )
+                    if (
+                        not hash_prefix_match
+                        and not include_non_prefix_local_reference_matches
+                    ):
                         continue
 
                     match_name_candidates = [
@@ -11526,36 +13178,48 @@ def _build_model_hash_evidence_for_parity(
 
                     model_name_compatible = any(
                         _model_keys_compatible(canonical_model_key, candidate)
-                        for candidate in [*match_name_candidates, *reference_name_candidates]
+                        for candidate in [
+                            *match_name_candidates,
+                            *reference_name_candidates,
+                        ]
                     )
 
                     ids_compatible = False
                     match_model_id = match.get("civitai_model_id")
                     match_version_id = match.get("civitai_model_version_id")
-                    if reference_version_id is not None and match_version_id is not None:
-                        ids_compatible = int(reference_version_id) == int(match_version_id)
+                    if (
+                        reference_version_id is not None
+                        and match_version_id is not None
+                    ):
+                        ids_compatible = int(reference_version_id) == int(
+                            match_version_id
+                        )
                     elif reference_model_id is not None and match_model_id is not None:
                         ids_compatible = int(reference_model_id) == int(match_model_id)
 
-                    source_evidence.append({
-                        "source": "local_reference_match",
-                        "resource_type": reference_type,
-                        "reference_display_name": reference.get("display_name"),
-                        "display_name": match.get("display_name"),
-                        "model_name": match.get("model_name"),
-                        "version_name": match.get("version_name"),
-                        "file_name": match.get("file_name"),
-                        "file_path": match.get("file_path"),
-                        "match_basis": match.get("match_basis"),
-                        "civitai_model_id": match_model_id,
-                        "civitai_model_version_id": match_version_id,
-                        "hash_tokens": sorted(match_hash_tokens),
-                        "model_name_compatible": bool(model_name_compatible or ids_compatible),
-                        "hash_prefix_match": hash_prefix_match,
-                        "evidence_paths": [
-                            "normalized.references[*].local_matches[*].hashes",
-                        ],
-                    })
+                    source_evidence.append(
+                        {
+                            "source": "local_reference_match",
+                            "resource_type": reference_type,
+                            "reference_display_name": reference.get("display_name"),
+                            "display_name": match.get("display_name"),
+                            "model_name": match.get("model_name"),
+                            "version_name": match.get("version_name"),
+                            "file_name": match.get("file_name"),
+                            "file_path": match.get("file_path"),
+                            "match_basis": match.get("match_basis"),
+                            "civitai_model_id": match_model_id,
+                            "civitai_model_version_id": match_version_id,
+                            "hash_tokens": sorted(match_hash_tokens),
+                            "model_name_compatible": bool(
+                                model_name_compatible or ids_compatible
+                            ),
+                            "hash_prefix_match": hash_prefix_match,
+                            "evidence_paths": [
+                                "normalized.references[*].local_matches[*].hashes",
+                            ],
+                        }
+                    )
 
             for entry in local_catalog.get("entries") or []:
                 if not isinstance(entry, dict):
@@ -11568,32 +13232,44 @@ def _build_model_hash_evidence_for_parity(
                 )
                 if not canonical_model_key or not entry_model_key:
                     continue
-                if not (
-                    _model_keys_compatible(canonical_model_key, entry_model_key)
-                ):
+                if not (_model_keys_compatible(canonical_model_key, entry_model_key)):
                     continue
-                entry_hashes = set(str(item).strip().lower() for item in _list_payload(entry.get("hashes")))
+                entry_hashes = set(
+                    str(item).strip().lower()
+                    for item in _list_payload(entry.get("hashes"))
+                )
                 if not entry_hashes:
                     continue
-                entry_hash_prefix_match = _hash_token_sets_match(local_hash_tokens, entry_hashes)
-                if not entry_hash_prefix_match and not include_non_prefix_local_reference_matches:
+                entry_hash_prefix_match = _hash_token_sets_match(
+                    local_hash_tokens, entry_hashes
+                )
+                if (
+                    not entry_hash_prefix_match
+                    and not include_non_prefix_local_reference_matches
+                ):
                     continue
-                source_evidence.append({
-                    "source": "local_catalog",
-                    "display_name": entry.get("display_name"),
-                    "model_name": entry.get("model_name"),
-                    "version_name": entry.get("version_name"),
-                    "civitai_model_id": entry.get("civitai_model_id"),
-                    "civitai_model_version_id": entry.get("civitai_model_version_id"),
-                    "hash_tokens": sorted(entry_hashes),
-                    "model_name_compatible": True,
-                    "hash_prefix_match": entry_hash_prefix_match,
-                })
+                source_evidence.append(
+                    {
+                        "source": "local_catalog",
+                        "display_name": entry.get("display_name"),
+                        "model_name": entry.get("model_name"),
+                        "version_name": entry.get("version_name"),
+                        "civitai_model_id": entry.get("civitai_model_id"),
+                        "civitai_model_version_id": entry.get(
+                            "civitai_model_version_id"
+                        ),
+                        "hash_tokens": sorted(entry_hashes),
+                        "model_name_compatible": True,
+                        "hash_prefix_match": entry_hash_prefix_match,
+                    }
+                )
     except Exception as exc:
-        source_evidence.append({
-            "source": "local_catalog",
-            "error": str(exc),
-        })
+        source_evidence.append(
+            {
+                "source": "local_catalog",
+                "error": str(exc),
+            }
+        )
 
     # Tier 1: Same-source confirmation — a single source has both
     # model_name_compatible and hash_prefix_match.
@@ -11610,7 +13286,8 @@ def _build_model_hash_evidence_for_parity(
     cross_source_detail: list[str] = []
     if not confirmed_tier_1:
         sources_with_hash_match = [
-            item for item in source_evidence
+            item
+            for item in source_evidence
             if isinstance(item, dict) and item.get("hash_prefix_match")
         ]
         sources_with_ids: list[dict[str, Any]] = []
@@ -11624,11 +13301,17 @@ def _build_model_hash_evidence_for_parity(
             if item.get("civitai_model_version_id") is not None:
                 item_vids.append(item["civitai_model_version_id"])
             if item_mids or item_vids:
-                sources_with_ids.append({
-                    "source_label": str(item.get("source") or "unknown"),
-                    "model_ids": sorted(set(int(x) for x in item_mids if x is not None)),
-                    "version_ids": sorted(set(int(x) for x in item_vids if x is not None)),
-                })
+                sources_with_ids.append(
+                    {
+                        "source_label": str(item.get("source") or "unknown"),
+                        "model_ids": sorted(
+                            set(int(x) for x in item_mids if x is not None)
+                        ),
+                        "version_ids": sorted(
+                            set(int(x) for x in item_vids if x is not None)
+                        ),
+                    }
+                )
 
         if sources_with_hash_match and sources_with_ids:
             # Collect any IDs present on hash-match sources themselves.
@@ -11671,7 +13354,11 @@ def _build_model_hash_evidence_for_parity(
             # Sub-case B: Hash-match sources have no IDs but one source with
             # IDs also provides model_name_compatible, giving contextual
             # confidence that the hash match refers to the same model.
-            if not confirmed_tier_2 and not all_hash_match_ids_m and not all_hash_match_ids_v:
+            if (
+                not confirmed_tier_2
+                and not all_hash_match_ids_m
+                and not all_hash_match_ids_v
+            ):
                 for id_src in sources_with_ids:
                     id_label = id_src["source_label"]
                     for ev in source_evidence:
@@ -11679,7 +13366,9 @@ def _build_model_hash_evidence_for_parity(
                             continue
                         if str(ev.get("source") or "") != id_label:
                             continue
-                        if ev.get("model_name_compatible") and not ev.get("hash_prefix_match"):
+                        if ev.get("model_name_compatible") and not ev.get(
+                            "hash_prefix_match"
+                        ):
                             # This source has name context + IDs; hash-match
                             # source provides the hash evidence.
                             confirmed_tier_2 = True
@@ -11694,9 +13383,7 @@ def _build_model_hash_evidence_for_parity(
 
     confirmed_exact = confirmed_tier_1 or confirmed_tier_2
     confirmation_tier = (
-        "verified" if confirmed_tier_1
-        else "probable" if confirmed_tier_2
-        else None
+        "verified" if confirmed_tier_1 else "probable" if confirmed_tier_2 else None
     )
 
     return {
@@ -11782,25 +13469,33 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
             with open(path, "r", encoding="utf-8") as handle:
                 payload = _dict_payload(json.load(handle))
         except Exception as exc:
-            load_errors.append({
-                "file_name": path.name,
-                "error": str(exc),
-            })
+            load_errors.append(
+                {
+                    "file_name": path.name,
+                    "error": str(exc),
+                }
+            )
             continue
 
         analysis = _dict_payload(payload.get("analysis"))
         if not analysis:
-            load_errors.append({
-                "file_name": path.name,
-                "error": "Missing analysis object.",
-            })
+            load_errors.append(
+                {
+                    "file_name": path.name,
+                    "error": "Missing analysis object.",
+                }
+            )
             continue
 
         user_comment = _dict_payload(analysis.get("user_comment"))
         parsed = _dict_payload(user_comment.get("parsed"))
         parsed_fields = _dict_payload(parsed.get("parsed_fields"))
         parameters = _dict_payload(parsed.get("parameters"))
-        warnings = [str(item) for item in _list_payload(parsed.get("warnings")) if str(item).strip()]
+        warnings = [
+            str(item)
+            for item in _list_payload(parsed.get("warnings"))
+            if str(item).strip()
+        ]
         validation = _dict_payload(analysis.get("validation"))
         target = _dict_payload(analysis.get("target"))
         raw_text = str(parsed.get("raw_text") or "")
@@ -11812,25 +13507,29 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
             "parameters": parameters,
         }
         fingerprint = hashlib.sha1(
-            json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
+            json.dumps(
+                fingerprint_payload, sort_keys=True, ensure_ascii=True, default=str
+            ).encode("utf-8")
         ).hexdigest()
         unique_fingerprints.add(fingerprint)
 
-        records.append({
-            "file_name": path.name,
-            "saved_at": payload.get("saved_at"),
-            "analysis_ok": bool(analysis.get("ok")),
-            "validation_status": str(validation.get("status") or "missing"),
-            "target_file_hash": str(target.get("file_hash") or "").strip() or None,
-            "parsed_fields": parsed_fields,
-            "parameters": parameters,
-            "raw_text": raw_text,
-            "positive_prompt": str(parsed.get("positive_prompt") or ""),
-            "negative_prompt": str(parsed.get("negative_prompt") or ""),
-            "warnings": warnings,
-            "lora_tags": _list_payload(parsed.get("lora_tags")),
-            "fingerprint": fingerprint,
-        })
+        records.append(
+            {
+                "file_name": path.name,
+                "saved_at": payload.get("saved_at"),
+                "analysis_ok": bool(analysis.get("ok")),
+                "validation_status": str(validation.get("status") or "missing"),
+                "target_file_hash": str(target.get("file_hash") or "").strip() or None,
+                "parsed_fields": parsed_fields,
+                "parameters": parameters,
+                "raw_text": raw_text,
+                "positive_prompt": str(parsed.get("positive_prompt") or ""),
+                "negative_prompt": str(parsed.get("negative_prompt") or ""),
+                "warnings": warnings,
+                "lora_tags": _list_payload(parsed.get("lora_tags")),
+                "fingerprint": fingerprint,
+            }
+        )
 
     unique_count = len(unique_fingerprints)
     record_count = len(records)
@@ -11880,11 +13579,15 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         if any(str(key).lower().startswith("adetailer") for key in parameters.keys()):
             signal_counts["adetailer_detected"] += 1
 
-        has_lora_hashes = any(str(key).lower() == "lora hashes" for key in parameters.keys())
+        has_lora_hashes = any(
+            str(key).lower() == "lora hashes" for key in parameters.keys()
+        )
         if has_lora_hashes or bool(lora_tags):
             signal_counts["lora_detected"] += 1
 
-        civitai_resources = any(str(key).lower() == "civitai resources" for key in parameters.keys())
+        civitai_resources = any(
+            str(key).lower() == "civitai resources" for key in parameters.keys()
+        )
         if civitai_resources:
             signal_counts["civitai_resources_detected"] += 1
 
@@ -11894,11 +13597,15 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         if _is_missing_process_value(parsed_fields.get("seed")):
             signal_counts["missing_seed"] += 1
 
-        if _is_missing_process_value(parsed_fields.get("model")) or _is_missing_process_value(parsed_fields.get("model_hash")):
+        if _is_missing_process_value(
+            parsed_fields.get("model")
+        ) or _is_missing_process_value(parsed_fields.get("model_hash")):
             signal_counts["missing_model_identity"] += 1
 
         status_name = str(record.get("validation_status") or "missing")
-        validation_status_counts[status_name] = validation_status_counts.get(status_name, 0) + 1
+        validation_status_counts[status_name] = (
+            validation_status_counts.get(status_name, 0) + 1
+        )
 
     def _pct(value: int, total: int) -> float:
         if total <= 0:
@@ -11928,12 +13635,14 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         field_coverage["model"]["coverage_percent"] >= 85.0
         and field_coverage["model_hash"]["coverage_percent"] >= 85.0
     )
-    reliable_for_process_inference = all([
-        sample_size_sufficient,
-        core_coverage_sufficient,
-        seed_coverage_sufficient,
-        model_coverage_sufficient,
-    ])
+    reliable_for_process_inference = all(
+        [
+            sample_size_sufficient,
+            core_coverage_sufficient,
+            seed_coverage_sufficient,
+            model_coverage_sufficient,
+        ]
+    )
 
     confidence_label = "low"
     if reliable_for_process_inference:
@@ -11946,7 +13655,9 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         "mode": "a1111_bridge_dataset_quality",
         "paths": {
             "export_dir_absolute": str(export_dir),
-            "export_dir_relative": str(export_dir.relative_to(Path(__file__).resolve().parent.parent)),
+            "export_dir_relative": str(
+                export_dir.relative_to(Path(__file__).resolve().parent.parent)
+            ),
         },
         "summary": {
             "file_count": len(files),
@@ -11955,7 +13666,9 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
             "duplicate_count_estimate": max(0, record_count - unique_count),
             "load_error_count": len(load_errors),
             "analysis_ok_count": sum(1 for item in records if item.get("analysis_ok")),
-            "parse_present_count": sum(1 for item in records if _dict_payload(item.get("parsed_fields"))),
+            "parse_present_count": sum(
+                1 for item in records if _dict_payload(item.get("parsed_fields"))
+            ),
             "validation_status_counts": validation_status_counts,
         },
         "coverage": {
@@ -11967,7 +13680,9 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
         "signals": {
             "img2img_or_inpaint_detected": {
                 "count": signal_counts["img2img_or_inpaint_detected"],
-                "percent": _pct(signal_counts["img2img_or_inpaint_detected"], record_count),
+                "percent": _pct(
+                    signal_counts["img2img_or_inpaint_detected"], record_count
+                ),
             },
             "hires_fix_detected": {
                 "count": signal_counts["hires_fix_detected"],
@@ -11983,13 +13698,17 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
             },
             "civitai_resources_detected": {
                 "count": signal_counts["civitai_resources_detected"],
-                "percent": _pct(signal_counts["civitai_resources_detected"], record_count),
+                "percent": _pct(
+                    signal_counts["civitai_resources_detected"], record_count
+                ),
             },
         },
         "quality_issues": {
             "truncated_positive_prompt": {
                 "count": signal_counts["truncated_positive_prompt"],
-                "percent": _pct(signal_counts["truncated_positive_prompt"], record_count),
+                "percent": _pct(
+                    signal_counts["truncated_positive_prompt"], record_count
+                ),
             },
             "missing_seed": {
                 "count": signal_counts["missing_seed"],
@@ -12036,10 +13755,14 @@ def analyze_a1111_bridge(
         raise HTTPException(status_code=404, detail="Image not found.")
 
     generation_payload = _build_generation_prototype_local_payload(image)
-    generation_payload, exif_refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    generation_payload, exif_refresh_warnings = (
+        _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    )
 
     user_comment_candidates = _extract_a1111_user_comment_candidates(generation_payload)
-    parse_payload, preferred_candidate = _build_authoritative_a1111_parse_payload(user_comment_candidates)
+    parse_payload, preferred_candidate = _build_authoritative_a1111_parse_payload(
+        user_comment_candidates
+    )
 
     comfy_export = _build_generation_comfy_workspace_export_payload(
         generation_payload,
@@ -12059,7 +13782,9 @@ def analyze_a1111_bridge(
         "field_alignment": None,
     }
     if provided_workflow_supplied and provided_workflow_json:
-        comparison["structural"] = _compare_json_scalar_structures(inferred_workflow, provided_workflow_json)
+        comparison["structural"] = _compare_json_scalar_structures(
+            inferred_workflow, provided_workflow_json
+        )
         comparison["field_alignment"] = _build_a1111_field_alignment(
             _dict_payload(parse_payload.get("parsed_fields")),
             provided_workflow_json,
@@ -12067,12 +13792,20 @@ def analyze_a1111_bridge(
 
     warnings = [
         *[str(item) for item in exif_refresh_warnings if str(item).strip()],
-        *[str(item) for item in _list_payload(parse_payload.get("warnings")) if str(item).strip()],
+        *[
+            str(item)
+            for item in _list_payload(parse_payload.get("warnings"))
+            if str(item).strip()
+        ],
     ]
     if provided_workflow_supplied and not provided_workflow_json:
-        warnings.append("Provided comfy_workflow_json was empty; structural comparison was skipped.")
+        warnings.append(
+            "Provided comfy_workflow_json was empty; structural comparison was skipped."
+        )
     if not inferred_workflow:
-        warnings.append("No inferred Comfy workflow was available from the local generation payload.")
+        warnings.append(
+            "No inferred Comfy workflow was available from the local generation payload."
+        )
 
     validation = _summarize_validation(warnings, [])
     response_payload: dict[str, Any] = {
@@ -12084,7 +13817,9 @@ def analyze_a1111_bridge(
             "source_url": image.source_url,
         },
         "user_comment": {
-            "source": preferred_candidate.get("source") if preferred_candidate else None,
+            "source": (
+                preferred_candidate.get("source") if preferred_candidate else None
+            ),
             "candidate_count": len(user_comment_candidates),
             "candidates": user_comment_candidates,
             "parsed": parse_payload,
@@ -12094,7 +13829,9 @@ def analyze_a1111_bridge(
             "inferred_prompt_api": inferred_prompt_api,
             "workspace_summary": _dict_payload(comfy_export.get("overview")),
             "workspace_validation": _dict_payload(comfy_export.get("validation")),
-            "provided_workflow_ui": provided_workflow_json if provided_workflow_supplied else None,
+            "provided_workflow_ui": (
+                provided_workflow_json if provided_workflow_supplied else None
+            ),
         },
         "comparison": comparison,
         "validation": validation,
@@ -12124,10 +13861,14 @@ def analyze_parity_candidate(
         raise HTTPException(status_code=404, detail="Image not found.")
 
     generation_payload = _build_generation_prototype_local_payload(image)
-    generation_payload, exif_refresh_warnings = _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    generation_payload, exif_refresh_warnings = (
+        _inject_fresh_local_exif_metadata_for_comfy(generation_payload, image, db)
+    )
 
     user_comment_candidates = _extract_a1111_user_comment_candidates(generation_payload)
-    parse_payload, preferred_candidate = _build_authoritative_a1111_parse_payload(user_comment_candidates)
+    parse_payload, preferred_candidate = _build_authoritative_a1111_parse_payload(
+        user_comment_candidates
+    )
 
     provided_workflow_json = _dict_payload(request.comfy_workflow_json)
     provided_workflow_supplied = request.comfy_workflow_json is not None
@@ -12140,14 +13881,22 @@ def analyze_parity_candidate(
         provided_workflow_supplied=provided_workflow_supplied,
         model_hash_evidence=_build_model_hash_evidence_for_parity(
             image=image,
-            canonical_model=_dict_payload(parse_payload.get("parsed_fields")).get("model"),
-            canonical_model_hash=_dict_payload(parse_payload.get("parsed_fields")).get("model_hash"),
+            canonical_model=_dict_payload(parse_payload.get("parsed_fields")).get(
+                "model"
+            ),
+            canonical_model_hash=_dict_payload(parse_payload.get("parsed_fields")).get(
+                "model_hash"
+            ),
             include_non_prefix_local_reference_matches=True,
         ),
     )
 
     audit["candidate"]["warnings"] = [
-        *[str(item) for item in _list_payload(audit["candidate"].get("warnings")) if str(item).strip()],
+        *[
+            str(item)
+            for item in _list_payload(audit["candidate"].get("warnings"))
+            if str(item).strip()
+        ],
         *[str(item) for item in exif_refresh_warnings if str(item).strip()],
     ]
     audit["user_comment"] = {
@@ -12162,7 +13911,9 @@ def analyze_parity_candidate(
 def save_a1111_bridge_analysis(payload: A1111BridgeSaveRequest):
     analysis_payload = _dict_payload(payload.analysis_payload)
     if not analysis_payload:
-        raise HTTPException(status_code=422, detail="analysis_payload must be a JSON object.")
+        raise HTTPException(
+            status_code=422, detail="analysis_payload must be a JSON object."
+        )
 
     target = _dict_payload(analysis_payload.get("target"))
     file_hash = str(target.get("file_hash") or "").strip()
@@ -12170,7 +13921,9 @@ def save_a1111_bridge_analysis(payload: A1111BridgeSaveRequest):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     default_stem = f"a1111_bridge_{hash_token}_{stamp}"
 
-    resolved_file_name = _sanitize_export_filename(str(payload.file_name or ""), default_stem=default_stem)
+    resolved_file_name = _sanitize_export_filename(
+        str(payload.file_name or ""), default_stem=default_stem
+    )
     export_dir = _a1111_bridge_export_dir()
     export_path = export_dir / resolved_file_name
 
@@ -12195,7 +13948,9 @@ def save_a1111_bridge_analysis(payload: A1111BridgeSaveRequest):
         "saved": {
             "file_name": export_path.name,
             "absolute_path": str(export_path),
-            "relative_path": str(export_path.relative_to(Path(__file__).resolve().parent.parent)),
+            "relative_path": str(
+                export_path.relative_to(Path(__file__).resolve().parent.parent)
+            ),
         },
         "target": {
             "file_hash": file_hash or None,
@@ -12241,14 +13996,16 @@ def _collect_comfy_history_images(
                 continue
             subfolder = str(image_meta.get("subfolder") or "")
             image_type = str(image_meta.get("type") or "output")
-            results.append({
-                "node_id": node_key,
-                "node_class_type": str(class_lookup.get(node_key) or ""),
-                "index": index,
-                "filename": filename,
-                "subfolder": subfolder,
-                "type": image_type,
-            })
+            results.append(
+                {
+                    "node_id": node_key,
+                    "node_class_type": str(class_lookup.get(node_key) or ""),
+                    "index": index,
+                    "filename": filename,
+                    "subfolder": subfolder,
+                    "type": image_type,
+                }
+            )
     return results
 
 
@@ -12257,11 +14014,13 @@ def _history_has_output_images(history_entry: dict[str, Any]) -> bool:
 
 
 def _build_comfy_view_url(base_url: str, image_meta: dict[str, Any]) -> str:
-    query = urlencode({
-        "filename": str(image_meta.get("filename") or ""),
-        "subfolder": str(image_meta.get("subfolder") or ""),
-        "type": str(image_meta.get("type") or "output"),
-    })
+    query = urlencode(
+        {
+            "filename": str(image_meta.get("filename") or ""),
+            "subfolder": str(image_meta.get("subfolder") or ""),
+            "type": str(image_meta.get("type") or "output"),
+        }
+    )
     return f"{base_url}/view?{query}"
 
 
@@ -12270,7 +14029,9 @@ def _to_data_url(image_bytes: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def _apply_comfy_filename_prefix_cache_bust(prompt_graph: dict[str, Any], suffix: str) -> tuple[dict[str, Any], int]:
+def _apply_comfy_filename_prefix_cache_bust(
+    prompt_graph: dict[str, Any], suffix: str
+) -> tuple[dict[str, Any], int]:
     """Clone a prompt graph and make SaveImage filename_prefix unique to avoid output filename collisions."""
     cloned = _clone_json_value(prompt_graph)
     if not isinstance(cloned, dict):
@@ -12311,7 +14072,9 @@ def generate_and_compare_comfy_workspace(
 
     workflow_json = _dict_payload(payload.workflow_json)
     if not workflow_json:
-        raise HTTPException(status_code=422, detail="workflow_json must be a JSON object.")
+        raise HTTPException(
+            status_code=422, detail="workflow_json must be a JSON object."
+        )
 
     prompt_graph = _extract_comfy_prompt_graph(workflow_json, {})
     if not prompt_graph and _looks_like_comfy_prompt_graph(workflow_json):
@@ -12332,7 +14095,9 @@ def generate_and_compare_comfy_workspace(
     cache_bust_filename_prefix_count = 0
     used_filename_prefix_retry = False
     include_all_workspace_images = bool(payload.include_all_workspace_images)
-    close_enough_similarity_threshold = max(0.0, min(1.0, ATELIER_COMFY_MATCH_THRESHOLD))
+    close_enough_similarity_threshold = max(
+        0.0, min(1.0, ATELIER_COMFY_MATCH_THRESHOLD)
+    )
 
     reference_file_hash = str(payload.reference_file_hash or "").strip()
     if not reference_file_hash:
@@ -12341,7 +14106,9 @@ def generate_and_compare_comfy_workspace(
     threshold_override = payload.match_threshold_override
     threshold_source = "default"
     if threshold_override is not None:
-        close_enough_similarity_threshold = max(0.0, min(1.0, float(threshold_override)))
+        close_enough_similarity_threshold = max(
+            0.0, min(1.0, float(threshold_override))
+        )
         threshold_source = "request_override"
 
     tweak_label = str(payload.tweak_label or "").strip() or None
@@ -12372,10 +14139,16 @@ def generate_and_compare_comfy_workspace(
             best_phash_distance = None
             best_output_filename = None
             if isinstance(best_match_value, dict):
-                best_output_filename = str(best_match_value.get("filename") or "").strip() or None
-                distance_raw = _dict_payload(best_match_value.get("phash")).get("distance")
+                best_output_filename = (
+                    str(best_match_value.get("filename") or "").strip() or None
+                )
+                distance_raw = _dict_payload(best_match_value.get("phash")).get(
+                    "distance"
+                )
                 try:
-                    best_phash_distance = int(distance_raw) if distance_raw is not None else None
+                    best_phash_distance = (
+                        int(distance_raw) if distance_raw is not None else None
+                    )
                 except (TypeError, ValueError):
                     best_phash_distance = None
 
@@ -12405,21 +14178,28 @@ def generate_and_compare_comfy_workspace(
             db.commit()
         except Exception:
             db.rollback()
+
     reference_image = _get_image_or_404(db, reference_file_hash)
     reference_path = _resolve_image_library_path(reference_image)
     if not reference_path.exists() or not reference_path.is_file():
-        raise HTTPException(status_code=404, detail="Reference image file not found on disk.")
+        raise HTTPException(
+            status_code=404, detail="Reference image file not found on disk."
+        )
 
     try:
         with Image.open(reference_path) as reference_handle:
             reference_hash = imagehash.phash(reference_handle.convert("RGB"), 8)
     except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to open reference image for hashing: {exc}")
+        raise HTTPException(
+            status_code=400, detail=f"Unable to open reference image for hashing: {exc}"
+        )
 
     timeout_seconds = int(payload.timeout_seconds or 120)
     poll_interval_seconds = float(payload.poll_interval_seconds or 1.25)
 
-    def _submit_and_wait(graph_to_submit: dict[str, Any]) -> tuple[dict[str, Any], str, dict[str, Any], str]:
+    def _submit_and_wait(
+        graph_to_submit: dict[str, Any],
+    ) -> tuple[dict[str, Any], str, dict[str, Any], str]:
         submit_url = f"{base_url}/prompt"
         try:
             submit_response = requests.post(
@@ -12428,18 +14208,29 @@ def generate_and_compare_comfy_workspace(
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Unable to reach ComfyUI submit endpoint: {exc}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Unable to reach ComfyUI submit endpoint: {exc}",
+            )
 
-        submit_payload_local = _dict_payload(submit_response.json() if submit_response.content else {})
+        submit_payload_local = _dict_payload(
+            submit_response.json() if submit_response.content else {}
+        )
         if not submit_response.ok:
             raise HTTPException(
                 status_code=502,
-                detail=str(submit_payload_local.get("error") or submit_payload_local.get("detail") or f"ComfyUI prompt submit failed with HTTP {submit_response.status_code}."),
+                detail=str(
+                    submit_payload_local.get("error")
+                    or submit_payload_local.get("detail")
+                    or f"ComfyUI prompt submit failed with HTTP {submit_response.status_code}."
+                ),
             )
 
         prompt_id_local = str(submit_payload_local.get("prompt_id") or "").strip()
         if not prompt_id_local:
-            raise HTTPException(status_code=502, detail="ComfyUI did not return a prompt_id.")
+            raise HTTPException(
+                status_code=502, detail="ComfyUI did not return a prompt_id."
+            )
 
         history_entry_local: dict[str, Any] = {}
         poll_started = time.monotonic()
@@ -12452,7 +14243,9 @@ def generate_and_compare_comfy_workspace(
                 time.sleep(poll_interval_seconds)
                 continue
 
-            history_payload = _dict_payload(history_response.json() if history_response.content else {})
+            history_payload = _dict_payload(
+                history_response.json() if history_response.content else {}
+            )
             entry = _dict_payload(history_payload.get(prompt_id_local))
             if not entry:
                 time.sleep(poll_interval_seconds)
@@ -12460,7 +14253,9 @@ def generate_and_compare_comfy_workspace(
 
             history_entry_local = entry
             status_obj = _dict_payload(entry.get("status"))
-            status_value_local = str(status_obj.get("status_str") or status_value_local or "queued")
+            status_value_local = str(
+                status_obj.get("status_str") or status_value_local or "queued"
+            )
             if bool(status_obj.get("completed")):
                 break
             if status_value_local.lower() in {"error", "failed"}:
@@ -12485,7 +14280,9 @@ def generate_and_compare_comfy_workspace(
                     time.sleep(max(0.25, min(1.0, poll_interval_seconds)))
                     continue
 
-                history_payload = _dict_payload(history_response.json() if history_response.content else {})
+                history_payload = _dict_payload(
+                    history_response.json() if history_response.content else {}
+                )
                 entry = _dict_payload(history_payload.get(prompt_id_local))
                 if entry:
                     history_entry_local = entry
@@ -12493,10 +14290,19 @@ def generate_and_compare_comfy_workspace(
                         break
                 time.sleep(max(0.25, min(1.0, poll_interval_seconds)))
 
-        return submit_payload_local, prompt_id_local, history_entry_local, status_value_local
+        return (
+            submit_payload_local,
+            prompt_id_local,
+            history_entry_local,
+            status_value_local,
+        )
 
-    submit_payload, prompt_id, history_entry, status_value = _submit_and_wait(submitted_prompt_graph)
-    generated_items = _collect_comfy_history_images(history_entry, active_prompt_node_class_map)
+    submit_payload, prompt_id, history_entry, status_value = _submit_and_wait(
+        submitted_prompt_graph
+    )
+    generated_items = _collect_comfy_history_images(
+        history_entry, active_prompt_node_class_map
+    )
 
     if not generated_items:
         status_obj = _dict_payload(history_entry.get("status"))
@@ -12511,11 +14317,17 @@ def generate_and_compare_comfy_workspace(
         )
         if has_execution_cached:
             retry_suffix = f"run_{int(time.time() * 1000)}"
-            retry_graph, retry_prefix_count = _apply_comfy_filename_prefix_cache_bust(prompt_graph, retry_suffix)
+            retry_graph, retry_prefix_count = _apply_comfy_filename_prefix_cache_bust(
+                prompt_graph, retry_suffix
+            )
             if retry_graph and retry_prefix_count > 0:
-                submit_payload, prompt_id, history_entry, status_value = _submit_and_wait(retry_graph)
+                submit_payload, prompt_id, history_entry, status_value = (
+                    _submit_and_wait(retry_graph)
+                )
                 active_prompt_node_class_map = _build_prompt_node_class_map(retry_graph)
-                generated_items = _collect_comfy_history_images(history_entry, active_prompt_node_class_map)
+                generated_items = _collect_comfy_history_images(
+                    history_entry, active_prompt_node_class_map
+                )
                 cache_bust_filename_prefix_count = retry_prefix_count
                 used_filename_prefix_retry = True
                 cache_bust_seed_count = 0
@@ -12545,7 +14357,8 @@ def generate_and_compare_comfy_workspace(
     selected_items = list(generated_items)
     if not include_all_workspace_images:
         save_image_items = [
-            item for item in selected_items
+            item
+            for item in selected_items
             if str(item.get("node_class_type") or "").strip().lower() == "saveimage"
         ]
         if save_image_items:
@@ -12559,66 +14372,93 @@ def generate_and_compare_comfy_workspace(
         try:
             image_response = requests.get(view_url, timeout=45)
         except requests.RequestException as exc:
-            fetch_errors.append({
-                "node_id": item.get("node_id"),
-                "filename": item.get("filename"),
-                "error": str(exc),
-            })
+            fetch_errors.append(
+                {
+                    "node_id": item.get("node_id"),
+                    "filename": item.get("filename"),
+                    "error": str(exc),
+                }
+            )
             continue
 
         if not image_response.ok:
-            fetch_errors.append({
-                "node_id": item.get("node_id"),
-                "filename": item.get("filename"),
-                "error": f"HTTP {image_response.status_code}",
-            })
+            fetch_errors.append(
+                {
+                    "node_id": item.get("node_id"),
+                    "filename": item.get("filename"),
+                    "error": f"HTTP {image_response.status_code}",
+                }
+            )
             continue
 
-        mime_type = str(image_response.headers.get("Content-Type") or "image/png").split(";")[0].strip() or "image/png"
+        mime_type = (
+            str(image_response.headers.get("Content-Type") or "image/png")
+            .split(";")[0]
+            .strip()
+            or "image/png"
+        )
         image_bytes = image_response.content
         try:
             with Image.open(io.BytesIO(image_bytes)) as generated_handle:
                 generated_hash = imagehash.phash(generated_handle.convert("RGB"), 8)
         except OSError as exc:
-            fetch_errors.append({
-                "node_id": item.get("node_id"),
-                "filename": item.get("filename"),
-                "error": f"Could not decode generated image: {exc}",
-            })
+            fetch_errors.append(
+                {
+                    "node_id": item.get("node_id"),
+                    "filename": item.get("filename"),
+                    "error": f"Could not decode generated image: {exc}",
+                }
+            )
             continue
 
         distance = int(reference_hash - generated_hash)
         similarity = max(0.0, min(1.0, 1.0 - (distance / 64.0)))
-        results.append({
-            "node_id": item.get("node_id"),
-            "node_class_type": item.get("node_class_type"),
-            "index": item.get("index"),
-            "filename": item.get("filename"),
-            "subfolder": item.get("subfolder"),
-            "type": item.get("type"),
-            "mime_type": mime_type,
-            "byte_size": len(image_bytes),
-            "view_url": view_url,
-            "image_data_url": _to_data_url(image_bytes, mime_type),
-            "phash": {
-                "reference": str(reference_hash),
-                "generated": str(generated_hash),
-                "distance": distance,
-                "similarity": round(similarity, 6),
-                "close_enough": similarity >= close_enough_similarity_threshold,
-            },
-        })
+        results.append(
+            {
+                "node_id": item.get("node_id"),
+                "node_class_type": item.get("node_class_type"),
+                "index": item.get("index"),
+                "filename": item.get("filename"),
+                "subfolder": item.get("subfolder"),
+                "type": item.get("type"),
+                "mime_type": mime_type,
+                "byte_size": len(image_bytes),
+                "view_url": view_url,
+                "image_data_url": _to_data_url(image_bytes, mime_type),
+                "phash": {
+                    "reference": str(reference_hash),
+                    "generated": str(generated_hash),
+                    "distance": distance,
+                    "similarity": round(similarity, 6),
+                    "close_enough": similarity >= close_enough_similarity_threshold,
+                },
+            }
+        )
 
-    results.sort(key=lambda item: (int(_dict_payload(item.get("phash")).get("distance") or 9999), str(item.get("filename") or "")))
+    results.sort(
+        key=lambda item: (
+            int(_dict_payload(item.get("phash")).get("distance") or 9999),
+            str(item.get("filename") or ""),
+        )
+    )
     if not include_all_workspace_images and len(results) > 1:
         results = [results[0]]
     best_match = results[0] if results else None
-    best_similarity_raw = _dict_payload(best_match.get("phash")).get("similarity") if isinstance(best_match, dict) else None
+    best_similarity_raw = (
+        _dict_payload(best_match.get("phash")).get("similarity")
+        if isinstance(best_match, dict)
+        else None
+    )
     try:
-        best_similarity = float(best_similarity_raw) if best_similarity_raw is not None else None
+        best_similarity = (
+            float(best_similarity_raw) if best_similarity_raw is not None else None
+        )
     except (TypeError, ValueError):
         best_similarity = None
-    is_close_enough = bool(best_similarity is not None and best_similarity >= close_enough_similarity_threshold)
+    is_close_enough = bool(
+        best_similarity is not None
+        and best_similarity >= close_enough_similarity_threshold
+    )
     is_fundamental_issue = not is_close_enough
 
     status_obj = _dict_payload(history_entry.get("status"))
@@ -12663,7 +14503,9 @@ def generate_and_compare_comfy_workspace(
             "count": len(results),
             "outputs": results,
             "best_match": best_match,
-            "best_similarity": round(best_similarity, 6) if best_similarity is not None else None,
+            "best_similarity": (
+                round(best_similarity, 6) if best_similarity is not None else None
+            ),
             "close_enough": is_close_enough,
             "close_enough_threshold": close_enough_similarity_threshold,
             "matched": is_close_enough,
@@ -12677,7 +14519,8 @@ def generate_and_compare_comfy_workspace(
                 "save_image_output_count": sum(
                     1
                     for item in generated_items
-                    if str(item.get("node_class_type") or "").strip().lower() == "saveimage"
+                    if str(item.get("node_class_type") or "").strip().lower()
+                    == "saveimage"
                 ),
                 "policy": "all" if include_all_workspace_images else "best_save_image",
             },
@@ -12698,14 +14541,20 @@ def list_comfy_generation_match_attempts(
 ):
     query = db.query(GenerationMatchAttempt)
     if reference_file_hash:
-        query = query.filter(GenerationMatchAttempt.reference_file_hash == str(reference_file_hash).strip())
+        query = query.filter(
+            GenerationMatchAttempt.reference_file_hash
+            == str(reference_file_hash).strip()
+        )
     if only_fundamental_issues:
-        query = query.filter(GenerationMatchAttempt.is_fundamental_generation_issue.is_(True))
+        query = query.filter(
+            GenerationMatchAttempt.is_fundamental_generation_issue.is_(True)
+        )
 
     total_count = int(query.count())
     attempts = (
-        query
-        .order_by(GenerationMatchAttempt.created_at.desc(), GenerationMatchAttempt.id.desc())
+        query.order_by(
+            GenerationMatchAttempt.created_at.desc(), GenerationMatchAttempt.id.desc()
+        )
         .offset(offset)
         .limit(limit)
         .all()
@@ -12724,16 +14573,22 @@ def list_comfy_generation_match_attempts(
                 "comfy_prompt_id": attempt.comfy_prompt_id,
                 "attempt_index": attempt.attempt_index,
                 "tweak_label": attempt.tweak_label,
-                "tweak_parameters": _clone_json_value(_dict_payload(attempt.tweak_parameters_json)),
+                "tweak_parameters": _clone_json_value(
+                    _dict_payload(attempt.tweak_parameters_json)
+                ),
                 "best_output_filename": attempt.best_output_filename,
                 "best_phash_distance": attempt.best_phash_distance,
                 "best_similarity": attempt.best_similarity,
                 "threshold_used": attempt.threshold_used,
                 "matched": bool(attempt.is_matched),
-                "fundamental_generation_issue": bool(attempt.is_fundamental_generation_issue),
+                "fundamental_generation_issue": bool(
+                    attempt.is_fundamental_generation_issue
+                ),
                 "notes": attempt.notes,
                 "error_message": attempt.error_message,
-                "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+                "created_at": (
+                    attempt.created_at.isoformat() if attempt.created_at else None
+                ),
             }
             for attempt in attempts
         ],
@@ -12741,29 +14596,46 @@ def list_comfy_generation_match_attempts(
 
 
 @app.post("/generation-templates/import-workspace", response_model=dict)
-def import_generation_template_workspace(payload: GenerationTemplateImportRequest, db: Session = Depends(get_db)):
+def import_generation_template_workspace(
+    payload: GenerationTemplateImportRequest, db: Session = Depends(get_db)
+):
     template_name = str(payload.name or "").strip()
     if not template_name:
         raise HTTPException(status_code=422, detail="Template name is required.")
 
-    existing = db.query(GenerationTemplate).filter(GenerationTemplate.name == template_name).first()
+    existing = (
+        db.query(GenerationTemplate)
+        .filter(GenerationTemplate.name == template_name)
+        .first()
+    )
     if existing is not None:
-        raise HTTPException(status_code=409, detail="A generation template with that name already exists.")
+        raise HTTPException(
+            status_code=409,
+            detail="A generation template with that name already exists.",
+        )
 
     workflow_json = _dict_payload(payload.workflow_json)
     if not workflow_json:
-        raise HTTPException(status_code=422, detail="workflow_json must be a JSON object.")
+        raise HTTPException(
+            status_code=422, detail="workflow_json must be a JSON object."
+        )
     nodes = workflow_json.get("nodes")
     if not isinstance(nodes, list):
-        raise HTTPException(status_code=422, detail="workflow_json must include a ComfyUI nodes array.")
+        raise HTTPException(
+            status_code=422, detail="workflow_json must include a ComfyUI nodes array."
+        )
 
     for item in payload.mappings:
         token_name = str(item.token or "").strip()
         target_path = str(item.target_path or "").strip()
         if not token_name:
-            raise HTTPException(status_code=422, detail="Template mapping token cannot be empty.")
+            raise HTTPException(
+                status_code=422, detail="Template mapping token cannot be empty."
+            )
         if not target_path:
-            raise HTTPException(status_code=422, detail="Template mapping target_path cannot be empty.")
+            raise HTTPException(
+                status_code=422, detail="Template mapping target_path cannot be empty."
+            )
         try:
             _tokenize_template_path(target_path)
         except ValueError as exc:
@@ -12832,7 +14704,9 @@ def _resolve_template_local_catalog(
         "raw": {},
         "raw_compacted": True,
     }
-    if any(str(value or "").strip() for value in (catalog_url, checkpoints_url, loras_url)):
+    if any(
+        str(value or "").strip() for value in (catalog_url, checkpoints_url, loras_url)
+    ):
         local_catalog = model_reference_service.fetch_local_catalog(
             catalog_url=catalog_url,
             checkpoints_url=checkpoints_url,
@@ -12858,14 +14732,18 @@ def preview_generation_template_tokens(
         file_hash=file_hash,
         image_id=image_id,
     )
-    generation_payload = _resolve_generation_payload_for_template_request(source_request, db)
+    generation_payload = _resolve_generation_payload_for_template_request(
+        source_request, db
+    )
     local_catalog = _resolve_template_local_catalog(
         catalog_url=catalog_url,
         checkpoints_url=checkpoints_url,
         loras_url=loras_url,
         include_full_catalog_raw=include_full_catalog_raw,
     )
-    preview = _build_generation_template_token_preview(generation_payload, local_catalog)
+    preview = _build_generation_template_token_preview(
+        generation_payload, local_catalog
+    )
     tokens = _dict_payload(preview.get("tokens"))
     global_tokens = _dict_payload(preview.get("global_tokens"))
     step_groups = _list_payload(preview.get("step_groups"))
@@ -12896,12 +14774,18 @@ def get_generation_template(
     include_workflow: bool = Query(default=True),
     db: Session = Depends(get_db),
 ):
-    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    template = (
+        db.query(GenerationTemplate)
+        .filter(GenerationTemplate.id == template_id)
+        .first()
+    )
     if template is None:
         raise HTTPException(status_code=404, detail="Generation template not found.")
     return {
         "ok": True,
-        "template": _serialize_generation_template(template, include_workflow=include_workflow),
+        "template": _serialize_generation_template(
+            template, include_workflow=include_workflow
+        ),
     }
 
 
@@ -12911,14 +14795,20 @@ def update_generation_template(
     payload: GenerationTemplateUpdateRequest,
     db: Session = Depends(get_db),
 ):
-    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    template = (
+        db.query(GenerationTemplate)
+        .filter(GenerationTemplate.id == template_id)
+        .first()
+    )
     if template is None:
         raise HTTPException(status_code=404, detail="Generation template not found.")
 
     if payload.name is not None:
         next_name = str(payload.name or "").strip()
         if not next_name:
-            raise HTTPException(status_code=422, detail="Template name cannot be empty.")
+            raise HTTPException(
+                status_code=422, detail="Template name cannot be empty."
+            )
         existing = (
             db.query(GenerationTemplate)
             .filter(GenerationTemplate.name == next_name)
@@ -12926,7 +14816,10 @@ def update_generation_template(
             .first()
         )
         if existing is not None:
-            raise HTTPException(status_code=409, detail="A generation template with that name already exists.")
+            raise HTTPException(
+                status_code=409,
+                detail="A generation template with that name already exists.",
+            )
         template.name = next_name
 
     if payload.description is not None:
@@ -12935,10 +14828,15 @@ def update_generation_template(
     if payload.workflow_json is not None:
         workflow_json = _dict_payload(payload.workflow_json)
         if not workflow_json:
-            raise HTTPException(status_code=422, detail="workflow_json must be a JSON object.")
+            raise HTTPException(
+                status_code=422, detail="workflow_json must be a JSON object."
+            )
         nodes = workflow_json.get("nodes")
         if not isinstance(nodes, list):
-            raise HTTPException(status_code=422, detail="workflow_json must include a ComfyUI nodes array.")
+            raise HTTPException(
+                status_code=422,
+                detail="workflow_json must include a ComfyUI nodes array.",
+            )
         template.workflow_json = _clone_json_value(workflow_json)
 
     if payload.mappings is not None:
@@ -12946,9 +14844,14 @@ def update_generation_template(
             token_name = str(item.token or "").strip()
             target_path = str(item.target_path or "").strip()
             if not token_name:
-                raise HTTPException(status_code=422, detail="Template mapping token cannot be empty.")
+                raise HTTPException(
+                    status_code=422, detail="Template mapping token cannot be empty."
+                )
             if not target_path:
-                raise HTTPException(status_code=422, detail="Template mapping target_path cannot be empty.")
+                raise HTTPException(
+                    status_code=422,
+                    detail="Template mapping target_path cannot be empty.",
+                )
             try:
                 _tokenize_template_path(target_path)
             except ValueError as exc:
@@ -12956,7 +14859,9 @@ def update_generation_template(
         template.mappings_json = [item.model_dump() for item in payload.mappings]
 
     if payload.default_tokens is not None:
-        template.default_tokens_json = _clone_json_value(_dict_payload(payload.default_tokens))
+        template.default_tokens_json = _clone_json_value(
+            _dict_payload(payload.default_tokens)
+        )
 
     template.updated_at = datetime.now(timezone.utc)
     db.commit()
@@ -12969,7 +14874,11 @@ def update_generation_template(
 
 @app.delete("/generation-templates/{template_id}", response_model=dict)
 def delete_generation_template(template_id: int, db: Session = Depends(get_db)):
-    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    template = (
+        db.query(GenerationTemplate)
+        .filter(GenerationTemplate.id == template_id)
+        .first()
+    )
     if template is None:
         raise HTTPException(status_code=404, detail="Generation template not found.")
     template_snapshot = _serialize_generation_template(template, include_workflow=False)
@@ -12981,11 +14890,15 @@ def delete_generation_template(template_id: int, db: Session = Depends(get_db)):
     }
 
 
-def _resolve_generation_payload_for_template_request(request: GenerationTemplateResolveRequest, db: Session) -> dict[str, Any]:
+def _resolve_generation_payload_for_template_request(
+    request: GenerationTemplateResolveRequest, db: Session
+) -> dict[str, Any]:
     if request.source_mode == "local":
         file_hash = str(request.file_hash or "").strip()
         if not file_hash:
-            raise HTTPException(status_code=422, detail="file_hash is required when source_mode=local.")
+            raise HTTPException(
+                status_code=422, detail="file_hash is required when source_mode=local."
+            )
         image = (
             db.query(ImageModel)
             .filter(ImageModel.file_hash == file_hash)
@@ -12998,7 +14911,9 @@ def _resolve_generation_payload_for_template_request(request: GenerationTemplate
 
     if request.source_mode == "civitai":
         if request.image_id is None:
-            raise HTTPException(status_code=422, detail="image_id is required when source_mode=civitai.")
+            raise HTTPException(
+                status_code=422, detail="image_id is required when source_mode=civitai."
+            )
         return _build_generation_prototype_civitai_payload(int(request.image_id))
 
     raise HTTPException(status_code=422, detail="Unsupported source_mode.")
@@ -13014,7 +14929,11 @@ def resolve_generation_template(
     include_full_catalog_raw: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
-    template = db.query(GenerationTemplate).filter(GenerationTemplate.id == template_id).first()
+    template = (
+        db.query(GenerationTemplate)
+        .filter(GenerationTemplate.id == template_id)
+        .first()
+    )
     if template is None:
         raise HTTPException(status_code=404, detail="Generation template not found.")
 
@@ -13069,12 +14988,18 @@ def analyze_local_image_perceptual_hashes(
     try:
         local_hashes = _build_perceptual_hash_suite(image_path, hash_size=hash_size)
     except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to open image for hashing: {exc}")
+        raise HTTPException(
+            status_code=400, detail=f"Unable to open image for hashing: {exc}"
+        )
 
     civitai_payload = _read_civitai_payload_for_image(image)
     civitai_image_hash = _extract_primary_civitai_image_hash(image, civitai_payload)
-    civitai_comparison = _build_civitai_hash_comparison_payload(local_hashes, civitai_payload)
-    blurhash_report = _build_blurhash_report(image_path, civitai_hash=civitai_image_hash)
+    civitai_comparison = _build_civitai_hash_comparison_payload(
+        local_hashes, civitai_payload
+    )
+    blurhash_report = _build_blurhash_report(
+        image_path, civitai_hash=civitai_image_hash
+    )
     civitai_hash_candidates = [
         {
             "path": str(candidate.get("path") or "civitai"),
@@ -13144,10 +15069,15 @@ def search_perceptual_similarity(
     target_image = _get_image_or_404(db, file_hash)
     target_path = _resolve_image_library_path(target_image)
     if not target_path.exists() or not target_path.is_file():
-        raise HTTPException(status_code=404, detail="Target image file not found on disk.")
+        raise HTTPException(
+            status_code=404, detail="Target image file not found on disk."
+        )
 
     if str(target_image.mimetype or "").lower().startswith("video/"):
-        raise HTTPException(status_code=400, detail="Perceptual similarity search currently supports still images only.")
+        raise HTTPException(
+            status_code=400,
+            detail="Perceptual similarity search currently supports still images only.",
+        )
 
     target_hex: Optional[str] = None
     target_blurhash: Optional[str] = None
@@ -13167,7 +15097,10 @@ def search_perceptual_similarity(
             with Image.open(target_path) as handle:
                 target_hash_obj = builder(handle.convert("RGB"), hash_size)
         except OSError as exc:
-            raise HTTPException(status_code=400, detail=f"Unable to open target image for hashing: {exc}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unable to open target image for hashing: {exc}",
+            )
         target_hex = str(target_hash_obj)
 
     query = (
@@ -13192,7 +15125,9 @@ def search_perceptual_similarity(
             continue
 
         if selected_algorithm == "blurhash":
-            candidate_blurhash, blurhash_source = _resolve_local_blurhash_4x4(candidate, candidate_path)
+            candidate_blurhash, blurhash_source = _resolve_local_blurhash_4x4(
+                candidate, candidate_path
+            )
             if not candidate_blurhash:
                 skipped_missing_blurhash += 1
                 continue
@@ -13211,21 +15146,23 @@ def search_perceptual_similarity(
             if distance_value > float(max_distance):
                 continue
 
-            matches.append({
-                "file_hash": candidate.file_hash,
-                "civitai_uuid": candidate.civitai_uuid,
-                "file_name": candidate.file_name,
-                "file_path": candidate.file_path,
-                "mimetype": candidate.mimetype,
-                "source_url": candidate.source_url,
-                "distance": round(distance_value, 4),
-                "distance_type": "blurhash_mae",
-                "similarity": preview_distance.get("normalized_similarity"),
-                "preview_distance": preview_distance,
-                "blurhash": candidate_blurhash,
-                "blurhash_source": blurhash_source,
-                "image_url": f"/image_library/{_normalize_media_url_path(str(candidate.file_path))}",
-            })
+            matches.append(
+                {
+                    "file_hash": candidate.file_hash,
+                    "civitai_uuid": candidate.civitai_uuid,
+                    "file_name": candidate.file_name,
+                    "file_path": candidate.file_path,
+                    "mimetype": candidate.mimetype,
+                    "source_url": candidate.source_url,
+                    "distance": round(distance_value, 4),
+                    "distance_type": "blurhash_mae",
+                    "similarity": preview_distance.get("normalized_similarity"),
+                    "preview_distance": preview_distance,
+                    "blurhash": candidate_blurhash,
+                    "blurhash_source": blurhash_source,
+                    "image_url": f"/image_library/{_normalize_media_url_path(str(candidate.file_path))}",
+                }
+            )
         else:
             try:
                 with Image.open(candidate_path) as handle:
@@ -13238,19 +15175,26 @@ def search_perceptual_similarity(
             if distance > max_distance:
                 continue
 
-            matches.append({
-                "file_hash": candidate.file_hash,
-                "civitai_uuid": candidate.civitai_uuid,
-                "file_name": candidate.file_name,
-                "file_path": candidate.file_path,
-                "mimetype": candidate.mimetype,
-                "source_url": candidate.source_url,
-                "distance": distance,
-                "distance_type": "hamming",
-                "image_url": f"/image_library/{_normalize_media_url_path(str(candidate.file_path))}",
-            })
+            matches.append(
+                {
+                    "file_hash": candidate.file_hash,
+                    "civitai_uuid": candidate.civitai_uuid,
+                    "file_name": candidate.file_name,
+                    "file_path": candidate.file_path,
+                    "mimetype": candidate.mimetype,
+                    "source_url": candidate.source_url,
+                    "distance": distance,
+                    "distance_type": "hamming",
+                    "image_url": f"/image_library/{_normalize_media_url_path(str(candidate.file_path))}",
+                }
+            )
 
-    matches.sort(key=lambda item: (float(item.get("distance") or 0.0), str(item.get("file_name") or "")))
+    matches.sort(
+        key=lambda item: (
+            float(item.get("distance") or 0.0),
+            str(item.get("file_name") or ""),
+        )
+    )
     limited_matches = matches[:limit]
 
     return {
@@ -13266,7 +15210,9 @@ def search_perceptual_similarity(
             "hash_size": hash_size,
             "hex": target_hex,
             "blurhash": target_blurhash,
-            "distance_type": "blurhash_mae" if selected_algorithm == "blurhash" else "hamming",
+            "distance_type": (
+                "blurhash_mae" if selected_algorithm == "blurhash" else "hamming"
+            ),
         },
         "search": {
             "max_distance": max_distance,
@@ -13417,7 +15363,11 @@ def trigger_model_prototype_local_model_download(payload: dict = Body(...)):
     return result
 
 
-@app.post("/tasks/{task_id}/retry_failed", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
+@app.post(
+    "/tasks/{task_id}/retry_failed",
+    response_model=dict,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def retry_failed_items_from_task(task_id: str):
     try:
         source_task = task_manager.get_task(task_id)
@@ -13429,7 +15379,9 @@ def retry_failed_items_from_task(task_id: str):
         skipped_hint = ""
         if skipped_items:
             preview = ", ".join(skipped_items[:3])
-            extra = "" if len(skipped_items) <= 3 else f" (+{len(skipped_items) - 3} more)"
+            extra = (
+                "" if len(skipped_items) <= 3 else f" (+{len(skipped_items) - 3} more)"
+            )
             skipped_hint = f" Skipped failed item keys: {preview}{extra}."
         raise HTTPException(
             status_code=400,
@@ -13449,7 +15401,9 @@ def retry_failed_items_from_task(task_id: str):
             "failed_items_count": len(retry_items),
             "skipped_item_keys": skipped_items,
         },
-        runner=lambda context: _run_retry_failed_items_job(context, source_task=source_task),
+        runner=lambda context: _run_retry_failed_items_job(
+            context, source_task=source_task
+        ),
     )
     return {
         "message": "Retry failed items task queued.",
@@ -13518,7 +15472,9 @@ def read_images(
 
     cached_payload = _search_cache_get(cache_key)
     if isinstance(cached_payload, dict):
-        response.headers["X-Filtered-Count"] = str(int(cached_payload.get("filtered_count") or 0))
+        response.headers["X-Filtered-Count"] = str(
+            int(cached_payload.get("filtered_count") or 0)
+        )
         items = cached_payload.get("items")
         if isinstance(items, list):
             return items
@@ -13681,7 +15637,9 @@ def read_image_keys(
 
 
 @app.patch("/images/{file_hash}", response_model=dict)
-def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depends(get_db)):
+def update_image(
+    file_hash: str, payload: ImageUpdateRequest, db: Session = Depends(get_db)
+):
     """Update editable image metadata fields and persist to sidecar JSON."""
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
@@ -13702,7 +15660,9 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
     if payload.artist_name is not None:
         normalized_artist = payload.artist_name.strip()
         if normalized_artist:
-            artist_obj = db.query(Artist).filter(Artist.name == normalized_artist).first()
+            artist_obj = (
+                db.query(Artist).filter(Artist.name == normalized_artist).first()
+            )
             if artist_obj is None:
                 artist_obj = Artist(name=normalized_artist)
                 db.add(artist_obj)
@@ -13748,7 +15708,7 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid user_nsfw_rating {payload.user_nsfw_rating!r}. "
-                       "Allowed values: pg, pg13, r, x, xxx (or empty string to clear).",
+                "Allowed values: pg, pg13, r, x, xxx (or empty string to clear).",
             )
 
     if payload.user_nsfw_safety_class is not None:
@@ -13761,7 +15721,7 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid user_nsfw_safety_class {payload.user_nsfw_safety_class!r}. "
-                       "Allowed values: safe, mature, explicit (or empty string to clear).",
+                "Allowed values: safe, mature, explicit (or empty string to clear).",
             )
 
     if update_values:
@@ -13785,7 +15745,9 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
         processor.save_json_metadata(
             image_path,
             image,
-            additional_data=sidecar_additional_data if sidecar_additional_data else None,
+            additional_data=(
+                sidecar_additional_data if sidecar_additional_data else None
+            ),
         )
         db.commit()
         image = (
@@ -13801,11 +15763,11 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
         sidecar_user_negative_tags: list[str] = []
         # Prefer DB column for user_tags (always up-to-date after the commit above).
         response_user_tags: list[str] = (
-            list(image.user_tags)
-            if isinstance(image.user_tags, list)
-            else []
+            list(image.user_tags) if isinstance(image.user_tags, list) else []
         )
-        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(".json")
+        sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(
+            ".json"
+        )
         if sidecar_path.exists():
             try:
                 with open(sidecar_path, "r", encoding="utf-8") as f:
@@ -13824,7 +15786,9 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
                 sidecar_user_negative_tags = []
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to update image metadata: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to update image metadata: {e}"
+        )
 
     return {
         "message": "Image metadata updated",
@@ -13842,7 +15806,9 @@ def update_image(file_hash: str, payload: ImageUpdateRequest, db: Session = Depe
 
 
 @app.get("/images/{file_hash}/video_poster")
-def get_image_video_poster(file_hash: str, request: Request, db: Session = Depends(get_db)):
+def get_image_video_poster(
+    file_hash: str, request: Request, db: Session = Depends(get_db)
+):
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -13852,7 +15818,10 @@ def get_image_video_poster(file_hash: str, request: Request, db: Session = Depen
         raise HTTPException(status_code=404, detail="Image file not found on disk")
 
     mimetype = (image.mimetype or "").lower()
-    is_video = mimetype.startswith("video/") or image_path.suffix.lower() in _VIDEO_FILE_SUFFIXES
+    is_video = (
+        mimetype.startswith("video/")
+        or image_path.suffix.lower() in _VIDEO_FILE_SUFFIXES
+    )
     if not is_video:
         raise HTTPException(status_code=400, detail="Image is not a video asset")
 
@@ -13864,11 +15833,15 @@ def get_image_video_poster(file_hash: str, request: Request, db: Session = Depen
     if _should_return_not_modified(request, poster_path, cache_headers):
         return Response(status_code=304, headers=cache_headers)
 
-    return FileResponse(str(poster_path), media_type="image/jpeg", headers=cache_headers)
+    return FileResponse(
+        str(poster_path), media_type="image/jpeg", headers=cache_headers
+    )
 
 
 @app.get("/images/{file_hash}/video_thumbnail")
-def get_image_video_thumbnail(file_hash: str, request: Request, db: Session = Depends(get_db)):
+def get_image_video_thumbnail(
+    file_hash: str, request: Request, db: Session = Depends(get_db)
+):
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -13878,7 +15851,10 @@ def get_image_video_thumbnail(file_hash: str, request: Request, db: Session = De
         raise HTTPException(status_code=404, detail="Image file not found on disk")
 
     mimetype = (image.mimetype or "").lower()
-    is_video = mimetype.startswith("video/") or image_path.suffix.lower() in _VIDEO_FILE_SUFFIXES
+    is_video = (
+        mimetype.startswith("video/")
+        or image_path.suffix.lower() in _VIDEO_FILE_SUFFIXES
+    )
     if not is_video:
         raise HTTPException(status_code=400, detail="Image is not a video asset")
 
@@ -13991,8 +15967,12 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                     if _thumb is not None:
                         _actions.append(f"Rebuilt video thumbnail {_thumb.name}.")
 
-                _actions.append("Re-downloaded missing file from CivitAI source and restored to library.")
-                _commit_with_lock_retry(db, context=f"Repair commit for missing image {file_hash}")
+                _actions.append(
+                    "Re-downloaded missing file from CivitAI source and restored to library."
+                )
+                _commit_with_lock_retry(
+                    db, context=f"Repair commit for missing image {file_hash}"
+                )
                 return _collect_repair_result(
                     image=image,
                     actions_taken=_actions,
@@ -14010,7 +15990,9 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                     image_id=civitai_image_id_missing,
                     image_url=str(_civitai_target_missing["image_url"]),
                     mime_type=_civitai_target_missing.get("mime_type"),
-                    declared_file_size=_civitai_target_missing.get("declared_file_size"),
+                    declared_file_size=_civitai_target_missing.get(
+                        "declared_file_size"
+                    ),
                     preview_image_url=_civitai_target_missing.get("preview_image_url"),
                     original_filename=str(_civitai_target_missing["original_filename"]),
                     artist_name=_civitai_target_missing.get("artist_name"),
@@ -14040,8 +16022,12 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                 if _repaired is not None:
                     _repaired_path = Path(IMAGE_LIBRARY_PATH) / str(_repaired.file_path)
                     if _normalize_mime_type(_repaired.mimetype).startswith("video/"):
-                        _poster = ensure_video_poster(_repaired_path, IMAGE_RESOURCES_PATH)
-                        _thumb = ensure_video_thumbnail(_repaired_path, IMAGE_RESOURCES_PATH)
+                        _poster = ensure_video_poster(
+                            _repaired_path, IMAGE_RESOURCES_PATH
+                        )
+                        _thumb = ensure_video_thumbnail(
+                            _repaired_path, IMAGE_RESOURCES_PATH
+                        )
                         if _poster is not None:
                             _actions.append(f"Rebuilt video poster {_poster.name}.")
                         if _thumb is not None:
@@ -14049,7 +16035,9 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                 _actions.append(
                     "Re-downloaded missing file from CivitAI (content changed); created replacement record."
                 )
-                _commit_with_lock_retry(db, context=f"Repair commit for missing image {file_hash}")
+                _commit_with_lock_retry(
+                    db, context=f"Repair commit for missing image {file_hash}"
+                )
                 return _collect_repair_result(
                     image=image,
                     actions_taken=_actions,
@@ -14082,10 +16070,16 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
     try:
         processor = ImageProcessor(str(image_path), db, IMAGE_LIBRARY_PATH)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not inspect image file: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Could not inspect image file: {e}"
+        )
 
     actual_mime = _normalize_mime_type(processor.mimetype)
-    actual_extension = ImageProcessor.mime_to_extension(processor.mimetype) or image_path.suffix.lower() or ".jpg"
+    actual_extension = (
+        ImageProcessor.mime_to_extension(processor.mimetype)
+        or image_path.suffix.lower()
+        or ".jpg"
+    )
     db_mime = _normalize_mime_type(image.mimetype)
     sidecar_before = _load_image_sidecar_payload(image)
     sidecar_mime = _normalize_mime_type(sidecar_before.get("mimetype"))
@@ -14096,11 +16090,17 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
         civitai_image_id = extract_civitai_image_id(image.source_url)
         if civitai_image_id is not None:
             try:
-                civitai_target = _resolve_civitai_image_target(CivitaiAPI.get_instance(), civitai_image_id, strict=False)
+                civitai_target = _resolve_civitai_image_target(
+                    CivitaiAPI.get_instance(), civitai_image_id, strict=False
+                )
             except Exception as exc:
-                warnings.append(f"Could not refresh CivitAI metadata during repair: {exc}")
+                warnings.append(
+                    f"Could not refresh CivitAI metadata during repair: {exc}"
+                )
 
-    declared_civitai_mime = _normalize_mime_type(civitai_target.get("mime_type")) if civitai_target else ""
+    declared_civitai_mime = (
+        _normalize_mime_type(civitai_target.get("mime_type")) if civitai_target else ""
+    )
     expected_library_name = f"{image.file_hash}{actual_extension}"
     preferred_file_name = _derive_preferred_file_name(
         image,
@@ -14109,30 +16109,59 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
     )
 
     if db_mime and db_mime != actual_mime:
-        issues_found.append(f"Database MIME type {db_mime} did not match actual file type {actual_mime}.")
+        issues_found.append(
+            f"Database MIME type {db_mime} did not match actual file type {actual_mime}."
+        )
     if sidecar_mime and sidecar_mime != actual_mime:
-        issues_found.append(f"Sidecar MIME type {sidecar_mime} did not match actual file type {actual_mime}.")
+        issues_found.append(
+            f"Sidecar MIME type {sidecar_mime} did not match actual file type {actual_mime}."
+        )
     if image_path.name != expected_library_name:
-        issues_found.append(f"Library filename {image_path.name} did not match expected normalized name {expected_library_name}.")
-    if _looks_like_hashed_display_name(image.file_name, file_hash=image.file_hash, file_path=image.file_path):
-        issues_found.append("Display filename looked like the library hash/path rather than an original source filename.")
+        issues_found.append(
+            f"Library filename {image_path.name} did not match expected normalized name {expected_library_name}."
+        )
+    if _looks_like_hashed_display_name(
+        image.file_name, file_hash=image.file_hash, file_path=image.file_path
+    ):
+        issues_found.append(
+            "Display filename looked like the library hash/path rather than an original source filename."
+        )
     if declared_civitai_mime and declared_civitai_mime != actual_mime:
-        issues_found.append(f"CivitAI declares {declared_civitai_mime}, but the local file is {actual_mime}.")
+        issues_found.append(
+            f"CivitAI declares {declared_civitai_mime}, but the local file is {actual_mime}."
+        )
 
-    if declared_civitai_mime and declared_civitai_mime != actual_mime and civitai_target and civitai_image_id is not None:
+    if (
+        declared_civitai_mime
+        and declared_civitai_mime != actual_mime
+        and civitai_target
+        and civitai_image_id is not None
+    ):
         temp_path = None
         mismatch_temp_path = None
         try:
-            declared_video_like = declared_civitai_mime.startswith("video/") or _url_looks_like_video(
-                civitai_target.get("image_url") if isinstance(civitai_target, dict) else None
+            declared_video_like = declared_civitai_mime.startswith(
+                "video/"
+            ) or _url_looks_like_video(
+                civitai_target.get("image_url")
+                if isinstance(civitai_target, dict)
+                else None
             )
             archived_variant = None
             if declared_video_like:
                 archived_variant = _archive_static_civitai_source_variant(
                     image=image,
                     civitai_image_id=civitai_image_id,
-                    expected_source_url=str(civitai_target.get("source_url") or "") if isinstance(civitai_target, dict) else None,
-                    declared_mime_type=civitai_target.get("mime_type") if isinstance(civitai_target, dict) else None,
+                    expected_source_url=(
+                        str(civitai_target.get("source_url") or "")
+                        if isinstance(civitai_target, dict)
+                        else None
+                    ),
+                    declared_mime_type=(
+                        civitai_target.get("mime_type")
+                        if isinstance(civitai_target, dict)
+                        else None
+                    ),
                 )
                 if archived_variant:
                     actions_taken.append(
@@ -14177,27 +16206,47 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             repaired_image = replacement.get("repaired_image")
             created_new_image = bool(replacement.get("created_new_image"))
             if repaired_image is not None and archived_variant:
-                merged_json = dict(repaired_image.json_metadata) if isinstance(repaired_image.json_metadata, dict) else {}
+                merged_json = (
+                    dict(repaired_image.json_metadata)
+                    if isinstance(repaired_image.json_metadata, dict)
+                    else {}
+                )
                 merged_json["civitai_source_variant_static"] = archived_variant
                 repaired_image.json_metadata = merged_json
-                repaired_path_for_sidecar = Path(IMAGE_LIBRARY_PATH) / str(repaired_image.file_path)
+                repaired_path_for_sidecar = Path(IMAGE_LIBRARY_PATH) / str(
+                    repaired_image.file_path
+                )
                 if repaired_path_for_sidecar.exists():
-                    repaired_processor = ImageProcessor(str(repaired_path_for_sidecar), db, IMAGE_LIBRARY_PATH)
+                    repaired_processor = ImageProcessor(
+                        str(repaired_path_for_sidecar), db, IMAGE_LIBRARY_PATH
+                    )
                     repaired_processor.save_json_metadata(
                         repaired_path_for_sidecar,
                         repaired_image,
-                        additional_data={"civitai_source_variant_static": archived_variant},
+                        additional_data={
+                            "civitai_source_variant_static": archived_variant
+                        },
                     )
             if repaired_image is not None:
                 repaired_path = Path(IMAGE_LIBRARY_PATH) / str(repaired_image.file_path)
                 if _normalize_mime_type(repaired_image.mimetype).startswith("video/"):
-                    poster_path = ensure_video_poster(repaired_path, IMAGE_RESOURCES_PATH)
-                    thumbnail_path = ensure_video_thumbnail(repaired_path, IMAGE_RESOURCES_PATH)
+                    poster_path = ensure_video_poster(
+                        repaired_path, IMAGE_RESOURCES_PATH
+                    )
+                    thumbnail_path = ensure_video_thumbnail(
+                        repaired_path, IMAGE_RESOURCES_PATH
+                    )
                     if poster_path is not None:
-                        actions_taken.append(f"Rebuilt video poster {poster_path.name}.")
+                        actions_taken.append(
+                            f"Rebuilt video poster {poster_path.name}."
+                        )
                     if thumbnail_path is not None:
-                        actions_taken.append(f"Rebuilt video thumbnail {thumbnail_path.name}.")
-            actions_taken.append("Downloaded and ingested the canonical source asset to replace the mismatched local media.")
+                        actions_taken.append(
+                            f"Rebuilt video thumbnail {thumbnail_path.name}."
+                        )
+            actions_taken.append(
+                "Downloaded and ingested the canonical source asset to replace the mismatched local media."
+            )
             _commit_with_lock_retry(db, context=f"Repair commit for image {file_hash}")
             return _collect_repair_result(
                 image=image,
@@ -14213,7 +16262,10 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
             raise
         except Exception as exc:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Failed to replace mismatched CivitAI media: {exc}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to replace mismatched CivitAI media: {exc}",
+            )
         finally:
             _cleanup_temp_file(temp_path)
             _cleanup_temp_file(mismatch_temp_path)
@@ -14278,7 +16330,11 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                 ),
                 image_db_id=image.id,
             )
-            after_variant = image.json_metadata.get("civitai_source_variant") if isinstance(image.json_metadata, dict) else None
+            after_variant = (
+                image.json_metadata.get("civitai_source_variant")
+                if isinstance(image.json_metadata, dict)
+                else None
+            )
             if after_variant and after_variant != before_variant:
                 actions_taken.append("Refreshed CivitAI source variant metadata.")
     else:
@@ -14313,7 +16369,9 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                     db,
                     image=image,
                     uploaded_file_path=temp_path,
-                    original_filename=preferred_file_name or image.file_name or current_path.name,
+                    original_filename=preferred_file_name
+                    or image.file_name
+                    or current_path.name,
                     replacement_reason="replaced_by_media_repair_png",
                     artist_name=image.artist.name if image.artist is not None else None,
                     source_url=image.source_url,
@@ -14321,8 +16379,12 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                 )
                 repaired_image = replacement.get("repaired_image")
                 created_new_image = bool(replacement.get("created_new_image"))
-                actions_taken.append("Repacked damaged PNG payload into a repaired library item.")
-                _commit_with_lock_retry(db, context=f"Repair commit for image {file_hash}")
+                actions_taken.append(
+                    "Repacked damaged PNG payload into a repaired library item."
+                )
+                _commit_with_lock_retry(
+                    db, context=f"Repair commit for image {file_hash}"
+                )
                 return _collect_repair_result(
                     image=image,
                     actions_taken=actions_taken,
@@ -14366,11 +16428,7 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
 @app.post("/images/{file_hash}/rescan", response_model=dict)
 def rescan_image_metadata(file_hash: str, db: Session = Depends(get_db)):
     """Rescan one media file and rerun metadata hydration/backfill steps."""
-    image = (
-        db.query(ImageModel)
-        .filter(ImageModel.file_hash == file_hash)
-        .first()
-    )
+    image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
 
@@ -14385,7 +16443,9 @@ def rescan_image_metadata(file_hash: str, db: Session = Depends(get_db)):
         raise
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Could not rescan image metadata: {exc}")
+        raise HTTPException(
+            status_code=500, detail=f"Could not rescan image metadata: {exc}"
+        )
 
 
 @app.delete("/images/{file_hash}/file", response_model=dict)
@@ -14406,9 +16466,15 @@ def delete_image_file(file_hash: str, db: Session = Depends(get_db)):
         except OperationalError as e:
             db.rollback()
             # Retry transient SQLITE_BUSY / database locked errors.
-            locked_error = "database is locked" in str(e).lower() or "sqlite_busy" in str(e).lower()
+            locked_error = (
+                "database is locked" in str(e).lower()
+                or "sqlite_busy" in str(e).lower()
+            )
             if not locked_error or attempt >= max_attempts:
-                raise HTTPException(status_code=503, detail=f"Failed to delete image due to database lock: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Failed to delete image due to database lock: {e}",
+                )
             time.sleep(0.1 * attempt)
         except Exception as e:
             db.rollback()
@@ -14426,8 +16492,12 @@ def delete_image_file(file_hash: str, db: Session = Depends(get_db)):
 def get_image_status_counts(db: Session = Depends(get_db)):
     active = db.query(ImageModel).filter(_active_image_filter()).count()
     deleted = db.query(ImageModel).filter(ImageModel.image_status == "deleted").count()
-    tombstoned = db.query(ImageModel).filter(ImageModel.image_status == "tombstoned").count()
-    placeholder = db.query(ImageModel).filter(ImageModel.image_status == "placeholder").count()
+    tombstoned = (
+        db.query(ImageModel).filter(ImageModel.image_status == "tombstoned").count()
+    )
+    placeholder = (
+        db.query(ImageModel).filter(ImageModel.image_status == "placeholder").count()
+    )
     return {
         "active": active,
         "deleted": deleted,
@@ -14497,13 +16567,26 @@ def get_placeholder_images(
 
     items: list[dict[str, Any]] = []
     for row in rows:
-        civitai_payload = row.json_metadata.get("civitai") if isinstance(row.json_metadata, dict) else {}
-        unavailable_detail = civitai_payload.get("unavailable_detail") if isinstance(civitai_payload, dict) else {}
+        civitai_payload = (
+            row.json_metadata.get("civitai")
+            if isinstance(row.json_metadata, dict)
+            else {}
+        )
+        unavailable_detail = (
+            civitai_payload.get("unavailable_detail")
+            if isinstance(civitai_payload, dict)
+            else {}
+        )
         if not isinstance(unavailable_detail, dict):
             unavailable_detail = {}
 
-        item_classification = str(unavailable_detail.get("classification") or "").strip().lower()
-        if normalized_classification and item_classification != normalized_classification:
+        item_classification = (
+            str(unavailable_detail.get("classification") or "").strip().lower()
+        )
+        if (
+            normalized_classification
+            and item_classification != normalized_classification
+        ):
             continue
 
         row_collection_ids = [int(c.id) for c in row.collections]
@@ -14522,7 +16605,9 @@ def get_placeholder_images(
                 "source_site": row.source_site,
                 "mimetype": row.mimetype,
                 "date_modified": (
-                    row.date_modified.isoformat() if row.date_modified is not None else None
+                    row.date_modified.isoformat()
+                    if row.date_modified is not None
+                    else None
                 ),
                 "collection_ids": row_collection_ids,
                 "collection_names": [str(c.name) for c in row.collections],
@@ -14559,13 +16644,26 @@ def get_placeholder_summary(
         if collection_id is not None and int(collection_id) not in row_collection_ids:
             continue
 
-        civitai_payload = row.json_metadata.get("civitai") if isinstance(row.json_metadata, dict) else {}
-        unavailable_detail = civitai_payload.get("unavailable_detail") if isinstance(civitai_payload, dict) else {}
+        civitai_payload = (
+            row.json_metadata.get("civitai")
+            if isinstance(row.json_metadata, dict)
+            else {}
+        )
+        unavailable_detail = (
+            civitai_payload.get("unavailable_detail")
+            if isinstance(civitai_payload, dict)
+            else {}
+        )
         if not isinstance(unavailable_detail, dict):
             unavailable_detail = {}
 
-        classification = str(unavailable_detail.get("classification") or "unknown").strip().lower() or "unknown"
-        endpoint = str(unavailable_detail.get("endpoint") or "unknown").strip() or "unknown"
+        classification = (
+            str(unavailable_detail.get("classification") or "unknown").strip().lower()
+            or "unknown"
+        )
+        endpoint = (
+            str(unavailable_detail.get("endpoint") or "unknown").strip() or "unknown"
+        )
         raw_status = unavailable_detail.get("status_code")
         status_code = str(raw_status) if raw_status is not None else "unknown"
 
@@ -14577,9 +16675,13 @@ def get_placeholder_summary(
     return {
         "total": total,
         "collection_id": collection_id,
-        "by_classification": dict(sorted(by_classification.items(), key=lambda item: item[0])),
+        "by_classification": dict(
+            sorted(by_classification.items(), key=lambda item: item[0])
+        ),
         "by_endpoint": dict(sorted(by_endpoint.items(), key=lambda item: item[0])),
-        "by_status_code": dict(sorted(by_status_code.items(), key=lambda item: item[0])),
+        "by_status_code": dict(
+            sorted(by_status_code.items(), key=lambda item: item[0])
+        ),
     }
 
 
@@ -14612,7 +16714,9 @@ def restore_image_record(file_hash: str, db: Session = Depends(get_db)):
 @app.post("/utilities/purge_deleted_files", response_model=dict)
 def purge_deleted_files(db: Session = Depends(get_db)):
     """Permanently remove deleted records and their on-disk files/sidecars."""
-    deleted_images = db.query(ImageModel).filter(ImageModel.image_status == "deleted").all()
+    deleted_images = (
+        db.query(ImageModel).filter(ImageModel.image_status == "deleted").all()
+    )
 
     purged = 0
     file_errors: list[str] = []
@@ -14632,9 +16736,15 @@ def purge_deleted_files(db: Session = Depends(get_db)):
         db.query(ImageCollectionMembership).filter(
             ImageCollectionMembership.image_id == image.id
         ).delete(synchronize_session=False)
-        db.query(ImageTag).filter(ImageTag.image_id == image.id).delete(synchronize_session=False)
-        db.query(DatasetImage).filter(DatasetImage.image_id == image.id).delete(synchronize_session=False)
-        db.query(AnalysisData).filter(AnalysisData.image_id == image.id).delete(synchronize_session=False)
+        db.query(ImageTag).filter(ImageTag.image_id == image.id).delete(
+            synchronize_session=False
+        )
+        db.query(DatasetImage).filter(DatasetImage.image_id == image.id).delete(
+            synchronize_session=False
+        )
+        db.query(AnalysisData).filter(AnalysisData.image_id == image.id).delete(
+            synchronize_session=False
+        )
 
         db.delete(image)
         purged += 1
@@ -14717,17 +16827,12 @@ def search_suggest(
 
     # Tags: union of Tag.name, Concept.canonical_name, and ConceptAlias.normalized_alias
     # When NSFW filtering is active, only include tags that appear on images with allowed ratings.
-    tag_name_query = (
-        db.query(Tag.name)
-        .filter(func.lower(Tag.name).like(like_pattern))
+    tag_name_query = db.query(Tag.name).filter(func.lower(Tag.name).like(like_pattern))
+    concept_name_query = db.query(Concept.canonical_name).filter(
+        func.lower(Concept.canonical_name).like(like_pattern)
     )
-    concept_name_query = (
-        db.query(Concept.canonical_name)
-        .filter(func.lower(Concept.canonical_name).like(like_pattern))
-    )
-    alias_name_query = (
-        db.query(ConceptAlias.normalized_alias)
-        .filter(func.lower(ConceptAlias.normalized_alias).like(like_pattern))
+    alias_name_query = db.query(ConceptAlias.normalized_alias).filter(
+        func.lower(ConceptAlias.normalized_alias).like(like_pattern)
     )
 
     if nsfw_allowed_image_ids is not None:
@@ -14739,30 +16844,37 @@ def search_suggest(
         )
         # Tag → image_tags → ImageModel
         tag_name_query = (
-            tag_name_query
-            .join(ImageTag, ImageTag.tag_id == Tag.id)
+            tag_name_query.join(ImageTag, ImageTag.tag_id == Tag.id)
             .filter(ImageTag.image_id.in_(allowed_ids_sub))
             .distinct()
         )
         # Concept → image_concept_observations → ImageModel
         concept_name_query = (
-            concept_name_query
-            .join(ImageConceptObservation, ImageConceptObservation.concept_id == Concept.id)
+            concept_name_query.join(
+                ImageConceptObservation,
+                ImageConceptObservation.concept_id == Concept.id,
+            )
             .filter(ImageConceptObservation.image_id.in_(allowed_ids_sub))
             .distinct()
         )
         # ConceptAlias → Concept → image_concept_observations → ImageModel
         alias_name_query = (
-            alias_name_query
-            .join(Concept, Concept.id == ConceptAlias.concept_id)
-            .join(ImageConceptObservation, ImageConceptObservation.concept_id == Concept.id)
+            alias_name_query.join(Concept, Concept.id == ConceptAlias.concept_id)
+            .join(
+                ImageConceptObservation,
+                ImageConceptObservation.concept_id == Concept.id,
+            )
             .filter(ImageConceptObservation.image_id.in_(allowed_ids_sub))
             .distinct()
         )
 
     tag_name_rows = tag_name_query.order_by(Tag.name).limit(limit).all()
-    concept_name_rows = concept_name_query.order_by(Concept.canonical_name).limit(limit).all()
-    alias_name_rows = alias_name_query.order_by(ConceptAlias.normalized_alias).limit(limit).all()
+    concept_name_rows = (
+        concept_name_query.order_by(Concept.canonical_name).limit(limit).all()
+    )
+    alias_name_rows = (
+        alias_name_query.order_by(ConceptAlias.normalized_alias).limit(limit).all()
+    )
 
     # Merge and deduplicate tag results, preserving sort order
     seen_tags: set[str] = set()
@@ -14853,7 +16965,9 @@ def get_filter_options(
             safety_labels.add("Explicit")
         return rating_labels, safety_labels
 
-    def _collect_nsfw_tokens_from_value(value: Any, rating_tokens: set[str], safety_tokens: set[str]) -> None:
+    def _collect_nsfw_tokens_from_value(
+        value: Any, rating_tokens: set[str], safety_tokens: set[str]
+    ) -> None:
         if value is None:
             return
 
@@ -14873,7 +16987,9 @@ def get_filter_options(
                 except json.JSONDecodeError:
                     parsed = None
                 if isinstance(parsed, list):
-                    _collect_nsfw_tokens_from_value(parsed, rating_tokens, safety_tokens)
+                    _collect_nsfw_tokens_from_value(
+                        parsed, rating_tokens, safety_tokens
+                    )
                     return
 
             upper_value = text_value.upper()
@@ -14898,23 +17014,15 @@ def get_filter_options(
         safety_tokens.update(safeties)
 
     tag_names_by_source = _gallery_tag_names_by_source_from_observations(db)
-    tag_names = sorted({
-        name
-        for names in tag_names_by_source.values()
-        for name in names
-    })
+    tag_names = sorted(
+        {name for names in tag_names_by_source.values() for name in names}
+    )
 
     source_site_rows = (
-        db.query(ImageModel.source_site)
-        .filter(_active_image_filter())
-        .distinct()
-        .all()
+        db.query(ImageModel.source_site).filter(_active_image_filter()).distinct().all()
     )
     mimetype_rows = (
-        db.query(ImageModel.mimetype)
-        .filter(_active_image_filter())
-        .distinct()
-        .all()
+        db.query(ImageModel.mimetype).filter(_active_image_filter()).distinct().all()
     )
 
     artist_name_rows = (
@@ -14926,7 +17034,10 @@ def get_filter_options(
     )
     collection_name_rows = (
         db.query(CollectionModel.name)
-        .join(ImageCollectionMembership, ImageCollectionMembership.collection_id == CollectionModel.id)
+        .join(
+            ImageCollectionMembership,
+            ImageCollectionMembership.collection_id == CollectionModel.id,
+        )
         .join(ImageModel, ImageModel.id == ImageCollectionMembership.image_id)
         .filter(_active_image_filter())
         .distinct()
@@ -14968,10 +17079,26 @@ def get_filter_options(
         "generation_software": _sorted_unique_text(generation_software_values),
         "source_sites": _sorted_unique_text([row[0] for row in source_site_rows]),
         "mimetypes": _sorted_unique_text([row[0] for row in mimetype_rows]),
-        "nsfw_ratings": sorted(rating_tokens, key=lambda item: ["PG", "PG13", "R", "X", "XXX", "N/A"].index(item) if item in {"PG", "PG13", "R", "X", "XXX", "N/A"} else 999),
-        "nsfw_safety": sorted(safety_tokens, key=lambda item: ["Safe", "Mature", "Explicit", "N/A"].index(item) if item in {"Safe", "Mature", "Explicit", "N/A"} else 999),
+        "nsfw_ratings": sorted(
+            rating_tokens,
+            key=lambda item: (
+                ["PG", "PG13", "R", "X", "XXX", "N/A"].index(item)
+                if item in {"PG", "PG13", "R", "X", "XXX", "N/A"}
+                else 999
+            ),
+        ),
+        "nsfw_safety": sorted(
+            safety_tokens,
+            key=lambda item: (
+                ["Safe", "Mature", "Explicit", "N/A"].index(item)
+                if item in {"Safe", "Mature", "Explicit", "N/A"}
+                else 999
+            ),
+        ),
         "artist_names": _sorted_unique_text([row[0] for row in artist_name_rows]),
-        "collection_names": _sorted_unique_text([row[0] for row in collection_name_rows]),
+        "collection_names": _sorted_unique_text(
+            [row[0] for row in collection_name_rows]
+        ),
     }
     _search_cache_put(cache_key, payload, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
     return payload
@@ -14997,9 +17124,15 @@ def get_collections(
 @app.post("/collections/", response_model=dict)
 def create_collection(payload: CollectionCreateRequest, db: Session = Depends(get_db)):
     normalized_name = _normalize_collection_name(payload.name)
-    existing = db.query(CollectionModel).filter(CollectionModel.name == normalized_name).first()
+    existing = (
+        db.query(CollectionModel)
+        .filter(CollectionModel.name == normalized_name)
+        .first()
+    )
     if existing is not None:
-        raise HTTPException(status_code=409, detail="Collection with this name already exists.")
+        raise HTTPException(
+            status_code=409, detail="Collection with this name already exists."
+        )
 
     created = CollectionModel(name=normalized_name, source="user")
     db.add(created)
@@ -15009,19 +17142,27 @@ def create_collection(payload: CollectionCreateRequest, db: Session = Depends(ge
 
 
 @app.patch("/collections/{collection_id}", response_model=dict)
-def rename_collection(collection_id: int, payload: CollectionRenameRequest, db: Session = Depends(get_db)):
-    collection = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+def rename_collection(
+    collection_id: int, payload: CollectionRenameRequest, db: Session = Depends(get_db)
+):
+    collection = (
+        db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    )
     if collection is None:
         raise HTTPException(status_code=404, detail="Collection not found.")
 
     normalized_name = _normalize_collection_name(payload.name)
     duplicate = (
         db.query(CollectionModel)
-        .filter(CollectionModel.name == normalized_name, CollectionModel.id != collection_id)
+        .filter(
+            CollectionModel.name == normalized_name, CollectionModel.id != collection_id
+        )
         .first()
     )
     if duplicate is not None:
-        raise HTTPException(status_code=409, detail="Collection with this name already exists.")
+        raise HTTPException(
+            status_code=409, detail="Collection with this name already exists."
+        )
 
     collection.name = normalized_name
     db.commit()
@@ -15031,11 +17172,15 @@ def rename_collection(collection_id: int, payload: CollectionRenameRequest, db: 
 
 @app.delete("/collections/{collection_id}", response_model=dict)
 def delete_collection(collection_id: int, db: Session = Depends(get_db)):
-    collection = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    collection = (
+        db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    )
     if collection is None:
         raise HTTPException(status_code=404, detail="Collection not found.")
 
-    db.query(ImageCollectionMembership).filter(ImageCollectionMembership.collection_id == collection_id).delete(synchronize_session=False)
+    db.query(ImageCollectionMembership).filter(
+        ImageCollectionMembership.collection_id == collection_id
+    ).delete(synchronize_session=False)
     db.delete(collection)
     db.commit()
     return {"message": "Collection deleted.", "collection_id": collection_id}
@@ -15055,12 +17200,16 @@ def get_image_collections(file_hash: str, db: Session = Depends(get_db)):
 
 
 @app.post("/images/{file_hash}/collections/{collection_id}", response_model=dict)
-def add_image_to_collection(file_hash: str, collection_id: int, db: Session = Depends(get_db)):
+def add_image_to_collection(
+    file_hash: str, collection_id: int, db: Session = Depends(get_db)
+):
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    collection = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    collection = (
+        db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    )
     if collection is None:
         raise HTTPException(status_code=404, detail="Collection not found")
 
@@ -15079,7 +17228,9 @@ def add_images_to_collection(
     payload: CollectionBulkMembershipRequest,
     db: Session = Depends(get_db),
 ):
-    collection = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    collection = (
+        db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    )
     if collection is None:
         raise HTTPException(status_code=404, detail="Collection not found")
 
@@ -15093,15 +17244,17 @@ def add_images_to_collection(
         normalized_hashes.append(file_hash)
 
     if not normalized_hashes:
-        raise HTTPException(status_code=400, detail="At least one file hash is required.")
+        raise HTTPException(
+            status_code=400, detail="At least one file hash is required."
+        )
 
     images = (
-        db.query(ImageModel)
-        .filter(ImageModel.file_hash.in_(normalized_hashes))
-        .all()
+        db.query(ImageModel).filter(ImageModel.file_hash.in_(normalized_hashes)).all()
     )
     images_by_hash = {str(image.file_hash): image for image in images}
-    missing_hashes = [file_hash for file_hash in normalized_hashes if file_hash not in images_by_hash]
+    missing_hashes = [
+        file_hash for file_hash in normalized_hashes if file_hash not in images_by_hash
+    ]
 
     added_count = 0
     already_member_count = 0
@@ -15137,7 +17290,9 @@ def add_images_to_collection(
 
 
 @app.delete("/images/{file_hash}/collections/{collection_id}", response_model=dict)
-def remove_image_from_collection(file_hash: str, collection_id: int, db: Session = Depends(get_db)):
+def remove_image_from_collection(
+    file_hash: str, collection_id: int, db: Session = Depends(get_db)
+):
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -15162,13 +17317,17 @@ def remove_image_from_collection(file_hash: str, collection_id: int, db: Session
     }
 
 
-@app.api_route("/collections/{collection_id}/images", methods=["DELETE"], response_model=dict)
+@app.api_route(
+    "/collections/{collection_id}/images", methods=["DELETE"], response_model=dict
+)
 def remove_images_from_collection(
     collection_id: int,
     payload: CollectionBulkMembershipRequest,
     db: Session = Depends(get_db),
 ):
-    collection = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    collection = (
+        db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+    )
     if collection is None:
         raise HTTPException(status_code=404, detail="Collection not found")
 
@@ -15182,15 +17341,17 @@ def remove_images_from_collection(
         normalized_hashes.append(file_hash)
 
     if not normalized_hashes:
-        raise HTTPException(status_code=400, detail="At least one file hash is required.")
+        raise HTTPException(
+            status_code=400, detail="At least one file hash is required."
+        )
 
     images = (
-        db.query(ImageModel)
-        .filter(ImageModel.file_hash.in_(normalized_hashes))
-        .all()
+        db.query(ImageModel).filter(ImageModel.file_hash.in_(normalized_hashes)).all()
     )
     images_by_hash = {str(image.file_hash): image for image in images}
-    missing_hashes = [file_hash for file_hash in normalized_hashes if file_hash not in images_by_hash]
+    missing_hashes = [
+        file_hash for file_hash in normalized_hashes if file_hash not in images_by_hash
+    ]
 
     removed_count = 0
     not_member_count = 0
@@ -15330,7 +17491,7 @@ async def upload_images(
 @app.post("/import_civitai/", status_code=status.HTTP_202_ACCEPTED)
 def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(get_db)):
     """Import CivitAI images by image URL/ID or collection URL/ID.
-    
+
     If a URL is provided, the import type is auto-detected.
     If the auto-detected type differs from the requested type, a warning is returned.
     """
@@ -15345,7 +17506,7 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
     detected_type = None
     detected_id = None
     type_mismatch_warning = None
-    
+
     try:
         detected_type, detected_id = _detect_civitai_url_type(value)
         if detected_type != payload.import_type:
@@ -15353,7 +17514,7 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
     except HTTPException:
         # If auto-detection fails, fall through to traditional parsing
         pass
-    
+
     # Use detected type if available, otherwise fall back to explicitly parsing the requested type
     if detected_type:
         import_type = detected_type
@@ -15364,7 +17525,7 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
             import_id = _parse_civitai_image_id(value)
         else:
             import_id = _parse_civitai_collection_id(value)
-    
+
     response_data = {}
     if type_mismatch_warning:
         response_data["warning"] = type_mismatch_warning
@@ -15407,6 +17568,7 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
 # CivitAI Authentication Endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.get("/civitai/auth/status", response_model=dict)
 def civitai_auth_status():
     """Check whether the current CivitAI session cookie is valid.
@@ -15442,7 +17604,9 @@ def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
             _normalize_token,
         )
     except ImportError:
-        raise HTTPException(status_code=500, detail="CivitAI auth module not available.")
+        raise HTTPException(
+            status_code=500, detail="CivitAI auth module not available."
+        )
 
     token = _normalize_token(payload.cookie)
     if not token:
@@ -15468,8 +17632,12 @@ def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
             detail=f"Failed to update session cookie: {exc}",
         )
 
-    status_msg = "CivitAI session cookie saved and validated." if is_valid else (
-        f"Cookie saved (validation inconclusive: {message}). It will be used for future requests."
+    status_msg = (
+        "CivitAI session cookie saved and validated."
+        if is_valid
+        else (
+            f"Cookie saved (validation inconclusive: {message}). It will be used for future requests."
+        )
     )
     return {"success": True, "message": status_msg, "validated": is_valid}
 
@@ -15484,7 +17652,9 @@ def civitai_auth_refresh():
     try:
         from atelierai.civitai.civitai_auth import get_cached_or_refresh_session_token
     except ImportError:
-        raise HTTPException(status_code=500, detail="CivitAI auth module not available.")
+        raise HTTPException(
+            status_code=500, detail="CivitAI auth module not available."
+        )
 
     cache_file = _get_civitai_session_cache_path()
 
@@ -15503,7 +17673,10 @@ def civitai_auth_refresh():
         api = CivitaiAPI.get_instance()
         api.update_session_cookie(token)
     except Exception as exc:
-        return {"success": False, "error": f"Token obtained but failed to update singleton: {exc}"}
+        return {
+            "success": False,
+            "error": f"Token obtained but failed to update singleton: {exc}",
+        }
 
     return {"success": True, "message": "CivitAI session refreshed successfully."}
 
@@ -15512,6 +17685,7 @@ def _get_civitai_session_cache_path() -> str:
     """Return the session cache file path from config, with a sensible default."""
     try:
         from atelierai.config import CIVITAI_SESSION_CACHE
+
         return CIVITAI_SESSION_CACHE
     except ImportError:
         pass
@@ -15519,7 +17693,11 @@ def _get_civitai_session_cache_path() -> str:
     return env_val or ".civitai_session"
 
 
-@app.post("/collections/sync/civitai", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
+@app.post(
+    "/collections/sync/civitai",
+    response_model=dict,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def sync_civitai_collections(
     payload: CivitaiCollectionSyncRequest, db: Session = Depends(get_db)
 ):
@@ -15532,7 +17710,9 @@ def sync_civitai_collections(
         metadata={
             "limit": payload.limit,
         },
-        runner=lambda context: _run_civitai_collection_sync_job(context, limit=payload.limit),
+        runner=lambda context: _run_civitai_collection_sync_job(
+            context, limit=payload.limit
+        ),
     )
 
     return {
@@ -15541,7 +17721,11 @@ def sync_civitai_collections(
     }
 
 
-@app.post("/civitai/backfill/nsfw-levels", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
+@app.post(
+    "/civitai/backfill/nsfw-levels",
+    response_model=dict,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def backfill_civitai_nsfw_levels(
     payload: CivitaiNsfwBackfillRequest,
     db: Session = Depends(get_db),
@@ -15586,12 +17770,17 @@ def _get_civitai_search_client():
         if _civitai_search_client is not None:
             return _civitai_search_client
         from atelierai.civitai.civitai_search import CivitaiSearchClient
+
         _civitai_search_client = CivitaiSearchClient()
         return _civitai_search_client
 
 
 # CivitAI image CDN base for constructing URLs from Meilisearch UUIDs.
-_CIVITAI_IMAGE_CDN = getattr(app_config, "CIVITAI_CDN_BASE_URL", "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA")
+_CIVITAI_IMAGE_CDN = getattr(
+    app_config,
+    "CIVITAI_CDN_BASE_URL",
+    "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA",
+)
 
 
 def _normalize_meili_hit(hit: dict) -> dict:
@@ -15679,11 +17868,14 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
         )
     except Exception as exc:
         from atelierai.civitai.http_client import CivitaiRequestError
+
         status_code = getattr(exc, "status_code", 502)
         detail = str(exc)
         if isinstance(exc, CivitaiRequestError) and not exc.retryable:
             raise HTTPException(status_code=status_code or 400, detail=detail)
-        raise HTTPException(status_code=502, detail=f"CivitAI search proxy error: {detail}")
+        raise HTTPException(
+            status_code=502, detail=f"CivitAI search proxy error: {detail}"
+        )
 
     # Build normalized response with frontend-friendly field names.
     raw_hits = result.get("hits", [])
@@ -15733,7 +17925,9 @@ def taxonomy_review_summary(db: Session = Depends(get_db)):
     concepts_merged = db.query(Concept).filter(Concept.status == "merged").count()
     aliases_total = db.query(ConceptAlias).count()
     terms_total = db.query(AuthorityTerm).count()
-    unresolved_terms = db.query(AuthorityTerm).filter(AuthorityTerm.concept_id.is_(None)).count()
+    unresolved_terms = (
+        db.query(AuthorityTerm).filter(AuthorityTerm.concept_id.is_(None)).count()
+    )
     observations_total = db.query(ImageConceptObservation).count()
 
     return {
@@ -15772,7 +17966,9 @@ def taxonomy_unresolved_terms(
             "external_tag_id": term.external_tag_id,
             "external_name": term.external_name,
             "normalized_external_name": term.normalized_external_name,
-            "last_seen_at": term.last_seen_at.isoformat() if term.last_seen_at else None,
+            "last_seen_at": (
+                term.last_seen_at.isoformat() if term.last_seen_at else None
+            ),
         }
         for term, auth in rows
     ]
@@ -15848,9 +18044,19 @@ def taxonomy_list_concepts(
 
     response: list[dict] = []
     for concept in rows:
-        alias_count = db.query(ConceptAlias).filter(ConceptAlias.concept_id == concept.id).count()
-        term_count = db.query(AuthorityTerm).filter(AuthorityTerm.concept_id == concept.id).count()
-        observation_count = db.query(ImageConceptObservation).filter(ImageConceptObservation.concept_id == concept.id).count()
+        alias_count = (
+            db.query(ConceptAlias).filter(ConceptAlias.concept_id == concept.id).count()
+        )
+        term_count = (
+            db.query(AuthorityTerm)
+            .filter(AuthorityTerm.concept_id == concept.id)
+            .count()
+        )
+        observation_count = (
+            db.query(ImageConceptObservation)
+            .filter(ImageConceptObservation.concept_id == concept.id)
+            .count()
+        )
         source_labels = source_map.get(int(concept.id), [])
         response.append(
             {
@@ -15884,14 +18090,19 @@ def taxonomy_update_concept(
     if payload.canonical_name is not None:
         normalized_name = _normalize_taxonomy_text(payload.canonical_name)
         if not normalized_name:
-            raise HTTPException(status_code=400, detail="canonical_name cannot be empty")
+            raise HTTPException(
+                status_code=400, detail="canonical_name cannot be empty"
+            )
         duplicate = (
             db.query(Concept)
             .filter(Concept.canonical_name == normalized_name, Concept.id != concept_id)
             .first()
         )
         if duplicate is not None:
-            raise HTTPException(status_code=409, detail="Another concept already uses that canonical_name")
+            raise HTTPException(
+                status_code=409,
+                detail="Another concept already uses that canonical_name",
+            )
         concept.canonical_name = normalized_name
 
     if payload.description is not None:
@@ -15946,9 +18157,13 @@ def taxonomy_add_alias(
 
     authority_id = None
     if payload.authority_name:
-        authority = db.query(TagAuthority).filter(
-            func.lower(TagAuthority.name) == payload.authority_name.strip().lower()
-        ).first()
+        authority = (
+            db.query(TagAuthority)
+            .filter(
+                func.lower(TagAuthority.name) == payload.authority_name.strip().lower()
+            )
+            .first()
+        )
         if authority is None:
             raise HTTPException(status_code=404, detail="Authority not found")
         authority_id = authority.id
@@ -15983,9 +18198,14 @@ def taxonomy_add_alias(
 
 
 @app.post("/taxonomy/review/merge_concepts", response_model=dict)
-def taxonomy_merge_concepts(payload: TaxonomyMergeRequest, db: Session = Depends(get_db)):
+def taxonomy_merge_concepts(
+    payload: TaxonomyMergeRequest, db: Session = Depends(get_db)
+):
     if payload.source_concept_id == payload.target_concept_id:
-        raise HTTPException(status_code=400, detail="source_concept_id and target_concept_id must differ")
+        raise HTTPException(
+            status_code=400,
+            detail="source_concept_id and target_concept_id must differ",
+        )
 
     source = db.query(Concept).filter(Concept.id == payload.source_concept_id).first()
     if source is None:
@@ -16000,14 +18220,18 @@ def taxonomy_merge_concepts(payload: TaxonomyMergeRequest, db: Session = Depends
     moved_aliases = 0
 
     terms = db.query(AuthorityTerm).filter(AuthorityTerm.concept_id == source.id).all()
-    observations = db.query(ImageConceptObservation).filter(ImageConceptObservation.concept_id == source.id).all()
-    source_aliases = db.query(ConceptAlias).filter(ConceptAlias.concept_id == source.id).all()
+    observations = (
+        db.query(ImageConceptObservation)
+        .filter(ImageConceptObservation.concept_id == source.id)
+        .all()
+    )
+    source_aliases = (
+        db.query(ConceptAlias).filter(ConceptAlias.concept_id == source.id).all()
+    )
 
     if payload.dry_run:
         target_aliases = (
-            db.query(ConceptAlias)
-            .filter(ConceptAlias.concept_id == target.id)
-            .all()
+            db.query(ConceptAlias).filter(ConceptAlias.concept_id == target.id).all()
         )
         target_alias_set = {
             (_normalize_taxonomy_text(a.normalized_alias or a.alias or ""))
@@ -16017,13 +18241,17 @@ def taxonomy_merge_concepts(payload: TaxonomyMergeRequest, db: Session = Depends
         mergeable_aliases = 0
         duplicate_aliases = 0
         for alias in source_aliases:
-            normalized_alias = _normalize_taxonomy_text(alias.normalized_alias or alias.alias or "")
+            normalized_alias = _normalize_taxonomy_text(
+                alias.normalized_alias or alias.alias or ""
+            )
             if normalized_alias in target_alias_set:
                 duplicate_aliases += 1
             else:
                 mergeable_aliases += 1
 
-        source_name_alias_conflict = _normalize_taxonomy_text(source.canonical_name) in target_alias_set
+        source_name_alias_conflict = (
+            _normalize_taxonomy_text(source.canonical_name) in target_alias_set
+        )
         projected_moved_aliases = mergeable_aliases
         if payload.create_source_alias and not source_name_alias_conflict:
             projected_moved_aliases += 1
@@ -16040,7 +18268,9 @@ def taxonomy_merge_concepts(payload: TaxonomyMergeRequest, db: Session = Depends
             "would_move_aliases": projected_moved_aliases,
             "would_drop_duplicate_aliases": duplicate_aliases,
             "would_deactivate_source": payload.deactivate_source,
-            "source_status_after": "merged" if payload.deactivate_source else source.status,
+            "source_status_after": (
+                "merged" if payload.deactivate_source else source.status
+            ),
         }
     for term in terms:
         term.concept_id = target.id
@@ -16053,7 +18283,9 @@ def taxonomy_merge_concepts(payload: TaxonomyMergeRequest, db: Session = Depends
         moved_observations += 1
 
     for alias in source_aliases:
-        normalized_alias = alias.normalized_alias or _normalize_taxonomy_text(alias.alias)
+        normalized_alias = alias.normalized_alias or _normalize_taxonomy_text(
+            alias.alias
+        )
         existing_target_alias = (
             db.query(ConceptAlias)
             .filter(
@@ -16111,7 +18343,9 @@ def taxonomy_merge_concepts(payload: TaxonomyMergeRequest, db: Session = Depends
 
 
 @app.post("/taxonomy/bootstrap/import", response_model=dict)
-def taxonomy_bootstrap_import(payload: TaxonomyBootstrapImportRequest, db: Session = Depends(get_db)):
+def taxonomy_bootstrap_import(
+    payload: TaxonomyBootstrapImportRequest, db: Session = Depends(get_db)
+):
     rows = _parse_bootstrap_terms(payload.format, payload.raw_text)
 
     return _execute_taxonomy_bootstrap_import(
@@ -16154,12 +18388,16 @@ async def taxonomy_bootstrap_import_file(
 
 
 @app.post("/taxonomy/concepts", response_model=dict)
-def taxonomy_create_concept(payload: TaxonomyConceptCreateRequest, db: Session = Depends(get_db)):
+def taxonomy_create_concept(
+    payload: TaxonomyConceptCreateRequest, db: Session = Depends(get_db)
+):
     canonical_name = _normalize_taxonomy_text(payload.canonical_name)
     if not canonical_name:
         raise HTTPException(status_code=400, detail="canonical_name is required")
 
-    existing = db.query(Concept).filter(Concept.canonical_name == canonical_name).first()
+    existing = (
+        db.query(Concept).filter(Concept.canonical_name == canonical_name).first()
+    )
     if existing is not None:
         return {
             "message": "Concept already exists.",
@@ -16173,7 +18411,9 @@ def taxonomy_create_concept(payload: TaxonomyConceptCreateRequest, db: Session =
         }
 
     if payload.parent_concept_id is not None:
-        parent = db.query(Concept).filter(Concept.id == payload.parent_concept_id).first()
+        parent = (
+            db.query(Concept).filter(Concept.id == payload.parent_concept_id).first()
+        )
         if parent is None:
             raise HTTPException(status_code=404, detail="Parent concept not found")
 
@@ -16189,7 +18429,9 @@ def taxonomy_create_concept(payload: TaxonomyConceptCreateRequest, db: Session =
     )
     db.add(concept)
     db.flush()
-    _ensure_alias_for_concept(db, concept_id=concept.id, alias_text=canonical_name, alias_type="canonical")
+    _ensure_alias_for_concept(
+        db, concept_id=concept.id, alias_text=canonical_name, alias_type="canonical"
+    )
     db.commit()
     db.refresh(concept)
 
@@ -16223,8 +18465,12 @@ def taxonomy_update_parent(
         parent = db.query(Concept).filter(Concept.id == new_parent_id).first()
         if parent is None:
             raise HTTPException(status_code=404, detail="Parent concept not found")
-        if _is_descendant(db, ancestor_id=concept.id, candidate_descendant_id=new_parent_id):
-            raise HTTPException(status_code=400, detail="Parent assignment would create a cycle")
+        if _is_descendant(
+            db, ancestor_id=concept.id, candidate_descendant_id=new_parent_id
+        ):
+            raise HTTPException(
+                status_code=400, detail="Parent assignment would create a cycle"
+            )
 
     if payload.dry_run:
         return {
@@ -16261,9 +18507,7 @@ def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db
             continue
         branch_ids.add(current)
         children = (
-            db.query(Concept.id)
-            .filter(Concept.parent_concept_id == current)
-            .all()
+            db.query(Concept.id).filter(Concept.parent_concept_id == current).all()
         )
         to_visit.extend(int(row.id) for row in children)
 
@@ -16271,11 +18515,15 @@ def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db
         {AuthorityTerm.concept_id: None, AuthorityTerm.updated_at: datetime.utcnow()},
         synchronize_session=False,
     )
-    db.query(ImageConceptObservation).filter(ImageConceptObservation.concept_id.in_(branch_ids)).delete(
+    db.query(ImageConceptObservation).filter(
+        ImageConceptObservation.concept_id.in_(branch_ids)
+    ).delete(synchronize_session=False)
+    db.query(ConceptAlias).filter(ConceptAlias.concept_id.in_(branch_ids)).delete(
         synchronize_session=False
     )
-    db.query(ConceptAlias).filter(ConceptAlias.concept_id.in_(branch_ids)).delete(synchronize_session=False)
-    db.query(Concept).filter(Concept.id.in_(branch_ids)).delete(synchronize_session=False)
+    db.query(Concept).filter(Concept.id.in_(branch_ids)).delete(
+        synchronize_session=False
+    )
     db.commit()
 
     return {
@@ -16285,7 +18533,9 @@ def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db
 
 
 @app.post("/taxonomy/utils/purge_root_concepts", response_model=dict)
-def taxonomy_purge_root_concepts(payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)):
+def taxonomy_purge_root_concepts(
+    payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)
+):
     roots = (
         db.query(Concept.id, Concept.canonical_name)
         .filter(Concept.parent_concept_id.is_(None))
@@ -16312,7 +18562,9 @@ def taxonomy_purge_root_concepts(payload: TaxonomyPurgeRootsRequest, db: Session
         if current in branch_ids:
             continue
         branch_ids.add(current)
-        children = db.query(Concept.id).filter(Concept.parent_concept_id == current).all()
+        children = (
+            db.query(Concept.id).filter(Concept.parent_concept_id == current).all()
+        )
         to_visit.extend(int(row.id) for row in children)
 
     branch_id_list = sorted(branch_ids)
@@ -16337,7 +18589,11 @@ def taxonomy_purge_root_concepts(payload: TaxonomyPurgeRootsRequest, db: Session
     )
 
     response = {
-        "message": "Dry-run purge preview." if payload.dry_run else "Root concept branches purged.",
+        "message": (
+            "Dry-run purge preview."
+            if payload.dry_run
+            else "Root concept branches purged."
+        ),
         "dry_run": payload.dry_run,
         "root_concept_count": len(root_ids),
         "affected_concept_count": len(branch_id_list),
@@ -16364,7 +18620,9 @@ def taxonomy_purge_root_concepts(payload: TaxonomyPurgeRootsRequest, db: Session
     db.query(ConceptAlias).filter(ConceptAlias.concept_id.in_(branch_id_list)).delete(
         synchronize_session=False
     )
-    db.query(Concept).filter(Concept.id.in_(branch_id_list)).delete(synchronize_session=False)
+    db.query(Concept).filter(Concept.id.in_(branch_id_list)).delete(
+        synchronize_session=False
+    )
     db.commit()
 
     return response
@@ -16388,7 +18646,9 @@ def taxonomy_tree(status: str = "active", db: Session = Depends(get_db)):
                 "status": concept.status,
                 "parent_concept_id": concept.parent_concept_id,
                 "source_labels": source_map.get(int(concept.id), []),
-                "display_prefix": _concept_display_prefix(source_map.get(int(concept.id), [])),
+                "display_prefix": _concept_display_prefix(
+                    source_map.get(int(concept.id), [])
+                ),
             }
         )
 
@@ -16413,7 +18673,10 @@ def taxonomy_tree_state(
 ):
     cache_key = _build_search_cache_key(
         "taxonomy_tree_state",
-        payload={"include_tag_details": bool(include_tag_details), "include_tags": bool(include_tags)},
+        payload={
+            "include_tag_details": bool(include_tag_details),
+            "include_tags": bool(include_tags),
+        },
     )
     cache_headers = _build_json_cache_headers(cache_key, max_age_seconds=30)
     for header_name, header_value in cache_headers.items():
@@ -16426,10 +18689,11 @@ def taxonomy_tree_state(
         return cached_state
 
     gallery_tag_names_by_source = _gallery_tag_names_by_source_from_observations(db)
-    gallery_tag_usage_counts_by_source = _gallery_tag_usage_counts_by_source_from_observations(db)
+    gallery_tag_usage_counts_by_source = (
+        _gallery_tag_usage_counts_by_source_from_observations(db)
+    )
     gallery_tag_name_sets_by_source = {
-        source: set(names)
-        for source, names in gallery_tag_names_by_source.items()
+        source: set(names) for source, names in gallery_tag_names_by_source.items()
     }
     concepts = (
         db.query(Concept)
@@ -16440,8 +18704,7 @@ def taxonomy_tree_state(
     concept_ids = [int(c.id) for c in concepts]
 
     alias_data_by_concept: dict[int, dict[str, list[str]]] = {
-        cid: {"aliases": [], "implies": []}
-        for cid in concept_ids
+        cid: {"aliases": [], "implies": []} for cid in concept_ids
     }
     if include_tag_details and concept_ids:
         aliases = (
@@ -16455,7 +18718,9 @@ def taxonomy_tree_state(
             if not alias_text:
                 continue
             concept_id = int(alias.concept_id)
-            bucket = alias_data_by_concept.setdefault(concept_id, {"aliases": [], "implies": []})
+            bucket = alias_data_by_concept.setdefault(
+                concept_id, {"aliases": [], "implies": []}
+            )
             alias_kind = str(alias.alias_type or "synonym").strip().lower()
 
             if alias_kind == "canonical":
@@ -16490,10 +18755,14 @@ def taxonomy_tree_state(
     normalized_term_names: set[str] = set()
     referenced_concept_ids: set[int] = set()
     for term, authority, concept in term_rows:
-        taxonomy_normalized_term_name = _normalize_taxonomy_text(term.external_name or "")
+        taxonomy_normalized_term_name = _normalize_taxonomy_text(
+            term.external_name or ""
+        )
         if taxonomy_normalized_term_name:
             normalized_term_names.add(taxonomy_normalized_term_name)
-        gallery_normalized_term_name = _normalize_gallery_tag_text(term.external_name or "")
+        gallery_normalized_term_name = _normalize_gallery_tag_text(
+            term.external_name or ""
+        )
 
         source_name = str(authority.name or "user").strip().lower()
         if source_name not in {"civitai", "danbooru", "prompt", "user"}:
@@ -16511,14 +18780,20 @@ def taxonomy_tree_state(
         metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
         examples = []
         if include_tag_details:
-            raw_examples = metadata.get("examples") if isinstance(metadata, dict) else []
+            raw_examples = (
+                metadata.get("examples") if isinstance(metadata, dict) else []
+            )
             if isinstance(raw_examples, list):
                 examples = [str(item) for item in raw_examples if str(item).strip()]
         post_count = None
         if source_name in {"danbooru", "civitai"}:
-            raw_post_count = metadata.get("post_count") if isinstance(metadata, dict) else None
+            raw_post_count = (
+                metadata.get("post_count") if isinstance(metadata, dict) else None
+            )
             try:
-                parsed_post_count = int(raw_post_count) if raw_post_count is not None else None
+                parsed_post_count = (
+                    int(raw_post_count) if raw_post_count is not None else None
+                )
             except (TypeError, ValueError):
                 parsed_post_count = None
             if parsed_post_count is not None and parsed_post_count > 0:
@@ -16528,7 +18803,11 @@ def taxonomy_tree_state(
         mapped_danbooru_name = None
         external_tag_id = term.external_tag_id
         if source_name == "prompt":
-            raw_mapped_danbooru_tag_id = metadata.get("mapped_danbooru_tag_id") if isinstance(metadata, dict) else None
+            raw_mapped_danbooru_tag_id = (
+                metadata.get("mapped_danbooru_tag_id")
+                if isinstance(metadata, dict)
+                else None
+            )
             if raw_mapped_danbooru_tag_id not in (None, ""):
                 try:
                     mapped_danbooru_tag_id = int(raw_mapped_danbooru_tag_id)
@@ -16539,7 +18818,9 @@ def taxonomy_tree_state(
                 mapped_danbooru_tag_id = external_tag_id
 
             if mapped_danbooru_tag_id:
-                mapped_danbooru_name = danbooru_name_by_external_tag_id.get(mapped_danbooru_tag_id)
+                mapped_danbooru_name = danbooru_name_by_external_tag_id.get(
+                    mapped_danbooru_tag_id
+                )
 
         tag_payload = {
             "id": f"term:{term.id}",
@@ -16549,7 +18830,8 @@ def taxonomy_tree_state(
             "source": source_name,
             "scope": (
                 "gallery"
-                if gallery_normalized_term_name and gallery_normalized_term_name in gallery_scope_names
+                if gallery_normalized_term_name
+                and gallery_normalized_term_name in gallery_scope_names
                 else "image"
             ),
             "post_count": post_count,
@@ -16571,16 +18853,20 @@ def taxonomy_tree_state(
         tags.append(tag_payload)
 
     child_parent_ids: set[int] = {
-        int(c.parent_concept_id)
-        for c in concepts
-        if c.parent_concept_id is not None
+        int(c.parent_concept_id) for c in concepts if c.parent_concept_id is not None
     }
 
     filtered_concepts: list[Concept] = []
     for concept in concepts:
         concept_id = int(concept.id)
-        alias_data = alias_data_by_concept.get(concept_id, {"aliases": [], "implies": []})
-        has_metadata = bool((concept.description or "").strip()) or bool(alias_data.get("aliases")) or bool(alias_data.get("implies"))
+        alias_data = alias_data_by_concept.get(
+            concept_id, {"aliases": [], "implies": []}
+        )
+        has_metadata = (
+            bool((concept.description or "").strip())
+            or bool(alias_data.get("aliases"))
+            or bool(alias_data.get("implies"))
+        )
         canonical_normalized = _normalize_taxonomy_text(concept.canonical_name or "")
 
         is_empty_tag_stub = (
@@ -16599,7 +18885,11 @@ def taxonomy_tree_state(
             {
                 "id": int(c.id),
                 "canonical_name": c.canonical_name,
-                "parent_concept_id": int(c.parent_concept_id) if c.parent_concept_id is not None else None,
+                "parent_concept_id": (
+                    int(c.parent_concept_id)
+                    if c.parent_concept_id is not None
+                    else None
+                ),
             }
             for c in filtered_concepts
         ],
@@ -16608,7 +18898,10 @@ def taxonomy_tree_state(
         "tag_usage_by_scope": {
             "gallery": gallery_tag_usage_counts_by_source,
             "selected": {source: {} for source in gallery_tag_usage_counts_by_source},
-            "all": {source: dict(counts) for source, counts in gallery_tag_usage_counts_by_source.items()},
+            "all": {
+                source: dict(counts)
+                for source, counts in gallery_tag_usage_counts_by_source.items()
+            },
         },
     }
     _search_cache_put(cache_key, payload, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
@@ -16616,7 +18909,16 @@ def taxonomy_tree_state(
 
 
 # Columnar tag columns for the per-source tag endpoint.
-_TAG_SOURCE_COLS = ["id", "name", "ext_id", "scope", "post_count", "concept_id", "mdtag_id", "mdtag_name"]
+_TAG_SOURCE_COLS = [
+    "id",
+    "name",
+    "ext_id",
+    "scope",
+    "post_count",
+    "concept_id",
+    "mdtag_id",
+    "mdtag_name",
+]
 
 
 @app.get("/taxonomy/tree/tags/{source}", response_model=dict)
@@ -16631,7 +18933,9 @@ def taxonomy_tree_tags_for_source(
     if source_lower not in valid_sources:
         raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
 
-    cache_key = _build_search_cache_key("taxonomy_tags_for_source", payload={"source": source_lower})
+    cache_key = _build_search_cache_key(
+        "taxonomy_tags_for_source", payload={"source": source_lower}
+    )
     cache_headers = _build_json_cache_headers(cache_key, max_age_seconds=30)
     for header_name, header_value in cache_headers.items():
         response.headers[header_name] = header_value
@@ -16648,7 +18952,11 @@ def taxonomy_tree_tags_for_source(
     gallery_names_all = _search_cache_get(gallery_names_cache_key)
     if not isinstance(gallery_names_all, dict):
         gallery_names_all = _gallery_tag_names_by_source_from_observations(db)
-        _search_cache_put(gallery_names_cache_key, gallery_names_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+        _search_cache_put(
+            gallery_names_cache_key,
+            gallery_names_all,
+            ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+        )
     gallery_scope_names: set[str] = {
         _normalize_gallery_tag_text(n)
         for n in gallery_names_all.get(source_lower, [])
@@ -16673,7 +18981,11 @@ def taxonomy_tree_tags_for_source(
             for ext_id, ext_name in danbooru_term_rows:
                 if ext_id is not None and ext_name:
                     danbooru_name_by_ext_id[ext_id] = str(ext_name).strip()
-            _search_cache_put(danbooru_names_cache_key, danbooru_name_by_ext_id, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+            _search_cache_put(
+                danbooru_names_cache_key,
+                danbooru_name_by_ext_id,
+                ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+            )
     term_rows = (
         db.query(AuthorityTerm, Concept)
         .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
@@ -16686,7 +18998,11 @@ def taxonomy_tree_tags_for_source(
     rows: list[list] = []
     for term, concept in term_rows:
         gallery_norm = _normalize_gallery_tag_text(term.external_name or "")
-        scope = "gallery" if (gallery_norm and gallery_norm in gallery_scope_names) else "image"
+        scope = (
+            "gallery"
+            if (gallery_norm and gallery_norm in gallery_scope_names)
+            else "image"
+        )
 
         metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
 
@@ -16705,7 +19021,11 @@ def taxonomy_tree_tags_for_source(
         mdtag_id = None
         mdtag_name = None
         if source_lower == "prompt":
-            raw_mapped = metadata.get("mapped_danbooru_tag_id") if isinstance(metadata, dict) else None
+            raw_mapped = (
+                metadata.get("mapped_danbooru_tag_id")
+                if isinstance(metadata, dict)
+                else None
+            )
             if raw_mapped not in (None, ""):
                 try:
                     mdtag_id = int(raw_mapped)
@@ -16716,24 +19036,24 @@ def taxonomy_tree_tags_for_source(
             if mdtag_id:
                 mdtag_name = danbooru_name_by_ext_id.get(mdtag_id)
 
-        rows.append([
-            int(term.id),
-            term.external_name,
-            external_tag_id,
-            scope,
-            post_count,
-            int(concept.id) if concept else None,
-            mdtag_id,
-            mdtag_name,
-        ])
+        rows.append(
+            [
+                int(term.id),
+                term.external_name,
+                external_tag_id,
+                scope,
+                post_count,
+                int(concept.id) if concept else None,
+                mdtag_id,
+                mdtag_name,
+            ]
+        )
 
     # For the "user" source, also include user-assigned tags from the
     # ImageModel.user_tags column that are not already in authority_terms.
     if source_lower == "user":
         existing_user_term_names: set[str] = {
-            _normalize_gallery_tag_text(r[1])
-            for r in rows
-            if r[1]
+            _normalize_gallery_tag_text(r[1]) for r in rows if r[1]
         }
         user_tag_name_counts: dict[str, int] = {}
         user_tag_rows = (
@@ -16748,7 +19068,9 @@ def taxonomy_tree_tags_for_source(
             for tag_name in user_tags_col:
                 normalized = _normalize_gallery_tag_text(str(tag_name))
                 if normalized:
-                    user_tag_name_counts[normalized] = user_tag_name_counts.get(normalized, 0) + 1
+                    user_tag_name_counts[normalized] = (
+                        user_tag_name_counts.get(normalized, 0) + 1
+                    )
 
         # Reuse shared gallery usage counts if available, otherwise use
         # the aggregate just computed.
@@ -16756,25 +19078,33 @@ def taxonomy_tree_tags_for_source(
         usage_counts_all = _search_cache_get(usage_counts_cache_key)
         if not isinstance(usage_counts_all, dict):
             usage_counts_all = _gallery_tag_usage_counts_by_source_from_observations(db)
-            _search_cache_put(usage_counts_cache_key, usage_counts_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+            _search_cache_put(
+                usage_counts_cache_key,
+                usage_counts_all,
+                ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+            )
         user_usage_counts = usage_counts_all.get("user", {})
 
         _synthetic_user_id = -1
         for tag_name in sorted(user_tag_name_counts):
             if tag_name in existing_user_term_names:
                 continue
-            gallery_count = user_usage_counts.get(tag_name, user_tag_name_counts.get(tag_name, 0))
+            gallery_count = user_usage_counts.get(
+                tag_name, user_tag_name_counts.get(tag_name, 0)
+            )
             synthetic_scope = "gallery" if tag_name in gallery_scope_names else "image"
-            rows.append([
-                _synthetic_user_id,  # unique synthetic ID per tag
-                tag_name,
-                None,  # no external_tag_id
-                synthetic_scope,
-                gallery_count if gallery_count > 0 else None,
-                None,  # no concept
-                None,  # no mapped danbooru tag
-                None,
-            ])
+            rows.append(
+                [
+                    _synthetic_user_id,  # unique synthetic ID per tag
+                    tag_name,
+                    None,  # no external_tag_id
+                    synthetic_scope,
+                    gallery_count if gallery_count > 0 else None,
+                    None,  # no concept
+                    None,  # no mapped danbooru tag
+                    None,
+                ]
+            )
             _synthetic_user_id -= 1
 
     payload = {"source": source_lower, "cols": _TAG_SOURCE_COLS, "rows": rows}
@@ -16783,7 +19113,9 @@ def taxonomy_tree_tags_for_source(
 
 
 @app.post("/taxonomy/tree/associate", response_model=dict)
-def taxonomy_tree_associate_tag(payload: TaxonomyTagAssociationRequest, db: Session = Depends(get_db)):
+def taxonomy_tree_associate_tag(
+    payload: TaxonomyTagAssociationRequest, db: Session = Depends(get_db)
+):
     concept = db.query(Concept).filter(Concept.id == payload.concept_id).first()
     if concept is None:
         raise HTTPException(status_code=404, detail="Concept not found")
@@ -16796,10 +19128,14 @@ def taxonomy_tree_associate_tag(payload: TaxonomyTagAssociationRequest, db: Sess
         raw_name = (payload.tag_name or "").strip()
         source_name = (payload.tag_source or "user").strip().lower()
         if not raw_name:
-            raise HTTPException(status_code=400, detail="tag_name is required for synthetic tag IDs")
+            raise HTTPException(
+                status_code=400, detail="tag_name is required for synthetic tag IDs"
+            )
         normalized_name = _normalize_taxonomy_text(raw_name)
         if not normalized_name:
-            raise HTTPException(status_code=400, detail="tag_name is empty after normalization")
+            raise HTTPException(
+                status_code=400, detail="tag_name is empty after normalization"
+            )
 
         authority = _get_or_create_authority(db, source_name)
         term = (
@@ -16837,14 +19173,17 @@ def taxonomy_tree_associate_tag(payload: TaxonomyTagAssociationRequest, db: Sess
     db.commit()
 
     return {
-        "message": "Tag associated to concept." + (" Authority term created." if created_term else ""),
+        "message": "Tag associated to concept."
+        + (" Authority term created." if created_term else ""),
         "authority_term_id": int(term.id),
         "concept_id": int(concept.id),
     }
 
 
 @app.delete("/taxonomy/tree/associate/{authority_term_id}", response_model=dict)
-def taxonomy_tree_disassociate_tag(authority_term_id: int, db: Session = Depends(get_db)):
+def taxonomy_tree_disassociate_tag(
+    authority_term_id: int, db: Session = Depends(get_db)
+):
     term = db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
     if term is None:
         raise HTTPException(status_code=404, detail="Authority term not found")
@@ -16865,9 +19204,16 @@ def taxonomy_tree_delete_tag(authority_term_id: int, db: Session = Depends(get_d
     if term is None:
         raise HTTPException(status_code=404, detail="Authority term not found")
 
-    authority_name = str(term.authority.name or "").strip().lower() if term.authority is not None else ""
+    authority_name = (
+        str(term.authority.name or "").strip().lower()
+        if term.authority is not None
+        else ""
+    )
     if authority_name != "prompt":
-        raise HTTPException(status_code=409, detail="Only prompt tags can be deleted from tree edit mode")
+        raise HTTPException(
+            status_code=409,
+            detail="Only prompt tags can be deleted from tree edit mode",
+        )
 
     deleted_name = str(term.external_name or "").strip()
     db.delete(term)
@@ -16916,7 +19262,9 @@ def _normalize_example_list(values: list[str], authority_name: str) -> list[str]
     return normalized
 
 
-def _build_default_example_url(authority_name: str, external_name: str, metadata: dict[str, Any]) -> str:
+def _build_default_example_url(
+    authority_name: str, external_name: str, metadata: dict[str, Any]
+) -> str:
     normalized_authority = str(authority_name or "").strip().lower()
     name = str(external_name or "").strip()
     if not name:
@@ -16928,7 +19276,11 @@ def _build_default_example_url(authority_name: str, external_name: str, metadata
         return f"{web_base}/search/images?tags={encoded}&sortBy=images_v6"
 
     if normalized_authority == "danbooru":
-        wiki_url = str(metadata.get("wiki_url") or "").strip() if isinstance(metadata, dict) else ""
+        wiki_url = (
+            str(metadata.get("wiki_url") or "").strip()
+            if isinstance(metadata, dict)
+            else ""
+        )
         if wiki_url:
             return _normalize_danbooru_example_url(wiki_url)
         encoded = quote(name, safe="")
@@ -16948,7 +19300,9 @@ def _with_source_default_example_first(
     values: list[str],
 ) -> list[str]:
     normalized = _normalize_example_list(values, authority_name)
-    default_url = str(_build_default_example_url(authority_name, external_name, metadata) or "").strip()
+    default_url = str(
+        _build_default_example_url(authority_name, external_name, metadata) or ""
+    ).strip()
     if str(authority_name or "").strip().lower() == "danbooru":
         default_url = _normalize_danbooru_example_url(default_url)
     if not default_url:
@@ -16970,7 +19324,11 @@ def taxonomy_tree_tag_details(authority_term_id: int, db: Session = Depends(get_
     if term is None:
         raise HTTPException(status_code=404, detail="Authority term not found")
 
-    authority_name = str(term.authority.name or "").strip().lower() if term.authority is not None else ""
+    authority_name = (
+        str(term.authority.name or "").strip().lower()
+        if term.authority is not None
+        else ""
+    )
 
     aliases: list[str] = []
     implies: list[str] = []
@@ -16996,7 +19354,9 @@ def taxonomy_tree_tag_details(authority_term_id: int, db: Session = Depends(get_
 
     metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
     raw_examples = metadata.get("examples") if isinstance(metadata, dict) else []
-    examples = [str(item) for item in raw_examples] if isinstance(raw_examples, list) else []
+    examples = (
+        [str(item) for item in raw_examples] if isinstance(raw_examples, list) else []
+    )
 
     return {
         "authority_term_id": int(term.id),
@@ -17022,7 +19382,11 @@ def taxonomy_tree_update_tag_details(
     if term is None:
         raise HTTPException(status_code=404, detail="Authority term not found")
 
-    authority_name = str(term.authority.name or "").strip().lower() if term.authority is not None else ""
+    authority_name = (
+        str(term.authority.name or "").strip().lower()
+        if term.authority is not None
+        else ""
+    )
 
     need_concept = (
         payload.description is not None
@@ -17116,7 +19480,11 @@ def taxonomy_tag_maint_export(source: str, db: Session = Depends(get_db)):
     if source_lower not in _VALID_TAG_MAINT_SOURCES:
         raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
 
-    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
     if authority is None:
         return {"authority": source_lower, "terms": [], "total": 0}
 
@@ -17155,24 +19523,45 @@ def taxonomy_tag_maint_export(source: str, db: Session = Depends(get_db)):
 
 
 @app.post("/taxonomy/tag-maint/{source}/purge", response_model=dict)
-def taxonomy_tag_maint_purge(source: str, payload: TaxonomyTagMaintPurgeRequest, db: Session = Depends(get_db)):
+def taxonomy_tag_maint_purge(
+    source: str, payload: TaxonomyTagMaintPurgeRequest, db: Session = Depends(get_db)
+):
     """Purge all authority_terms for a source."""
     source_lower = (source or "").strip().lower()
     if source_lower not in _VALID_TAG_MAINT_SOURCES:
         raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
 
-    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
     if authority is None:
-        return {"message": "No authority found for source.", "source": source_lower, "deleted": 0, "dry_run": payload.dry_run}
+        return {
+            "message": "No authority found for source.",
+            "source": source_lower,
+            "deleted": 0,
+            "dry_run": payload.dry_run,
+        }
 
-    term_count = db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id).count()
+    term_count = (
+        db.query(AuthorityTerm)
+        .filter(AuthorityTerm.authority_id == authority.id)
+        .count()
+    )
 
     if not payload.dry_run:
-        db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id).delete(synchronize_session=False)
+        db.query(AuthorityTerm).filter(
+            AuthorityTerm.authority_id == authority.id
+        ).delete(synchronize_session=False)
         db.commit()
 
     return {
-        "message": "Dry-run purge preview." if payload.dry_run else "All authority terms purged.",
+        "message": (
+            "Dry-run purge preview."
+            if payload.dry_run
+            else "All authority terms purged."
+        ),
         "source": source_lower,
         "deleted": term_count,
         "dry_run": payload.dry_run,
@@ -17197,9 +19586,20 @@ def taxonomy_tag_maint_list(
     page = max(1, page)
     page_size = max(1, min(500, page_size))
 
-    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
     if authority is None:
-        return {"source": source_lower, "cols": _TAG_SOURCE_COLS, "rows": [], "total": 0, "page": page, "page_size": page_size}
+        return {
+            "source": source_lower,
+            "cols": _TAG_SOURCE_COLS,
+            "rows": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+        }
 
     q = db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id)
 
@@ -17220,14 +19620,20 @@ def taxonomy_tag_maint_list(
     else:
         sort_expr = sort_expr.asc()
 
-    term_rows = q.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size).all()
+    term_rows = (
+        q.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size).all()
+    )
 
     # Build gallery scope lookup
     gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
     gallery_names_all = _search_cache_get(gallery_names_cache_key)
     if not isinstance(gallery_names_all, dict):
         gallery_names_all = _gallery_tag_names_by_source_from_observations(db)
-        _search_cache_put(gallery_names_cache_key, gallery_names_all, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+        _search_cache_put(
+            gallery_names_cache_key,
+            gallery_names_all,
+            ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+        )
     gallery_scope_names: set[str] = {
         _normalize_gallery_tag_text(n)
         for n in gallery_names_all.get(source_lower, [])
@@ -17237,7 +19643,11 @@ def taxonomy_tag_maint_list(
     rows: list[list] = []
     for term in term_rows:
         gallery_norm = _normalize_gallery_tag_text(term.external_name or "")
-        scope = "gallery" if (gallery_norm and gallery_norm in gallery_scope_names) else "image"
+        scope = (
+            "gallery"
+            if (gallery_norm and gallery_norm in gallery_scope_names)
+            else "image"
+        )
 
         metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
         post_count = None
@@ -17255,16 +19665,18 @@ def taxonomy_tag_maint_list(
         mdtag_id = None
         mdtag_name = None
 
-        rows.append([
-            int(term.id),
-            term.external_name,
-            external_tag_id,
-            scope,
-            post_count,
-            int(term.concept_id) if term.concept_id else None,
-            mdtag_id,
-            mdtag_name,
-        ])
+        rows.append(
+            [
+                int(term.id),
+                term.external_name,
+                external_tag_id,
+                scope,
+                post_count,
+                int(term.concept_id) if term.concept_id else None,
+                mdtag_id,
+                mdtag_name,
+            ]
+        )
 
     return {
         "source": source_lower,
@@ -17277,20 +19689,30 @@ def taxonomy_tag_maint_list(
 
 
 @app.patch("/taxonomy/tag-maint/{source}/update", response_model=dict)
-def taxonomy_tag_maint_update(source: str, payload: TaxonomyTagMaintUpdateRequest, db: Session = Depends(get_db)):
+def taxonomy_tag_maint_update(
+    source: str, payload: TaxonomyTagMaintUpdateRequest, db: Session = Depends(get_db)
+):
     """Inline cell edit for a single authority_term field."""
     source_lower = (source or "").strip().lower()
     if source_lower not in _VALID_TAG_MAINT_SOURCES:
         raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
 
-    term = db.query(AuthorityTerm).filter(AuthorityTerm.id == payload.authority_term_id).first()
+    term = (
+        db.query(AuthorityTerm)
+        .filter(AuthorityTerm.id == payload.authority_term_id)
+        .first()
+    )
     if term is None:
         raise HTTPException(status_code=404, detail="Authority term not found")
 
     # Verify the term belongs to the requested source
-    authority = db.query(TagAuthority).filter(TagAuthority.id == term.authority_id).first()
+    authority = (
+        db.query(TagAuthority).filter(TagAuthority.id == term.authority_id).first()
+    )
     if authority is None or authority.name.strip().lower() != source_lower:
-        raise HTTPException(status_code=409, detail="Authority term does not belong to this source")
+        raise HTTPException(
+            status_code=409, detail="Authority term does not belong to this source"
+        )
 
     if payload.field == "external_name":
         new_name = str(payload.value or "").strip()
@@ -17303,7 +19725,9 @@ def taxonomy_tag_maint_update(source: str, payload: TaxonomyTagMaintUpdateReques
             try:
                 term.external_tag_id = int(payload.value)
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="external_tag_id must be an integer")
+                raise HTTPException(
+                    status_code=400, detail="external_tag_id must be an integer"
+                )
         else:
             term.external_tag_id = None
     elif payload.field == "concept_id":
@@ -17330,7 +19754,11 @@ def taxonomy_tag_maint_update(source: str, payload: TaxonomyTagMaintUpdateReques
 
 
 @app.post("/taxonomy/tag-maint/{source}/bulk-delete", response_model=dict)
-def taxonomy_tag_maint_bulk_delete(source: str, payload: TaxonomyTagMaintBulkDeleteRequest, db: Session = Depends(get_db)):
+def taxonomy_tag_maint_bulk_delete(
+    source: str,
+    payload: TaxonomyTagMaintBulkDeleteRequest,
+    db: Session = Depends(get_db),
+):
     """Delete multiple authority_terms by ID."""
     source_lower = (source or "").strip().lower()
     if source_lower not in _VALID_TAG_MAINT_SOURCES:
@@ -17339,9 +19767,17 @@ def taxonomy_tag_maint_bulk_delete(source: str, payload: TaxonomyTagMaintBulkDel
     if not payload.authority_term_ids:
         return {"message": "No IDs provided.", "deleted": 0, "dry_run": payload.dry_run}
 
-    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == source_lower).first()
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
     if authority is None:
-        return {"message": "Authority not found.", "deleted": 0, "dry_run": payload.dry_run}
+        return {
+            "message": "Authority not found.",
+            "deleted": 0,
+            "dry_run": payload.dry_run,
+        }
 
     terms = (
         db.query(AuthorityTerm)
@@ -17359,7 +19795,9 @@ def taxonomy_tag_maint_bulk_delete(source: str, payload: TaxonomyTagMaintBulkDel
         db.commit()
 
     return {
-        "message": "Dry-run bulk delete preview." if payload.dry_run else "Tags deleted.",
+        "message": (
+            "Dry-run bulk delete preview." if payload.dry_run else "Tags deleted."
+        ),
         "source": source_lower,
         "deleted": deleted_count,
         "dry_run": payload.dry_run,
@@ -17383,7 +19821,11 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
         raise HTTPException(status_code=500, detail="Image library path not found.")
 
     # Snapshot how many terms are currently missing IDs
-    authority = db.query(TagAuthority).filter(func.lower(TagAuthority.name) == "civitai").first()
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == "civitai")
+        .first()
+    )
     if authority is None:
         return {"message": "No CivitAI authority exists yet.", "resolved": 0}
 
@@ -17426,10 +19868,7 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
             continue
 
         # Only process if at least one tag has a numeric ID
-        has_ids = any(
-            isinstance(t, dict) and t.get("id") is not None
-            for t in tags
-        )
+        has_ids = any(isinstance(t, dict) and t.get("id") is not None for t in tags)
         if not has_ids:
             continue
 
@@ -17447,13 +19886,17 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
         db.commit()
 
     missing_after = (
-        db.query(AuthorityTerm)
-        .filter(
-            AuthorityTerm.authority_id == authority.id,
-            AuthorityTerm.external_tag_id.is_(None),
+        (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority.id,
+                AuthorityTerm.external_tag_id.is_(None),
+            )
+            .count()
         )
-        .count()
-    ) if not dry_run else missing_before
+        if not dry_run
+        else missing_before
+    )
 
     return {
         "dry_run": dry_run,

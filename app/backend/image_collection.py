@@ -79,7 +79,9 @@ class ImageCollection:
 
     def _get_or_create_authority(self, name: str, *, is_external: bool) -> TagAuthority:
         normalized = self._normalize_text(name)
-        existing = self.db.query(TagAuthority).filter(TagAuthority.name == normalized).first()
+        existing = (
+            self.db.query(TagAuthority).filter(TagAuthority.name == normalized).first()
+        )
         if existing is not None:
             return existing
 
@@ -93,7 +95,13 @@ class ImageCollection:
                 "base_url": "https://danbooru.donmai.us",
             },
         }
-        config = defaults.get(normalized, {"description": f"Auto-created authority '{normalized}'.", "base_url": None})
+        config = defaults.get(
+            normalized,
+            {
+                "description": f"Auto-created authority '{normalized}'.",
+                "base_url": None,
+            },
+        )
 
         authority = TagAuthority(
             name=normalized,
@@ -136,7 +144,8 @@ class ImageCollection:
                     self.db.query(AuthorityTerm)
                     .filter(
                         AuthorityTerm.authority_id == authority_id,
-                        AuthorityTerm.normalized_external_name == normalized_external_name,
+                        AuthorityTerm.normalized_external_name
+                        == normalized_external_name,
                         AuthorityTerm.id != by_id.id,
                     )
                     .first()
@@ -146,15 +155,25 @@ class ImageCollection:
                     # UNIQUE constraint conflicts on (authority_id, external_tag_id).
                     self.db.query(ImageConceptObservation).filter(
                         ImageConceptObservation.authority_term_id == by_id.id
-                    ).update({"authority_term_id": collision.id}, synchronize_session="fetch")
+                    ).update(
+                        {"authority_term_id": collision.id}, synchronize_session="fetch"
+                    )
                     self.db.delete(by_id)
                     self.db.flush()
                     # Now safe to adopt the external_tag_id and update the surviving row.
                     if not collision.external_tag_id and external_tag_id is not None:
                         collision.external_tag_id = external_tag_id
                     collision.external_name = str(external_name)
-                    existing_meta = collision.metadata_json if isinstance(collision.metadata_json, dict) else {}
-                    collision.metadata_json = {**existing_meta, **(metadata or {})} if metadata else existing_meta
+                    existing_meta = (
+                        collision.metadata_json
+                        if isinstance(collision.metadata_json, dict)
+                        else {}
+                    )
+                    collision.metadata_json = (
+                        {**existing_meta, **(metadata or {})}
+                        if metadata
+                        else existing_meta
+                    )
                     collision.last_seen_at = now
                     collision.updated_at = now
                     self.db.flush()
@@ -164,8 +183,12 @@ class ImageCollection:
             row = by_id
             row.external_name = str(external_name)
             row.normalized_external_name = normalized_external_name
-            existing_meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
-            row.metadata_json = {**existing_meta, **(metadata or {})} if metadata else existing_meta
+            existing_meta = (
+                row.metadata_json if isinstance(row.metadata_json, dict) else {}
+            )
+            row.metadata_json = (
+                {**existing_meta, **(metadata or {})} if metadata else existing_meta
+            )
             row.last_seen_at = now
             row.updated_at = now
             return False
@@ -203,8 +226,12 @@ class ImageCollection:
                 else:
                     row.external_tag_id = external_tag_id
             row.external_name = str(external_name)
-            existing_meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
-            row.metadata_json = {**existing_meta, **(metadata or {})} if metadata else existing_meta
+            existing_meta = (
+                row.metadata_json if isinstance(row.metadata_json, dict) else {}
+            )
+            row.metadata_json = (
+                {**existing_meta, **(metadata or {})} if metadata else existing_meta
+            )
             row.last_seen_at = now
             row.updated_at = now
             return False
@@ -251,12 +278,16 @@ class ImageCollection:
         )
         prompt_record_by_name: dict[str, dict[str, Any]] = {}
         for record in prompt_records:
-            normalized_name = normalize_prompt_tag_name(str(record.get("normalized_name") or record.get("name") or ""))
+            normalized_name = normalize_prompt_tag_name(
+                str(record.get("normalized_name") or record.get("name") or "")
+            )
             if normalized_name:
                 prompt_record_by_name[normalized_name] = record
         danbooru_record_by_name: dict[str, dict[str, Any]] = {}
         for record in danbooru_records:
-            normalized_name = normalize_prompt_tag_name(str(record.get("normalized_name") or record.get("name") or ""))
+            normalized_name = normalize_prompt_tag_name(
+                str(record.get("normalized_name") or record.get("name") or "")
+            )
             if normalized_name:
                 danbooru_record_by_name[normalized_name] = record
 
@@ -275,7 +306,9 @@ class ImageCollection:
             record = prompt_record_by_name.get(normalized_name) or {}
             raw_tag_id = record.get("danbooru_tag_id")
             try:
-                external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                external_tag_id = (
+                    int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                )
             except (TypeError, ValueError):
                 external_tag_id = None
             metadata = {
@@ -300,7 +333,9 @@ class ImageCollection:
             record = danbooru_record_by_name.get(normalized_name) or {}
             raw_tag_id = record.get("danbooru_tag_id")
             try:
-                external_tag_id = int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                external_tag_id = (
+                    int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                )
             except (TypeError, ValueError):
                 external_tag_id = None
             metadata = {
@@ -400,7 +435,9 @@ class ImageCollection:
                 merged[normalized_name] = record
                 continue
 
-            if existing.get("danbooru_term_id") in (None, "") and record.get("danbooru_term_id") not in (None, ""):
+            if existing.get("danbooru_term_id") in (None, "") and record.get(
+                "danbooru_term_id"
+            ) not in (None, ""):
                 existing["danbooru_term_id"] = record.get("danbooru_term_id")
 
         return list(merged.values())
@@ -435,8 +472,13 @@ class ImageCollection:
                     "name": name,
                     "normalized_name": normalized,
                     "source": "danbooru",
-                    "source_label": record.get("source_label") or "rescan:prompt_mapping",
-                    "confidence": record.get("confidence") if isinstance(record.get("confidence"), (int, float)) else 1.0,
+                    "source_label": record.get("source_label")
+                    or "rescan:prompt_mapping",
+                    "confidence": (
+                        record.get("confidence")
+                        if isinstance(record.get("confidence"), (int, float))
+                        else 1.0
+                    ),
                     "danbooru_tag_id": str(record.get("danbooru_tag_id")),
                     "danbooru_term_id": danbooru_term_id,
                 }
@@ -463,7 +505,9 @@ class ImageCollection:
         return None
 
     @staticmethod
-    def _normalize_expected_filename(candidate_name: Optional[str], fallback_ext: str) -> Optional[str]:
+    def _normalize_expected_filename(
+        candidate_name: Optional[str], fallback_ext: str
+    ) -> Optional[str]:
         """Build a safe filename preserving extension when missing."""
         return sanitize_display_filename(candidate_name, fallback_ext=fallback_ext)
 
@@ -479,7 +523,9 @@ class ImageCollection:
             return
 
         fallback_ext = image_path.suffix or (processor.extension or "")
-        normalized_current = self._normalize_expected_filename(current_name, fallback_ext)
+        normalized_current = self._normalize_expected_filename(
+            current_name, fallback_ext
+        )
         if normalized_current and normalized_current != current_name.strip():
             self.results["filename_backfill_attempts"] += 1
             try:
@@ -546,8 +592,6 @@ class ImageCollection:
             return {}
 
         try:
-            import json
-
             with open(sidecar_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
             return loaded if isinstance(loaded, dict) else {}
@@ -588,7 +632,10 @@ class ImageCollection:
 
         def has_generation_fields(exif_dict: dict[str, Any]) -> bool:
             lower_keys = {str(k).strip().lower() for k in exif_dict.keys()}
-            return any(k in lower_keys for k in {"parameters", "comment", "comments", "usercomment"})
+            return any(
+                k in lower_keys
+                for k in {"parameters", "comment", "comments", "usercomment"}
+            )
 
         # Treat absent/empty exif as missing so the file is normalized once.
         exif_present = sidecar_exif not in (None, {}, [])
@@ -598,7 +645,9 @@ class ImageCollection:
         self.results["exif_backfill_attempts"] += 1
 
         try:
-            exif_data = processor.exif_data if isinstance(processor.exif_data, dict) else {}
+            exif_data = (
+                processor.exif_data if isinstance(processor.exif_data, dict) else {}
+            )
 
             self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
                 {ImageModel.exif_data: exif_data},
@@ -644,7 +693,9 @@ class ImageCollection:
 
         blurhash_payload = payload.get("blurhash")
         imagehash_payload = payload.get("imagehash")
-        blurhash_ok = isinstance(blurhash_payload, dict) and bool(str(blurhash_payload.get("4x4") or "").strip())
+        blurhash_ok = isinstance(blurhash_payload, dict) and bool(
+            str(blurhash_payload.get("4x4") or "").strip()
+        )
 
         if not isinstance(imagehash_payload, dict):
             return False
@@ -653,7 +704,10 @@ class ImageCollection:
         imagehash_ok = True
         for algorithm in required_algorithms:
             algorithm_payload = imagehash_payload.get(algorithm)
-            if not isinstance(algorithm_payload, dict) or not str(algorithm_payload.get("8x8") or "").strip():
+            if (
+                not isinstance(algorithm_payload, dict)
+                or not str(algorithm_payload.get("8x8") or "").strip()
+            ):
                 imagehash_ok = False
                 break
 
@@ -673,7 +727,10 @@ class ImageCollection:
         width, height = analysis_image.size
         flat_pixels = list(analysis_image.getdata())
         pixel_rows = [
-            [tuple(pixel) for pixel in flat_pixels[row_index * width : (row_index + 1) * width]]
+            [
+                tuple(pixel)
+                for pixel in flat_pixels[row_index * width : (row_index + 1) * width]
+            ]
             for row_index in range(height)
         ]
 
@@ -707,9 +764,15 @@ class ImageCollection:
 
             if imagehash is not None:
                 payload["imagehash"] = {
-                    "phash": {"8x8": str(imagehash.phash(normalized_image, hash_size=8))},
-                    "dhash": {"8x8": str(imagehash.dhash(normalized_image, hash_size=8))},
-                    "whash": {"8x8": str(imagehash.whash(normalized_image, hash_size=8))},
+                    "phash": {
+                        "8x8": str(imagehash.phash(normalized_image, hash_size=8))
+                    },
+                    "dhash": {
+                        "8x8": str(imagehash.dhash(normalized_image, hash_size=8))
+                    },
+                    "whash": {
+                        "8x8": str(imagehash.whash(normalized_image, hash_size=8))
+                    },
                 }
 
             return payload
@@ -730,7 +793,9 @@ class ImageCollection:
             else {}
         )
 
-        if self._local_perceptual_metadata_present(sidecar_data) and self._local_perceptual_metadata_present(existing_json_metadata):
+        if self._local_perceptual_metadata_present(
+            sidecar_data
+        ) and self._local_perceptual_metadata_present(existing_json_metadata):
             return
 
         try:
@@ -909,7 +974,10 @@ class ImageCollection:
     ) -> List[dict[str, Any]]:
         """Copy prompt tag records and attach any exact Danbooru mappings."""
         mappings = self._lookup_danbooru_prompt_tag_mappings(
-            [str(record.get("normalized_name") or record.get("name") or "") for record in records]
+            [
+                str(record.get("normalized_name") or record.get("name") or "")
+                for record in records
+            ]
         )
         if not mappings:
             return [dict(record) for record in records]
@@ -966,11 +1034,14 @@ class ImageCollection:
                 if not prompt_text:
                     continue
 
-                prompt_role = str(getattr(prompt, "prompt_role", "positive") or "positive").strip().lower() or "positive"
-                source_type = getattr(prompt, "source_type", None)
-                source_label = (
-                    f"generation_prompt:process={getattr(process, 'id', 'na')}:prompt={getattr(prompt, 'id', 'na')}"
+                prompt_role = (
+                    str(getattr(prompt, "prompt_role", "positive") or "positive")
+                    .strip()
+                    .lower()
+                    or "positive"
                 )
+                source_type = getattr(prompt, "source_type", None)
+                source_label = f"generation_prompt:process={getattr(process, 'id', 'na')}:prompt={getattr(prompt, 'id', 'na')}"
                 analysis = self._build_prompt_analysis(
                     prompt_text,
                     prompt_role=prompt_role,
@@ -1028,14 +1099,21 @@ class ImageCollection:
                 class_type = str(node.get("class_type") or "").strip().lower()
                 meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
                 title = str(meta.get("title") or "").strip().lower()
-                inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+                inputs = (
+                    node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+                )
 
                 text_input = inputs.get("text")
                 if isinstance(text_input, str) and text_input.strip():
                     if "cliptextencode" in class_type:
                         if "negative" not in title:
                             add_candidate(text_input)
-                    elif key_lower in {"prompt", "positive_prompt", "positiveprompt", "text_positive"}:
+                    elif key_lower in {
+                        "prompt",
+                        "positive_prompt",
+                        "positiveprompt",
+                        "text_positive",
+                    }:
                         add_candidate(text_input)
 
                 for child_key, child_value in node.items():
@@ -1048,7 +1126,12 @@ class ImageCollection:
                 return
 
             if isinstance(node, str):
-                if key_lower in {"prompt", "positive_prompt", "positiveprompt", "text_positive"}:
+                if key_lower in {
+                    "prompt",
+                    "positive_prompt",
+                    "positiveprompt",
+                    "text_positive",
+                }:
                     add_candidate(node)
 
         walk(payload)
@@ -1064,7 +1147,9 @@ class ImageCollection:
         if not cleaned:
             return ""
 
-        is_structured_payload, extracted_prompt = ImageCollection._extract_prompt_from_structured_payload(cleaned)
+        is_structured_payload, extracted_prompt = (
+            ImageCollection._extract_prompt_from_structured_payload(cleaned)
+        )
         if is_structured_payload:
             return extracted_prompt
 
@@ -1106,7 +1191,9 @@ class ImageCollection:
 
         for process in getattr(db_record, "generation_processes", []) or []:
             for prompt in getattr(process, "prompts", []) or []:
-                prompt_role = str(getattr(prompt, "prompt_role", "") or "").strip().lower()
+                prompt_role = (
+                    str(getattr(prompt, "prompt_role", "") or "").strip().lower()
+                )
                 if prompt_role and prompt_role != "positive":
                     continue
                 add_candidate(
@@ -1115,13 +1202,29 @@ class ImageCollection:
                 )
 
         exif_data = processor.exif_data if isinstance(processor.exif_data, dict) else {}
-        for key in ("Prompt", "prompt", "parameters", "UserComment", "comment", "comments"):
+        for key in (
+            "Prompt",
+            "prompt",
+            "parameters",
+            "UserComment",
+            "comment",
+            "comments",
+        ):
             add_candidate(f"processor_exif:{key}", exif_data.get(key))
 
         sidecar_data = self._load_sidecar_json(image_path.with_suffix(".json"))
-        sidecar_exif = sidecar_data.get("exif_data") if isinstance(sidecar_data, dict) else None
+        sidecar_exif = (
+            sidecar_data.get("exif_data") if isinstance(sidecar_data, dict) else None
+        )
         if isinstance(sidecar_exif, dict):
-            for key in ("Prompt", "prompt", "parameters", "UserComment", "comment", "comments"):
+            for key in (
+                "Prompt",
+                "prompt",
+                "parameters",
+                "UserComment",
+                "comment",
+                "comments",
+            ):
                 add_candidate(f"sidecar_exif:{key}", sidecar_exif.get(key))
 
         return candidates
@@ -1138,10 +1241,15 @@ class ImageCollection:
         """Import a newly discovered image using the same pipeline used during scan."""
         file_hash = processor.file_hash
         file_extension = (
-            processor.mime_to_extension(processor.mimetype)
-            if processor.mimetype
-            else None
-        ) or image_file.suffix.lower() or processor.extension or ".jpg"
+            (
+                processor.mime_to_extension(processor.mimetype)
+                if processor.mimetype
+                else None
+            )
+            or image_file.suffix.lower()
+            or processor.extension
+            or ".jpg"
+        )
         expected_filename = f"{file_hash}{file_extension}"
 
         if image_file.name != expected_filename:
@@ -1153,7 +1261,6 @@ class ImageCollection:
         else:
             relative_path = image_file.name
             final_file_path = image_file
-
 
         # Correct the display filename extension to match the actual detected
         # content type.  Providers like CivitAI sometimes report the wrong
@@ -1200,11 +1307,15 @@ class ImageCollection:
         license_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Ingest one uploaded file through the same import steps used by scan."""
-        processor = ImageProcessor(str(uploaded_file_path), self.db, str(self.library_path))
+        processor = ImageProcessor(
+            str(uploaded_file_path), self.db, str(self.library_path)
+        )
         existing_image = processor.find_in_database()
 
         if existing_image is not None:
-            existing_status = (getattr(existing_image, "image_status", None) or "active").lower()
+            existing_status = (
+                getattr(existing_image, "image_status", None) or "active"
+            ).lower()
             if existing_status == "tombstoned":
                 return {
                     "images_added": 0,
@@ -1227,7 +1338,9 @@ class ImageCollection:
                 if license_id is not None:
                     existing_image.license_id = license_id
                 if artist_name:
-                    artist_obj = ImageProcessor.find_or_create_artist(self.db, artist_name)
+                    artist_obj = ImageProcessor.find_or_create_artist(
+                        self.db, artist_name
+                    )
                     existing_image.artist_id = artist_obj.id
 
                 self.db.flush()
@@ -1292,10 +1405,15 @@ class ImageCollection:
         actions_taken: List[str] = []
 
         file_extension = (
-            processor.mime_to_extension(processor.mimetype)
-            if processor.mimetype
-            else None
-        ) or processor.original_path.suffix.lower() or processor.extension or ".jpg"
+            (
+                processor.mime_to_extension(processor.mimetype)
+                if processor.mimetype
+                else None
+            )
+            or processor.original_path.suffix.lower()
+            or processor.extension
+            or ".jpg"
+        )
         expected_filename = f"{processor.file_hash}{file_extension}"
 
         final_file_path = image_path
@@ -1303,7 +1421,9 @@ class ImageCollection:
             processor.save_to_library()
             self.results["files_renamed"] += 1
             final_file_path = processor.original_path
-            actions_taken.append(f"Renamed file to standardized name '{expected_filename}'.")
+            actions_taken.append(
+                f"Renamed file to standardized name '{expected_filename}'."
+            )
 
             self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
                 {
@@ -1319,10 +1439,14 @@ class ImageCollection:
             self.db.flush()
             self.db.refresh(db_record)
             processor.save_json_metadata(final_file_path, db_record)
-            actions_taken.append("Updated DB file-derived fields and rewrote sidecar metadata.")
+            actions_taken.append(
+                "Updated DB file-derived fields and rewrote sidecar metadata."
+            )
         else:
             actual_file_stat = image_path.stat()
-            current_file_size = db_record.file_size if db_record.file_size is not None else 0
+            current_file_size = (
+                db_record.file_size if db_record.file_size is not None else 0
+            )
             current_width = db_record.width if db_record.width is not None else 0
             current_height = db_record.height if db_record.height is not None else 0
             needs_file_update = bool(
@@ -1343,7 +1467,9 @@ class ImageCollection:
                 self.db.flush()
                 self.db.refresh(db_record)
                 processor.save_json_metadata(final_file_path, db_record)
-                actions_taken.append("Synchronized file-derived DB fields and sidecar metadata.")
+                actions_taken.append(
+                    "Synchronized file-derived DB fields and sidecar metadata."
+                )
 
         sidecar_before = final_file_path.with_suffix(".json").exists()
         self._ensure_json_file_exists(final_file_path, db_record, processor)
@@ -1360,8 +1486,12 @@ class ImageCollection:
 
         generation_prompt_updates = self._hydrate_generation_prompt_metadata(db_record)
         self._hydrate_missing_exif_if_needed(db_record, final_file_path, processor)
-        self._hydrate_missing_generation_software_if_needed(db_record, final_file_path, processor)
-        self._hydrate_local_perceptual_metadata_if_needed(db_record, final_file_path, processor)
+        self._hydrate_missing_generation_software_if_needed(
+            db_record, final_file_path, processor
+        )
+        self._hydrate_local_perceptual_metadata_if_needed(
+            db_record, final_file_path, processor
+        )
         self._backfill_filename_if_needed(db_record, final_file_path, processor)
 
         prompt_candidates = self._collect_generation_prompt_candidates(
@@ -1380,7 +1510,10 @@ class ImageCollection:
                 min_words=2,
                 max_words=4,
             )
-            phrases = [str(item.get("name") or "") for item in list(analysis.get("phrases") or [])]
+            phrases = [
+                str(item.get("name") or "")
+                for item in list(analysis.get("phrases") or [])
+            ]
             prompt_tags = list(analysis.get("prompt_tags") or [])
             prompt_tag_records.extend(prompt_tags)
             extracted_phrases.append(
@@ -1397,7 +1530,9 @@ class ImageCollection:
 
         prompt_tags = merge_prompt_tag_records(prompt_tag_records)
 
-        mapped_danbooru_from_prompt = self._extract_mapped_danbooru_tags_from_prompt_tags(prompt_tags)
+        mapped_danbooru_from_prompt = (
+            self._extract_mapped_danbooru_tags_from_prompt_tags(prompt_tags)
+        )
         danbooru_tags = self._coerce_danbooru_tag_records(
             mapped_danbooru_from_prompt,
             source_label="rescan:danbooru_tags",
@@ -1440,7 +1575,9 @@ class ImageCollection:
             actions_taken.append(
                 f"Updated parsed metadata for {generation_prompt_updates} generation prompt(s)."
             )
-        if authority_sync_stats.get("prompt_terms_created") or authority_sync_stats.get("danbooru_terms_created"):
+        if authority_sync_stats.get("prompt_terms_created") or authority_sync_stats.get(
+            "danbooru_terms_created"
+        ):
             actions_taken.append(
                 "Synced image tags to taxonomy authority terms "
                 f"(prompt +{authority_sync_stats.get('prompt_terms_created', 0)}, "
@@ -1465,12 +1602,20 @@ class ImageCollection:
         hydration_summary = {
             "exif_backfill_attempts": self.results.get("exif_backfill_attempts", 0),
             "exif_backfill_successes": self.results.get("exif_backfill_successes", 0),
-            "generation_software_backfill_attempts": self.results.get("generation_software_backfill_attempts", 0),
-            "generation_software_backfill_successes": self.results.get("generation_software_backfill_successes", 0),
+            "generation_software_backfill_attempts": self.results.get(
+                "generation_software_backfill_attempts", 0
+            ),
+            "generation_software_backfill_successes": self.results.get(
+                "generation_software_backfill_successes", 0
+            ),
             "civitai_lookup_attempts": self.results.get("civitai_lookup_attempts", 0),
             "civitai_lookup_successes": self.results.get("civitai_lookup_successes", 0),
-            "filename_backfill_attempts": self.results.get("filename_backfill_attempts", 0),
-            "filename_backfill_successes": self.results.get("filename_backfill_successes", 0),
+            "filename_backfill_attempts": self.results.get(
+                "filename_backfill_attempts", 0
+            ),
+            "filename_backfill_successes": self.results.get(
+                "filename_backfill_successes", 0
+            ),
             "json_files_created": self.results.get("json_files_created", 0),
         }
 
@@ -1513,7 +1658,9 @@ class ImageCollection:
         sidecar_data = self._load_sidecar_json(image_path.with_suffix(".json"))
         sidecar_civitai_payload = sidecar_data.get("civitai")
         sidecar_has_civitai = isinstance(sidecar_civitai_payload, dict)
-        sidecar_has_nsfw_level = self._civitai_payload_has_nsfw_level(sidecar_civitai_payload)
+        sidecar_has_nsfw_level = self._civitai_payload_has_nsfw_level(
+            sidecar_civitai_payload
+        )
 
         if not force_refresh and sidecar_has_civitai and sidecar_has_nsfw_level:
             return
@@ -1533,12 +1680,16 @@ class ImageCollection:
             return
 
         civitai_uuid = None
-        raw_uuid = civitai_data.get("civitai_uuid") if isinstance(civitai_data, dict) else None
+        raw_uuid = (
+            civitai_data.get("civitai_uuid") if isinstance(civitai_data, dict) else None
+        )
         if isinstance(raw_uuid, str) and raw_uuid.strip():
             civitai_uuid = raw_uuid.strip()
 
         civitai_hash = None
-        raw_hash = civitai_data.get("civitai_hash") if isinstance(civitai_data, dict) else None
+        raw_hash = (
+            civitai_data.get("civitai_hash") if isinstance(civitai_data, dict) else None
+        )
         if isinstance(raw_hash, str) and raw_hash.strip():
             civitai_hash = raw_hash.strip()
 
@@ -1717,14 +1868,20 @@ class ImageCollection:
         if image_data.mimetype:
             ext = ImageProcessor.mime_to_extension(image_data.mimetype)
         else:
-            file_name = sanitize_display_filename(image_data.file_name, fallback_ext=".jpg") or "image.jpg"
+            file_name = (
+                sanitize_display_filename(image_data.file_name, fallback_ext=".jpg")
+                or "image.jpg"
+            )
             ext = (
                 "." + file_name.rsplit(".", 1)[1].lower()
                 if "." in file_name
                 else ".jpg"
             )
         if not ext:
-            file_name = sanitize_display_filename(image_data.file_name, fallback_ext=".jpg") or "image.jpg"
+            file_name = (
+                sanitize_display_filename(image_data.file_name, fallback_ext=".jpg")
+                or "image.jpg"
+            )
             ext = (
                 "." + file_name.rsplit(".", 1)[1].lower()
                 if "." in file_name
@@ -1741,7 +1898,8 @@ class ImageCollection:
             file_name=sanitize_display_filename(
                 image_data.file_name or json_file.stem,
                 fallback_ext=Path(relative_filepath).suffix,
-            ) or json_file.stem,
+            )
+            or json_file.stem,
             file_hash=file_hash,
             file_size=image_data.file_size or 0,
             width=image_data.width or 0,
@@ -1757,9 +1915,11 @@ class ImageCollection:
             ),
             license_id=image_data.license_id,
             exif_data=image_data.exif_data,
-            json_metadata={"civitai": image_data.civitai_data}
-            if image_data.civitai_data
-            else None,
+            json_metadata=(
+                {"civitai": image_data.civitai_data}
+                if image_data.civitai_data
+                else None
+            ),
         )
         try:
             self.db.add(new_image)
@@ -1791,9 +1951,7 @@ class ImageCollection:
 
         file_hash = image_data.file_hash
         if not file_hash:
-            print(
-                f"Warning: JSON file {json_file.name} has no file_hash, skipping"
-            )
+            print(f"Warning: JSON file {json_file.name} has no file_hash, skipping")
             return None
 
         expected_json_path = self.library_path / f"{file_hash}.json"
@@ -1811,17 +1969,14 @@ class ImageCollection:
 
         # Check database and handle accordingly
         db_record = (
-            self.db.query(ImageModel)
-            .filter(ImageModel.file_hash == file_hash)
-            .first()
+            self.db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
         )
 
         if db_record is not None:
             # Compare JSON values with database values using ImageData
             print(f"Comparing JSON with database for hash {file_hash}")
             has_differences = self._compare_json_with_database(
-                final_image_data or image_data,
-                db_record
+                final_image_data or image_data, db_record
             )
             if has_differences:
                 self.results["json_db_differences"] += 1
@@ -1893,7 +2048,9 @@ class ImageCollection:
 
         if differences:
             has_differences = True
-            print(f"  Found {len(differences)} difference(s) between JSON and database:")
+            print(
+                f"  Found {len(differences)} difference(s) between JSON and database:"
+            )
             for field, values in differences.items():
                 print(f"    {field}: DB={values['self']} -> JSON={values['other']}")
 
@@ -1931,8 +2088,12 @@ class ImageCollection:
         # Skip file-derived fields (updated during image processing)
         update_fields = {}
         metadata_fields = {
-            "file_name", "artist_id", "source_url", "license_id",
-            "date_created", "exif_data"
+            "file_name",
+            "artist_id",
+            "source_url",
+            "license_id",
+            "date_created",
+            "exif_data",
         }
 
         for field in differences.keys():
@@ -1943,6 +2104,7 @@ class ImageCollection:
                     # Special handling for date_created (convert from ISO string to datetime)
                     if field == "date_created" and isinstance(value, str):
                         from datetime import datetime
+
                         try:
                             value = datetime.fromisoformat(value)
                         except ValueError:
@@ -1953,9 +2115,9 @@ class ImageCollection:
 
         if update_fields:
             print(f"    Updating fields: {list(update_fields.keys())}")
-            self.db.query(ImageModel).filter(
-                ImageModel.id == db_record.id
-            ).update(update_fields, synchronize_session=False)
+            self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
+                update_fields, synchronize_session=False
+            )
             self.results["json_db_records_updated"] += 1
         else:
             print("    No metadata fields to update (only file-derived fields changed)")
@@ -2010,10 +2172,15 @@ class ImageCollection:
                 self.results["images_scanned"] += 1
                 file_hash = processor.file_hash
                 file_extension = (
-                    processor.mime_to_extension(processor.mimetype)
-                    if processor.mimetype
-                    else None
-                ) or processor.original_path.suffix.lower() or processor.extension or ".jpg"
+                    (
+                        processor.mime_to_extension(processor.mimetype)
+                        if processor.mimetype
+                        else None
+                    )
+                    or processor.original_path.suffix.lower()
+                    or processor.extension
+                    or ".jpg"
+                )
                 expected_filename = f"{file_hash}{file_extension}"
                 db_record = processor.find_in_database()
 
@@ -2022,11 +2189,14 @@ class ImageCollection:
 
                 # If no JSON data, try to load from file
                 if not json_data:
-                    json_data = ImageData.from_json_file(image_file.with_suffix(".json"))
+                    json_data = ImageData.from_json_file(
+                        image_file.with_suffix(".json")
+                    )
 
                 # Get original filename from JSON or use current filename
                 original_filename = (
-                    json_data.file_name if json_data and json_data.file_name
+                    json_data.file_name
+                    if json_data and json_data.file_name
                     else (processor.metadata.file_name or image_file.name)
                 )
 
@@ -2103,7 +2273,9 @@ class ImageCollection:
                             self.db.commit()
 
                         # Check if JSON file exists, create if missing
-                        self._ensure_json_file_exists(final_file_path, db_record, processor)
+                        self._ensure_json_file_exists(
+                            final_file_path, db_record, processor
+                        )
 
                     self._hydrate_missing_metadata_fields(
                         db_record=db_record,

@@ -23,6 +23,7 @@ Import convention (from main.py or other services):
 """
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from typing import Any, Optional

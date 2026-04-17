@@ -14,7 +14,6 @@ import shutil
 import tempfile
 import time
 import threading
-import unicodedata
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +32,7 @@ from fastapi import (
     status,
     Body,
 )
-from typing import Any, Callable, List, Optional, Literal
+from typing import Any, Callable, List, Optional, Literal, cast
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlparse
 
@@ -49,20 +48,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import atelierai.config as app_config
-
-IMAGE_LIBRARY_PATH = str(getattr(app_config, "IMAGE_LIBRARY_PATH", "image_library"))
-IMAGE_RESOURCES_PATH = str(
-    getattr(app_config, "IMAGE_RESOURCES_PATH", "image_resources")
-)
-CURRENT_SCHEMA_VERSION = str(getattr(app_config, "CURRENT_SCHEMA_VERSION", "1.0"))
-DATABASE_URL = str(getattr(app_config, "DATABASE_URL", "sqlite:///image_db.sqlite"))
-ALLOW_SCHEMA_RESET = bool(getattr(app_config, "ALLOW_SCHEMA_RESET", False))
-ATELIER_COMFYUI_BASE_URL = str(
-    getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "")
-).strip()
-ATELIER_COMFY_MATCH_THRESHOLD = float(
-    getattr(app_config, "ATELIER_COMFY_MATCH_THRESHOLD", 0.95)
-)
 
 # Use absolute imports for consistency with our project structure
 from database import (
@@ -154,6 +139,20 @@ from schemas import (
     CivitaiSearchRequest,
     SyncLabAnalyzeRequest,
     SyncLabIngestRequest,
+)
+
+IMAGE_LIBRARY_PATH = str(getattr(app_config, "IMAGE_LIBRARY_PATH", "image_library"))
+IMAGE_RESOURCES_PATH = str(
+    getattr(app_config, "IMAGE_RESOURCES_PATH", "image_resources")
+)
+CURRENT_SCHEMA_VERSION = str(getattr(app_config, "CURRENT_SCHEMA_VERSION", "1.0"))
+DATABASE_URL = str(getattr(app_config, "DATABASE_URL", "sqlite:///image_db.sqlite"))
+ALLOW_SCHEMA_RESET = bool(getattr(app_config, "ALLOW_SCHEMA_RESET", False))
+ATELIER_COMFYUI_BASE_URL = str(
+    getattr(app_config, "ATELIER_COMFYUI_BASE_URL", "")
+).strip()
+ATELIER_COMFY_MATCH_THRESHOLD = float(
+    getattr(app_config, "ATELIER_COMFY_MATCH_THRESHOLD", 0.95)
 )
 
 try:
@@ -1557,7 +1556,7 @@ def _execute_taxonomy_bootstrap_import(
                     stats["authority_terms_created"] += 1
                 else:
                     changed = False
-                    if term.external_tag_id != external_tag_id:
+                    if getattr(term, "external_tag_id", None) != external_tag_id:
                         term.external_tag_id = external_tag_id
                         changed = True
                     if str(term.external_name or "") != raw_name:
@@ -7919,7 +7918,7 @@ def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
             stats["terms_created"] += 1
         else:
             changed = False
-            if term.external_tag_id != external_tag_id:
+            if getattr(term, "external_tag_id", None) != external_tag_id:
                 term.external_tag_id = external_tag_id
                 changed = True
             if str(term.external_name or "") != raw_name:
@@ -8924,6 +8923,7 @@ def _build_civitai_unavailable_result(
                     if isinstance(merged_json.get("civitai"), dict)
                     else {}
                 )
+                civitai_json = cast(dict[str, Any], civitai_json)
                 civitai_json.update(civitai_unavailable_payload)
                 merged_json["civitai"] = civitai_json
 
@@ -11634,8 +11634,12 @@ def _run_civitai_collection_sync_job(
             }
             collections_progress.append(cp_entry)
 
-        def _update_cp_entry(**updates: Any) -> None:
-            cp_entry.update(updates)
+        cp_entry = cast(dict[str, Any], cp_entry)
+
+        def _update_cp_entry(
+            _cp_entry: dict[str, Any] = cp_entry, **updates: Any
+        ) -> None:
+            _cp_entry.update(updates)
             task_context.set_metadata("collections_progress", collections_progress)
 
         def _set_pending_activity(activity: str) -> None:
@@ -14683,6 +14687,12 @@ def generate_and_compare_comfy_workspace(
             status_code=404, detail="Reference image file not found on disk."
         )
 
+    if imagehash is None:
+        raise HTTPException(
+            status_code=503,
+            detail="imagehash dependency is not installed; parity matching is unavailable.",
+        )
+
     try:
         with Image.open(reference_path) as reference_handle:
             reference_hash = imagehash.phash(reference_handle.convert("RGB"), 8)
@@ -15084,7 +15094,9 @@ def list_comfy_generation_match_attempts(
                 "notes": attempt.notes,
                 "error_message": attempt.error_message,
                 "created_at": (
-                    attempt.created_at.isoformat() if attempt.created_at else None
+                    attempt.created_at.isoformat()
+                    if getattr(attempt, "created_at", None) is not None
+                    else None
                 ),
             }
             for attempt in attempts
@@ -20271,7 +20283,9 @@ def taxonomy_tag_maint_list(
                 external_tag_id,
                 scope,
                 post_count,
-                int(term.concept_id) if term.concept_id else None,
+                int(term.concept_id)
+                if getattr(term, "concept_id", None) is not None
+                else None,
                 mdtag_id,
                 mdtag_name,
             ]
@@ -20643,7 +20657,7 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
             )
             if match is None:
                 new_ids.append(img_id)
-            elif match.image_status == "tombstoned":
+            elif str(getattr(match, "image_status", "")) == "tombstoned":
                 tombstoned.append(
                     {
                         "civitai_image_id": img_id,
@@ -20651,7 +20665,7 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
                         "file_hash": match.file_hash,
                     }
                 )
-            elif match.image_status == "placeholder":
+            elif str(getattr(match, "image_status", "")) == "placeholder":
                 placeholders.append(
                     {
                         "civitai_image_id": img_id,

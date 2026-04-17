@@ -20,6 +20,10 @@
 
   function el(id) { return document.getElementById(id); }
 
+  function getCivitaiWebBaseUrl() {
+    return window.__ATELIER_CONFIG?.civitai_web_base_url || 'https://civitai.red';
+  }
+
   /* ── Timing formatter ── */
   function fmtMs(ms) {
     if (ms == null) return '';
@@ -186,7 +190,7 @@
     let collectionId = dd.value || manual.value.trim();
 
     // Parse URL form
-    const urlMatch = collectionId.match(/civitai\.com\/collections\/(\d+)/);
+    const urlMatch = collectionId.match(/(?:https?:\/\/)?(?:www\.)?civitai\.(?:com|red)\/collections\/(\d+)/i);
     if (urlMatch) collectionId = urlMatch[1];
 
     collectionId = parseInt(collectionId, 10);
@@ -275,8 +279,9 @@
       const mimeType = item.mimeType || '';
       const size = (item.width && item.height) ? `${item.width}×${item.height}` : '';
 
+      const imageUrl = `${getCivitaiWebBaseUrl()}/images/${id}`;
       return `<tr data-id="${id}">
-        <td class="col-id"><a href="https://civitai.com/images/${id}" target="_blank" rel="noopener">${id}</a></td>
+        <td class="col-id"><a href="${imageUrl}" target="_blank" rel="noopener">${id}</a></td>
         <td class="col-name" title="${escHtml(mimeType)}${size ? ' · ' + size : ''}">${escHtml(name)}</td>
         <td class="col-type">${escHtml(type)}</td>
         <td class="col-rating">${nsfwBadge}</td>

@@ -863,9 +863,6 @@ def _ensure_file_hash_nonunique() -> None:
             if idx_name in indexes:
                 # Verify it is actually unique before dropping
                 # Note: PRAGMA doesn't support parameterized queries
-                idx_info = connection.execute(
-                    text(f"PRAGMA index_info({idx_name})")
-                ).fetchall()
                 is_unique = any(
                     row
                     for row in connection.execute(
@@ -2176,92 +2173,97 @@ def _ingest_civitai_duplicate_asset(
     # Copy the downloaded temp file to the library
     shutil.copy2(prepared.temp_path, absolute_target)
 
-    # Verify the hash matches (sanity check)
-    actual_hash = _sha256_file(absolute_target)
-    if actual_hash != file_hash:
-        print(
-            f"WARNING: Duplicate asset hash mismatch for CivitAI {prepared.image_id}: "
-            f"expected {file_hash}, got {actual_hash}"
-        )
-        absolute_target.unlink(missing_ok=True)
-        raise ValueError(
-            f"Hash mismatch for duplicate CivitAI image {prepared.image_id}"
-        )
-
-    # Determine display filename
-    original_filename = (
-        prepared.original_filename or f"civitai_{prepared.image_id}{suffix}"
-    )
-    display_name = (
-        sanitize_display_filename(
-            original_filename,
-            fallback_ext=suffix,
-        )
-        or original_filename
-    )
-
-    # Build civitai metadata
-    civitai_meta: dict[str, Any] = {}
-    if prepared.civitai_uuid:
-        civitai_meta["uuid"] = prepared.civitai_uuid
-    if prepared.civitai_hash:
-        civitai_meta["hash"] = prepared.civitai_hash
-    if prepared.api_response_paths:
-        civitai_meta.update(prepared.api_response_paths)
-
-    # Mark this as a duplicate asset
-    civitai_meta["is_civitai_duplicate_asset"] = True
-    civitai_meta["duplicate_of_file_hash"] = file_hash
-    civitai_meta["duplicate_of_image_db_id"] = existing_records[0].id
-    civitai_meta["original_civitai_image_id"] = prepared.image_id
-
-    json_metadata: dict[str, Any] = {"civitai": civitai_meta}
-
-    # Detect image dimensions
-    stat = absolute_target.stat()
-    width, height = None, None
-    mimetype = prepared.mime_type
     try:
-        from PIL import Image as PILImage
+        # Verify the hash matches (sanity check)
+        actual_hash = _sha256_file(absolute_target)
+        if actual_hash != file_hash:
+            print(
+                f"WARNING: Duplicate asset hash mismatch for CivitAI {prepared.image_id}: "
+                f"expected {file_hash}, got {actual_hash}"
+            )
+            raise ValueError(
+                f"Hash mismatch for duplicate CivitAI image {prepared.image_id}"
+            )
 
-        with PILImage.open(absolute_target) as img:
-            width, height = img.size
+        # Determine display filename
+        original_filename = (
+            prepared.original_filename or f"civitai_{prepared.image_id}{suffix}"
+        )
+        display_name = (
+            sanitize_display_filename(
+                original_filename,
+                fallback_ext=suffix,
+            )
+            or original_filename
+        )
+
+        # Build civitai metadata
+        civitai_meta: dict[str, Any] = {}
+        if prepared.civitai_uuid:
+            civitai_meta["uuid"] = prepared.civitai_uuid
+        if prepared.civitai_hash:
+            civitai_meta["hash"] = prepared.civitai_hash
+        if prepared.api_response_paths:
+            civitai_meta.update(prepared.api_response_paths)
+
+        # Mark this as a duplicate asset
+        civitai_meta["is_civitai_duplicate_asset"] = True
+        civitai_meta["duplicate_of_file_hash"] = file_hash
+        civitai_meta["duplicate_of_image_db_id"] = existing_records[0].id
+        civitai_meta["original_civitai_image_id"] = prepared.image_id
+
+        json_metadata: dict[str, Any] = {"civitai": civitai_meta}
+
+        # Detect image dimensions
+        stat = absolute_target.stat()
+        width, height = None, None
+        mimetype = prepared.mime_type
+        try:
+            from PIL import Image as PILImage
+
+            with PILImage.open(absolute_target) as img:
+                width, height = img.size
+        except Exception:
+            pass
+
+        # Create the ImageModel record
+        new_image = ImageModel(
+            file_path=relative_file_path,
+            file_name=display_name,
+            original_file_name=original_filename,
+            file_hash=actual_hash,
+            file_size=stat.st_size,
+            width=width,
+            height=height,
+            mimetype=mimetype,
+            date_created=datetime.fromtimestamp(stat.st_ctime),
+            date_modified=datetime.fromtimestamp(stat.st_mtime),
+            artist_id=None,
+            source_url=prepared.source_url,
+            source_site="civitai",
+            json_metadata=json_metadata,
+        )
+
+        if prepared.artist_name:
+            artist_obj = ImageProcessor.find_or_create_artist(db, prepared.artist_name)
+            new_image.artist_id = artist_obj.id
+
+        db.add(new_image)
+        db.flush()
+
+        # Attach to collection if specified
+        if attach_collection_id is not None:
+            _ensure_image_in_collection(db, new_image.id, attach_collection_id)
+
+        # Save sidecar JSON
+        json_sidecar_path = absolute_target.with_suffix(f"{absolute_target.suffix}.json")
+        with open(json_sidecar_path, "w", encoding="utf-8") as handle:
+            json.dump(json_metadata, handle, indent=2)
     except Exception:
-        pass
-
-    # Create the ImageModel record
-    new_image = ImageModel(
-        file_path=relative_file_path,
-        file_name=display_name,
-        original_file_name=original_filename,
-        file_hash=actual_hash,
-        file_size=stat.st_size,
-        width=width,
-        height=height,
-        mimetype=mimetype,
-        date_created=datetime.fromtimestamp(stat.st_ctime),
-        date_modified=datetime.fromtimestamp(stat.st_mtime),
-        artist_id=None,
-        source_url=prepared.source_url,
-        source_site="civitai",
-        json_metadata=json_metadata,
-    )
-
-    if prepared.artist_name:
-        artist_obj = ImageProcessor.find_or_create_artist(db, prepared.artist_name)
-        new_image.artist_id = artist_obj.id
-
-    db.add(new_image)
-    db.flush()
-
-    # Attach to collection if specified
-    if attach_collection_id is not None:
-        _ensure_image_in_collection(db, new_image.id, attach_collection_id)
-
-    # Save sidecar JSON
-    json_sidecar_path = absolute_target.with_suffix(f"{absolute_target.suffix}.json")
-    with open(json_sidecar_path, "w", encoding="utf-8") as handle:
-        json.dump(json_metadata, handle, indent=2)
+        # Avoid orphaned duplicate files if DB persistence fails after copy.
+        absolute_target.unlink(missing_ok=True)
+        absolute_target.with_suffix(f"{absolute_target.suffix}.json").unlink(missing_ok=True)
+        raise
 
     print(
         f"Created duplicate asset record: CivitAI {prepared.image_id} -> DB #{new_image.id} "
@@ -20915,8 +20917,8 @@ def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)
             {
                 "image_db_id": image.id,
                 "file_hash": image.file_hash,
-                "filename": image.filename,
-                "status": image.status,
+                "filename": image.file_name,
+                "status": image.image_status,
                 "source_url": image.source_url,
             }
         )

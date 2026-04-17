@@ -59,6 +59,7 @@
                     <span>Debug</span>
                 </label>
                 <a class="btn ghost" href="/frontend/search-lab.html" title="Search CivitAI images">🔍 Search Lab</a>
+                <a class="btn ghost" href="/sync-lab" title="CivitAI Collection Sync Lab">🔄 Sync Lab</a>
                 <button id="scan-btn" class="btn solid" type="button">Rescan Library</button>
                 <button id="purge-deleted-btn" class="btn ghost" type="button" title="Purge deleted files from disk">&#128465;</button>
             </div>
@@ -466,6 +467,28 @@
                         <div id="task-detail-content" class="task-detail-content hidden">
                             <div id="task-detail-summary" class="task-detail-summary"></div>
                             <section class="task-detail-section">
+                                <h5>Pending Activities</h5>
+                                <div id="task-pending-activities" class="task-detail-list task-pending-activities"></div>
+                            </section>
+                            <section class="task-detail-section">
+                                <h5>Collection Progress</h5>
+                                <div id="task-collection-progress" class="task-collection-progress"></div>
+                            </section>
+                            <section class="task-detail-section">
+                                <div class="task-detail-section-header">
+                                    <h5>Missing Failures</h5>
+                                    <button id="task-retry-missing-btn" class="btn ghost btn-sm hidden" type="button">Retry Missing</button>
+                                </div>
+                                <div id="task-missing-failures" class="task-detail-list"></div>
+                            </section>
+                            <section class="task-detail-section">
+                                <div class="task-detail-section-header">
+                                    <h5>Temporary Failures</h5>
+                                    <button id="task-retry-temporary-btn" class="btn ghost btn-sm hidden" type="button">Retry Temporary</button>
+                                </div>
+                                <div id="task-temporary-failures" class="task-detail-list"></div>
+                            </section>
+                            <section class="task-detail-section">
                                 <h5>Failed Items</h5>
                                 <div id="task-failed-items" class="task-detail-list"></div>
                             </section>
@@ -478,8 +501,10 @@
                                 <div id="task-recent-activity" class="task-detail-list"></div>
                             </section>
                             <section class="task-detail-section">
-                                <h5>Raw Details</h5>
-                                <pre id="import-output" class="status-output"></pre>
+                                <details class="task-raw-details">
+                                    <summary>Raw Details</summary>
+                                    <pre id="import-output" class="status-output"></pre>
+                                </details>
                             </section>
                         </div>
                     </section>

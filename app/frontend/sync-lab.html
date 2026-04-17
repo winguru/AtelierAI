@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CivitAI Collection Sync Lab</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/folder-tabs.css">
+  <link rel="stylesheet" href="/frontend/css/sync-lab.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1>CivitAI Collection Sync Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">← Gallery</a>
+        <a class="btn ghost" href="/frontend/search-lab.html">Search Lab</a>
+        <a class="btn ghost" href="/frontend/generation-lab.html">Generation Lab</a>
+      </div>
+    </header>
+
+    <main class="sync-lab-layout">
+
+      <!-- ── Step 1: Fetch Collections ── -->
+      <section class="step-card" id="step-1" data-step="1">
+        <div class="step-header">
+          <div class="step-number">1</div>
+          <div class="step-title-area">
+            <h2>Fetch Collections</h2>
+            <p class="step-desc">Retrieve your CivitAI image collections list</p>
+          </div>
+          <div class="step-actions">
+            <span class="step-timing" id="step1-timing"></span>
+            <button class="btn primary" id="btn-fetch-collections">Fetch Collections</button>
+          </div>
+        </div>
+        <div class="step-body" id="step1-body">
+          <div class="step-status" id="step1-status"></div>
+          <div class="step-results" id="step1-results"></div>
+        </div>
+      </section>
+
+      <!-- ── Step 2: Select Collection ── -->
+      <section class="step-card" id="step-2" data-step="2">
+        <div class="step-header">
+          <div class="step-number">2</div>
+          <div class="step-title-area">
+            <h2>Select Collection</h2>
+            <p class="step-desc">Choose a collection from the list or enter an ID/URL manually</p>
+          </div>
+        </div>
+        <div class="step-body" id="step2-body">
+          <div class="collection-selector">
+            <div class="selector-row">
+              <label for="collection-dropdown">From list:</label>
+              <select id="collection-dropdown" disabled>
+                <option value="">— Fetch collections first —</option>
+              </select>
+            </div>
+            <div class="selector-divider">or</div>
+            <div class="selector-row">
+              <label for="collection-manual">Manual ID/URL:</label>
+              <input id="collection-manual" type="text" placeholder="e.g. 12345 or https://civitai.com/collections/12345">
+            </div>
+            <button class="btn primary" id="btn-select-collection" disabled>Select Collection</button>
+          </div>
+          <div class="step-status" id="step2-status"></div>
+          <div class="step-results" id="step2-results"></div>
+        </div>
+      </section>
+
+      <!-- ── Flow indicator ── -->
+      <div class="flow-indicator" id="flow-2-3">
+        <span class="flow-arrow">↓</span>
+        <span class="flow-label" id="flow-2-3-label">Select a collection to proceed</span>
+      </div>
+
+      <!-- ── Step 3: Fetch Collection Items ── -->
+      <section class="step-card" id="step-3" data-step="3">
+        <div class="step-header">
+          <div class="step-number">3</div>
+          <div class="step-title-area">
+            <h2>Fetch Collection Items</h2>
+            <p class="step-desc">Paginate through the collection to discover all image items</p>
+          </div>
+          <div class="step-actions">
+            <span class="step-timing" id="step3-timing"></span>
+            <button class="btn primary" id="btn-fetch-items" disabled>Fetch Items</button>
+          </div>
+        </div>
+        <div class="step-body" id="step3-body">
+          <div class="step-status" id="step3-status"></div>
+          <div class="step-results" id="step3-results"></div>
+        </div>
+      </section>
+
+      <!-- ── Flow indicator ── -->
+      <div class="flow-indicator" id="flow-3-4">
+        <span class="flow-arrow">↓</span>
+        <span class="flow-label" id="flow-3-4-label">Fetch items to analyze</span>
+      </div>
+
+      <!-- ── Step 4: Analyze Local State ── -->
+      <section class="step-card" id="step-4" data-step="4">
+        <div class="step-header">
+          <div class="step-number">4</div>
+          <div class="step-title-area">
+            <h2>Analyze Local State</h2>
+            <p class="step-desc">Check which images already exist in your library</p>
+          </div>
+          <div class="step-actions">
+            <span class="step-timing" id="step4-timing"></span>
+            <button class="btn primary" id="btn-analyze-local" disabled>Analyze</button>
+          </div>
+        </div>
+        <div class="step-body" id="step4-body">
+          <div class="step-status" id="step4-status"></div>
+          <div class="dedup-summary" id="dedup-summary"></div>
+          <div class="step-results" id="step4-results"></div>
+        </div>
+      </section>
+
+      <!-- ── Flow indicator ── -->
+      <div class="flow-indicator" id="flow-4-5">
+        <span class="flow-arrow">↓</span>
+        <span class="flow-label" id="flow-4-5-label">Analyze to proceed</span>
+      </div>
+
+      <!-- ── Step 5: Fetch Metadata ── -->
+      <section class="step-card" id="step-5" data-step="5">
+        <div class="step-header">
+          <div class="step-number">5</div>
+          <div class="step-title-area">
+            <h2>Fetch Metadata</h2>
+            <p class="step-desc">Retrieve CivitAI API metadata (basic info + generation data) for new items</p>
+          </div>
+          <div class="step-actions">
+            <span class="step-timing" id="step5-timing"></span>
+            <button class="btn primary" id="btn-fetch-metadata" disabled>Fetch Metadata</button>
+          </div>
+        </div>
+        <div class="step-body" id="step5-body">
+          <div class="step-status" id="step5-status"></div>
+          <div class="step-results" id="step5-results"></div>
+        </div>
+      </section>
+
+      <!-- ── Flow indicator ── -->
+      <div class="flow-indicator" id="flow-5-6">
+        <span class="flow-arrow">↓</span>
+        <span class="flow-label" id="flow-5-6-label">Fetch metadata to proceed</span>
+      </div>
+
+      <!-- ── Step 6: Download Images ── -->
+      <section class="step-card" id="step-6" data-step="6">
+        <div class="step-header">
+          <div class="step-number">6</div>
+          <div class="step-title-area">
+            <h2>Download Images</h2>
+            <p class="step-desc">Download image files for new items</p>
+          </div>
+          <div class="step-actions">
+            <span class="step-timing" id="step6-timing"></span>
+            <button class="btn primary" id="btn-download" disabled>Download</button>
+          </div>
+        </div>
+        <div class="step-body" id="step6-body">
+          <div class="step-status" id="step6-status"></div>
+          <div class="step-results" id="step6-results"></div>
+        </div>
+      </section>
+
+      <!-- ── Flow indicator ── -->
+      <div class="flow-indicator" id="flow-6-7">
+        <span class="flow-arrow">↓</span>
+        <span class="flow-label" id="flow-6-7-label">Download to proceed</span>
+      </div>
+
+      <!-- ── Step 7: Ingest to Library ── -->
+      <section class="step-card" id="step-7" data-step="7">
+        <div class="step-header">
+          <div class="step-number">7</div>
+          <div class="step-title-area">
+            <h2>Ingest to Library</h2>
+            <p class="step-desc">Move downloaded files into the library and create DB records</p>
+          </div>
+          <div class="step-actions">
+            <span class="step-timing" id="step7-timing"></span>
+            <button class="btn primary" id="btn-ingest" disabled>Ingest</button>
+          </div>
+        </div>
+        <div class="step-body" id="step7-body">
+          <div class="step-status" id="step7-status"></div>
+          <div class="step-results" id="step7-results"></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/frontend/js/shared/preferences.js"></script>
+  <script src="/frontend/js/shared/ui-kit.js"></script>
+  <script src="/frontend/js/sync-lab.js"></script>
+</body>
+</html>

@@ -210,3 +210,14 @@ class CivitaiSearchRequest(BaseModel):
     username: Optional[str] = None
     facets: Optional[list[str]] = None
     extra_filters: Optional[list[str]] = None
+
+
+class SyncLabAnalyzeRequest(BaseModel):
+    """Sync Lab: analyze-local and fetch-metadata step payload."""
+    image_ids: list[int]
+
+
+class SyncLabIngestRequest(BaseModel):
+    """Sync Lab: ingest step payload."""
+    image_ids: list[int]
+    collection_id: Optional[int] = None

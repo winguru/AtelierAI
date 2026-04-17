@@ -40,6 +40,9 @@ class _TaskRecord:
     recent_items: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=60))
     recent_errors: Deque[str] = field(default_factory=lambda: deque(maxlen=20))
     failed_items: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=120))
+    unavailable_items: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=120))
+    missing_failures: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=200))
+    temporary_failures: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=200))
     result: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -64,6 +67,9 @@ class _TaskRecord:
             "recent_items": list(self.recent_items),
             "recent_errors": list(self.recent_errors),
             "failed_items": list(self.failed_items),
+            "unavailable_items": list(self.unavailable_items),
+            "missing_failures": list(self.missing_failures),
+            "temporary_failures": list(self.temporary_failures),
             "result": self.result,
         }
 
@@ -91,11 +97,23 @@ class TaskContext:
     def set_metadata(self, key: str, value: Any) -> None:
         self._manager._set_metadata(self.task_id, key, value)
 
+    def get_metadata(self, key: str, default: Any = None) -> Any:
+        return self._manager._get_metadata(self.task_id, key, default)
+
     def add_error(self, message: str) -> None:
         self._manager._add_error(self.task_id, message)
 
     def mark_item(self, item_key: str, status: str, message: Optional[str] = None) -> None:
         self._manager._mark_item(self.task_id, item_key, status, message)
+
+    def mark_unavailable(self, item_key: str, message: str) -> None:
+        self._manager._mark_unavailable(self.task_id, item_key, message)
+
+    def mark_missing_failure(self, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
+        self._manager._mark_missing_failure(self.task_id, item_key, message, item_data=item_data)
+
+    def mark_temporary_failure(self, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
+        self._manager._mark_temporary_failure(self.task_id, item_key, message, item_data=item_data)
 
     def check_cancelled(self) -> None:
         if self._manager.is_cancel_requested(self.task_id):
@@ -265,6 +283,11 @@ class BackgroundTaskManager:
             record.metadata[key] = value
             record.updated_at = _utc_now()
 
+    def _get_metadata(self, task_id: str, key: str, default: Any = None) -> Any:
+        with self._lock:
+            record = self._tasks[task_id]
+            return record.metadata.get(key, default)
+
     def _add_error(self, task_id: str, message: str) -> None:
         with self._lock:
             record = self._tasks[task_id]
@@ -299,6 +322,49 @@ class BackgroundTaskManager:
                         "timestamp": _utc_now().isoformat(),
                     }
                 )
+            record.updated_at = _utc_now()
+
+    def _mark_unavailable(self, task_id: str, item_key: str, message: str) -> None:
+        normalized_key = str(item_key)
+        with self._lock:
+            record = self._tasks[task_id]
+            record.unavailable_items.appendleft(
+                {
+                    "item_key": normalized_key,
+                    "message": message,
+                    "timestamp": _utc_now().isoformat(),
+                }
+            )
+            record.updated_at = _utc_now()
+
+    def _mark_missing_failure(self, task_id: str, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
+        normalized_key = str(item_key)
+        with self._lock:
+            record = self._tasks[task_id]
+            entry = {
+                "item_key": normalized_key,
+                "message": message,
+                "failure_type": "missing",
+                "timestamp": _utc_now().isoformat(),
+            }
+            if item_data:
+                entry["item_data"] = item_data
+            record.missing_failures.appendleft(entry)
+            record.updated_at = _utc_now()
+
+    def _mark_temporary_failure(self, task_id: str, item_key: str, message: str, *, item_data: Optional[Dict[str, Any]] = None) -> None:
+        normalized_key = str(item_key)
+        with self._lock:
+            record = self._tasks[task_id]
+            entry = {
+                "item_key": normalized_key,
+                "message": message,
+                "failure_type": "temporary",
+                "timestamp": _utc_now().isoformat(),
+            }
+            if item_data:
+                entry["item_data"] = item_data
+            record.temporary_failures.appendleft(entry)
             record.updated_at = _utc_now()
 
     def _complete(self, task_id: str, result: Optional[dict[str, Any]], message: Optional[str]) -> None:

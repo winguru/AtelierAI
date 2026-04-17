@@ -134,6 +134,8 @@ from schemas import (
     ComfyGenerateCompareRequest,
     ParityCandidateAuditRequest,
     CivitaiSearchRequest,
+    SyncLabAnalyzeRequest,
+    SyncLabIngestRequest,
 )
 
 try:
@@ -744,6 +746,39 @@ def _backfill_user_tags_from_sidecars() -> None:
             print(f"   Backfilled user_tags from sidecars for {updated} image(s).")
 
 
+def _ensure_file_hash_nonunique() -> None:
+    """Drop the UNIQUE index on images.file_hash so CivitAI duplicate assets can coexist.
+
+    SQLite does not support ALTER TABLE ... DROP CONSTRAINT, so we must
+    identify and drop the unique index by name.  SQLAlchemy creates this as
+    ``ix_images_file_hash`` when ``unique=True`` is declared on the Column.
+    """
+    with engine.begin() as connection:
+        indexes = {
+            row[1]
+            for row in connection.execute(text("PRAGMA index_list(images)")).fetchall()
+        }
+        # SQLAlchemy auto-generates the unique index name
+        for idx_name in ("ix_images_file_hash",):
+            if idx_name in indexes:
+                # Verify it is actually unique before dropping
+                # Note: PRAGMA doesn't support parameterized queries
+                idx_info = connection.execute(
+                    text(f"PRAGMA index_info({idx_name})")
+                ).fetchall()
+                is_unique = any(
+                    row for row in connection.execute(text("PRAGMA index_list(images)")).fetchall()
+                    if row[1] == idx_name and row[2] == 1
+                )
+                if is_unique:
+                    print(f"Dropping UNIQUE index {idx_name} on images.file_hash")
+                    connection.execute(text(f"DROP INDEX {idx_name}"))
+                    # Recreate as non-unique for query performance
+                    connection.execute(
+                        text("CREATE INDEX ix_images_file_hash ON images (file_hash)")
+                    )
+
+
 def _ensure_image_variant_columns() -> None:
     """Backfill image variant grouping columns for existing sqlite databases."""
     with engine.begin() as connection:
@@ -759,11 +794,23 @@ def _ensure_image_variant_columns() -> None:
         if "variant_role" not in existing:
             connection.execute(text("ALTER TABLE images ADD COLUMN variant_role VARCHAR"))
 
+        # Default variant_group_key to file_hash so that visually identical
+        # assets (same SHA256, different CivitAI IDs) are grouped as variants.
         connection.execute(
             text(
                 "UPDATE images "
                 "SET variant_group_key = file_hash "
                 "WHERE (variant_group_key IS NULL OR variant_group_key = '') "
+                "AND file_hash IS NOT NULL AND file_hash != ''"
+            )
+        )
+        # Fix any rows that were incorrectly backfilled with file_path —
+        # restore file_hash grouping so duplicate assets share a group.
+        connection.execute(
+            text(
+                "UPDATE images "
+                "SET variant_group_key = file_hash "
+                "WHERE variant_group_key = file_path "
                 "AND file_hash IS NOT NULL AND file_hash != ''"
             )
         )
@@ -1906,6 +1953,138 @@ def _preserve_civitai_source_variant(
         image,
         additional_data={"civitai_source_variant": variant_metadata},
     )
+
+
+def _find_existing_by_file_hash(db: Session, file_hash: str) -> list[ImageModel]:
+    """Return all ImageModel records matching a given file_hash (may be >1 after dropping unique)."""
+    return db.query(ImageModel).filter(ImageModel.file_hash == file_hash).all()
+
+
+def _resolve_duplicate_file_path(file_hash: str, civitai_image_id: int, suffix: str) -> str:
+    """Build a unique file_path for a duplicate asset in the image library.
+
+    Format: ``{hash_trunc}_civitai_{id}{ext}`` — guaranteed unique per CivitAI ID.
+    """
+    hash_prefix = file_hash[:16]
+    return f"{hash_prefix}_civitai_{civitai_image_id}{suffix}"
+
+
+def _ingest_civitai_duplicate_asset(
+    db: Session,
+    *,
+    prepared: _PreparedCivitaiImport,
+    existing_records: list[ImageModel],
+    attach_collection_id: Optional[int] = None,
+) -> dict:
+    """Create an independent ImageModel for a CivitAI asset whose SHA256 matches an existing image.
+
+    The duplicate file is stored in the image library with a unique filename
+    (``{hash_prefix}_civitai_{id}.{ext}``) so it participates in normal serving,
+    thumbnailing, and metadata workflows.  Both records share ``file_hash`` but
+    have unique ``file_path`` values.
+    """
+    suffix = _guess_suffix(prepared.mime_type) or prepared.temp_path.suffix.lower() or ".jpg"
+    file_hash = existing_records[0].file_hash
+
+    # Build a unique filename in the image library
+    relative_file_path = _resolve_duplicate_file_path(file_hash, prepared.image_id, suffix)
+    absolute_target = Path(IMAGE_LIBRARY_PATH) / relative_file_path
+
+    # Copy the downloaded temp file to the library
+    shutil.copy2(prepared.temp_path, absolute_target)
+
+    # Verify the hash matches (sanity check)
+    actual_hash = _sha256_file(absolute_target)
+    if actual_hash != file_hash:
+        print(f"WARNING: Duplicate asset hash mismatch for CivitAI {prepared.image_id}: "
+              f"expected {file_hash}, got {actual_hash}")
+        absolute_target.unlink(missing_ok=True)
+        raise ValueError(f"Hash mismatch for duplicate CivitAI image {prepared.image_id}")
+
+    # Determine display filename
+    original_filename = prepared.original_filename or f"civitai_{prepared.image_id}{suffix}"
+    display_name = sanitize_display_filename(
+        original_filename,
+        fallback_ext=suffix,
+    ) or original_filename
+
+    # Build civitai metadata
+    civitai_meta: dict[str, Any] = {}
+    if prepared.civitai_uuid:
+        civitai_meta["uuid"] = prepared.civitai_uuid
+    if prepared.civitai_hash:
+        civitai_meta["hash"] = prepared.civitai_hash
+    if prepared.api_response_paths:
+        civitai_meta.update(prepared.api_response_paths)
+
+    # Mark this as a duplicate asset
+    civitai_meta["is_civitai_duplicate_asset"] = True
+    civitai_meta["duplicate_of_file_hash"] = file_hash
+    civitai_meta["duplicate_of_image_db_id"] = existing_records[0].id
+    civitai_meta["original_civitai_image_id"] = prepared.image_id
+
+    json_metadata: dict[str, Any] = {"civitai": civitai_meta}
+
+    # Detect image dimensions
+    stat = absolute_target.stat()
+    width, height = None, None
+    mimetype = prepared.mime_type
+    try:
+        from PIL import Image as PILImage
+        with PILImage.open(absolute_target) as img:
+            width, height = img.size
+    except Exception:
+        pass
+
+    # Create the ImageModel record
+    new_image = ImageModel(
+        file_path=relative_file_path,
+        file_name=display_name,
+        original_file_name=original_filename,
+        file_hash=actual_hash,
+        file_size=stat.st_size,
+        width=width,
+        height=height,
+        mimetype=mimetype,
+        date_created=datetime.fromtimestamp(stat.st_ctime),
+        date_modified=datetime.fromtimestamp(stat.st_mtime),
+        artist_id=None,
+        source_url=prepared.source_url,
+        source_site="civitai",
+        json_metadata=json_metadata,
+    )
+
+    if prepared.artist_name:
+        artist_obj = ImageProcessor.find_or_create_artist(db, prepared.artist_name)
+        new_image.artist_id = artist_obj.id
+
+    db.add(new_image)
+    db.flush()
+
+    # Attach to collection if specified
+    if attach_collection_id is not None:
+        _ensure_image_in_collection(db, new_image.id, attach_collection_id)
+
+    # Save sidecar JSON
+    json_sidecar_path = absolute_target.with_suffix(f"{absolute_target.suffix}.json")
+    with open(json_sidecar_path, "w", encoding="utf-8") as handle:
+        json.dump(json_metadata, handle, indent=2)
+
+    print(f"Created duplicate asset record: CivitAI {prepared.image_id} -> DB #{new_image.id} "
+          f"({relative_file_path}, hash={actual_hash[:12]}...)")
+
+    return {
+        "image_id": prepared.image_id,
+        "image_db_id": new_image.id,
+        "images_added": 1,
+        "images_skipped": 0,
+        "images_recovered": 0,
+        "json_files_created": 1,
+        "metadata_backfilled": False,
+        "skip_reason": None,
+        "is_duplicate_asset": True,
+        "duplicate_of_image_db_id": existing_records[0].id,
+    }
 
 
 def _persist_mismatch_static_variant(
@@ -7646,6 +7825,22 @@ def _apply_civitai_task_result(
     if result.get("error"):
         task_context.increment_counter("images_failed", 1)
         task_context.add_error(f"Image {image_id}: {result['error']}")
+        # Categorize failure: unavailable_detail indicates missing (404/deleted),
+        # everything else is a temporary failure (timeout, rate-limit, etc.).
+        unavailable_detail = result.get("unavailable_detail")
+        item_data = {"image_id": image_id, "error": result["error"]}
+        if isinstance(unavailable_detail, dict):
+            task_context.mark_missing_failure(
+                item_key,
+                str(result["error"]),
+                item_data={**item_data, "unavailable_detail": unavailable_detail},
+            )
+        else:
+            task_context.mark_temporary_failure(
+                item_key,
+                str(result["error"]),
+                item_data=item_data,
+            )
         task_context.mark_item(item_key, "failed", str(result["error"]))
         task_context.advance()
         return
@@ -8240,7 +8435,9 @@ def _variant_group_key_for_image(image: ImageModel, merged_payload: dict[str, An
     ).strip()
     if explicit_key:
         return explicit_key
-    return str(image.file_hash or image.id or image.file_path or "").strip()
+    # Default to file_hash so that duplicate assets (same SHA256, different
+    # CivitAI IDs) are grouped together as variants.
+    return str(image.file_hash or image.file_path or image.id or "").strip()
 
 
 def _variant_sort_index_for_image(image: ImageModel, fallback: int) -> int:
@@ -8501,9 +8698,22 @@ def _validate_local_file_health(file_path_obj: Path) -> tuple[bool, Optional[str
 
 def _build_local_image_variant(image: ImageModel, merged_payload: dict[str, Any], *, group_key: str) -> dict[str, Any]:
     variant_role = str(getattr(image, "variant_role", None) or merged_payload.get("variant_role") or "library").strip() or "library"
+
+    # Build a descriptive label — for CivitAI duplicates include the image ID
+    # so the user can tell variants apart in the picker.
+    civitai_image_id = (
+        extract_civitai_image_id(str(merged_payload.get("source_url") or ""))
+        or (merged_payload.get("json_metadata") or {}).get("original_civitai_image_id")
+        or None
+    )
+    if civitai_image_id:
+        variant_label = f"CivitAI #{civitai_image_id}"
+    else:
+        variant_label = "Library Asset"
+
     variant = {
-        "variant_key": f"variant:local:{group_key}:{image.file_hash}",
-        "variant_label": "Library Asset",
+        "variant_key": f"variant:local:{group_key}:{image.file_hash}:id:{image.id}",
+        "variant_label": variant_label,
         "variant_role": variant_role,
         "variant_sort_index": _variant_sort_index_for_image(image, 100),
         "file_name": merged_payload.get("file_name"),
@@ -9032,6 +9242,59 @@ def _load_filtered_image_keys(
         return [str(file_hash) for file_hash, _ in rows if file_hash]
 
 
+def _merge_duplicate_grouped_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge grouped display items that share the same gallery_item_key.
+
+    Duplicate CivitAI assets (same SHA256, different CivitAI IDs) each
+    produce their own grouped display item with the same gallery_item_key.
+    This function merges them into a single item whose variant list is the
+    union of all duplicates' variants, so the user sees one tile with a
+    variant picker to switch between the different CivitAI entries.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in items:
+        key = item.get("gallery_item_key", "")
+        if key not in merged:
+            merged[key] = dict(item)
+            order.append(key)
+            continue
+
+        existing = merged[key]
+        # Collect all variants from both items, deduplicating by variant_key
+        existing_variants: list[dict[str, Any]] = existing.get("variants") or []
+        new_variants: list[dict[str, Any]] = item.get("variants") or []
+        seen_vkeys: set[str] = {v.get("variant_key") for v in existing_variants if v.get("variant_key")}
+        for v in new_variants:
+            vk = v.get("variant_key")
+            if vk and vk not in seen_vkeys:
+                existing_variants.append(v)
+                seen_vkeys.add(vk)
+
+        existing["variants"] = existing_variants
+        existing["variant_count"] = len(existing_variants)
+        existing["default_variant_key"] = existing_variants[0].get("variant_key") if existing_variants else None
+        existing["active_variant_key"] = existing_variants[0].get("variant_key") if existing_variants else None
+
+        # Merge collection names/ids from the duplicate
+        existing_cnames = set(existing.get("collection_names") or [])
+        existing_cids = set(existing.get("collection_ids") or [])
+        for cname in (item.get("collection_names") or []):
+            existing_cnames.add(cname)
+        for cid in (item.get("collection_ids") or []):
+            existing_cids.add(cid)
+        existing["collection_names"] = list(existing_cnames)
+        existing["collection_ids"] = list(existing_cids)
+
+        # Re-merge the default variant into the top-level payload
+        if existing_variants:
+            merged_item = _merge_display_item_variant(existing, existing_variants[0])
+            # Copy the variant-merged fields back into the existing dict
+            existing.update(merged_item)
+
+    return [merged[k] for k in order]
+
+
 def _load_display_image_items(
     db: Session,
     *,
@@ -9203,6 +9466,15 @@ def _load_display_image_items(
         if isinstance(db_user_tags, list) and db_user_tags:
             merged["user_tags"] = db_user_tags
         display_items.extend(_build_display_items_for_image(image, merged, group_variants=group_variants))
+
+    # Merge display items that share the same gallery_item_key (duplicate
+    # assets with the same file_hash but different CivitAI IDs).  When
+    # group_variants is enabled, each duplicate independently produced a
+    # grouped display item.  We merge them into a single item whose variant
+    # list is the union of all duplicates' variants, keeping each variant
+    # independently selectable.
+    if group_variants:
+        display_items = _merge_duplicate_grouped_items(display_items)
 
     _t7 = _time.perf_counter()
     print(f"[PERF] display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
@@ -9579,6 +9851,19 @@ def _run_civitai_collection_import_pipeline(
             return f"Collection {collection_index}/{collection_count}: {collection_label}"
         return f"Collection: {collection_label}"
 
+    def _update_cp_entry(**updates: Any) -> None:
+        """Update the collections_progress entry for this collection."""
+        cp_list: Optional[list[dict[str, Any]]] = task_context.get_metadata("collections_progress")
+        if not cp_list:
+            return
+        for entry in cp_list:
+            if entry.get("collection_id") == collection_id:
+                entry.update(updates)
+                break
+
+    def _set_pending_activity(activity: str) -> None:
+        task_context.set_metadata("pending_activities", [activity])
+
     def _on_collection_page(page_number: int, page_items: int, discovered_count: int) -> None:
         overall_discovered = overall_discovered_before + discovered_count
         _set_collection_state(
@@ -9590,11 +9875,19 @@ def _run_civitai_collection_import_pipeline(
             overall_items_discovered=overall_discovered,
             overall_items_processed=overall_processed_before,
         )
+        _update_cp_entry(
+            discovered=discovered_count,
+            total=discovered_count,
+            message=f"Discovered {discovered_count} items (page {page_number})",
+        )
+        _set_pending_activity(f"Fetching items for {collection_label} (page {page_number})")
         task_context.set_message(
             f"{_format_collection_prefix()} | Discovered {discovered_count} items | All discovered {overall_discovered}"
         )
 
     task_context.set_message(f"Fetching collection items for {collection_label}")
+    _update_cp_entry(status="fetching", message="Fetching collection items")
+    _set_pending_activity(f"Fetching items for {collection_label}")
     scraper = CivitaiPrivateScraper(auto_authenticate=True)
     collection_items = scraper.fetch_collection_items(
         collection_id=collection_id,
@@ -9633,6 +9926,13 @@ def _run_civitai_collection_import_pipeline(
         overall_items_discovered=overall_discovered,
         overall_items_processed=overall_processed_before,
     )
+    _update_cp_entry(
+        discovered=collection_total,
+        total=collection_total,
+        status="processing",
+        message=f"Discovered {collection_total} unique items",
+    )
+    _set_pending_activity(f"Processing {collection_total} items for {collection_label}")
     task_context.set_message(
         f"{_format_collection_prefix()} | Discovered {collection_total} items | All discovered {overall_discovered}"
     )
@@ -9664,6 +9964,12 @@ def _run_civitai_collection_import_pipeline(
             overall_items_discovered=overall_discovered,
             overall_items_processed=overall_processed,
         )
+        _update_cp_entry(
+            metadata_gathered=collection_processed,
+            images_fetched=collection_processed,
+            message=f"Processing {collection_processed}/{collection_size}",
+        )
+        _set_pending_activity(f"Processing items for {collection_label}: {collection_processed}/{collection_size}")
         task_context.set_message(
             f"{_format_collection_prefix()} | Collection {collection_processed}/{collection_size} | All {overall_processed}/{overall_discovered}"
         )
@@ -9711,6 +10017,24 @@ def _run_civitai_collection_import_pipeline(
 
     task_context.increment_counter("collections_synced", 1)
     task_context.increment_counter("memberships_removed", memberships_removed)
+
+    # Finalize structured progress entry from import results.
+    images_added = sum(int(r.get("images_added", 0) or 0) for r in results)
+    images_skipped = sum(int(r.get("images_skipped", 0) or 0) for r in results)
+    error_count = sum(1 for r in results if r.get("error"))
+    _update_cp_entry(
+        imported=images_added,
+        skipped=images_skipped,
+        errors=error_count,
+        total=len(image_ids),
+        discovered=collection_total,
+        metadata_gathered=len(results),
+        images_fetched=len(results),
+        status="completed",
+        message=f"Done: {images_added} imported, {images_skipped} skipped, {error_count} errors",
+    )
+    _set_pending_activity("")
+
     return {
         "civitai_collection_id": collection_id,
         "civitai_collection_name": collection_name,
@@ -9853,6 +10177,27 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
             "civitai_payload_retry_metrics": retry_metrics,
         }
 
+    # Initialize per-collection structured progress tracking.
+    collections_progress: list[dict[str, Any]] = []
+    for remote in remote_collections:
+        cid = int(remote["id"])
+        cname = str(remote["name"])
+        collections_progress.append({
+            "collection_id": cid,
+            "collection_name": cname,
+            "status": "pending",
+            "discovered": 0,
+            "metadata_gathered": 0,
+            "images_fetched": 0,
+            "skipped": 0,
+            "errors": 0,
+            "imported": 0,
+            "total": 0,
+            "message": "",
+        })
+    task_context.set_metadata("collections_progress", collections_progress)
+    task_context.set_metadata("pending_activities", [])
+
     collection_summaries: list[dict] = []
     overall_processed = 0
     overall_discovered = 0
@@ -9860,6 +10205,13 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
         collection_id = int(remote["id"])
         collection_name = str(remote["name"])
         collection_item_key = f"collection:{collection_id}"
+
+        # Update structured progress entry.
+        cp_entry = collections_progress[index - 1]
+        cp_entry["status"] = "fetching"
+        cp_entry["message"] = "Starting sync"
+        task_context.set_metadata("pending_activities", [f"Fetching collection {index}/{len(remote_collections)}: {collection_name}"])
+
         task_context.mark_item(collection_item_key, "running", f"Syncing {collection_name}")
         task_context.set_message(
             f"Syncing collection {index}/{len(remote_collections)}: {collection_name}"
@@ -9924,6 +10276,9 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
                         db,
                         context=f"Empty collection sync commit for {collection_id}",
                     )
+                    cp_entry["status"] = "completed"
+                    cp_entry["message"] = "Empty collection synced"
+                    task_context.set_metadata("pending_activities", [])
                     task_context.increment_counter("collections_synced", 1)
                     task_context.increment_counter("memberships_removed", memberships_removed)
                     summary = _build_civitai_empty_collection_sync_summary(
@@ -9943,6 +10298,9 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
                         db,
                         context=f"Collection incremental sync commit for {collection_id}",
                     )
+                    cp_entry["status"] = "skipped"
+                    cp_entry["message"] = f"No remote changes ({sync_state})"
+                    task_context.set_metadata("pending_activities", [])
                     task_context.increment_counter("collections_synced", 1)
                     summary = _build_civitai_collection_skip_summary(
                         collection_id=collection_id,
@@ -9952,6 +10310,8 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
                     )
 
             if summary is None:
+                cp_entry["status"] = "processing"
+                cp_entry["message"] = "Importing items"
                 summary = _run_civitai_collection_import_pipeline(
                     task_context,
                     api=api,
@@ -9964,6 +10324,17 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
                     overall_processed_before=overall_processed,
                     overall_discovered_before=overall_discovered,
                 )
+            # Finalize structured progress from pipeline results.
+            if cp_entry["status"] not in ("completed", "skipped", "failed"):
+                cp_entry["status"] = "completed"
+                cp_entry["imported"] = int(summary.get("images_added", 0) or 0)
+                cp_entry["skipped"] = int(summary.get("images_skipped", 0) or 0)
+                cp_entry["errors"] = len(summary.get("errors", []))
+                cp_entry["total"] = int(summary.get("requested", 0) or 0)
+                cp_entry["discovered"] = cp_entry["total"]
+                cp_entry["message"] = f"Synced {cp_entry['imported']} imported, {cp_entry['skipped']} skipped"
+            task_context.set_metadata("pending_activities", [])
+
             collection_summaries.append(summary)
             overall_processed += int(summary.get("requested", 0) or 0)
             overall_discovered += int(summary.get("requested", 0) or 0)
@@ -9979,6 +10350,10 @@ def _run_civitai_collection_sync_job(task_context: TaskContext, *, limit: Option
             )
         except Exception as exc:
             error_text = str(exc)
+            cp_entry["status"] = "failed"
+            cp_entry["errors"] = 1
+            cp_entry["message"] = error_text
+            task_context.set_metadata("pending_activities", [])
             task_context.add_error(f"Collection {collection_id}: {error_text}")
             task_context.mark_item(collection_item_key, "failed", error_text)
             collection_summaries.append(
@@ -10369,6 +10744,61 @@ def _run_retry_failed_items_job(
     return summary
 
 
+def _run_retry_specific_image_ids_job(
+    task_context: TaskContext,
+    *,
+    image_ids: list[int],
+    source_task_id: str,
+) -> dict:
+    """Retry a flat list of image IDs (used by retry-missing and retry-temporary endpoints)."""
+    if not image_ids:
+        raise RuntimeError("No image IDs to retry.")
+
+    api = CivitaiAPI.get_instance()
+    retry_metrics_before = _snapshot_civitai_payload_retry_metrics(api)
+
+    task_context.set_total(len(image_ids))
+    task_context.set_metadata("source_task_id", source_task_id)
+    task_context.set_metadata("retry_requested", len(image_ids))
+    task_context.set_message(f"Retrying {len(image_ids)} image(s)")
+
+    results, _ = _process_civitai_image_ids(
+        task_context,
+        api=api,
+        image_ids=image_ids,
+        attach_collection_id=None,
+        item_key_prefix="retry-specific",
+    )
+
+    summary = {
+        "message": "Retry complete.",
+        "source_task_id": source_task_id,
+        "requested": len(image_ids),
+        "images_added": sum(int(r.get("images_added", 0) or 0) for r in results),
+        "images_skipped": sum(int(r.get("images_skipped", 0) or 0) for r in results),
+        "images_recovered": sum(int(r.get("images_recovered", 0) or 0) for r in results),
+        "images_cancelled": sum(1 for r in results if r.get("cancelled")),
+        "json_files_created": sum(int(r.get("json_files_created", 0) or 0) for r in results),
+        "errors": [
+            f"Image {r.get('image_id')}: {r['error']}"
+            for r in results
+            if r.get("error")
+        ],
+        "unavailable_items": _collect_civitai_unavailable_items(results),
+        "warnings": _get_runtime_warnings(),
+        "results": results,
+    }
+    retry_metrics = _diff_civitai_payload_retry_metrics(
+        retry_metrics_before,
+        _snapshot_civitai_payload_retry_metrics(api),
+    )
+    _record_civitai_payload_retry_metrics(task_context, retry_metrics)
+    summary["civitai_payload_retry_metrics"] = retry_metrics
+    if task_context.cancel_requested:
+        task_context.cancel(summary, "Cancelled")
+    return summary
+
+
 def _sync_single_civitai_collection(
     api: CivitaiAPI,
     scraper: CivitaiPrivateScraper,
@@ -10603,6 +11033,7 @@ async def lifespan(app: FastAPI):
     _ensure_original_file_name_column()
     _ensure_blurhash_column()
     _ensure_observation_unique_constraint()
+    _ensure_file_hash_nonunique()
 
     print("AtelierAI API is ready to go!")
 
@@ -13453,6 +13884,96 @@ def retry_failed_items_from_task(task_id: str):
     )
     return {
         "message": "Retry failed items task queued.",
+        "task": task,
+    }
+
+
+@app.post("/tasks/{task_id}/retry-missing", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
+def retry_missing_failures_from_task(task_id: str):
+    """Retry items that failed due to missing/unavailable (404/deleted) conditions."""
+    try:
+        source_task = task_manager.get_task(task_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    missing_items = source_task.get("missing_failures", [])
+    if not missing_items:
+        raise HTTPException(
+            status_code=400,
+            detail="No missing/unavailable failures found for this task.",
+        )
+
+    image_ids = []
+    for entry in missing_items:
+        item_data = entry.get("item_data") if isinstance(entry, dict) else None
+        if isinstance(item_data, dict):
+            iid = item_data.get("image_id")
+            if isinstance(iid, int):
+                image_ids.append(iid)
+    if not image_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No retryable image IDs found in missing failures.",
+        )
+
+    task = task_manager.create_task(
+        kind="civitai-retry-missing",
+        title=f"Retry {len(image_ids)} missing items from job {task_id}",
+        metadata={
+            "source_task_id": task_id,
+            "retry_image_ids": image_ids,
+        },
+        runner=lambda context: _run_retry_specific_image_ids_job(
+            context, image_ids=image_ids, source_task_id=task_id,
+        ),
+    )
+    return {
+        "message": f"Retry missing items task queued ({len(image_ids)} items).",
+        "task": task,
+    }
+
+
+@app.post("/tasks/{task_id}/retry-temporary", response_model=dict, status_code=status.HTTP_202_ACCEPTED)
+def retry_temporary_failures_from_task(task_id: str):
+    """Retry items that failed due to temporary errors (timeout, rate-limit, etc.)."""
+    try:
+        source_task = task_manager.get_task(task_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    temp_items = source_task.get("temporary_failures", [])
+    if not temp_items:
+        raise HTTPException(
+            status_code=400,
+            detail="No temporary failures found for this task.",
+        )
+
+    image_ids = []
+    for entry in temp_items:
+        item_data = entry.get("item_data") if isinstance(entry, dict) else None
+        if isinstance(item_data, dict):
+            iid = item_data.get("image_id")
+            if isinstance(iid, int):
+                image_ids.append(iid)
+    if not image_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No retryable image IDs found in temporary failures.",
+        )
+
+    task = task_manager.create_task(
+        kind="civitai-retry-temporary",
+        title=f"Retry {len(image_ids)} temporary-failed items from job {task_id}",
+        metadata={
+            "source_task_id": task_id,
+            "retry_image_ids": image_ids,
+        },
+        runner=lambda context: _run_retry_specific_image_ids_job(
+            context, image_ids=image_ids, source_task_id=task_id,
+        ),
+    )
+    return {
+        "message": f"Retry temporary-failed items task queued ({len(image_ids)} items).",
         "task": task,
     }
 
@@ -17467,6 +17988,395 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
         "resolved": missing_before - missing_after,
         "errors": errors,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Sync Lab endpoints — step-by-step CivitAI collection import analysis
+# ──────────────────────────────────────────────────────────────────────
+
+# In-memory session store for prepared downloads (keyed by image_id).
+_sync_lab_prepared: dict[int, _PreparedCivitaiImport] = {}
+
+
+@app.get("/sync-lab/collections", response_model=dict)
+def sync_lab_list_collections():
+    """Step 1: Fetch the authenticated user's CivitAI image collections."""
+    t0 = time.monotonic()
+    api = CivitaiAPI.get_instance()
+    try:
+        collections = _fetch_civitai_user_image_collections(api)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch collections: {exc}")
+    elapsed_ms = round((time.monotonic() - t0) * 1000)
+    return {
+        "status": "ok",
+        "timing": {"duration_ms": elapsed_ms},
+        "data": {"collections": collections, "total": len(collections)},
+    }
+
+
+@app.get("/sync-lab/collection-items/{collection_id}", response_model=dict)
+def sync_lab_fetch_collection_items(collection_id: int, limit: int = Query(default=None, ge=1)):
+    """Step 3: Fetch all items for a specific CivitAI collection."""
+    t0 = time.monotonic()
+    scraper = CivitaiPrivateScraper(auto_authenticate=True)
+    try:
+        items = scraper.fetch_collection_items(
+            collection_id=collection_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch collection items: {exc}")
+
+    if not items:
+        return {
+            "status": "ok",
+            "timing": {"duration_ms": round((time.monotonic() - t0) * 1000)},
+            "data": {"collection_id": collection_id, "items": [], "total": 0, "image_ids": []},
+        }
+
+    # Normalize and archive
+    normalized = [item for item in items if isinstance(item, dict)]
+    _archive_civitai_collection_items(normalized)
+
+    # Deduplicate and extract image IDs
+    seen: set[int] = set()
+    image_ids: list[int] = []
+    item_index: dict[int, dict[str, Any]] = {}
+    for item in normalized:
+        raw_id = item.get("id")
+        try:
+            img_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if img_id in seen:
+            continue
+        seen.add(img_id)
+        image_ids.append(img_id)
+        item_index[img_id] = item
+
+    elapsed_ms = round((time.monotonic() - t0) * 1000)
+    return {
+        "status": "ok",
+        "timing": {"duration_ms": elapsed_ms},
+        "data": {
+            "collection_id": collection_id,
+            "total": len(image_ids),
+            "image_ids": image_ids,
+            "items": normalized,
+            "item_index": {str(k): v for k, v in item_index.items()},
+        },
+    }
+
+
+@app.post("/sync-lab/analyze-local", response_model=dict)
+def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
+    """Step 4: Check which CivitAI image IDs exist in the local DB."""
+    t0 = time.monotonic()
+    image_ids = payload.image_ids
+    if not image_ids:
+        return {
+            "status": "ok",
+            "timing": {"duration_ms": 0},
+            "data": {"existing": [], "new": [], "tombstoned": [], "placeholders": [], "summary": {"existing": 0, "new": 0, "tombstoned": 0, "placeholders": 0}},
+        }
+
+    existing: list[dict] = []
+    new_ids: list[int] = []
+    tombstoned: list[dict] = []
+    placeholders: list[dict] = []
+
+    db = SessionLocal()
+    try:
+        for img_id in image_ids:
+            # Match against both civitai.com and civitai.red source URLs
+            url_pattern = f"%/images/{img_id}"
+            match = (
+                db.query(ImageModel)
+                .filter(ImageModel.source_url.like(url_pattern))
+                .first()
+            )
+            if match is None:
+                new_ids.append(img_id)
+            elif match.image_status == "tombstoned":
+                tombstoned.append({"civitai_image_id": img_id, "image_db_id": match.id, "file_hash": match.file_hash})
+            elif match.image_status == "placeholder":
+                placeholders.append({"civitai_image_id": img_id, "image_db_id": match.id, "file_hash": match.file_hash})
+            else:
+                existing.append({"civitai_image_id": img_id, "image_db_id": match.id, "file_hash": match.file_hash, "filename": match.file_name})
+    finally:
+        db.close()
+
+    elapsed_ms = round((time.monotonic() - t0) * 1000)
+    return {
+        "status": "ok",
+        "timing": {"duration_ms": elapsed_ms},
+        "data": {
+            "existing": existing,
+            "new": new_ids,
+            "tombstoned": tombstoned,
+            "placeholders": placeholders,
+            "summary": {
+                "total": len(image_ids),
+                "existing": len(existing),
+                "new": len(new_ids),
+                "tombstoned": len(tombstoned),
+                "placeholders": len(placeholders),
+            },
+        },
+    }
+
+
+@app.post("/sync-lab/fetch-metadata", response_model=dict)
+def sync_lab_fetch_metadata(payload: SyncLabAnalyzeRequest):
+    """Step 5: Fetch CivitAI API metadata (basic info + generation data) for specified image IDs."""
+    t0 = time.monotonic()
+    api = CivitaiAPI.get_instance()
+    results: dict[str, dict[str, Any]] = {}
+    errors: list[dict] = []
+
+    for img_id in payload.image_ids:
+        id_t0 = time.monotonic()
+        info = {"image_id": img_id, "basic_info": None, "generation_data": None, "timing_ms": 0, "error": None}
+        try:
+            basic = api.fetch_basic_info(img_id)
+            info["basic_info"] = basic
+        except Exception as exc:
+            info["error"] = f"basic_info failed: {exc}"
+            errors.append({"image_id": img_id, "stage": "basic_info", "error": str(exc)})
+
+        try:
+            gen_data = api.fetch_generation_data(img_id)
+            info["generation_data"] = gen_data
+        except Exception as exc:
+            err_msg = f"generation_data failed: {exc}"
+            info["error"] = (info["error"] + "; " + err_msg) if info["error"] else err_msg
+            errors.append({"image_id": img_id, "stage": "generation_data", "error": str(exc)})
+
+        info["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+        results[str(img_id)] = info
+
+    elapsed_ms = round((time.monotonic() - t0) * 1000)
+    ok_count = sum(1 for v in results.values() if v.get("error") is None)
+    return {
+        "status": "ok" if not errors else "partial",
+        "timing": {"duration_ms": elapsed_ms, "per_image_avg_ms": round(elapsed_ms / max(len(payload.image_ids), 1))},
+        "data": {
+            "total": len(payload.image_ids),
+            "successful": ok_count,
+            "failed": len(errors),
+            "results": results,
+        },
+        "errors": errors,
+    }
+
+
+@app.post("/sync-lab/download", response_model=dict)
+def sync_lab_download(payload: SyncLabAnalyzeRequest):
+    """Step 6: Download images for specified CivitAI image IDs."""
+    t0 = time.monotonic()
+    api = CivitaiAPI.get_instance()
+    results: list[dict[str, Any]] = []
+    errors: list[dict] = []
+
+    for img_id in payload.image_ids:
+        id_t0 = time.monotonic()
+        result = {"image_id": img_id, "status": "pending", "timing_ms": 0, "error": None}
+        try:
+            # Resolve metadata
+            target = _resolve_civitai_image_target(api, img_id)
+
+            # Download
+            image_url = target.get("image_url", "")
+            mime_type = target.get("mime_type")
+            file_size = target.get("declared_file_size")
+            download_result = _download_civitai_image_with_validation(
+                image_id=img_id,
+                target=target,
+            )
+
+            # Build a prepared import and store it in session
+            prepared = _PreparedCivitaiImport(
+                image_id=img_id,
+                image_url=image_url,
+                mime_type=download_result.selected_mime_type or mime_type,
+                declared_file_size=file_size,
+                preview_image_url=target.get("preview_image_url"),
+                original_filename=target.get("original_filename", f"civitai_{img_id}"),
+                artist_name=target.get("artist_name"),
+                source_url=_build_civitai_image_source_url(img_id),
+                temp_path=download_result.temp_path,
+                civitai_uuid=target.get("civitai_uuid"),
+                civitai_hash=target.get("civitai_hash"),
+                raw_basic_info=target.get("raw_basic_info"),
+                raw_generation_data=target.get("raw_generation_data"),
+            )
+            _sync_lab_prepared[img_id] = prepared
+
+            result["status"] = "downloaded"
+            result["temp_path"] = str(download_result.temp_path)
+            result["mime_type"] = download_result.selected_mime_type
+            result["selected_url"] = download_result.selected_url
+
+        except _CivitaiImageUnavailableError as exc:
+            result["status"] = "unavailable"
+            result["error"] = str(exc)
+            errors.append({"image_id": img_id, "stage": "unavailable", "error": str(exc)})
+        except Exception as exc:
+            result["status"] = "failed"
+            result["error"] = str(exc)
+            errors.append({"image_id": img_id, "stage": "download", "error": str(exc)})
+
+        result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+        results.append(result)
+
+    elapsed_ms = round((time.monotonic() - t0) * 1000)
+    ok_count = sum(1 for r in results if r["status"] == "downloaded")
+    return {
+        "status": "ok" if not errors else "partial",
+        "timing": {"duration_ms": elapsed_ms, "per_image_avg_ms": round(elapsed_ms / max(len(payload.image_ids), 1))},
+        "data": {
+            "total": len(payload.image_ids),
+            "downloaded": ok_count,
+            "unavailable": sum(1 for r in results if r["status"] == "unavailable"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "results": results,
+        },
+        "errors": errors,
+    }
+
+
+@app.post("/sync-lab/ingest", response_model=dict)
+def sync_lab_ingest(payload: SyncLabIngestRequest):
+    """Step 7: Ingest previously downloaded images into the library.
+
+    When an image has the same SHA256 as an already-ingested record, a duplicate
+    asset record is created in ``image_resources/civitai_source_variants/`` instead
+    of skipping.  Both records share ``file_hash`` but have unique ``file_path``.
+    """
+    t0 = time.monotonic()
+    results: list[dict[str, Any]] = []
+    errors: list[dict] = []
+
+    db = SessionLocal()
+    try:
+        for img_id in payload.image_ids:
+            id_t0 = time.monotonic()
+            result = {"image_id": img_id, "status": "pending", "timing_ms": 0, "error": None}
+
+            prepared = _sync_lab_prepared.get(img_id)
+            if prepared is None:
+                result["status"] = "skipped"
+                result["error"] = "No prepared download found — run the download step first"
+                errors.append({"image_id": img_id, "stage": "ingest", "error": result["error"]})
+                result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                results.append(result)
+                continue
+
+            try:
+                # Check for existing records with the same file hash
+                temp_hash = _sha256_file(prepared.temp_path)
+                existing_records = _find_existing_by_file_hash(db, temp_hash)
+
+                if existing_records:
+                    # Duplicate asset — create independent record in civitai_source_variants
+                    ingest_result = _ingest_civitai_duplicate_asset(
+                        db,
+                        prepared=prepared,
+                        existing_records=existing_records,
+                        attach_collection_id=payload.collection_id,
+                    )
+                else:
+                    # Normal ingest — no hash collision
+                    ingest_result = _ingest_prepared_civitai_import(
+                        db,
+                        prepared=prepared,
+                        attach_collection_id=payload.collection_id,
+                    )
+
+                db.commit()
+                result["status"] = "ingested"
+                result["ingest_result"] = ingest_result
+                # Clean up session store
+                _sync_lab_prepared.pop(img_id, None)
+            except Exception as exc:
+                db.rollback()
+                result["status"] = "failed"
+                result["error"] = str(exc)
+                errors.append({"image_id": img_id, "stage": "ingest", "error": str(exc)})
+
+            result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+            results.append(result)
+    finally:
+        db.close()
+
+    elapsed_ms = round((time.monotonic() - t0) * 1000)
+    ok_count = sum(1 for r in results if r["status"] == "ingested")
+    return {
+        "status": "ok" if not errors else "partial",
+        "timing": {"duration_ms": elapsed_ms, "per_image_avg_ms": round(elapsed_ms / max(len(payload.image_ids), 1))},
+        "data": {
+            "total": len(payload.image_ids),
+            "ingested": ok_count,
+            "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "results": results,
+        },
+        "errors": errors,
+    }
+
+
+@app.get("/sync-lab/collection-status/{collection_id}", response_model=dict)
+def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)):
+    """Get the current local DB state for a CivitAI collection."""
+    collection = (
+        db.query(CollectionModel)
+        .filter(CollectionModel.civitai_collection_id == collection_id)
+        .first()
+    )
+    if not collection:
+        return {
+            "status": "ok",
+            "data": {"collection_id": collection_id, "exists_locally": False, "images": [], "total": 0},
+        }
+
+    # Get images in this collection
+    memberships = (
+        db.query(ImageCollectionMembership, ImageModel)
+        .join(ImageModel, ImageCollectionMembership.image_id == ImageModel.id)
+        .filter(ImageCollectionMembership.collection_id == collection.id)
+        .all()
+    )
+
+    images = []
+    for membership, image in memberships:
+        images.append({
+            "image_db_id": image.id,
+            "file_hash": image.file_hash,
+            "filename": image.filename,
+            "status": image.status,
+            "source_url": image.source_url,
+        })
+
+    return {
+        "status": "ok",
+        "data": {
+            "collection_id": collection_id,
+            "exists_locally": True,
+            "local_collection_id": collection.id,
+            "local_name": collection.name,
+            "total": len(images),
+            "images": images,
+        },
+    }
+
+
+@app.get("/sync-lab")
+def sync_lab_page():
+    """Serve the Sync Lab page."""
+    return FileResponse("frontend/sync-lab.html")
 
 
 if __name__ == "__main__":

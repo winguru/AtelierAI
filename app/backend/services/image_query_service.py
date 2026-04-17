@@ -881,6 +881,16 @@ class ImageQueryService:
         if ImageQueryService._is_hex_compatible(normalized_search):
             column_conditions.append(func.lower(ImageModel.file_hash).like(like_term))
 
+        # CivitAI image ID: when the term is a pure number, also match the
+        # URL path pattern explicitly (/images/{id}) and check civitai_hash /
+        # civitai_uuid columns which are indexed.
+        if normalized_search.isdigit():
+            column_conditions.append(
+                ImageModel.source_url.like(f"%/images/{normalized_search}%")
+            )
+            column_conditions.append(ImageModel.civitai_hash.like(like_term))
+            column_conditions.append(ImageModel.civitai_uuid.like(like_term))
+
         for row in (
             session.query(ImageModel.id).filter(or_(*column_conditions))
         ):

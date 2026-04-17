@@ -367,9 +367,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const taskHistoryList = document.getElementById('task-history-list');
     const taskDetailStatus = document.getElementById('task-detail-status');
     const taskRetryFailedBtn = document.getElementById('task-retry-failed-btn');
+    const taskRetryMissingBtn = document.getElementById('task-retry-missing-btn');
+    const taskRetryTemporaryBtn = document.getElementById('task-retry-temporary-btn');
     const taskDetailEmpty = document.getElementById('task-detail-empty');
     const taskDetailContent = document.getElementById('task-detail-content');
     const taskDetailSummary = document.getElementById('task-detail-summary');
+    const taskCollectionProgress = document.getElementById('task-collection-progress');
+    const taskPendingActivities = document.getElementById('task-pending-activities');
+    const taskMissingFailures = document.getElementById('task-missing-failures');
+    const taskTemporaryFailures = document.getElementById('task-temporary-failures');
     const taskFailedItems = document.getElementById('task-failed-items');
     const taskUnavailableItems = document.getElementById('task-unavailable-items');
     const taskRecentActivity = document.getElementById('task-recent-activity');
@@ -891,6 +897,108 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function renderPendingActivities(task) {
+        if (!taskPendingActivities) {
+            return;
+        }
+        taskPendingActivities.innerHTML = '';
+        const metadata = task && typeof task === 'object' ? (task.metadata || {}) : {};
+        const activities = Array.isArray(metadata.pending_activities) ? metadata.pending_activities : [];
+        if (!activities.length || !activities[0]) {
+            const empty = document.createElement('div');
+            empty.className = 'task-detail-empty-list';
+            empty.textContent = 'No pending activities.';
+            taskPendingActivities.appendChild(empty);
+            return;
+        }
+        activities.forEach((activity) => {
+            if (!activity) return;
+            const row = document.createElement('div');
+            row.className = 'task-pending-activity-item';
+            const dot = document.createElement('span');
+            dot.className = 'task-pending-dot';
+            row.appendChild(dot);
+            const text = document.createElement('span');
+            text.textContent = activity;
+            row.appendChild(text);
+            taskPendingActivities.appendChild(row);
+        });
+    }
+
+    function renderCollectionProgress(task) {
+        if (!taskCollectionProgress) {
+            return;
+        }
+        taskCollectionProgress.innerHTML = '';
+        const metadata = task && typeof task === 'object' ? (task.metadata || {}) : {};
+        const collections = Array.isArray(metadata.collections_progress) ? metadata.collections_progress : [];
+        if (!collections.length) {
+            const empty = document.createElement('div');
+            empty.className = 'task-detail-empty-list';
+            empty.textContent = 'No collection progress data.';
+            taskCollectionProgress.appendChild(empty);
+            return;
+        }
+
+        collections.forEach((col) => {
+            const row = document.createElement('div');
+            row.className = `task-collection-row task-collection-${col.status || 'pending'}`;
+
+            const header = document.createElement('div');
+            header.className = 'task-collection-header';
+
+            const nameEl = document.createElement('span');
+            nameEl.className = 'task-collection-name';
+            nameEl.textContent = col.collection_name || `Collection ${col.collection_id}`;
+            header.appendChild(nameEl);
+
+            const statusBadge = document.createElement('span');
+            statusBadge.className = `task-collection-status task-collection-status-${col.status || 'pending'}`;
+            statusBadge.textContent = col.status || 'pending';
+            header.appendChild(statusBadge);
+
+            row.appendChild(header);
+
+            // Progress bar
+            const total = Number(col.total || col.discovered || 0);
+            const processed = Number(col.metadata_gathered || col.images_fetched || 0);
+            if (total > 0) {
+                const barWrap = document.createElement('div');
+                barWrap.className = 'task-collection-progress-bar-wrap';
+                const bar = document.createElement('div');
+                bar.className = 'task-collection-progress-bar';
+                bar.style.width = `${Math.min(100, Math.round((processed / total) * 100))}%`;
+                barWrap.appendChild(bar);
+                row.appendChild(barWrap);
+            }
+
+            // Stats line
+            const stats = document.createElement('div');
+            stats.className = 'task-collection-stats';
+
+            const statParts = [];
+            if (total > 0) {
+                statParts.push(`${processed}/${total} items`);
+            }
+            if (Number(col.imported || 0) > 0) {
+                statParts.push(`imported: ${col.imported}`);
+            }
+            if (Number(col.skipped || 0) > 0) {
+                statParts.push(`skipped: ${col.skipped}`);
+            }
+            if (Number(col.errors || 0) > 0) {
+                statParts.push(`errors: ${col.errors}`);
+            }
+            if (col.message) {
+                statParts.push(col.message);
+            }
+            stats.textContent = statParts.join(' · ');
+            row.appendChild(stats);
+
+            taskCollectionProgress.appendChild(row);
+        });
+    }
+
     function renderTaskUnavailableItems(container, items, emptyText) {
         if (!container) {
             return;
@@ -964,6 +1072,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 taskRetryFailedBtn.disabled = false;
                 taskRetryFailedBtn.dataset.taskId = '';
             }
+            if (taskRetryMissingBtn) {
+                taskRetryMissingBtn.classList.add('hidden');
+                taskRetryMissingBtn.disabled = false;
+                taskRetryMissingBtn.dataset.taskId = '';
+            }
+            if (taskRetryTemporaryBtn) {
+                taskRetryTemporaryBtn.classList.add('hidden');
+                taskRetryTemporaryBtn.disabled = false;
+                taskRetryTemporaryBtn.dataset.taskId = '';
+            }
             importOutput.textContent = '';
             return;
         }
@@ -986,6 +1104,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         renderTaskDetailSummary(selectedTask);
+        renderPendingActivities(selectedTask);
+        renderCollectionProgress(selectedTask);
         renderTaskDetailList(
             taskFailedItems,
             Array.isArray(selectedTask.failed_items) ? selectedTask.failed_items : [],
@@ -997,6 +1117,31 @@ document.addEventListener('DOMContentLoaded', () => {
             getUnavailableItems(selectedTask),
             'No unavailable remote items were recorded for this job.',
         );
+
+        // Missing failures
+        const missingFailures = Array.isArray(selectedTask.missing_failures) ? selectedTask.missing_failures : [];
+        if (taskRetryMissingBtn) {
+            const hasMissing = missingFailures.length > 0 && selectedTask.status !== 'running';
+            taskRetryMissingBtn.classList.toggle('hidden', !hasMissing);
+            taskRetryMissingBtn.disabled = false;
+            taskRetryMissingBtn.dataset.taskId = hasMissing ? selectedTask.id : '';
+        }
+        if (taskMissingFailures) {
+            renderTaskDetailList(taskMissingFailures, missingFailures, 'No missing-item failures.', { failed: true });
+        }
+
+        // Temporary failures
+        const temporaryFailures = Array.isArray(selectedTask.temporary_failures) ? selectedTask.temporary_failures : [];
+        if (taskRetryTemporaryBtn) {
+            const hasTemporary = temporaryFailures.length > 0 && selectedTask.status !== 'running';
+            taskRetryTemporaryBtn.classList.toggle('hidden', !hasTemporary);
+            taskRetryTemporaryBtn.disabled = false;
+            taskRetryTemporaryBtn.dataset.taskId = hasTemporary ? selectedTask.id : '';
+        }
+        if (taskTemporaryFailures) {
+            renderTaskDetailList(taskTemporaryFailures, temporaryFailures, 'No temporary failures.', { failed: true });
+        }
+
         renderTaskDetailList(
             taskRecentActivity,
             Array.isArray(selectedTask.recent_items) ? selectedTask.recent_items : [],
@@ -1052,6 +1197,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function retryFailedItems(taskId) {
         const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/retry_failed`, {
+            method: 'POST',
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.detail || `HTTP ${response.status}`);
+        }
+        return result;
+    }
+
+    async function retryMissingItems(taskId) {
+        const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/retry-missing`, {
+            method: 'POST',
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.detail || `HTTP ${response.status}`);
+        }
+        return result;
+    }
+
+    async function retryTemporaryItems(taskId) {
+        const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/retry-temporary`, {
             method: 'POST',
         });
         const result = await response.json();
@@ -6382,9 +6549,11 @@ document.addEventListener('DOMContentLoaded', () => {
         // Keep keys stable across refresh/import reordering so detail/fullscreen state
         // stays attached to the same logical image.
         const stablePart = image.gallery_item_key
+            || (image.file_hash && image.file_path ? `${image.file_hash}:${image.file_path}` : '')
+            || ((image.file_hash && image.id) ? `${image.file_hash}:id:${image.id}` : '')
+            || image.file_path
             || image.file_hash
             || (image.id ? `id:${image.id}` : '')
-            || (image.file_path ? `path:${image.file_path}` : '')
             || (image.file_name ? `name:${image.file_name}` : '')
             || `row-${indexOffset}`;
         const clientImage = {
@@ -10836,6 +11005,50 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (error) {
                 showToast(`Could not queue retry task: ${error.message}`, 'warn');
                 taskRetryFailedBtn.disabled = false;
+            }
+        });
+    }
+
+    if (taskRetryMissingBtn) {
+        taskRetryMissingBtn.addEventListener('click', async () => {
+            const taskId = String(taskRetryMissingBtn.dataset.taskId || '').trim();
+            if (!taskId) {
+                return;
+            }
+
+            taskRetryMissingBtn.disabled = true;
+            try {
+                const result = await retryMissingItems(taskId);
+                if (result && result.task && result.task.id) {
+                    state.highlightedTaskId = result.task.id;
+                }
+                await refreshTasks();
+                showToast('Retry task queued for missing items.', 'info');
+            } catch (error) {
+                showToast(`Could not queue retry for missing items: ${error.message}`, 'warn');
+                taskRetryMissingBtn.disabled = false;
+            }
+        });
+    }
+
+    if (taskRetryTemporaryBtn) {
+        taskRetryTemporaryBtn.addEventListener('click', async () => {
+            const taskId = String(taskRetryTemporaryBtn.dataset.taskId || '').trim();
+            if (!taskId) {
+                return;
+            }
+
+            taskRetryTemporaryBtn.disabled = true;
+            try {
+                const result = await retryTemporaryItems(taskId);
+                if (result && result.task && result.task.id) {
+                    state.highlightedTaskId = result.task.id;
+                }
+                await refreshTasks();
+                showToast('Retry task queued for temporary failures.', 'info');
+            } catch (error) {
+                showToast(`Could not queue retry for temporary failures: ${error.message}`, 'warn');
+                taskRetryTemporaryBtn.disabled = false;
             }
         });
     }

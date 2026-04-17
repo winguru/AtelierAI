@@ -30,7 +30,7 @@ class ImageModel(Base):
     file_path = Column(Text, unique=True, index=True, nullable=False)
     file_name = Column(String, nullable=False)
     original_file_name = Column(String, nullable=True)
-    file_hash = Column(String, unique=True, index=True, nullable=False)
+    file_hash = Column(String, index=True, nullable=False)  # Not unique — CivitAI duplicate assets can share the same SHA256
     file_size = Column(Integer)
     width = Column(Integer)
     height = Column(Integer)

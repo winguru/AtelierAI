@@ -11211,6 +11211,8 @@ def _run_civitai_collection_import_pipeline(
     collection_count: Optional[int] = None,
     overall_processed_before: int = 0,
     overall_discovered_before: int = 0,
+    on_collection_progress: Optional[Callable[..., None]] = None,
+    on_pending_activity: Optional[Callable[[str], None]] = None,
 ) -> dict:
     collection_label = collection_name or f"Collection {collection_id}"
 
@@ -11247,21 +11249,25 @@ def _run_civitai_collection_import_pipeline(
             overall_items_discovered=overall_discovered,
             overall_items_processed=overall_processed_before,
         )
-        _update_cp_entry(
-            discovered=discovered_count,
-            total=discovered_count,
-            message=f"Discovered {discovered_count} items (page {page_number})",
-        )
-        _set_pending_activity(
-            f"Fetching items for {collection_label} (page {page_number})"
-        )
+        if on_collection_progress is not None:
+            on_collection_progress(
+                discovered=discovered_count,
+                total=discovered_count,
+                message=f"Discovered {discovered_count} items (page {page_number})",
+            )
+        if on_pending_activity is not None:
+            on_pending_activity(
+                f"Fetching items for {collection_label} (page {page_number})"
+            )
         task_context.set_message(
             f"{_format_collection_prefix()} | Discovered {discovered_count} items | All discovered {overall_discovered}"
         )
 
     task_context.set_message(f"Fetching collection items for {collection_label}")
-    _update_cp_entry(status="fetching", message="Fetching collection items")
-    _set_pending_activity(f"Fetching items for {collection_label}")
+    if on_collection_progress is not None:
+        on_collection_progress(status="fetching", message="Fetching collection items")
+    if on_pending_activity is not None:
+        on_pending_activity(f"Fetching items for {collection_label}")
     scraper = CivitaiPrivateScraper(auto_authenticate=True)
     collection_items = scraper.fetch_collection_items(
         collection_id=collection_id,
@@ -11300,13 +11306,15 @@ def _run_civitai_collection_import_pipeline(
         overall_items_discovered=overall_discovered,
         overall_items_processed=overall_processed_before,
     )
-    _update_cp_entry(
-        discovered=collection_total,
-        total=collection_total,
-        status="processing",
-        message=f"Discovered {collection_total} unique items",
-    )
-    _set_pending_activity(f"Processing {collection_total} items for {collection_label}")
+    if on_collection_progress is not None:
+        on_collection_progress(
+            discovered=collection_total,
+            total=collection_total,
+            status="processing",
+            message=f"Discovered {collection_total} unique items",
+        )
+    if on_pending_activity is not None:
+        on_pending_activity(f"Processing {collection_total} items for {collection_label}")
     task_context.set_message(
         f"{_format_collection_prefix()} | Discovered {collection_total} items | All discovered {overall_discovered}"
     )
@@ -11340,14 +11348,16 @@ def _run_civitai_collection_import_pipeline(
             overall_items_discovered=overall_discovered,
             overall_items_processed=overall_processed,
         )
-        _update_cp_entry(
-            metadata_gathered=collection_processed,
-            images_fetched=collection_processed,
-            message=f"Processing {collection_processed}/{collection_size}",
-        )
-        _set_pending_activity(
-            f"Processing items for {collection_label}: {collection_processed}/{collection_size}"
-        )
+        if on_collection_progress is not None:
+            on_collection_progress(
+                metadata_gathered=collection_processed,
+                images_fetched=collection_processed,
+                message=f"Processing {collection_processed}/{collection_size}",
+            )
+        if on_pending_activity is not None:
+            on_pending_activity(
+                f"Processing items for {collection_label}: {collection_processed}/{collection_size}"
+            )
         task_context.set_message(
             f"{_format_collection_prefix()} | Collection {collection_processed}/{collection_size} | All {overall_processed}/{overall_discovered}"
         )
@@ -11404,18 +11414,20 @@ def _run_civitai_collection_import_pipeline(
     images_added = sum(int(r.get("images_added", 0) or 0) for r in results)
     images_skipped = sum(int(r.get("images_skipped", 0) or 0) for r in results)
     error_count = sum(1 for r in results if r.get("error"))
-    _update_cp_entry(
-        imported=images_added,
-        skipped=images_skipped,
-        errors=error_count,
-        total=len(image_ids),
-        discovered=collection_total,
-        metadata_gathered=len(results),
-        images_fetched=len(results),
-        status="completed",
-        message=f"Done: {images_added} imported, {images_skipped} skipped, {error_count} errors",
-    )
-    _set_pending_activity("")
+    if on_collection_progress is not None:
+        on_collection_progress(
+            imported=images_added,
+            skipped=images_skipped,
+            errors=error_count,
+            total=len(image_ids),
+            discovered=collection_total,
+            metadata_gathered=len(results),
+            images_fetched=len(results),
+            status="completed",
+            message=f"Done: {images_added} imported, {images_skipped} skipped, {error_count} errors",
+        )
+    if on_pending_activity is not None:
+        on_pending_activity("")
 
     return {
         "civitai_collection_id": collection_id,
@@ -11598,6 +11610,37 @@ def _run_civitai_collection_sync_job(
     for index, remote in enumerate(remote_collections, start=1):
         collection_id = int(remote["id"])
         collection_name = str(remote["name"])
+        cp_entry = next(
+            (
+                entry
+                for entry in collections_progress
+                if int(entry.get("collection_id", 0) or 0) == collection_id
+            ),
+            None,
+        )
+        if cp_entry is None:
+            cp_entry = {
+                "collection_id": collection_id,
+                "collection_name": collection_name,
+                "status": "pending",
+                "discovered": 0,
+                "metadata_gathered": 0,
+                "images_fetched": 0,
+                "skipped": 0,
+                "errors": 0,
+                "imported": 0,
+                "total": 0,
+                "message": "",
+            }
+            collections_progress.append(cp_entry)
+
+        def _update_cp_entry(**updates: Any) -> None:
+            cp_entry.update(updates)
+            task_context.set_metadata("collections_progress", collections_progress)
+
+        def _set_pending_activity(activity: str) -> None:
+            task_context.set_metadata("pending_activities", [activity] if activity else [])
+
         collection_item_key = f"collection:{collection_id}"
         task_context.mark_item(
             collection_item_key, "running", f"Syncing {collection_name}"
@@ -11720,6 +11763,8 @@ def _run_civitai_collection_sync_job(
                     collection_count=len(remote_collections),
                     overall_processed_before=overall_processed,
                     overall_discovered_before=overall_discovered,
+                    on_collection_progress=_update_cp_entry,
+                    on_pending_activity=_set_pending_activity,
                 )
             # Finalize structured progress from pipeline results.
             if cp_entry["status"] not in ("completed", "skipped", "failed"):

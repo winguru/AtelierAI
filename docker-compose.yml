@@ -31,6 +31,8 @@ services:
       - "8000:8000"
     volumes:
       - atelier-runtime-data:/var/lib/atelierai
+      - ./image_library:/var/lib/atelierai/image_library
+      - ./image_resources:/var/lib/atelierai/image_resources
     environment:
       IMAGE_LIBRARY_PATH: /var/lib/atelierai/image_library
       IMAGE_RESOURCES_PATH: /var/lib/atelierai/image_resources

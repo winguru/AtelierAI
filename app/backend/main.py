@@ -7595,6 +7595,30 @@ def _find_existing_image_by_source_url(
                 if candidate_status == status:
                     return candidate
 
+    # Cross-domain fallback: images imported when CIVITAI_WEB_BASE_URL used a
+    # different hostname (e.g. civitai.com vs civitai.red) won't match on exact
+    # URL equality.  Match by the URL path suffix instead so both domains resolve
+    # to the same record.  This mirrors the LIKE pattern used by the sync-lab
+    # analyze-local endpoint.
+    _parsed = urlparse(source_url)
+    _path_suffix = _parsed.path  # e.g. "/images/12345"
+    if _path_suffix and _path_suffix != "/":
+        cross_domain_matches = (
+            db.query(ImageModel)
+            .filter(
+                ImageModel.source_url.like(f"%{_path_suffix}"),
+                ImageModel.source_url != source_url,
+            )
+            .order_by(ImageModel.id.desc())
+            .all()
+        )
+        if cross_domain_matches:
+            for status in ("active", "placeholder", "tombstoned", "deleted"):
+                for candidate in cross_domain_matches:
+                    candidate_status = (candidate.image_status or "active").lower()
+                    if candidate_status == status:
+                        return candidate
+
     # Back-compat fallback: older rows may have source_url only in sidecar JSON.
     candidates = (
         db.query(ImageModel)

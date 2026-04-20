@@ -71,3 +71,4 @@ Common checks after edits:
 - Preserve backward-compatible behavior unless intentionally changing it.
 - Prefer clear, explicit imports and avoid dynamic path manipulation.
 - Update this file when project structure or conventions change.
+- Always run ruff and/or pylint to check for warnings and errors after any code changes

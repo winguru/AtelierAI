@@ -12,6 +12,7 @@ from services import a1111_parser_service as _a1111_svc
 
 from models import (
     Artist,
+    AuthorityTerm,
     CollectionModel,
     Concept,
     ConceptAlias,
@@ -335,10 +336,13 @@ class ImageQueryService:
     ) -> Optional[list[int]]:
         """Filter images by exact tag name match across all tag sources.
 
-        Looks up tags via two FK paths:
+        Looks up tags via four FK paths:
           1. Tag.name -> ImageTag.image_id  (legacy image_tags table)
           2. Concept.canonical_name / ConceptAlias.normalized_alias
              -> ImageConceptObservation.image_id  (taxonomy observations)
+          3. AuthorityTerm.external_name -> ImageConceptObservation.image_id
+             (external authority tags with direct observations)
+          4. ImageModel.user_tags JSON array  (user-assigned tags)
 
         For include_tags: image must have ALL listed tags (AND semantics).
         For exclude_tags: image must have NONE of the listed tags.
@@ -386,6 +390,37 @@ class ImageQueryService:
                     ImageConceptObservation.concept_id.in_(list(concept_ids))
                 ).distinct():
                     ids.add(row[0])
+
+            # Path 2c: AuthorityTerm.external_name -> ImageConceptObservation
+            # Tags from external authorities (e.g. CivitAI) may exist as authority_terms
+            # with observations linked directly, even without a matching concept.
+            at_ids = [
+                row[0]
+                for row in session.query(AuthorityTerm.id).filter(
+                    func.lower(AuthorityTerm.external_name) == tag_name
+                )
+            ]
+            if at_ids:
+                for row in session.query(ImageConceptObservation.image_id).filter(
+                    ImageConceptObservation.authority_term_id.in_(at_ids)
+                ).distinct():
+                    ids.add(row[0])
+
+            # Path 3: ImageModel.user_tags JSON array (user-assigned tags).
+            # Uses json_each to expand the JSON array and match case-insensitively.
+            try:
+                for row in session.execute(
+                    text(
+                        "SELECT DISTINCT images.id FROM images, json_each(images.user_tags) "
+                        "WHERE LOWER(json_each.value) = :tag"
+                    ),
+                    {"tag": tag_name},
+                ):
+                    ids.add(row[0])
+            except Exception:
+                # json_each may fail if user_tags is NULL or not a valid JSON array;
+                # just skip this path.
+                pass
 
             return ids
 
@@ -734,18 +769,48 @@ class ImageQueryService:
             images_query = images_query.filter(func.lower(ImageModel.mimetype).in_(normalized_mimetypes))
 
         if normalized_artist_names:
+            # Try to parse any filter values as integers for civitai_user_id matching
+            numeric_artist_ids = []
+            for name in normalized_artist_names:
+                try:
+                    numeric_artist_ids.append(int(name))
+                except (ValueError, TypeError):
+                    pass
+
+            artist_conditions = [
+                func.lower(Artist.name).in_(normalized_artist_names),
+                func.lower(Artist.civitai_user_original_name).in_(normalized_artist_names),
+            ]
+            if numeric_artist_ids:
+                artist_conditions.append(Artist.civitai_user_id.in_(numeric_artist_ids))
+
             images_query = images_query.filter(
-                ImageModel.artist.has(func.lower(Artist.name).in_(normalized_artist_names))
+                ImageModel.artist.has(or_(*artist_conditions))
             )
 
         if normalized_exclude_artist_names:
+            # Try to parse any filter values as integers for civitai_user_id matching
+            numeric_exclude_ids = []
+            for name in normalized_exclude_artist_names:
+                try:
+                    numeric_exclude_ids.append(int(name))
+                except (ValueError, TypeError):
+                    pass
+
+            exclude_conditions = [
+                func.lower(Artist.name).in_(normalized_exclude_artist_names),
+                func.lower(Artist.civitai_user_original_name).in_(normalized_exclude_artist_names),
+            ]
+            if numeric_exclude_ids:
+                exclude_conditions.append(Artist.civitai_user_id.in_(numeric_exclude_ids))
+
             # Use NOT IN subquery instead of ~has() (NOT EXISTS) — SQLite
             # materialises the subquery once with a Bloom filter vs running a
             # correlated subquery per row.
             excluded_artist_ids_sq = (
                 select(ImageModel.id)
                 .join(Artist, ImageModel.artist_id == Artist.id)
-                .where(func.lower(Artist.name).in_(normalized_exclude_artist_names))
+                .where(or_(*exclude_conditions))
                 .correlate(None)
                 .scalar_subquery()
             )
@@ -854,6 +919,21 @@ class ImageQueryService:
             ):
                 matched.add(row[0])
 
+        # AuthorityTerms (external_name → ImageConceptObservation)
+        matching_auth_ids = [
+            row[0]
+            for row in session.query(AuthorityTerm.id).filter(
+                func.lower(AuthorityTerm.external_name).like(like_term)
+            )
+        ]
+        if matching_auth_ids:
+            for row in (
+                session.query(ImageConceptObservation.image_id)
+                .filter(ImageConceptObservation.authority_term_id.in_(matching_auth_ids))
+                .distinct()
+            ):
+                matched.add(row[0])
+
         # Collections (name)
         matching_collection_ids = [
             row[0]
@@ -867,6 +947,20 @@ class ImageQueryService:
                 .filter(ImageCollectionMembership.collection_id.in_(matching_collection_ids))
             ):
                 matched.add(row[0])
+
+        # user_tags JSON array — uses SQLite json_each for substring search
+        try:
+            for row in session.execute(
+                text(
+                    "SELECT DISTINCT images.id FROM images, json_each(images.user_tags) "
+                    "WHERE LOWER(json_each.value) LIKE :pattern"
+                ),
+                {"pattern": like_term},
+            ):
+                matched.add(row[0])
+        except Exception:
+            # json_each may fail if user_tags is NULL or malformed; skip.
+            pass
 
         # ---- Phase 2: fast column scans on images table ----
         _t1 = _time.perf_counter()

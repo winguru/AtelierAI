@@ -31,6 +31,34 @@
     return `${(ms / 1000).toFixed(2)}s`;
   }
 
+  /* ── Step error formatter ── */
+  function formatStepError(resp, data) {
+    const errs = data.errors || [data.detail || 'Unknown error'];
+    const joined = errs.join('; ');
+    if (resp.status === 503) {
+      return `CivitAI Unavailable: ${joined}`;
+    }
+    return `Failed: ${joined}`;
+  }
+
+  /* ── Timestamp formatter (ISO → relative or short date) ── */
+  function fmtTimestamp(iso) {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      const now = Date.now();
+      const diffMs = now - d.getTime();
+      const diffMins = Math.floor(diffMs / 60000);
+      if (diffMins < 1) return 'just now';
+      if (diffMins < 60) return `${diffMins}m ago`;
+      const diffHrs = Math.floor(diffMins / 60);
+      if (diffHrs < 24) return `${diffHrs}h ago`;
+      const diffDays = Math.floor(diffHrs / 24);
+      if (diffDays < 30) return `${diffDays}d ago`;
+      return d.toLocaleDateString();
+    } catch { return '—'; }
+  }
+
   /* ── Status message ── */
   function setStatus(stepNum, type, msg) {
     const s = el(`step${stepNum}-status`);
@@ -114,8 +142,7 @@
 
       if (!resp.ok || data.status === 'error') {
         setStepState(1, 'error');
-        const errs = data.errors || [data.detail || 'Unknown error'];
-        setStatus(1, 'error', `Failed: ${errs.join('; ')}`);
+        setStatus(1, 'error', formatStepError(resp, data));
         return;
       }
 
@@ -150,17 +177,19 @@
       const name = c.name || '(unnamed)';
       const type = c.type || 'image';
       const count = c.itemCount ?? c.count ?? '—';
+      const synced = c.lastSyncedAt ? fmtTimestamp(c.lastSyncedAt) : '—';
       return `<tr data-idx="${i}">
         <td>${id}</td>
         <td>${escHtml(name)}</td>
         <td>${type}</td>
         <td>${count}</td>
+        <td>${synced}</td>
       </tr>`;
     }).join('');
 
     container.innerHTML = `
       <table class="collection-table">
-        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Items</th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Items</th><th>Last Synced</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
@@ -224,26 +253,40 @@
     el('step3-results').innerHTML = '';
 
     try {
-      const resp = await fetch(`/sync-lab/collection-items/${state.selectedCollectionId}`);
-      const data = await resp.json();
+      const url = `/sync-lab/collection-items/${state.selectedCollectionId}`;
+      const result = await new Promise((resolve, reject) => {
+        const es = new EventSource(url);
+        let lastProgress = null;
 
-      if (!resp.ok || data.status === 'error') {
-        setStepState(3, 'error');
-        const errs = data.errors || [data.detail || 'Unknown error'];
-        setStatus(3, 'error', `Failed: ${errs.join('; ')}`);
-        return;
-      }
+        es.onmessage = (event) => {
+          let data;
+          try { data = JSON.parse(event.data); } catch { return; }
 
-      setTiming(3, data.timing?.duration_ms);
-      state.collectionItems = data.data?.items || [];
+          if (data.type === 'progress') {
+            lastProgress = data;
+            setStatus(3, 'info',
+              `Fetching… Page ${data.page}: ${data.page_items} items (total: ${data.total})`);
+          } else if (data.type === 'complete') {
+            es.close();
+            resolve(data);
+          } else if (data.type === 'error') {
+            es.close();
+            reject({ status_code: data.status_code, detail: data.detail });
+          }
+        };
+
+        es.onerror = () => {
+          es.close();
+          reject({ status_code: 0, detail: 'Connection lost during fetch' });
+        };
+      });
+
+      setTiming(3, result.timing?.duration_ms);
+      state.collectionItems = result.data?.items || [];
 
       const total = state.collectionItems.length;
-      const archived = data.data?.archived_count || 0;
-      const dupes = data.data?.duplicate_count || 0;
 
-      let summary = `Fetched ${total} item(s) in ${fmtMs(data.timing?.duration_ms)}`;
-      if (archived) summary += ` · ${archived} archived`;
-      if (dupes) summary += ` · ${dupes} duplicates removed`;
+      let summary = `Fetched ${total} item(s) in ${fmtMs(result.timing?.duration_ms)}`;
       setStatus(3, 'success', summary);
 
       renderItemsTable();
@@ -257,7 +300,11 @@
       }
     } catch (err) {
       setStepState(3, 'error');
-      setStatus(3, 'error', `Network error: ${err.message}`);
+      if (err.status_code === 503) {
+        setStatus(3, 'error', `CivitAI Unavailable: ${err.detail}`);
+      } else {
+        setStatus(3, 'error', err.detail || `Error: ${err}`);
+      }
     } finally {
       btnLoading(btn, false);
     }
@@ -272,29 +319,41 @@
 
     const rows = state.collectionItems.map(item => {
       const id = item.id || item.imageId || '?';
-      const name = item.name || item.title || '—';
+      const rawName = item.name || item.title || '—';
+      const name = rawName.length > 45 ? rawName.slice(0, 45) + '…' : rawName;
       const type = item.type || '—';
       const nsfwLevel = item.nsfwLevel ?? '—';
       const nsfwBadge = renderNsfwBadge(nsfwLevel);
       const mimeType = item.mimeType || '';
       const size = (item.width && item.height) ? `${item.width}×${item.height}` : '';
+      const publishedAt = item.publishedAt || item.createdAt || '';
+      const dateDisplay = publishedAt ? fmtTimestamp(publishedAt) : '—';
+      const rawUser = (item.user && item.user.username) || '—';
+      const isUserDeleted = !!(item.user && item.user.deletedAt);
+      const userDisplay = isUserDeleted && rawUser !== '—'
+        ? `<span class="deleted-user" title="CivitAI account deleted">${escHtml(rawUser.length > 25 ? rawUser.slice(0, 25) + '…' : rawUser)}</span>`
+        : escHtml(rawUser.length > 25 ? rawUser.slice(0, 25) + '…' : rawUser);
 
       const imageUrl = `${getCivitaiWebBaseUrl()}/images/${id}`;
       return `<tr data-id="${id}">
         <td class="col-id"><a href="${imageUrl}" target="_blank" rel="noopener">${id}</a></td>
-        <td class="col-name" title="${escHtml(mimeType)}${size ? ' · ' + size : ''}">${escHtml(name)}</td>
+        <td class="col-name" title="${escHtml(rawName)}${mimeType ? ' · ' + escHtml(mimeType) : ''}${size ? ' · ' + size : ''}">${escHtml(name)}</td>
         <td class="col-type">${escHtml(type)}</td>
+        <td class="col-user" title="${escHtml(rawUser)}">${userDisplay}</td>
+        <td class="col-date" title="${escHtml(publishedAt)}">${escHtml(dateDisplay)}</td>
         <td class="col-rating">${nsfwBadge}</td>
       </tr>`;
     }).join('');
 
     container.innerHTML = `
-      <div style="overflow-x:auto">
+      <div class="items-scroll-pane">
         <table class="collection-table items-table">
           <thead><tr>
             <th class="col-id">ID</th>
             <th class="col-name">Filename</th>
             <th class="col-type">Type</th>
+            <th class="col-user">User</th>
+            <th class="col-date">Published</th>
             <th class="col-rating">Rating</th>
           </tr></thead>
           <tbody>${rows}</tbody>
@@ -338,8 +397,7 @@
 
       if (!resp.ok || data.status === 'error') {
         setStepState(4, 'error');
-        const errs = data.errors || [data.detail || 'Unknown error'];
-        setStatus(4, 'error', `Failed: ${errs.join('; ')}`);
+        setStatus(4, 'error', formatStepError(resp, data));
         return;
       }
 
@@ -407,7 +465,8 @@
       sec.items.forEach(it => {
         // 'new' items are plain IDs; others are dicts with civitai_image_id
         const id = typeof it === 'number' ? it : (it.civitai_image_id || it.image_id || '?');
-        html += `<span class="item-chip ${sec.chipClass}">#${id}</span>`;
+        const paddedId = String(id).padStart(9, '\u2007'); // figure space for uniform width
+        html += `<span class="item-chip ${sec.chipClass}">#${paddedId}</span>`;
       });
       html += '</div>';
     }
@@ -438,22 +497,35 @@
     }
 
     try {
-      const resp = await fetch('/sync-lab/fetch-metadata', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_ids: imageIds }),
+      const url = `/sync-lab/fetch-metadata?image_ids=${imageIds.join(',')}`;
+      const result = await new Promise((resolve, reject) => {
+        const es = new EventSource(url);
+
+        es.onmessage = (event) => {
+          let data;
+          try { data = JSON.parse(event.data); } catch { return; }
+
+          if (data.type === 'progress') {
+            const errSuffix = data.error ? ' ⚠' : '';
+            setStatus(5, 'info',
+              `Fetching metadata… ${data.done}/${data.total} — #${data.image_id} (${fmtMs(data.timing_ms)})${errSuffix}`);
+          } else if (data.type === 'complete') {
+            es.close();
+            resolve(data);
+          } else if (data.type === 'error') {
+            es.close();
+            reject({ status_code: data.status_code, detail: data.detail });
+          }
+        };
+
+        es.onerror = () => {
+          es.close();
+          reject({ status_code: 0, detail: 'Connection lost during fetch' });
+        };
       });
-      const data = await resp.json();
 
-      if (!resp.ok || data.status === 'error') {
-        setStepState(5, 'error');
-        const errs = data.errors || [data.detail || 'Unknown error'];
-        setStatus(5, 'error', `Failed: ${errs.join('; ')}`);
-        return;
-      }
-
-      setTiming(5, data.timing?.duration_ms);
-      const rawResults = data.data?.results || {};
+      setTiming(5, result.timing?.duration_ms);
+      const rawResults = result.data?.results || {};
       // Backend returns a dict keyed by image ID — convert to array
       state.metadataResults = typeof rawResults === 'object' && !Array.isArray(rawResults)
         ? Object.values(rawResults)
@@ -463,7 +535,7 @@
       const failed = state.metadataResults.filter(r => r.error).length;
 
       setStatus(5, 'success',
-        `Metadata fetched: ${ok} OK, ${failed} failed in ${fmtMs(data.timing?.duration_ms)}`
+        `Metadata fetched: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
       );
 
       renderMetadataDetails();
@@ -476,7 +548,11 @@
       }
     } catch (err) {
       setStepState(5, 'error');
-      setStatus(5, 'error', `Network error: ${err.message}`);
+      if (err.status_code === 503) {
+        setStatus(5, 'error', `CivitAI Unavailable: ${err.detail}`);
+      } else {
+        setStatus(5, 'error', err.detail || `Network error: ${err.message || err}`);
+      }
     } finally {
       btnLoading(btn, false);
     }
@@ -489,11 +565,11 @@
       return;
     }
     let html = '<div class="item-chips">';
-    state.metadataResults.forEach(r => {
+    state.metadataResults.forEach((r, i) => {
       const id = r.image_id || '?';
       const cls = r.error ? 'failed' : 'new';
       const timing = r.timing_ms ? ` (${fmtMs(r.timing_ms)})` : '';
-      html += `<span class="item-chip ${cls}" title="${escHtml(r.error || '')}${timing}">#${id}</span>`;
+      html += `<span class="item-chip ${cls}" data-idx="${i}" title="Click to inspect metadata${r.error ? ' — ' + escHtml(r.error) : ''}${timing}">#${id}</span>`;
     });
     html += '</div>';
 
@@ -506,6 +582,162 @@
     }
 
     container.innerHTML = html;
+  }
+
+  /** Show a popup with the full metadata for one image result. */
+  function showMetadataPopup(idx) {
+    const r = state.metadataResults[idx];
+    if (!r) return;
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'meta-popup-backdrop';
+    backdrop.addEventListener('click', e => {
+      if (e.target === backdrop) backdrop.remove();
+    });
+
+    const popup = document.createElement('div');
+    popup.className = 'meta-popup';
+
+    const id = r.image_id || '?';
+    const statusCls = r.error ? 'failed' : 'new';
+
+    let sections = '';
+
+    // Header
+    sections += `<div class="meta-popup-header">`;
+    sections += `  <span class="item-chip ${statusCls}">#${id}</span>`;
+    if (r.timing_ms) sections += `  <span class="meta-popup-timing">${fmtMs(r.timing_ms)}</span>`;
+    sections += `  <button class="meta-popup-close" title="Close">&times;</button>`;
+    sections += `</div>`;
+
+    if (r.error) {
+      sections += `<div class="meta-popup-error"><strong>Error:</strong> ${escHtml(r.error)}</div>`;
+    }
+
+    // Basic info section
+    if (r.basic_info && typeof r.basic_info === 'object') {
+      const bi = r.basic_info;
+      sections += `<div class="meta-popup-section">`;
+      sections += `  <h4>Basic Info</h4>`;
+      sections += `  <table class="meta-popup-table">`;
+      // Key fields in a sensible order
+      const biFields = [
+        ['id', 'Image ID'],
+        ['url', 'URL'],
+        ['nsfw', 'NSFW'],
+        ['nsfwLevel', 'NSFW Level'],
+        ['width', 'Width'],
+        ['height', 'Height'],
+        ['hash', 'Hash'],
+        ['type', 'Type'],
+        ['postId', 'Post ID'],
+        ['stats', 'Stats'],
+        ['createdAt', 'Created'],
+        ['tags', 'Tags'],
+      ];
+      for (const [key, label] of biFields) {
+        if (bi[key] !== undefined) {
+          sections += renderMetaRow(label, bi[key]);
+        }
+      }
+      // Catch any remaining keys
+      const shown = new Set(biFields.map(f => f[0]));
+      for (const [key, val] of Object.entries(bi)) {
+        if (!shown.has(key)) {
+          sections += renderMetaRow(key, val);
+        }
+      }
+      sections += `  </table>`;
+      sections += `</div>`;
+    }
+
+    // Generation data section
+    if (r.generation_data && typeof r.generation_data === 'object') {
+      const gd = r.generation_data;
+      sections += `<div class="meta-popup-section">`;
+      sections += `  <h4>Generation Data</h4>`;
+      sections += `  <table class="meta-popup-table">`;
+      // Key fields in a sensible order
+      const gdFields = [
+        ['prompt', 'Prompt'],
+        ['negativePrompt', 'Negative Prompt'],
+        ['sampler', 'Sampler'],
+        ['steps', 'Steps'],
+        ['cfgScale', 'CFG Scale'],
+        ['seed', 'Seed'],
+        ['clipSkip', 'Clip Skip'],
+        ['Model', 'Model'],
+        ['modelHash', 'Model Hash'],
+        ['schedule_type', 'Schedule Type'],
+        ['guidance_rescale', 'Guidance Rescale'],
+        ['denoise', 'Denoise'],
+        ['hires upscale', 'Hires Upscale'],
+        ['hires upscaler', 'Hires Upscaler'],
+        ['hires_latent_upscale', 'Hires Latent Upscale'],
+        ['resources', 'Resources'],
+        ['workflow', 'Workflow'],
+      ];
+      for (const [key, label] of gdFields) {
+        if (gd[key] !== undefined) {
+          sections += renderMetaRow(label, gd[key]);
+        }
+      }
+      // Catch any remaining keys
+      const shown = new Set(gdFields.map(f => f[0]));
+      for (const [key, val] of Object.entries(gd)) {
+        if (!shown.has(key)) {
+          sections += renderMetaRow(key, val);
+        }
+      }
+      sections += `  </table>`;
+      sections += `</div>`;
+    }
+
+    // Raw JSON toggle
+    sections += `<details class="meta-popup-raw">`;
+    sections += `  <summary>Raw JSON</summary>`;
+    sections += `  <pre>${escHtml(JSON.stringify({ basic_info: r.basic_info, generation_data: r.generation_data }, null, 2))}</pre>`;
+    sections += `</details>`;
+
+    popup.innerHTML = sections;
+
+    // Close button
+    popup.querySelector('.meta-popup-close').addEventListener('click', () => backdrop.remove());
+
+    // Escape key
+    const onKey = e => {
+      if (e.key === 'Escape') {
+        backdrop.remove();
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+
+    backdrop.appendChild(popup);
+    document.body.appendChild(backdrop);
+  }
+
+  /** Render one key-value row for the metadata popup table. */
+  function renderMetaRow(label, value) {
+    let display;
+    if (value === null || value === undefined) {
+      display = '<em class="meta-null">null</em>';
+    } else if (Array.isArray(value)) {
+      if (value.length === 0) {
+        display = '<em class="meta-null">empty</em>';
+      } else if (typeof value[0] === 'string') {
+        display = value.map(v => escHtml(String(v))).join(', ');
+      } else {
+        display = escHtml(JSON.stringify(value, null, 2));
+      }
+    } else if (typeof value === 'object') {
+      display = escHtml(JSON.stringify(value, null, 2));
+    } else if (typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'))) {
+      display = `<a href="${escHtml(value)}" target="_blank" rel="noopener">${escHtml(value.length > 80 ? value.slice(0, 77) + '…' : value)}</a>`;
+    } else {
+      display = escHtml(String(value));
+    }
+    return `<tr><td class="meta-key">${escHtml(label)}</td><td class="meta-val">${display}</td></tr>`;
   }
 
   /* ────────────────────────────────────────
@@ -533,29 +765,45 @@
     }
 
     try {
-      const resp = await fetch('/sync-lab/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_ids: imageIds }),
+      const url = `/sync-lab/download?image_ids=${imageIds.join(',')}`;
+      const result = await new Promise((resolve, reject) => {
+        const es = new EventSource(url);
+
+        es.onmessage = (event) => {
+          let data;
+          try { data = JSON.parse(event.data); } catch { return; }
+
+          if (data.type === 'progress') {
+            const errSuffix = data.error ? ' ⚠' : '';
+            setStatus(6, 'info',
+              `Downloading… ${data.done}/${data.total} — #${data.image_id} (${fmtMs(data.timing_ms)})${errSuffix}`);
+          } else if (data.type === 'complete') {
+            es.close();
+            resolve(data);
+          } else if (data.type === 'error') {
+            es.close();
+            reject({ status_code: data.status_code, detail: data.detail });
+          }
+        };
+
+        es.onerror = () => {
+          es.close();
+          reject({ status_code: 0, detail: 'Connection lost during download' });
+        };
       });
-      const data = await resp.json();
 
-      if (!resp.ok || data.status === 'error') {
-        setStepState(6, 'error');
-        const errs = data.errors || [data.detail || 'Unknown error'];
-        setStatus(6, 'error', `Failed: ${errs.join('; ')}`);
-        return;
-      }
-
-      setTiming(6, data.timing?.duration_ms);
-      const rawDlResults = data.data?.results || [];
-      state.downloadResults = Array.isArray(rawDlResults) ? rawDlResults : Object.values(rawDlResults);
+      setTiming(6, result.timing?.duration_ms);
+      const rawDlResults = result.data?.results || {};
+      // Backend returns a dict keyed by image ID — convert to array
+      state.downloadResults = typeof rawDlResults === 'object' && !Array.isArray(rawDlResults)
+        ? Object.values(rawDlResults)
+        : rawDlResults;
 
       const ok = state.downloadResults.filter(r => r.status === 'downloaded').length;
       const failed = state.downloadResults.filter(r => r.error).length;
 
       setStatus(6, 'success',
-        `Downloaded: ${ok} OK, ${failed} failed in ${fmtMs(data.timing?.duration_ms)}`
+        `Downloaded: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
       );
 
       renderDownloadDetails();
@@ -568,7 +816,7 @@
       }
     } catch (err) {
       setStepState(6, 'error');
-      setStatus(6, 'error', `Network error: ${err.message}`);
+      setStatus(6, 'error', err.detail || `Network error: ${err.message || err}`);
     } finally {
       btnLoading(btn, false);
     }
@@ -576,12 +824,16 @@
 
   function renderDownloadDetails() {
     const container = el('step6-results');
+    if (!state.downloadResults.length) {
+      container.innerHTML = '<p class="detail-label">No results.</p>';
+      return;
+    }
     let html = '<div class="item-chips">';
-    state.downloadResults.forEach(r => {
+    state.downloadResults.forEach((r, i) => {
       const id = r.image_id || '?';
       const cls = r.status === 'downloaded' ? 'existing' : 'failed';
       const size = r.file_size ? ` (${(r.file_size / 1024).toFixed(0)}KB)` : '';
-      html += `<span class="item-chip ${cls}" title="${escHtml(r.error || r.file_name || '')}${size}">#${id}</span>`;
+      html += `<span class="item-chip ${cls}" data-idx="${i}" title="Click to inspect download details${r.error ? ' — ' + escHtml(r.error) : ''}${size}">#${id}</span>`;
     });
     html += '</div>';
 
@@ -617,26 +869,39 @@
     el('step7-results').innerHTML = '';
 
     try {
-      const resp = await fetch('/sync-lab/ingest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_ids: okIds,
-          collection_id: state.selectedCollectionId,
-        }),
+      const url = `/sync-lab/ingest?image_ids=${okIds.join(',')}&collection_id=${state.selectedCollectionId || ''}`;
+      const result = await new Promise((resolve, reject) => {
+        const es = new EventSource(url);
+
+        es.onmessage = (event) => {
+          let data;
+          try { data = JSON.parse(event.data); } catch { return; }
+
+          if (data.type === 'progress') {
+            const errSuffix = data.error ? ' ⚠' : '';
+            setStatus(7, 'info',
+              `Ingesting… ${data.done}/${data.total} — #${data.image_id} (${fmtMs(data.timing_ms)})${errSuffix}`);
+          } else if (data.type === 'complete') {
+            es.close();
+            resolve(data);
+          } else if (data.type === 'error') {
+            es.close();
+            reject({ status_code: data.status_code, detail: data.detail });
+          }
+        };
+
+        es.onerror = () => {
+          es.close();
+          reject({ status_code: 0, detail: 'Connection lost during ingest' });
+        };
       });
-      const data = await resp.json();
 
-      if (!resp.ok || data.status === 'error') {
-        setStepState(7, 'error');
-        const errs = data.errors || [data.detail || 'Unknown error'];
-        setStatus(7, 'error', `Failed: ${errs.join('; ')}`);
-        return;
-      }
-
-      setTiming(7, data.timing?.duration_ms);
-      const rawIngestResults = data.data?.results || [];
-      state.ingestResults = Array.isArray(rawIngestResults) ? rawIngestResults : Object.values(rawIngestResults);
+      setTiming(7, result.timing?.duration_ms);
+      const rawIngestResults = result.data?.results || {};
+      // Backend returns a dict keyed by image ID — convert to array
+      state.ingestResults = typeof rawIngestResults === 'object' && !Array.isArray(rawIngestResults)
+        ? Object.values(rawIngestResults)
+        : rawIngestResults;
 
       const ok = state.ingestResults.filter(r => r.status === 'ingested').length;
       const dups = state.ingestResults.filter(r => r.ingest_result?.is_duplicate_asset).length;
@@ -647,14 +912,14 @@
       if (dups) msg += ` (${dups} duplicate assets)`;
       if (skipped) msg += `, ${skipped} skipped`;
       if (failed) msg += `, ${failed} failed`;
-      msg += ` in ${fmtMs(data.timing?.duration_ms)}`;
+      msg += ` in ${fmtMs(result.timing?.duration_ms)}`;
       setStatus(7, failed ? 'warning' : 'success', msg);
 
       renderIngestDetails();
       setStepState(7, 'complete');
     } catch (err) {
       setStepState(7, 'error');
-      setStatus(7, 'error', `Network error: ${err.message}`);
+      setStatus(7, 'error', err.detail || `Network error: ${err.message || err}`);
     } finally {
       btnLoading(btn, false);
     }
@@ -662,8 +927,12 @@
 
   function renderIngestDetails() {
     const container = el('step7-results');
+    if (!state.ingestResults.length) {
+      container.innerHTML = '<p class="detail-label">No results.</p>';
+      return;
+    }
     let html = '<div class="item-chips">';
-    state.ingestResults.forEach(r => {
+    state.ingestResults.forEach((r, i) => {
       const id = r.image_id || '?';
       const isDup = r.ingest_result?.is_duplicate_asset === true;
       let cls, label;
@@ -677,11 +946,12 @@
         cls = 'failed';
         label = `#${id}`;
       }
-      const titleParts = [r.error || r.file_path || ''];
+      const titleParts = ['Click to inspect ingest details'];
+      if (r.error) titleParts.push(r.error);
       if (isDup) {
         titleParts.push(`Duplicate of DB #${r.ingest_result?.duplicate_of_image_db_id || '?'}`);
       }
-      html += `<span class="item-chip ${cls}" title="${escHtml(titleParts.filter(Boolean).join(' · '))}">${escHtml(label)}</span>`;
+      html += `<span class="item-chip ${cls}" data-idx="${i}" title="${escHtml(titleParts.filter(Boolean).join(' · '))}">${escHtml(label)}</span>`;
     });
     html += '</div>';
 
@@ -700,6 +970,165 @@
     }
 
     container.innerHTML = html;
+  }
+
+  /** Show a popup with download details for one image result. */
+  function showDownloadPopup(idx) {
+    const r = state.downloadResults[idx];
+    if (!r) return;
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'meta-popup-backdrop';
+    backdrop.addEventListener('click', e => {
+      if (e.target === backdrop) backdrop.remove();
+    });
+
+    const popup = document.createElement('div');
+    popup.className = 'meta-popup';
+
+    const id = r.image_id || '?';
+    const statusCls = r.status === 'downloaded' ? 'existing' : 'failed';
+
+    let sections = '';
+
+    // Header
+    sections += `<div class="meta-popup-header">`;
+    sections += `  <span class="item-chip ${statusCls}">#${id}</span>`;
+    if (r.timing_ms) sections += `  <span class="meta-popup-timing">${fmtMs(r.timing_ms)}</span>`;
+    sections += `  <button class="meta-popup-close" title="Close">&times;</button>`;
+    sections += `</div>`;
+
+    if (r.error) {
+      sections += `<div class="meta-popup-error"><strong>Error:</strong> ${escHtml(r.error)}</div>`;
+    }
+
+    // Download details
+    sections += `<div class="meta-popup-section">`;
+    sections += `  <h4>Download Details</h4>`;
+    sections += `  <table class="meta-popup-table">`;
+    const dlFields = [
+      ['status', 'Status'],
+      ['temp_path', 'Temp Path'],
+      ['mime_type', 'MIME Type'],
+      ['selected_url', 'Selected URL'],
+      ['timing_ms', 'Timing'],
+    ];
+    for (const [key, label] of dlFields) {
+      if (r[key] !== undefined && r[key] !== null) {
+        const val = key === 'timing_ms' ? fmtMs(r[key]) : r[key];
+        sections += renderMetaRow(label, val);
+      }
+    }
+    sections += `  </table>`;
+    sections += `</div>`;
+
+    // Raw JSON toggle
+    sections += `<details class="meta-popup-raw">`;
+    sections += `  <summary>Raw JSON</summary>`;
+    sections += `  <pre>${escHtml(JSON.stringify(r, null, 2))}</pre>`;
+    sections += `</details>`;
+
+    popup.innerHTML = sections;
+    popup.querySelector('.meta-popup-close').addEventListener('click', () => backdrop.remove());
+
+    const onKey = e => {
+      if (e.key === 'Escape') {
+        backdrop.remove();
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+
+    backdrop.appendChild(popup);
+    document.body.appendChild(backdrop);
+  }
+
+  /** Show a popup with ingest details for one image result. */
+  function showIngestPopup(idx) {
+    const r = state.ingestResults[idx];
+    if (!r) return;
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'meta-popup-backdrop';
+    backdrop.addEventListener('click', e => {
+      if (e.target === backdrop) backdrop.remove();
+    });
+
+    const popup = document.createElement('div');
+    popup.className = 'meta-popup';
+
+    const id = r.image_id || '?';
+    const isDup = r.ingest_result?.is_duplicate_asset === true;
+    let statusCls;
+    if (r.status === 'ingested') statusCls = isDup ? 'duplicate' : 'existing';
+    else if (r.status === 'skipped') statusCls = 'tombstoned';
+    else statusCls = 'failed';
+
+    let sections = '';
+
+    // Header
+    sections += `<div class="meta-popup-header">`;
+    sections += `  <span class="item-chip ${statusCls}">#${id}${isDup ? ' (dup)' : ''}</span>`;
+    if (r.timing_ms) sections += `  <span class="meta-popup-timing">${fmtMs(r.timing_ms)}</span>`;
+    sections += `  <button class="meta-popup-close" title="Close">&times;</button>`;
+    sections += `</div>`;
+
+    if (r.error) {
+      sections += `<div class="meta-popup-error"><strong>Error:</strong> ${escHtml(r.error)}</div>`;
+    }
+
+    // Ingest details
+    sections += `<div class="meta-popup-section">`;
+    sections += `  <h4>Ingest Details</h4>`;
+    sections += `  <table class="meta-popup-table">`;
+    const ingestFields = [
+      ['status', 'Status'],
+      ['timing_ms', 'Timing'],
+    ];
+    for (const [key, label] of ingestFields) {
+      if (r[key] !== undefined && r[key] !== null) {
+        const val = key === 'timing_ms' ? fmtMs(r[key]) : r[key];
+        sections += renderMetaRow(label, val);
+      }
+    }
+    // Ingest result sub-fields
+    if (r.ingest_result && typeof r.ingest_result === 'object') {
+      const ir = r.ingest_result;
+      const irFields = [
+        ['is_duplicate_asset', 'Duplicate Asset'],
+        ['duplicate_of_image_db_id', 'Duplicate Of DB ID'],
+        ['file_path', 'Library Path'],
+        ['file_hash', 'File Hash'],
+        ['image_db_id', 'Image DB ID'],
+      ];
+      for (const [key, label] of irFields) {
+        if (ir[key] !== undefined) {
+          sections += renderMetaRow(label, ir[key]);
+        }
+      }
+    }
+    sections += `  </table>`;
+    sections += `</div>`;
+
+    // Raw JSON toggle
+    sections += `<details class="meta-popup-raw">`;
+    sections += `  <summary>Raw JSON</summary>`;
+    sections += `  <pre>${escHtml(JSON.stringify(r, null, 2))}</pre>`;
+    sections += `</details>`;
+
+    popup.innerHTML = sections;
+    popup.querySelector('.meta-popup-close').addEventListener('click', () => backdrop.remove());
+
+    const onKey = e => {
+      if (e.key === 'Escape') {
+        backdrop.remove();
+        document.removeEventListener('keydown', onKey);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+
+    backdrop.appendChild(popup);
+    document.body.appendChild(backdrop);
   }
 
   /* ── HTML escaping ── */
@@ -767,6 +1196,39 @@
         localStorage.setItem('atelier.syncLab.theme', isDark ? 'dark' : 'light');
       });
     }
+
+    // Delegated click handler for step 5 metadata chip inspection
+    el('step5-results').addEventListener('click', e => {
+      const chip = e.target.closest('.item-chip[data-idx]');
+      if (chip) {
+        const idx = parseInt(chip.dataset.idx, 10);
+        if (!isNaN(idx) && state.metadataResults[idx]) {
+          showMetadataPopup(idx);
+        }
+      }
+    });
+
+    // Delegated click handler for step 6 download chip inspection
+    el('step6-results').addEventListener('click', e => {
+      const chip = e.target.closest('.item-chip[data-idx]');
+      if (chip) {
+        const idx = parseInt(chip.dataset.idx, 10);
+        if (!isNaN(idx) && state.downloadResults[idx]) {
+          showDownloadPopup(idx);
+        }
+      }
+    });
+
+    // Delegated click handler for step 7 ingest chip inspection
+    el('step7-results').addEventListener('click', e => {
+      const chip = e.target.closest('.item-chip[data-idx]');
+      if (chip) {
+        const idx = parseInt(chip.dataset.idx, 10);
+        if (!isNaN(idx) && state.ingestResults[idx]) {
+          showIngestPopup(idx);
+        }
+      }
+    });
   }
 
   /* ── Boot ── */

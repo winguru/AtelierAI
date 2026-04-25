@@ -1278,6 +1278,68 @@ class ImageProcessor:
             db.refresh(artist_obj)
         return artist_obj
 
+    @staticmethod
+    def find_or_update_civitai_artist(
+        db: Session,
+        username: str,
+        civitai_user_id: Optional[int],
+        is_deleted: bool = False,
+        original_name: Optional[str] = None,
+    ) -> Artist:
+        """Find or create an artist record linked to a CivitAI user account.
+
+        Lookup strategy:
+        1. Match by civitai_user_id (exact, even if username changed).
+        2. Fall back to name-based lookup (existing behavior).
+
+        When *is_deleted* is True, the original username is preserved in
+        ``civitai_user_original_name`` and the artist's display name is
+        left unchanged so the UI can show the original identity.
+        """
+        artist_obj: Optional[Artist] = None
+
+        # 1. Try exact match on civitai_user_id
+        if civitai_user_id is not None:
+            artist_obj = (
+                db.query(Artist)
+                .filter(Artist.civitai_user_id == civitai_user_id)
+                .first()
+            )
+
+        # 2. Fall back to name-based lookup
+        if artist_obj is None and username:
+            artist_obj = db.query(Artist).filter(Artist.name == username).first()
+
+        if artist_obj is None:
+            # Create a new record
+            artist_obj = Artist(name=username or "[unknown]")
+            if civitai_user_id is not None:
+                artist_obj.civitai_user_id = civitai_user_id
+            if is_deleted:
+                artist_obj.civitai_user_deleted = True
+                if original_name:
+                    artist_obj.civitai_user_original_name = original_name
+            db.add(artist_obj)
+            db.commit()
+            db.refresh(artist_obj)
+            return artist_obj
+
+        # Update existing record with CivitAI identity info
+        dirty = False
+        if civitai_user_id is not None and artist_obj.civitai_user_id is None:
+            artist_obj.civitai_user_id = civitai_user_id
+            dirty = True
+        if is_deleted and not artist_obj.civitai_user_deleted:
+            artist_obj.civitai_user_deleted = True
+            if original_name and not artist_obj.civitai_user_original_name:
+                artist_obj.civitai_user_original_name = original_name
+            dirty = True
+        if dirty:
+            db.commit()
+            db.refresh(artist_obj)
+
+        return artist_obj
+
     def _get_json_path(self, image_path: Path) -> Path:
         """Returns the path to the JSON metadata file for a given image path."""
         return image_path.with_suffix(".json")

@@ -39,10 +39,11 @@ from urllib.parse import quote, urlencode, urlparse
 import requests
 from PIL import Image
 from sqlalchemy import text, func, or_, event
+import sqlalchemy as sa
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, joinedload
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -138,7 +139,6 @@ from schemas import (
     ParityCandidateAuditRequest,
     CivitaiSearchRequest,
     SyncLabAnalyzeRequest,
-    SyncLabIngestRequest,
 )
 
 IMAGE_LIBRARY_PATH = str(getattr(app_config, "IMAGE_LIBRARY_PATH", "image_library"))
@@ -209,6 +209,9 @@ class _PreparedCivitaiImport:
     mismatch_source_url: Optional[str] = None
     mismatch_mime_type: Optional[str] = None
     mismatch_file_hash: Optional[str] = None
+    author_id: Optional[int] = None
+    author_deleted: bool = False
+    author_original_name: Optional[str] = None
 
 
 @dataclass
@@ -566,6 +569,233 @@ def _filter_image_ids_by_tag_names(
         include_tags=include_tags,
         exclude_tags=exclude_tags,
     )
+
+
+# ---------------------------------------------------------------------------
+# Missing-data filter
+# ---------------------------------------------------------------------------
+# Maps normalised condition labels (what the frontend sends) to a list of
+# SQLAlchemy binary expressions that, when ALL true, mean the image is
+# *missing* the requested data.  Each entry returns a list of expressions so
+# we can express compound checks (e.g. "no prompt" needs both exif and
+# civitai prompt fields to be empty).
+_MISSING_DATA_CONDITION_MAP: dict[str, list] = {}
+
+
+def _build_missing_data_condition(key: str) -> list:
+    """Return SQLAlchemy filter expressions for a *missing-data* condition.
+
+    The condition ``key`` uses the normalised ``"no <field>"`` form that the
+    frontend sends.  Each expression should evaluate to ``True`` when the
+    corresponding piece of data is absent.
+    """
+    Im = ImageModel
+
+    if key == "no artist":
+        return [
+            sa.or_(
+                Im.artist_id.is_(None),
+                Im.artist_id == 0,
+            )
+        ]
+    if key == "no source url":
+        return [
+            sa.or_(
+                Im.source_url.is_(None),
+                Im.source_url == "",
+            )
+        ]
+    if key == "no generation info":
+        return [
+            sa.or_(
+                Im.generation_software.is_(None),
+                Im.generation_software == "",
+            )
+        ]
+    if key == "no prompt":
+        return [
+            Im.has_generation_prompt == False,  # noqa: E712
+        ]
+    if key == "no a1111 metadata":
+        return [
+            Im.has_a1111_metadata == False,  # noqa: E712
+        ]
+    if key == "no a1111 hires upscale":
+        return [
+            Im.a1111_hires == False,  # noqa: E712
+        ]
+    if key == "no a1111 regional prompter":
+        return [
+            Im.a1111_regional_prompter == False,  # noqa: E712
+        ]
+    if key == "no a1111 adetailer":
+        return [
+            Im.a1111_adetailer == False,  # noqa: E712
+        ]
+    if key == "no comfyui metadata":
+        return [
+            Im.has_comfyui_metadata == False,  # noqa: E712
+        ]
+    if key == "no nsfw rating":
+        return [
+            sa.and_(
+                Im.user_nsfw_rating.is_(None),
+                Im.civitai_nsfw_level.is_(None),
+            )
+        ]
+    if key == "no safety class":
+        return [
+            Im.user_nsfw_safety_class.is_(None),
+        ]
+    if key == "no exif data":
+        return [
+            sa.or_(
+                Im.exif_data.is_(None),
+                Im.exif_data == "{}",
+                Im.exif_data == "{}\n",
+            )
+        ]
+    if key == "no civitai meta":
+        # Only applies when source_site is civitai; we encode that as
+        # "(source_site != civitai) OR json_metadata is empty/{}"
+        return [
+            sa.or_(
+                sa.func.lower(Im.source_site) != "civitai",
+                Im.json_metadata.is_(None),
+                Im.json_metadata == "{}",
+                Im.json_metadata == "{}\n",
+            )
+        ]
+    if key == "no tags":
+        # No user_tags, no image_tags entries, and no civitai tags in json_metadata
+        return [
+            sa.and_(
+                sa.or_(Im.user_tags.is_(None), Im.user_tags == "[]"),
+                ~Im.id.in_(
+                    sa.select(ImageTag.image_id).where(
+                        ImageTag.image_id == Im.id
+                    )
+                ),
+            )
+        ]
+    # Unknown condition – no filter.
+    return []
+
+
+def _normalize_missing_data_key(raw: str) -> str:
+    """Normalise a missing-data label to the canonical ``"no <field>"`` form."""
+    stripped = (raw or "").strip().lower()
+    if not stripped:
+        return ""
+    if not stripped.startswith("no "):
+        stripped = f"no {stripped}"
+    return stripped
+
+
+def _filter_image_ids_by_missing_data(
+    images_query,
+    missing_data: Optional[list[str]],
+) -> Optional[list[int]]:
+    """Return image IDs that match ALL missing-data conditions, or ``None``
+    when no conditions are specified (i.e. skip the filter entirely)."""
+    if not missing_data:
+        return None
+
+    conditions = []
+    for raw_entry in missing_data:
+        key = _normalize_missing_data_key(raw_entry)
+        if not key:
+            continue
+        exprs = _build_missing_data_condition(key)
+        for expr in exprs:
+            conditions.append(expr)
+
+    if not conditions:
+        return None
+
+    # AND all conditions together
+    combined = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
+    rows = images_query.with_entities(ImageModel.id).filter(combined).all()
+    return [row[0] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Missing-source (tag source) filter
+# ---------------------------------------------------------------------------
+# The frontend source names and how they map to backend data:
+#   civitai  → image_tags (imported from CivitAI) + civitai_data tags
+#   danbooru → json_metadata.danbooru_tags / exif_data.danbooru_tags
+#   prompt   → json_metadata.prompt_tags   / exif_data.prompt
+#   user     → user_tags column
+
+
+def _build_missing_source_condition(source: str) -> list:
+    """Return SQLAlchemy filter expressions for a *missing-source* condition.
+
+    An image is considered to be *missing* tags from *source* when it has
+    zero tags from that source.
+    """
+    Im = ImageModel
+    source_lower = (source or "").strip().lower()
+
+    if source_lower == "civitai":
+        # Civitai tags come via the image_tags join table (imported).
+        # Image is missing civitai source when it has NO image_tags entries.
+        return [
+            ~Im.id.in_(
+                sa.select(ImageTag.image_id)
+            )
+        ]
+    if source_lower == "danbooru":
+        # Danbooru tags are embedded in json_metadata or exif_data JSON.
+        # We do a LIKE check for "danbooru" key presence in either column.
+        return [
+            sa.and_(
+                sa.not_(Im.json_metadata.cast(sa.String).like("%danbooru%")),
+                sa.not_(Im.exif_data.cast(sa.String).like("%danbooru%")),
+            )
+        ]
+    if source_lower == "prompt":
+        # Prompt tags in exif_data or json_metadata (prompt_tags / prompt keys).
+        # has_generation_prompt already captures this.
+        return [
+            Im.has_generation_prompt == False,  # noqa: E712
+        ]
+    if source_lower == "user":
+        # User tags are stored in user_tags JSON column.
+        return [
+            sa.or_(
+                Im.user_tags.is_(None),
+                Im.user_tags == "[]",
+                Im.user_tags == "null",
+            )
+        ]
+    return []
+
+
+def _filter_image_ids_by_missing_source(
+    images_query,
+    missing_source: Optional[list[str]],
+) -> Optional[list[int]]:
+    """Return image IDs that have zero tags from ALL specified sources.
+
+    Returns ``None`` when no sources are specified (skip the filter).
+    """
+    if not missing_source:
+        return None
+
+    conditions = []
+    for source in missing_source:
+        exprs = _build_missing_source_condition(source)
+        for expr in exprs:
+            conditions.append(expr)
+
+    if not conditions:
+        return None
+
+    combined = sa.and_(*conditions) if len(conditions) > 1 else conditions[0]
+    rows = images_query.with_entities(ImageModel.id).filter(combined).all()
+    return [row[0] for row in rows]
 
 
 def _apply_image_list_filters(
@@ -994,6 +1224,112 @@ def _ensure_blurhash_column() -> None:
                 "WHERE civitai_hash IS NOT NULL AND blurhash IS NULL"
             )
         )
+
+
+def _ensure_civitai_image_id_column() -> None:
+    """Add civitai_image_id column and index, then backfill from source_url."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+        if "civitai_image_id" in existing:
+            return
+
+        connection.execute(
+            text("ALTER TABLE images ADD COLUMN civitai_image_id INTEGER")
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_images_civitai_image_id "
+                "ON images(civitai_image_id)"
+            )
+        )
+        # Backfill: extract the numeric image ID from source_url paths like
+        # "/images/12345" for existing CivitAI rows.
+        connection.execute(
+            text(
+                "UPDATE images "
+                "SET civitai_image_id = CAST("
+                "  SUBSTR("
+                "    source_url,"
+                "    INSTR(source_url, '/images/') + 8"
+                "  )"
+                "  AS INTEGER"
+                ") "
+                "WHERE source_site = 'civitai' "
+                "AND source_url LIKE '%/images/%' "
+                "AND civitai_image_id IS NULL"
+            )
+        )
+
+
+def _ensure_civitai_user_columns() -> None:
+    """Add civitai_user_id, civitai_user_deleted, civitai_user_original_name to artists.
+
+    Backfills civitai_user_id from json_metadata.author_id where available.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(artists)")).fetchall()
+        }
+
+        if "civitai_user_id" not in existing:
+            connection.execute(
+                text("ALTER TABLE artists ADD COLUMN civitai_user_id INTEGER")
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_artists_civitai_user_id "
+                    "ON artists(civitai_user_id)"
+                )
+            )
+
+        if "civitai_user_deleted" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE artists ADD COLUMN civitai_user_deleted BOOLEAN "
+                    "DEFAULT 0"
+                )
+            )
+
+        if "civitai_user_original_name" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE artists ADD COLUMN civitai_user_original_name VARCHAR"
+                )
+            )
+
+        # Backfill civitai_user_id from image json_metadata where artist_id is set
+        if "civitai_user_id" not in existing:
+            import json as _json
+
+            rows = connection.execute(
+                text(
+                    "SELECT a.id, a.name, i.json_metadata "
+                    "FROM artists a "
+                    "JOIN images i ON i.artist_id = a.id "
+                    "WHERE a.civitai_user_id IS NULL "
+                    "AND i.json_metadata IS NOT NULL "
+                    "GROUP BY a.id"
+                )
+            ).fetchall()
+
+            for artist_id, artist_name, metadata_str in rows:
+                try:
+                    metadata = _json.loads(metadata_str) if metadata_str else {}
+                    author_id = metadata.get("author_id")
+                    if author_id is not None:
+                        connection.execute(
+                            text(
+                                "UPDATE artists SET civitai_user_id = :uid "
+                                "WHERE id = :aid AND civitai_user_id IS NULL"
+                            ),
+                            {"uid": int(author_id), "aid": artist_id},
+                        )
+                except (ValueError, TypeError, _json.JSONDecodeError):
+                    continue
 
 
 def _ensure_observation_unique_constraint() -> None:
@@ -2240,11 +2576,23 @@ def _ingest_civitai_duplicate_asset(
             artist_id=None,
             source_url=prepared.source_url,
             source_site="civitai",
+            civitai_image_id=prepared.image_id,
             json_metadata=json_metadata,
         )
 
-        if prepared.artist_name:
-            artist_obj = ImageProcessor.find_or_create_artist(db, prepared.artist_name)
+        if prepared.artist_name or prepared.author_id:
+            if prepared.author_id is not None:
+                artist_obj = ImageProcessor.find_or_update_civitai_artist(
+                    db,
+                    username=prepared.artist_name or "[unknown]",
+                    civitai_user_id=prepared.author_id,
+                    is_deleted=prepared.author_deleted,
+                    original_name=prepared.author_original_name,
+                )
+            else:
+                artist_obj = ImageProcessor.find_or_create_artist(
+                    db, prepared.artist_name
+                )
             new_image.artist_id = artist_obj.id
 
         db.add(new_image)
@@ -2576,6 +2924,24 @@ def _resolve_civitai_image_target(
     if not author_name and isinstance(basic_user, dict):
         author_name = basic_user.get("username")
 
+    author_id = basic_user.get("id") if isinstance(basic_user, dict) else None
+    if author_id is not None:
+        try:
+            author_id = int(author_id)
+        except (TypeError, ValueError):
+            author_id = None
+
+    deleted_at = basic_user.get("deletedAt") if isinstance(basic_user, dict) else None
+    is_deleted = deleted_at is not None
+    author_original_name = None
+    if is_deleted and author_name and author_name != "[deleted]":
+        author_original_name = author_name
+
+    # For deleted accounts with no username, build a synthetic name from the
+    # CivitAI user ID so the artist record is identifiable and searchable.
+    if is_deleted and not author_name and author_id is not None:
+        author_name = f"[deleted:{author_id}]"
+
     return {
         "image_id": image_id,
         "image_url": image_url,
@@ -2584,6 +2950,9 @@ def _resolve_civitai_image_target(
         "preview_image_url": preview_image_url,
         "original_filename": original_filename,
         "artist_name": author_name,
+        "author_id": author_id,
+        "author_deleted": is_deleted,
+        "author_original_name": author_original_name,
         "source_url": f"{getattr(app_config, 'CIVITAI_WEB_BASE_URL', 'https://civitai.red')}/images/{image_id}",
         "civitai_url_hash": url_hash,
         "civitai_uuid": civitai_uuid,
@@ -7467,6 +7836,9 @@ def _import_single_civitai_image(
             mismatch_source_url=download_result.mismatch_source_url,
             mismatch_mime_type=download_result.mismatch_mime_type,
             mismatch_file_hash=download_result.mismatch_file_hash,
+            author_id=target.get("author_id"),
+            author_deleted=target.get("author_deleted", False),
+            author_original_name=target.get("author_original_name"),
         )
         return _ingest_prepared_civitai_import(
             db,
@@ -7580,7 +7952,24 @@ def _get_media_capabilities() -> dict[str, Any]:
 def _find_existing_image_by_source_url(
     db: Session, source_url: str
 ) -> Optional[ImageModel]:
-    """Find existing image by DB source_url, then by sidecar source_url fallback."""
+    """Find existing image by civitai_image_id index, source_url, or sidecar fallback."""
+    # Fast path: if source_url is a CivitAI image URL, try indexed lookup first.
+    if is_civitai_image_url(str(source_url or "")):
+        extracted_id = extract_civitai_image_id(source_url)
+        if extracted_id is not None:
+            indexed_matches = (
+                db.query(ImageModel)
+                .filter(ImageModel.civitai_image_id == extracted_id)
+                .order_by(ImageModel.id.desc())
+                .all()
+            )
+            if indexed_matches:
+                for status in ("active", "placeholder", "tombstoned", "deleted"):
+                    for candidate in indexed_matches:
+                        candidate_status = (candidate.image_status or "active").lower()
+                        if candidate_status == status:
+                            return candidate
+
     direct_matches = (
         db.query(ImageModel)
         .filter(ImageModel.source_url == source_url)
@@ -7743,6 +8132,13 @@ def _ensure_civitai_source_attribution_for_existing_image(
         image.source_site = "civitai"
         changed = True
 
+    # Backfill civitai_image_id from the source URL if not already set.
+    if image.civitai_image_id is None:
+        extracted_id = extract_civitai_image_id(normalized_source_url)
+        if extracted_id is not None:
+            image.civitai_image_id = extracted_id
+            changed = True
+
     if not changed:
         return False
 
@@ -7832,20 +8228,27 @@ def _ensure_civitai_metadata_for_existing_image(
     merged_json["civitai"] = civitai_data
 
     # Extract civitai_nsfw_level from the enrichment data
+    # Extract civitai_image_id from source_url and include in update
+    civitai_img_id = extract_civitai_image_id(source_url)
+
     nsfw_level = extract_civitai_nsfw_level({"civitai": civitai_data})
+
+    update_fields = {
+        ImageModel.json_metadata: merged_json,
+        ImageModel.source_url: source_url,
+        ImageModel.source_site: "civitai",
+        ImageModel.civitai_uuid: civitai_uuid,
+        ImageModel.civitai_hash: civitai_hash,
+        ImageModel.civitai_nsfw_level: nsfw_level,
+    }
+    if civitai_img_id is not None:
+        update_fields[ImageModel.civitai_image_id] = civitai_img_id
 
     (
         db.query(ImageModel)
         .filter(ImageModel.id == image.id)
         .update(
-            {
-                ImageModel.json_metadata: merged_json,
-                ImageModel.source_url: source_url,
-                ImageModel.source_site: "civitai",
-                ImageModel.civitai_uuid: civitai_uuid,
-                ImageModel.civitai_hash: civitai_hash,
-                ImageModel.civitai_nsfw_level: nsfw_level,
-            },
+            update_fields,
             synchronize_session=False,
         )
     )
@@ -8025,6 +8428,51 @@ def _fetch_civitai_collection_name(api: CivitaiAPI, civitai_collection_id: int) 
         return fallback
 
 
+def _classify_civitai_upstream_error(exc: CivitaiRequestError) -> HTTPException:
+    """Map a CivitaiRequestError to a semantically correct HTTPException.
+
+    Status code mapping:
+        401 → 502 Bad Gateway (auth expired – our gateway cannot fulfill the request)
+        4xx → 502 Bad Gateway (other client error from upstream)
+        5xx → 503 Service Unavailable (CivitAI is down or in maintenance)
+        None / unknown → 503 Service Unavailable
+    """
+    upstream_status = getattr(exc, "status_code", None)
+    message = str(exc)
+
+    if upstream_status == 401:
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "CivitAI returned HTTP 401 Unauthorized. "
+                "Your session cookie has expired. "
+                "Please re-authenticate via /civitai/auth/cookie or /civitai/auth/refresh."
+            ),
+        )
+
+    if upstream_status and 500 <= upstream_status < 600:
+        return HTTPException(
+            status_code=503,
+            detail=(
+                f"CivitAI is currently unavailable (HTTP {upstream_status}). "
+                "The service may be under maintenance. "
+                "Check https://status.civitai.com/status/public for details."
+            ),
+        )
+
+    if upstream_status and 400 <= upstream_status < 500:
+        return HTTPException(
+            status_code=502,
+            detail=f"CivitAI returned HTTP {upstream_status}: {message}",
+        )
+
+    # No status code (e.g. connection error after retries) – treat as unavailable.
+    return HTTPException(
+        status_code=503,
+        detail=f"Could not reach CivitAI: {message}",
+    )
+
+
 def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
     try:
         response = api._make_request(
@@ -8033,18 +8481,10 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
             strict=True,
         )
     except CivitaiRequestError as exc:
-        if getattr(exc, "status_code", None) == 401:
-            raise HTTPException(
-                status_code=502,
-                detail="CivitAI returned HTTP 401 Unauthorized. Your session cookie has expired. Please re-authenticate via /civitai/auth/cookie or /civitai/auth/refresh.",
-            )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not fetch CivitAI user collections: {exc}",
-        )
+        raise _classify_civitai_upstream_error(exc)
     except Exception as e:
         raise HTTPException(
-            status_code=502,
+            status_code=503,
             detail=f"Could not fetch CivitAI user collections: {e}",
         )
 
@@ -8085,6 +8525,36 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
         )
 
     collections.sort(key=lambda item: str(item.get("name") or "").lower())
+
+    # ── Enrich with stored DB metadata (item counts, sync timestamps) ──
+    if collections:
+        civitai_ids = [c["id"] for c in collections]
+        with SessionLocal() as db:
+            rows = (
+                db.query(CollectionModel)
+                .filter(CollectionModel.civitai_collection_id.in_(civitai_ids))
+                .all()
+            )
+            by_civitai_id = {r.civitai_collection_id: r for r in rows}
+
+        for col in collections:
+            db_col = by_civitai_id.get(col["id"])
+            if db_col is None:
+                continue
+            # Prefer the most complete count available
+            col["itemCount"] = (
+                db_col.civitai_last_full_item_count
+                or db_col.civitai_head_item_count
+            )
+            if db_col.civitai_last_synced_at:
+                col["lastSyncedAt"] = _isoformat_or_none(
+                    db_col.civitai_last_synced_at
+                )
+            if db_col.civitai_last_full_scan_at:
+                col["lastFullScanAt"] = _isoformat_or_none(
+                    db_col.civitai_last_full_scan_at
+                )
+
     return collections
 
 
@@ -8929,6 +9399,7 @@ def _build_civitai_unavailable_result(
                     replaced_by_image_id=None,
                     source_url=source_url,
                     source_site="civitai",
+                    civitai_image_id=image_id,
                     exif_data={},
                     json_metadata={"civitai": civitai_unavailable_payload},
                 )
@@ -8956,6 +9427,7 @@ def _build_civitai_unavailable_result(
                 existing.replaced_by_image_id = None
                 existing.source_url = source_url
                 existing.source_site = "civitai"
+                existing.civitai_image_id = image_id
                 existing.mimetype = (
                     existing.mimetype or "application/x-civitai-placeholder"
                 )
@@ -9401,6 +9873,9 @@ def _prepare_civitai_download(
         mismatch_source_url=download_result.mismatch_source_url,
         mismatch_mime_type=download_result.mismatch_mime_type,
         mismatch_file_hash=download_result.mismatch_file_hash,
+        author_id=target.get("author_id"),
+        author_deleted=target.get("author_deleted", False),
+        author_original_name=target.get("author_original_name"),
     )
 
 
@@ -9446,6 +9921,10 @@ def _ingest_prepared_civitai_import(
             if prepared.civitai_hash:
                 image.civitai_hash = prepared.civitai_hash
                 civitai_metadata_info["hash"] = prepared.civitai_hash
+
+            # Ensure civitai_image_id is populated from the prepared import.
+            if image.civitai_image_id is None and prepared.image_id:
+                image.civitai_image_id = prepared.image_id
 
             # Add pre-saved API response file paths (includes basic_info, generation_data, and infinite)
             if prepared.api_response_paths:
@@ -9497,6 +9976,40 @@ def _ingest_prepared_civitai_import(
             prepared=prepared,
             image_db_id=image_db_id,
         )
+
+        # Update artist with CivitAI identity if we have author_id
+        if prepared.author_id is not None:
+            if image.artist_id is not None:
+                # Update existing artist with CivitAI identity
+                artist_obj = db.query(Artist).filter(Artist.id == image.artist_id).first()
+                if artist_obj is not None:
+                    dirty = False
+                    if artist_obj.civitai_user_id is None:
+                        artist_obj.civitai_user_id = prepared.author_id
+                        dirty = True
+                    if prepared.author_deleted and not artist_obj.civitai_user_deleted:
+                        artist_obj.civitai_user_deleted = True
+                        if (
+                            prepared.author_original_name
+                            and not artist_obj.civitai_user_original_name
+                        ):
+                            artist_obj.civitai_user_original_name = (
+                                prepared.author_original_name
+                            )
+                        dirty = True
+                    if dirty:
+                        db.flush()
+            else:
+                # No artist yet — create one from CivitAI identity
+                artist_obj = ImageProcessor.find_or_update_civitai_artist(
+                    db,
+                    username=prepared.artist_name or "[deleted:" + str(prepared.author_id) + "]",
+                    civitai_user_id=prepared.author_id,
+                    is_deleted=prepared.author_deleted,
+                    original_name=prepared.author_original_name,
+                )
+                image.artist_id = artist_obj.id
+                db.flush()
 
     _commit_with_lock_retry(db, context=f"Import commit for image {prepared.image_id}")
     return {
@@ -10631,6 +11144,13 @@ def _merge_duplicate_grouped_items(items: list[dict[str, Any]]) -> list[dict[str
     return [merged[k] for k in order]
 
 
+# Multiplier applied to the requested page size when using cursor-based
+# pagination.  Because grouping/merging can reduce N DB rows to fewer
+# display items, we over-fetch from the DB and trim after merging so the
+# caller always receives a full page.
+_OVERFETCH_FACTOR = 3
+
+
 def _load_display_image_items(
     db: Session,
     *,
@@ -10653,8 +11173,20 @@ def _load_display_image_items(
     group_variants: bool,
     skip: int = 0,
     limit: Optional[int] = None,
-) -> tuple[list[dict[str, Any]], int]:
-    """Return (paginated_display_items, total_filtered_count)."""
+    cursor: Optional[int] = None,
+    missing_data: Optional[list[str]] = None,
+    missing_source: Optional[list[str]] = None,
+) -> tuple[list[dict[str, Any]], int, Optional[int]]:
+    """Return (paginated_display_items, total_grouped_count, next_cursor).
+
+    When *cursor* is provided, keyset pagination is used instead of offset:
+      - ``first_added`` sort  →  ``WHERE id > cursor ORDER BY id ASC``
+      - ``last_added`` sort   →  ``WHERE id < cursor ORDER BY id DESC``
+
+    To guarantee a full page of grouped display items, the DB over-fetches
+    rows (up to ``limit * _OVERFETCH_FACTOR``) before grouping and merging.
+    The result is then trimmed to exactly *limit* display items.
+    """
     display_cache_key = _build_search_cache_key(
         "images_display_items",
         payload={
@@ -10677,11 +11209,18 @@ def _load_display_image_items(
             "group_variants": bool(group_variants),
             "skip": skip,
             "limit": limit,
+            "cursor": cursor,
+            "missing_data": _normalize_cache_list(missing_data),
+            "missing_source": _normalize_cache_list(missing_source),
         },
     )
     cached_result = _search_cache_get(display_cache_key)
     if isinstance(cached_result, dict) and "items" in cached_result:
-        return cached_result["items"], cached_result["filtered_count"]
+        return (
+            cached_result["items"],
+            cached_result["filtered_count"],
+            cached_result.get("next_cursor"),
+        )
 
     import time as _time
 
@@ -10752,6 +11291,22 @@ def _load_display_image_items(
         f"[PERF] tag filter: {_t5b-_t5:.3f}s  ids={len(tag_filtered_ids) if tag_filtered_ids is not None else 'skip'}"
     )
 
+    missing_data_filtered_ids = _filter_image_ids_by_missing_data(
+        images_query, missing_data
+    )
+    _t5c = _time.perf_counter()
+    print(
+        f"[PERF] missing_data filter: {_t5c-_t5b:.3f}s  ids={len(missing_data_filtered_ids) if missing_data_filtered_ids is not None else 'skip'}"
+    )
+
+    missing_source_filtered_ids = _filter_image_ids_by_missing_source(
+        images_query, missing_source
+    )
+    _t5d = _time.perf_counter()
+    print(
+        f"[PERF] missing_source filter: {_t5d-_t5c:.3f}s  ids={len(missing_source_filtered_ids) if missing_source_filtered_ids is not None else 'skip'}"
+    )
+
     constrained_ids: Optional[set[int]] = None
     for filtered_ids in (
         generation_filtered_ids,
@@ -10759,6 +11314,8 @@ def _load_display_image_items(
         nsfw_safety_filtered_ids,
         a1111_filtered_ids,
         tag_filtered_ids,
+        missing_data_filtered_ids,
+        missing_source_filtered_ids,
     ):
         if filtered_ids is None:
             continue
@@ -10780,16 +11337,33 @@ def _load_display_image_items(
     else:
         images_query = images_query.order_by(ImageModel.id.asc())
 
-    # Count total matching rows before pagination
-    total_count = images_query.with_entities(func.count(ImageModel.id)).scalar() or 0
-    _t5c = _time.perf_counter()
-    print(f"[PERF] count query: {_t5c-_t5b:.3f}s  total={total_count}")
-
-    # Apply SQL-level pagination
-    if skip > 0:
-        images_query = images_query.offset(skip)
-    if limit is not None:
-        images_query = images_query.limit(limit)
+    # --- Cursor-based (keyset) pagination --------------------------------
+    # When *cursor* is supplied, use keyset pagination for stable page
+    # boundaries regardless of variant grouping.  Over-fetch DB rows so
+    # that after grouping/merging we still have ≥ limit display items.
+    #
+    # When *group_variants* is True we ALWAYS over-fetch and compute a
+    # next_cursor — even on the first page (cursor=None, skip=0) — so the
+    # frontend can rely on X-Next-Cursor to decide whether more pages exist
+    # instead of comparing offset < filtered_count (which breaks because
+    # the count is pre-grouping while offset is post-grouping).
+    use_overfetch = group_variants and limit is not None
+    use_cursor = use_overfetch  # over-fetch path is now the same as cursor path
+    if use_overfetch:
+        if cursor is not None:
+            if sort_by == "last_added":
+                images_query = images_query.filter(ImageModel.id < cursor)
+            else:
+                images_query = images_query.filter(ImageModel.id > cursor)
+        # else: first page — no cursor filter, start from the beginning
+        db_row_limit = limit * _OVERFETCH_FACTOR
+        images_query = images_query.limit(db_row_limit)
+    else:
+        # Legacy offset path — for non-grouped queries without cursor.
+        if skip > 0:
+            images_query = images_query.offset(skip)
+        if limit is not None:
+            images_query = images_query.limit(limit)
 
     images = images_query.all()
     _t6 = _time.perf_counter()
@@ -10818,6 +11392,8 @@ def _load_display_image_items(
         # Inject artist_name from the already-joined relationship so the
         # frontend has it for detail-panel display and client-side filtering.
         merged["artist_name"] = image.artist.name if image.artist is not None else None
+        merged["artist_deleted"] = image.artist.civitai_user_deleted if image.artist is not None else None
+        merged["artist_original_name"] = image.artist.civitai_user_original_name if image.artist is not None else None
         nsfw_ratings = _read_nsfw_ratings_for_image(image)
         merged["nsfw_ratings"] = nsfw_ratings
         merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
@@ -10839,14 +11415,62 @@ def _load_display_image_items(
     if group_variants:
         display_items = _merge_duplicate_grouped_items(display_items)
 
+    # --- Cursor pagination: trim to exactly *limit* display items ---------
+    next_cursor: Optional[int] = None
+    if use_cursor and limit is not None:
+        if len(display_items) > limit:
+            display_items = display_items[:limit]
+        # Derive the next cursor from the last item's base_image_id.
+        if display_items:
+            last_item = display_items[-1]
+            next_cursor = last_item.get("base_image_id")
+            # If the page is short, there are no more results.
+            if len(display_items) < limit:
+                next_cursor = None
+
+    # --- Total count for X-Filtered-Count header -------------------------
+    # For cursor pagination, we count total matching DB rows (pre-grouping)
+    # using a separate query without the cursor/limit applied.  This count
+    # is informational — the frontend relies on X-Next-Cursor to determine
+    # whether more pages exist.
+    if use_cursor:
+        # Build a count query from the same constrained ID set.
+        if constrained_ids is not None:
+            total_count = len(constrained_ids)
+        else:
+            # No ID-level constraints applied — count from the base query.
+            base_count_query = (
+                db.query(func.count(ImageModel.id))
+                .filter(_active_image_filter())
+            )
+            base_count_query = _apply_image_list_filters(
+                base_count_query,
+                search=search,
+                source_sites=source_site,
+                mimetypes=mimetype,
+                artist_names=artist_name,
+                collection_names=collection_name,
+                exclude_artist_names=exclude_artist_name,
+                exclude_collection_names=exclude_collection_name,
+            )
+            total_count = base_count_query.scalar() or 0
+    else:
+        # Legacy offset path: compute from the full query without offset/limit.
+        total_count = len(display_items)
+
     _t7 = _time.perf_counter()
     print(f"[PERF] display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
     print(f"[PERF] TOTAL: {_t7-_t0:.3f}s")
 
     _search_cache_put(
-        display_cache_key, {"items": display_items, "filtered_count": total_count}
+        display_cache_key,
+        {
+            "items": display_items,
+            "filtered_count": total_count,
+            "next_cursor": next_cursor,
+        },
     )
-    return display_items, total_count
+    return display_items, total_count, next_cursor
 
 
 def _replace_image_with_uploaded_file(
@@ -11556,9 +12180,15 @@ def _run_civitai_collection_sync_job(
         is_auth_error = (
             exc.status_code == 502 and "401" in detail and "Unauthorized" in detail
         )
+        is_unavailable = exc.status_code == 503
         if is_auth_error:
             task_context.set_metadata("auth_required", True)
             task_context.fail(f"CivitAI authentication expired. {detail}")
+        elif is_unavailable:
+            task_context.set_metadata("upstream_unavailable", True)
+            task_context.fail(
+                detail or "CivitAI is currently unavailable (HTTP 503)."
+            )
         else:
             task_context.fail(
                 detail or f"Could not fetch collections (HTTP {exc.status_code})."
@@ -12582,6 +13212,8 @@ async def lifespan(app: FastAPI):
     _ensure_promoted_metadata_columns()
     _ensure_original_file_name_column()
     _ensure_blurhash_column()
+    _ensure_civitai_image_id_column()
+    _ensure_civitai_user_columns()
     _ensure_observation_unique_constraint()
     _ensure_file_hash_nonunique()
 
@@ -12699,6 +13331,88 @@ async def read_perceptual_lab():
 @app.get("/expression-lab")
 async def read_expression_lab():
     return FileResponse("frontend/expression-lab.html")
+
+
+@app.get("/comfyui-lab")
+async def read_comfyui_lab():
+    return FileResponse("frontend/comfyui-lab.html")
+
+
+# ── ComfyUI proxy ─────────────────────────────────────────────
+# Forwards requests to a ComfyUI instance to avoid CORS issues
+# from the browser.  The ComfyUI URL is passed via ?target= query param.
+
+import urllib.parse as _urlparse
+
+_PROXY_TIMEOUT = 30  # seconds
+
+
+def _comfyui_target(target: str) -> str:
+    """Validate and return the ComfyUI base URL from the target param."""
+    if not target:
+        raise HTTPException(status_code=400, detail="Missing ?target= ComfyUI URL")
+    parsed = _urlparse.urlparse(target)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="target must be http(s)://…")
+    # Strip trailing slash
+    return target.rstrip("/")
+
+
+@app.post("/comfyui-proxy/upload/image")
+async def comfyui_proxy_upload_image(
+    request: Request,
+    target: str = Query(..., description="ComfyUI base URL, e.g. http://127.0.0.1:8188"),
+):
+    """Proxy an image upload to ComfyUI's /upload/image endpoint.
+
+    Forwards the raw multipart body as-is so the client can send whatever
+    fields ComfyUI expects (image, overwrite, subfolder, type, etc.).
+    """
+    base = _comfyui_target(target)
+    url = f"{base}/upload/image"
+
+    body = await request.body()
+    content_type = request.headers.get("content-type", "")
+
+    try:
+        resp = requests.post(
+            url,
+            data=body,
+            headers={"Content-Type": content_type},
+            timeout=_PROXY_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"ComfyUI unreachable: {exc}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+
+    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+@app.post("/comfyui-proxy/prompt")
+async def comfyui_proxy_prompt(
+    target: str = Query(..., description="ComfyUI base URL"),
+    prompt: str = Body(..., media_type="application/json"),
+):
+    """Proxy a /prompt call to ComfyUI."""
+    base = _comfyui_target(target)
+    url = f"{base}/prompt"
+
+    try:
+        resp = requests.post(
+            url,
+            data=prompt,
+            headers={"Content-Type": "application/json"},
+            timeout=_PROXY_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"ComfyUI unreachable: {exc}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:500])
+
+    return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
 @app.get("/api/expression-sets")
@@ -16069,11 +16783,19 @@ def read_images(
     a1111_adetailer: Optional[list[str]] = Query(default=None),
     include_tag: Optional[list[str]] = Query(default=None),
     exclude_tag: Optional[list[str]] = Query(default=None),
+    cursor: Optional[int] = None,
+    missing_data: Optional[list[str]] = Query(default=None),
+    missing_source: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
     Returns a list of images with their associated artist and license info.
     Uses ImageData class to encapsulate and display image metadata.
+
+    Supports both legacy offset pagination (*skip*) and cursor-based keyset
+    pagination (*cursor*).  When *cursor* is supplied, it takes precedence:
+    the server over-fetches DB rows to guarantee a full page after variant
+    grouping, and returns ``X-Next-Cursor`` for the next page boundary.
     """
     cache_key = _build_search_cache_key(
         "images",
@@ -16097,6 +16819,9 @@ def read_images(
             "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
             "include_tag": _normalize_cache_list(include_tag),
             "exclude_tag": _normalize_cache_list(exclude_tag),
+            "cursor": cursor,
+            "missing_data": _normalize_cache_list(missing_data),
+            "missing_source": _normalize_cache_list(missing_source),
         },
     )
     cache_headers = _build_json_cache_headers(cache_key, gallery=True)
@@ -16110,11 +16835,14 @@ def read_images(
         response.headers["X-Filtered-Count"] = str(
             int(cached_payload.get("filtered_count") or 0)
         )
+        next_cursor_val = cached_payload.get("next_cursor")
+        if next_cursor_val is not None:
+            response.headers["X-Next-Cursor"] = str(int(next_cursor_val))
         items = cached_payload.get("items")
         if isinstance(items, list):
             return items
 
-    display_items, filtered_count = _load_display_image_items(
+    display_items, filtered_count, next_cursor = _load_display_image_items(
         db,
         sort_by=sort_by,
         search=search,
@@ -16135,14 +16863,20 @@ def read_images(
         group_variants=group_variants,
         skip=skip,
         limit=limit,
+        cursor=cursor,
+        missing_data=missing_data,
+        missing_source=missing_source,
     )
     response.headers["X-Filtered-Count"] = str(filtered_count)
+    if next_cursor is not None:
+        response.headers["X-Next-Cursor"] = str(int(next_cursor))
 
     _search_cache_put(
         cache_key,
         {
             "filtered_count": filtered_count,
             "items": display_items,
+            "next_cursor": next_cursor,
         },
     )
 
@@ -16640,6 +17374,11 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                     mismatch_source_url=_download_result.mismatch_source_url,
                     mismatch_mime_type=_download_result.mismatch_mime_type,
                     mismatch_file_hash=_download_result.mismatch_file_hash,
+                    author_id=_civitai_target_missing.get("author_id"),
+                    author_deleted=_civitai_target_missing.get("author_deleted", False),
+                    author_original_name=_civitai_target_missing.get(
+                        "author_original_name"
+                    ),
                 )
                 _replacement = _replace_image_with_uploaded_file(
                     db,
@@ -16826,6 +17565,9 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                 mismatch_source_url=download_result.mismatch_source_url,
                 mismatch_mime_type=download_result.mismatch_mime_type,
                 mismatch_file_hash=download_result.mismatch_file_hash,
+                author_id=civitai_target.get("author_id"),
+                author_deleted=civitai_target.get("author_deleted", False),
+                author_original_name=civitai_target.get("author_original_name"),
             )
             replacement = _replace_image_with_uploaded_file(
                 db,
@@ -16962,6 +17704,9 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
                     temp_path=current_path,
                     civitai_uuid=civitai_target.get("civitai_uuid"),
                     civitai_hash=civitai_target.get("civitai_hash"),
+                    author_id=civitai_target.get("author_id"),
+                    author_deleted=civitai_target.get("author_deleted", False),
+                    author_original_name=civitai_target.get("author_original_name"),
                 ),
                 image_db_id=image.id,
             )
@@ -17409,7 +18154,14 @@ def get_artists(
 
     artists = db.query(Artist).all()
     return [
-        {"id": artist.id, "name": artist.name, "nickname": artist.nickname}
+        {
+            "id": artist.id,
+            "name": artist.name,
+            "nickname": artist.nickname,
+            "civitai_user_id": artist.civitai_user_id,
+            "civitai_user_deleted": artist.civitai_user_deleted,
+            "civitai_user_original_name": artist.civitai_user_original_name,
+        }
         for artist in artists
     ]
 
@@ -17419,115 +18171,302 @@ def search_suggest(
     q: str = Query(default="", min_length=1, max_length=200),
     limit: int = Query(default=15, ge=1, le=50),
     nsfw_rating: Optional[list[str]] = Query(default=None),
+    # Filter context params — same as read_images for narrowing suggestions
+    search: Optional[str] = None,
+    generation_software: Optional[list[str]] = Query(default=None),
+    source_site: Optional[list[str]] = Query(default=None),
+    mimetype: Optional[list[str]] = Query(default=None),
+    nsfw_safety: Optional[list[str]] = Query(default=None),
+    artist_name: Optional[list[str]] = Query(default=None),
+    collection_name: Optional[list[str]] = Query(default=None),
+    exclude_artist_name: Optional[list[str]] = Query(default=None),
+    exclude_collection_name: Optional[list[str]] = Query(default=None),
+    a1111_hires: Optional[list[str]] = Query(default=None),
+    a1111_regional_prompter: Optional[list[str]] = Query(default=None),
+    a1111_adetailer: Optional[list[str]] = Query(default=None),
+    include_tag: Optional[list[str]] = Query(default=None),
+    exclude_tag: Optional[list[str]] = Query(default=None),
+    missing_data: Optional[list[str]] = Query(default=None),
+    missing_source: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Return matching collections, artists, and tags for autocomplete suggestions."""
+    """Return matching collections, artists, and tags for autocomplete suggestions.
+
+    All results are gallery-scoped: only items linked to at least one active image
+    are returned.  When filter context params are provided, results are further
+    narrowed to only items present in the filtered image subset.
+
+    Each result is a ``{name, count}`` object where *count* is the number of
+    distinct matching images.  Results are sorted by count (descending) then
+    alphabetically.
+    """
     needle = q.strip().lower()
     if not needle:
         return {"collections": [], "artists": [], "tags": []}
 
     like_pattern = f"%{needle}%"
-    nsfw_ratings = nsfw_rating if nsfw_rating else None
 
-    # When NSFW filtering is active, precompute the set of allowed image IDs
-    # so tag/concept/alias queries only return tags from visible images.
-    nsfw_allowed_image_ids: Optional[set[int]] = None
-    if nsfw_ratings:
-        nsfw_filtered = _filter_image_ids_by_nsfw_ratings(
-            db.query(ImageModel).filter(_active_image_filter()),
-            nsfw_ratings,
+    # --- Build the constrained image ID set from filter context ---
+    base_query = db.query(ImageModel).filter(_active_image_filter())
+
+    # Apply text / relational filters first
+    filtered_query = _apply_image_list_filters(
+        base_query,
+        search=search,
+        source_sites=source_site,
+        mimetypes=mimetype,
+        artist_names=artist_name,
+        collection_names=collection_name,
+        exclude_artist_names=exclude_artist_name,
+        exclude_collection_names=exclude_collection_name,
+    )
+
+    # Determine whether _apply_image_list_filters narrowed the query.
+    # If any of these params are provided, we must extract IDs from
+    # filtered_query and use them as the base scope.
+    has_list_filters = any(
+        p
+        for p in (
+            search,
+            source_site,
+            mimetype,
+            artist_name,
+            collection_name,
+            exclude_artist_name,
+            exclude_collection_name,
         )
-        if nsfw_filtered is not None:
-            nsfw_allowed_image_ids = set(nsfw_filtered)
+    )
 
+    constrained_ids: Optional[set[int]] = None
+
+    # If list filters are active, extract the scoped image IDs first
+    if has_list_filters:
+        constrained_ids = set(
+            row[0]
+            for row in filtered_query.with_entities(ImageModel.id).all()
+        )
+
+    # Intersect with specialised filters (each returns None when inactive)
+    nsfw_filtered = _filter_image_ids_by_nsfw_ratings(filtered_query, nsfw_rating)
+    nsfw_safety_filtered = _filter_image_ids_by_nsfw_safety_classes(
+        filtered_query, nsfw_safety
+    )
+    gen_filtered = _filter_image_ids_by_generation_software(
+        filtered_query, generation_software
+    )
+    a1111_filtered = _filter_image_ids_by_a1111_features(
+        filtered_query,
+        a1111_hires=a1111_hires,
+        a1111_regional_prompter=a1111_regional_prompter,
+        a1111_adetailer=a1111_adetailer,
+    )
+    tag_filtered = _filter_image_ids_by_tag_names(
+        filtered_query, include_tags=include_tag, exclude_tags=exclude_tag,
+    )
+    missing_data_filtered = _filter_image_ids_by_missing_data(
+        filtered_query, missing_data
+    )
+    missing_source_filtered = _filter_image_ids_by_missing_source(
+        filtered_query, missing_source
+    )
+
+    for fids in (
+        nsfw_filtered,
+        nsfw_safety_filtered,
+        gen_filtered,
+        a1111_filtered,
+        tag_filtered,
+        missing_data_filtered,
+        missing_source_filtered,
+    ):
+        if fids is not None:
+            constrained_ids = (
+                fids if constrained_ids is None else constrained_ids & fids
+            )
+
+    # Final set of image IDs that suggestions must be linked to
+    if constrained_ids is not None:
+        allowed_ids = constrained_ids
+    else:
+        allowed_ids = set(
+            row[0]
+            for row in db.query(ImageModel.id).filter(_active_image_filter()).all()
+        )
+
+    if not allowed_ids:
+        return {"collections": [], "artists": [], "tags": []}
+
+    allowed_ids_sub = (
+        db.query(ImageModel.id).filter(ImageModel.id.in_(allowed_ids)).subquery()
+    )
+
+    # --- Collections with counts ---
     collection_rows = (
-        db.query(CollectionModel.name)
-        .filter(func.lower(CollectionModel.name).like(like_pattern))
-        .order_by(CollectionModel.name)
+        db.query(
+            CollectionModel.name,
+            func.count(func.distinct(ImageModel.id)),
+        )
+        .join(
+            ImageCollectionMembership,
+            ImageCollectionMembership.collection_id == CollectionModel.id,
+        )
+        .join(ImageModel, ImageModel.id == ImageCollectionMembership.image_id)
+        .filter(
+            ImageModel.id.in_(allowed_ids_sub),
+            func.lower(CollectionModel.name).like(like_pattern),
+        )
+        .group_by(CollectionModel.name)
+        .order_by(func.count(func.distinct(ImageModel.id)).desc(), CollectionModel.name)
         .limit(limit)
         .all()
     )
 
-    artist_query = (
-        db.query(Artist.name)
+    # --- Artists with counts ---
+    artist_rows = (
+        db.query(
+            Artist.name,
+            func.count(func.distinct(ImageModel.id)),
+        )
         .join(ImageModel, ImageModel.artist_id == Artist.id)
         .filter(
-            _active_image_filter(),
+            ImageModel.id.in_(allowed_ids_sub),
             func.lower(Artist.name).like(like_pattern),
         )
-    )
-    if nsfw_allowed_image_ids is not None:
-        artist_query = artist_query.filter(ImageModel.id.in_(nsfw_allowed_image_ids))
-    artist_rows = artist_query.distinct().order_by(Artist.name).limit(limit).all()
-
-    # Tags: union of Tag.name, Concept.canonical_name, and ConceptAlias.normalized_alias
-    # When NSFW filtering is active, only include tags that appear on images with allowed ratings.
-    tag_name_query = db.query(Tag.name).filter(func.lower(Tag.name).like(like_pattern))
-    concept_name_query = db.query(Concept.canonical_name).filter(
-        func.lower(Concept.canonical_name).like(like_pattern)
-    )
-    alias_name_query = db.query(ConceptAlias.normalized_alias).filter(
-        func.lower(ConceptAlias.normalized_alias).like(like_pattern)
+        .group_by(Artist.name)
+        .order_by(func.count(func.distinct(ImageModel.id)).desc(), Artist.name)
+        .limit(limit)
+        .all()
     )
 
-    if nsfw_allowed_image_ids is not None:
-        # Restrict tags to those linked to at least one image with an allowed NSFW rating
-        allowed_ids_sub = (
-            db.query(ImageModel.id)
-            .filter(ImageModel.id.in_(nsfw_allowed_image_ids))
-            .subquery()
-        )
-        # Tag → image_tags → ImageModel
-        tag_name_query = (
-            tag_name_query.join(ImageTag, ImageTag.tag_id == Tag.id)
-            .filter(ImageTag.image_id.in_(allowed_ids_sub))
-            .distinct()
-        )
-        # Concept → image_concept_observations → ImageModel
-        concept_name_query = (
-            concept_name_query.join(
-                ImageConceptObservation,
-                ImageConceptObservation.concept_id == Concept.id,
-            )
-            .filter(ImageConceptObservation.image_id.in_(allowed_ids_sub))
-            .distinct()
-        )
-        # ConceptAlias → Concept → image_concept_observations → ImageModel
-        alias_name_query = (
-            alias_name_query.join(Concept, Concept.id == ConceptAlias.concept_id)
-            .join(
-                ImageConceptObservation,
-                ImageConceptObservation.concept_id == Concept.id,
-            )
-            .filter(ImageConceptObservation.image_id.in_(allowed_ids_sub))
-            .distinct()
-        )
+    # --- Tags with counts from 5 sources ---
+    # Merge across sources keeping max count per canonical (lowered) name.
+    tag_counts: dict[str, dict[str, Any]] = {}  # lowered → {name, count}
 
-    tag_name_rows = tag_name_query.order_by(Tag.name).limit(limit).all()
-    concept_name_rows = (
-        concept_name_query.order_by(Concept.canonical_name).limit(limit).all()
+    # 1. Tag → image_tags → ImageModel
+    tag_rows = (
+        db.query(
+            Tag.name,
+            func.count(func.distinct(ImageTag.image_id)),
+        )
+        .join(ImageTag, ImageTag.tag_id == Tag.id)
+        .filter(
+            ImageTag.image_id.in_(allowed_ids_sub),
+            func.lower(Tag.name).like(like_pattern),
+        )
+        .group_by(Tag.name)
+        .all()
     )
-    alias_name_rows = (
-        alias_name_query.order_by(ConceptAlias.normalized_alias).limit(limit).all()
-    )
+    for name, cnt in tag_rows:
+        key = name.lower()
+        if key not in tag_counts or cnt > tag_counts[key]["count"]:
+            tag_counts[key] = {"name": name, "count": int(cnt)}
 
-    # Merge and deduplicate tag results, preserving sort order
-    seen_tags: set[str] = set()
-    merged_tags: list[str] = []
-    for row_list in (tag_name_rows, concept_name_rows, alias_name_rows):
-        for (name,) in row_list:
-            lowered = name.lower()
-            if lowered not in seen_tags:
-                seen_tags.add(lowered)
-                merged_tags.append(name)
-    merged_tags.sort(key=lambda s: s.lower())
-    if len(merged_tags) > limit:
-        merged_tags = merged_tags[:limit]
+    # 2. Concept → image_concept_observations → ImageModel
+    concept_rows = (
+        db.query(
+            Concept.canonical_name,
+            func.count(func.distinct(ImageConceptObservation.image_id)),
+        )
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.concept_id == Concept.id,
+        )
+        .filter(
+            ImageConceptObservation.image_id.in_(allowed_ids_sub),
+            func.lower(Concept.canonical_name).like(like_pattern),
+        )
+        .group_by(Concept.canonical_name)
+        .all()
+    )
+    for name, cnt in concept_rows:
+        key = name.lower()
+        if key not in tag_counts or cnt > tag_counts[key]["count"]:
+            tag_counts[key] = {"name": name, "count": int(cnt)}
+
+    # 3. ConceptAlias → Concept → image_concept_observations → ImageModel
+    alias_rows = (
+        db.query(
+            ConceptAlias.normalized_alias,
+            func.count(func.distinct(ImageConceptObservation.image_id)),
+        )
+        .join(Concept, Concept.id == ConceptAlias.concept_id)
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.concept_id == Concept.id,
+        )
+        .filter(
+            ImageConceptObservation.image_id.in_(allowed_ids_sub),
+            func.lower(ConceptAlias.normalized_alias).like(like_pattern),
+        )
+        .group_by(ConceptAlias.normalized_alias)
+        .all()
+    )
+    for name, cnt in alias_rows:
+        key = name.lower()
+        if key not in tag_counts or cnt > tag_counts[key]["count"]:
+            tag_counts[key] = {"name": name, "count": int(cnt)}
+
+    # 4. AuthorityTerm → image_concept_observations → ImageModel
+    auth_rows = (
+        db.query(
+            AuthorityTerm.external_name,
+            func.count(func.distinct(ImageConceptObservation.image_id)),
+        )
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+        )
+        .filter(
+            ImageConceptObservation.image_id.in_(allowed_ids_sub),
+            func.lower(AuthorityTerm.external_name).like(like_pattern),
+        )
+        .group_by(AuthorityTerm.external_name)
+        .all()
+    )
+    for name, cnt in auth_rows:
+        key = name.lower()
+        if key not in tag_counts or cnt > tag_counts[key]["count"]:
+            tag_counts[key] = {"name": name, "count": int(cnt)}
+
+    # 5. User tags from ImageModel.user_tags (JSON array) — Python-side expansion
+    try:
+        ut_results = (
+            db.query(ImageModel.user_tags)
+            .filter(ImageModel.id.in_(allowed_ids))
+            .all()
+        )
+        user_tag_counts: dict[str, int] = {}
+        for (ut_json,) in ut_results:
+            if ut_json and isinstance(ut_json, list):
+                seen_in_image: set[str] = set()
+                for tag in ut_json:
+                    if isinstance(tag, str):
+                        lowered = tag.lower()
+                        if needle in lowered:
+                            if lowered not in seen_in_image:
+                                seen_in_image.add(lowered)
+                                user_tag_counts[lowered] = (
+                                    user_tag_counts.get(lowered, 0) + 1
+                                )
+        for tag_lower, cnt in user_tag_counts.items():
+            if tag_lower not in tag_counts or cnt > tag_counts[tag_lower]["count"]:
+                tag_counts[tag_lower] = {"name": tag_lower, "count": cnt}
+    except Exception:
+        # Fail open if user_tags query encounters issues
+        pass
+
+    # Sort by count desc, then name asc; apply limit
+    sorted_tags = sorted(
+        tag_counts.values(),
+        key=lambda t: (-t["count"], t["name"].lower()),
+    )[:limit]
 
     return {
-        "collections": [row[0] for row in collection_rows],
-        "artists": [row[0] for row in artist_rows],
-        "tags": merged_tags,
+        "collections": [
+            {"name": name, "count": int(cnt)} for name, cnt in collection_rows
+        ],
+        "artists": [{"name": name, "count": int(cnt)} for name, cnt in artist_rows],
+        "tags": sorted_tags,
     }
 
 
@@ -18501,15 +19440,11 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
             facets=payload.facets,
             extra_filters=payload.extra_filters,
         )
+    except CivitaiRequestError as exc:
+        raise _classify_civitai_upstream_error(exc)
     except Exception as exc:
-        from atelierai.civitai.http_client import CivitaiRequestError
-
-        status_code = getattr(exc, "status_code", 502)
-        detail = str(exc)
-        if isinstance(exc, CivitaiRequestError) and not exc.retryable:
-            raise HTTPException(status_code=status_code or 400, detail=detail)
         raise HTTPException(
-            status_code=502, detail=f"CivitAI search proxy error: {detail}"
+            status_code=503, detail=f"CivitAI search proxy error: {exc}"
         )
 
     # Build normalized response with frontend-friendly field names.
@@ -20568,7 +21503,7 @@ def sync_lab_list_collections():
         raise
     except Exception as exc:
         raise HTTPException(
-            status_code=502, detail=f"Failed to fetch collections: {exc}"
+            status_code=503, detail=f"Failed to fetch collections: {exc}"
         )
     elapsed_ms = round((time.monotonic() - t0) * 1000)
     return {
@@ -20578,67 +21513,124 @@ def sync_lab_list_collections():
     }
 
 
-@app.get("/sync-lab/collection-items/{collection_id}", response_model=dict)
+@app.get("/sync-lab/collection-items/{collection_id}")
 def sync_lab_fetch_collection_items(
     collection_id: int, limit: int = Query(default=None, ge=1)
 ):
-    """Step 3: Fetch all items for a specific CivitAI collection."""
-    t0 = time.monotonic()
-    scraper = CivitaiPrivateScraper(auto_authenticate=True)
-    try:
-        items = scraper.fetch_collection_items(
-            collection_id=collection_id,
-            limit=limit,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Failed to fetch collection items: {exc}"
-        )
+    """Step 3: Fetch all items for a specific CivitAI collection (SSE streaming)."""
+    import queue
+    import threading
 
-    if not items:
-        return {
-            "status": "ok",
-            "timing": {"duration_ms": round((time.monotonic() - t0) * 1000)},
+    def _sse(data: dict) -> str:
+        return f"data: {json.dumps(data)}\n\n"
+
+    def event_stream():
+        q: queue.Queue = queue.Queue()
+        t0 = time.monotonic()
+
+        def on_progress(page: int, page_items: int, total: int):
+            q.put(("progress", page, page_items, total))
+
+        def worker():
+            try:
+                scraper = CivitaiPrivateScraper(auto_authenticate=True)
+                items = scraper.fetch_collection_items(
+                    collection_id=collection_id,
+                    limit=limit,
+                    progress_callback=on_progress,
+                )
+                q.put(("result", items))
+            except CivitaiRequestError as exc:
+                classified = _classify_civitai_upstream_error(exc)
+                q.put(("error", classified.status_code, classified.detail))
+            except Exception as exc:
+                q.put(("error", 503, f"Failed to fetch collection items: {exc}"))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        # Yield progress events as they arrive
+        while thread.is_alive() or not q.empty():
+            try:
+                msg = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            kind = msg[0]
+            if kind == "progress":
+                _, page, page_items, total = msg
+                yield _sse({
+                    "type": "progress",
+                    "page": page,
+                    "page_items": page_items,
+                    "total": total,
+                })
+            elif kind == "error":
+                _, status_code, detail = msg
+                yield _sse({
+                    "type": "error",
+                    "status_code": status_code,
+                    "detail": detail,
+                })
+                return
+            elif kind == "result":
+                items = msg[1]
+                break
+
+        thread.join(timeout=5)
+
+        if not items:
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
+            yield _sse({
+                "type": "complete",
+                "timing": {"duration_ms": elapsed_ms},
+                "data": {
+                    "collection_id": collection_id,
+                    "items": [],
+                    "total": 0,
+                    "image_ids": [],
+                },
+            })
+            return
+
+        # Normalize and archive
+        normalized = [item for item in items if isinstance(item, dict)]
+        _archive_civitai_collection_items(normalized)
+
+        # Deduplicate and extract image IDs
+        seen: set[int] = set()
+        image_ids: list[int] = []
+        item_index: dict[int, dict[str, Any]] = {}
+        for item in normalized:
+            raw_id = item.get("id")
+            try:
+                img_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if img_id in seen:
+                continue
+            seen.add(img_id)
+            image_ids.append(img_id)
+            item_index[img_id] = item
+
+        elapsed_ms = round((time.monotonic() - t0) * 1000)
+        yield _sse({
+            "type": "complete",
+            "timing": {"duration_ms": elapsed_ms},
             "data": {
                 "collection_id": collection_id,
-                "items": [],
-                "total": 0,
-                "image_ids": [],
+                "total": len(image_ids),
+                "image_ids": image_ids,
+                "items": normalized,
+                "item_index": {str(k): v for k, v in item_index.items()},
             },
-        }
+        })
 
-    # Normalize and archive
-    normalized = [item for item in items if isinstance(item, dict)]
-    _archive_civitai_collection_items(normalized)
-
-    # Deduplicate and extract image IDs
-    seen: set[int] = set()
-    image_ids: list[int] = []
-    item_index: dict[int, dict[str, Any]] = {}
-    for item in normalized:
-        raw_id = item.get("id")
-        try:
-            img_id = int(raw_id)
-        except (TypeError, ValueError):
-            continue
-        if img_id in seen:
-            continue
-        seen.add(img_id)
-        image_ids.append(img_id)
-        item_index[img_id] = item
-
-    elapsed_ms = round((time.monotonic() - t0) * 1000)
-    return {
-        "status": "ok",
-        "timing": {"duration_ms": elapsed_ms},
-        "data": {
-            "collection_id": collection_id,
-            "total": len(image_ids),
-            "image_ids": image_ids,
-            "items": normalized,
-            "item_index": {str(k): v for k, v in item_index.items()},
-        },
-    }
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/sync-lab/analyze-local", response_model=dict)
@@ -20671,14 +21663,70 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
 
     db = SessionLocal()
     try:
-        for img_id in image_ids:
-            # Match against both civitai.com and civitai.red source URLs
-            url_pattern = f"%/images/{img_id}"
-            match = (
+        # Batch-query by civitai_image_id using an indexed column.
+        # Falls back to source_url matching for rows not yet backfilled.
+        _CHUNK = 500
+        rows: list[ImageModel] = []
+        for start in range(0, len(image_ids), _CHUNK):
+            chunk = image_ids[start : start + _CHUNK]
+            rows.extend(
                 db.query(ImageModel)
-                .filter(ImageModel.source_url.like(url_pattern))
-                .first()
+                .filter(ImageModel.civitai_image_id.in_(chunk))
+                .all()
             )
+
+        # Also check for rows that haven't been backfilled yet — match by
+        # source_url using the old batched-URL approach.
+        matched_ids = {row.civitai_image_id for row in rows if row.civitai_image_id}
+        unmatched_ids = [iid for iid in image_ids if iid not in matched_ids]
+
+        if unmatched_ids:
+            web_base = getattr(
+                app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red"
+            )
+            alt = "civitai.com" if "civitai.red" in web_base else "civitai.red"
+            fallback_urls: list[str] = []
+            for img_id in unmatched_ids:
+                fallback_urls.append(f"{web_base}/images/{img_id}")
+                fallback_urls.append(f"https://{alt}/images/{img_id}")
+
+            # Chunk the fallback URLs too to stay within SQLite limits.
+            for fb_start in range(0, len(fallback_urls), _CHUNK * 2):
+                url_chunk = fallback_urls[fb_start : fb_start + _CHUNK * 2]
+                url_rows = (
+                    db.query(ImageModel)
+                    .filter(ImageModel.source_url.in_(url_chunk))
+                    .all()
+                )
+                for row in url_rows:
+                    if row.civitai_image_id and row.civitai_image_id not in matched_ids:
+                        rows.append(row)
+                        matched_ids.add(row.civitai_image_id)
+                    elif not row.civitai_image_id:
+                        # Not yet backfilled — extract from URL and include.
+                        src = str(getattr(row, "source_url", "") or "")
+                        m = re.search(r"/images/(\d+)", src)
+                        if m:
+                            extracted_id = int(m.group(1))
+                            if extracted_id not in matched_ids:
+                                rows.append(row)
+                                matched_ids.add(extracted_id)
+
+        # Build a lookup dict keyed by civitai_image_id
+        db_lookup: dict[int, ImageModel] = {}
+        for row in rows:
+            if row.civitai_image_id:
+                db_lookup[row.civitai_image_id] = row
+            else:
+                # Legacy fallback: extract from source_url
+                src = str(getattr(row, "source_url", "") or "")
+                m = re.search(r"/images/(\d+)", src)
+                if m:
+                    db_lookup[int(m.group(1))] = row
+
+        # Classify each requested image ID against the lookup
+        for img_id in image_ids:
+            match = db_lookup.get(img_id)
             if match is None:
                 new_ids.append(img_id)
             elif str(getattr(match, "image_status", "")) == "tombstoned":
@@ -20729,242 +21777,418 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
     }
 
 
-@app.post("/sync-lab/fetch-metadata", response_model=dict)
-def sync_lab_fetch_metadata(payload: SyncLabAnalyzeRequest):
-    """Step 5: Fetch CivitAI API metadata (basic info + generation data) for specified image IDs."""
-    t0 = time.monotonic()
-    api = CivitaiAPI.get_instance()
-    results: dict[str, dict[str, Any]] = {}
-    errors: list[dict] = []
+@app.get("/sync-lab/fetch-metadata")
+def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separated CivitAI image IDs")):
+    """Step 5: Fetch CivitAI API metadata (basic info + generation data) for specified image IDs (SSE streaming)."""
+    import queue
+    import threading
 
-    for img_id in payload.image_ids:
-        id_t0 = time.monotonic()
-        info = {
-            "image_id": img_id,
-            "basic_info": None,
-            "generation_data": None,
-            "timing_ms": 0,
-            "error": None,
-        }
-        try:
-            basic = api.fetch_basic_info(img_id)
-            info["basic_info"] = basic
-        except Exception as exc:
-            info["error"] = f"basic_info failed: {exc}"
-            errors.append(
-                {"image_id": img_id, "stage": "basic_info", "error": str(exc)}
-            )
+    parsed_ids: list[int] = []
+    for part in image_ids.split(","):
+        part = part.strip()
+        if part:
+            try:
+                parsed_ids.append(int(part))
+            except ValueError:
+                pass
 
-        try:
-            gen_data = api.fetch_generation_data(img_id)
-            info["generation_data"] = gen_data
-        except Exception as exc:
-            err_msg = f"generation_data failed: {exc}"
-            info["error"] = (
-                (info["error"] + "; " + err_msg) if info["error"] else err_msg
-            )
-            errors.append(
-                {"image_id": img_id, "stage": "generation_data", "error": str(exc)}
-            )
+    def _sse(data: dict) -> str:
+        return f"data: {json.dumps(data)}\n\n"
 
-        info["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
-        results[str(img_id)] = info
+    def event_stream():
+        q: queue.Queue = queue.Queue()
+        t0 = time.monotonic()
 
-    elapsed_ms = round((time.monotonic() - t0) * 1000)
-    ok_count = sum(1 for v in results.values() if v.get("error") is None)
-    return {
-        "status": "ok" if not errors else "partial",
-        "timing": {
-            "duration_ms": elapsed_ms,
-            "per_image_avg_ms": round(elapsed_ms / max(len(payload.image_ids), 1)),
-        },
-        "data": {
-            "total": len(payload.image_ids),
-            "successful": ok_count,
-            "failed": len(errors),
-            "results": results,
-        },
-        "errors": errors,
-    }
+        def worker():
+            api = CivitaiAPI.get_instance()
+            results: dict[str, dict[str, Any]] = {}
+            errors: list[dict] = []
 
+            for idx, img_id in enumerate(parsed_ids, 1):
+                id_t0 = time.monotonic()
+                info: dict[str, Any] = {
+                    "image_id": img_id,
+                    "basic_info": None,
+                    "generation_data": None,
+                    "timing_ms": 0,
+                    "error": None,
+                }
+                try:
+                    basic = api.fetch_basic_info(img_id)
+                    info["basic_info"] = basic
+                except Exception as exc:
+                    info["error"] = f"basic_info failed: {exc}"
+                    errors.append(
+                        {"image_id": img_id, "stage": "basic_info", "error": str(exc)}
+                    )
 
-@app.post("/sync-lab/download", response_model=dict)
-def sync_lab_download(payload: SyncLabAnalyzeRequest):
-    """Step 6: Download images for specified CivitAI image IDs."""
-    t0 = time.monotonic()
-    api = CivitaiAPI.get_instance()
-    results: list[dict[str, Any]] = []
-    errors: list[dict] = []
+                try:
+                    gen_data = api.fetch_generation_data(img_id)
+                    info["generation_data"] = gen_data
+                except Exception as exc:
+                    err_msg = f"generation_data failed: {exc}"
+                    info["error"] = (
+                        (info["error"] + "; " + err_msg) if info["error"] else err_msg
+                    )
+                    errors.append(
+                        {"image_id": img_id, "stage": "generation_data", "error": str(exc)}
+                    )
 
-    for img_id in payload.image_ids:
-        id_t0 = time.monotonic()
-        result = {
-            "image_id": img_id,
-            "status": "pending",
-            "timing_ms": 0,
-            "error": None,
-        }
-        try:
-            # Resolve metadata
-            target = _resolve_civitai_image_target(api, img_id)
+                info["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                results[str(img_id)] = info
 
-            # Download
-            image_url = target.get("image_url", "")
-            mime_type = target.get("mime_type")
-            file_size = target.get("declared_file_size")
-            download_result = _download_civitai_image_with_validation(
-                image_id=img_id,
-                target=target,
-            )
+                q.put(("progress", img_id, idx, info["timing_ms"], info.get("error")))
 
-            # Build a prepared import and store it in session
-            prepared = _PreparedCivitaiImport(
-                image_id=img_id,
-                image_url=image_url,
-                mime_type=download_result.selected_mime_type or mime_type,
-                declared_file_size=file_size,
-                preview_image_url=target.get("preview_image_url"),
-                original_filename=target.get("original_filename", f"civitai_{img_id}"),
-                artist_name=target.get("artist_name"),
-                source_url=_build_civitai_image_source_url(img_id),
-                temp_path=download_result.temp_path,
-                civitai_uuid=target.get("civitai_uuid"),
-                civitai_hash=target.get("civitai_hash"),
-                raw_basic_info=target.get("raw_basic_info"),
-                raw_generation_data=target.get("raw_generation_data"),
-            )
-            _sync_lab_prepared[img_id] = prepared
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
+            ok_count = sum(1 for v in results.values() if v.get("error") is None)
+            q.put(("complete", {
+                "status": "ok" if not errors else "partial",
+                "timing": {
+                    "duration_ms": elapsed_ms,
+                    "per_image_avg_ms": round(elapsed_ms / max(len(parsed_ids), 1)),
+                },
+                "data": {
+                    "total": len(parsed_ids),
+                    "successful": ok_count,
+                    "failed": len(errors),
+                    "results": results,
+                },
+                "errors": errors,
+            }))
 
-            result["status"] = "downloaded"
-            result["temp_path"] = str(download_result.temp_path)
-            result["mime_type"] = download_result.selected_mime_type
-            result["selected_url"] = download_result.selected_url
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
 
-        except _CivitaiImageUnavailableError as exc:
-            result["status"] = "unavailable"
-            result["error"] = str(exc)
-            errors.append(
-                {"image_id": img_id, "stage": "unavailable", "error": str(exc)}
-            )
-        except Exception as exc:
-            result["status"] = "failed"
-            result["error"] = str(exc)
-            errors.append({"image_id": img_id, "stage": "download", "error": str(exc)})
+        while thread.is_alive() or not q.empty():
+            try:
+                msg = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
 
-        result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
-        results.append(result)
+            kind = msg[0]
+            if kind == "progress":
+                _, img_id, done, timing_ms, err = msg
+                yield _sse({
+                    "type": "progress",
+                    "image_id": img_id,
+                    "done": done,
+                    "total": len(parsed_ids),
+                    "timing_ms": timing_ms,
+                    "error": err,
+                })
+            elif kind == "complete":
+                yield _sse({
+                    "type": "complete",
+                    **msg[1],
+                })
+                return
 
-    elapsed_ms = round((time.monotonic() - t0) * 1000)
-    ok_count = sum(1 for r in results if r["status"] == "downloaded")
-    return {
-        "status": "ok" if not errors else "partial",
-        "timing": {
-            "duration_ms": elapsed_ms,
-            "per_image_avg_ms": round(elapsed_ms / max(len(payload.image_ids), 1)),
-        },
-        "data": {
-            "total": len(payload.image_ids),
-            "downloaded": ok_count,
-            "unavailable": sum(1 for r in results if r["status"] == "unavailable"),
-            "failed": sum(1 for r in results if r["status"] == "failed"),
-            "results": results,
-        },
-        "errors": errors,
-    }
+        thread.join(timeout=5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-@app.post("/sync-lab/ingest", response_model=dict)
-def sync_lab_ingest(payload: SyncLabIngestRequest):
-    """Step 7: Ingest previously downloaded images into the library.
+@app.get("/sync-lab/download")
+def sync_lab_download(image_ids: str = Query(..., description="Comma-separated CivitAI image IDs")):
+    """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
+    import queue
+    import threading
+
+    parsed_ids: list[int] = []
+    for part in image_ids.split(","):
+        part = part.strip()
+        if part:
+            try:
+                parsed_ids.append(int(part))
+            except ValueError:
+                pass
+
+    def _sse(data: dict) -> str:
+        return f"data: {json.dumps(data)}\n\n"
+
+    def event_stream():
+        q: queue.Queue = queue.Queue()
+        t0 = time.monotonic()
+
+        def worker():
+            api = CivitaiAPI.get_instance()
+            results: dict[str, dict[str, Any]] = {}
+            errors: list[dict] = []
+
+            for idx, img_id in enumerate(parsed_ids, 1):
+                id_t0 = time.monotonic()
+                result: dict[str, Any] = {
+                    "image_id": img_id,
+                    "status": "pending",
+                    "timing_ms": 0,
+                    "error": None,
+                }
+                try:
+                    # Resolve metadata
+                    target = _resolve_civitai_image_target(api, img_id)
+
+                    # Download
+                    image_url = target.get("image_url", "")
+                    mime_type = target.get("mime_type")
+                    file_size = target.get("declared_file_size")
+                    download_result = _download_civitai_image_with_validation(
+                        image_id=img_id,
+                        target=target,
+                    )
+
+                    # Build a prepared import and store it in session
+                    prepared = _PreparedCivitaiImport(
+                        image_id=img_id,
+                        image_url=image_url,
+                        mime_type=download_result.selected_mime_type or mime_type,
+                        declared_file_size=file_size,
+                        preview_image_url=target.get("preview_image_url"),
+                        original_filename=target.get("original_filename", f"civitai_{img_id}"),
+                        artist_name=target.get("artist_name"),
+                        source_url=_build_civitai_image_source_url(img_id),
+                        temp_path=download_result.temp_path,
+                        civitai_uuid=target.get("civitai_uuid"),
+                        civitai_hash=target.get("civitai_hash"),
+                        raw_basic_info=target.get("raw_basic_info"),
+                        raw_generation_data=target.get("raw_generation_data"),
+                        author_id=target.get("author_id"),
+                        author_deleted=target.get("author_deleted", False),
+                        author_original_name=target.get("author_original_name"),
+                    )
+                    _sync_lab_prepared[img_id] = prepared
+
+                    result["status"] = "downloaded"
+                    result["temp_path"] = str(download_result.temp_path)
+                    result["mime_type"] = download_result.selected_mime_type
+                    result["selected_url"] = download_result.selected_url
+
+                except _CivitaiImageUnavailableError as exc:
+                    result["status"] = "unavailable"
+                    result["error"] = str(exc)
+                    errors.append(
+                        {"image_id": img_id, "stage": "unavailable", "error": str(exc)}
+                    )
+                except Exception as exc:
+                    result["status"] = "failed"
+                    result["error"] = str(exc)
+                    errors.append({"image_id": img_id, "stage": "download", "error": str(exc)})
+
+                result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                results[str(img_id)] = result
+
+                q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
+
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
+            ok_count = sum(1 for v in results.values() if v.get("status") == "downloaded")
+            q.put(("complete", {
+                "status": "ok" if not errors else "partial",
+                "timing": {
+                    "duration_ms": elapsed_ms,
+                    "per_image_avg_ms": round(elapsed_ms / max(len(parsed_ids), 1)),
+                },
+                "data": {
+                    "total": len(parsed_ids),
+                    "downloaded": ok_count,
+                    "unavailable": sum(1 for v in results.values() if v.get("status") == "unavailable"),
+                    "failed": sum(1 for v in results.values() if v.get("status") == "failed"),
+                    "results": results,
+                },
+                "errors": errors,
+            }))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while thread.is_alive() or not q.empty():
+            try:
+                msg = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            kind = msg[0]
+            if kind == "progress":
+                _, img_id, done, timing_ms, status, err = msg
+                yield _sse({
+                    "type": "progress",
+                    "image_id": img_id,
+                    "done": done,
+                    "total": len(parsed_ids),
+                    "timing_ms": timing_ms,
+                    "status": status,
+                    "error": err,
+                })
+            elif kind == "complete":
+                yield _sse({
+                    "type": "complete",
+                    **msg[1],
+                })
+                return
+
+        thread.join(timeout=5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/sync-lab/ingest")
+def sync_lab_ingest(
+    image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    collection_id: Optional[int] = Query(None, description="CivitAI collection ID to attach"),
+):
+    """Step 7: Ingest previously downloaded images into the library (SSE streaming).
 
     When an image has the same SHA256 as an already-ingested record, a duplicate
     asset record is created in ``image_resources/civitai_source_variants/`` instead
     of skipping.  Both records share ``file_hash`` but have unique ``file_path``.
     """
-    t0 = time.monotonic()
-    results: list[dict[str, Any]] = []
-    errors: list[dict] = []
+    import queue
+    import threading
 
-    db = SessionLocal()
-    try:
-        for img_id in payload.image_ids:
-            id_t0 = time.monotonic()
-            result = {
-                "image_id": img_id,
-                "status": "pending",
-                "timing_ms": 0,
-                "error": None,
-            }
+    parsed_ids: list[int] = []
+    for part in image_ids.split(","):
+        part = part.strip()
+        if part:
+            try:
+                parsed_ids.append(int(part))
+            except ValueError:
+                pass
 
-            prepared = _sync_lab_prepared.get(img_id)
-            if prepared is None:
-                result["status"] = "skipped"
-                result["error"] = (
-                    "No prepared download found — run the download step first"
-                )
-                errors.append(
-                    {"image_id": img_id, "stage": "ingest", "error": result["error"]}
-                )
-                result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
-                results.append(result)
+    def _sse(data: dict) -> str:
+        return f"data: {json.dumps(data)}\n\n"
+
+    def event_stream():
+        q: queue.Queue = queue.Queue()
+        t0 = time.monotonic()
+
+        def worker():
+            results: dict[str, dict[str, Any]] = {}
+            errors: list[dict] = []
+
+            db = SessionLocal()
+            try:
+                for idx, img_id in enumerate(parsed_ids, 1):
+                    id_t0 = time.monotonic()
+                    result: dict[str, Any] = {
+                        "image_id": img_id,
+                        "status": "pending",
+                        "timing_ms": 0,
+                        "error": None,
+                    }
+
+                    prepared = _sync_lab_prepared.get(img_id)
+                    if prepared is None:
+                        result["status"] = "skipped"
+                        result["error"] = (
+                            "No prepared download found — run the download step first"
+                        )
+                        errors.append(
+                            {"image_id": img_id, "stage": "ingest", "error": result["error"]}
+                        )
+                        result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                        results[str(img_id)] = result
+                        q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
+                        continue
+
+                    try:
+                        # Check for existing records with the same file hash
+                        temp_hash = _sha256_file(prepared.temp_path)
+                        existing_records = _find_existing_by_file_hash(db, temp_hash)
+
+                        if existing_records:
+                            # Duplicate asset — create independent record in civitai_source_variants
+                            ingest_result = _ingest_civitai_duplicate_asset(
+                                db,
+                                prepared=prepared,
+                                existing_records=existing_records,
+                                attach_collection_id=collection_id,
+                            )
+                        else:
+                            # Normal ingest — no hash collision
+                            ingest_result = _ingest_prepared_civitai_import(
+                                db,
+                                prepared=prepared,
+                                attach_collection_id=collection_id,
+                            )
+
+                        db.commit()
+                        result["status"] = "ingested"
+                        result["ingest_result"] = ingest_result
+                        # Clean up session store
+                        _sync_lab_prepared.pop(img_id, None)
+                    except Exception as exc:
+                        db.rollback()
+                        result["status"] = "failed"
+                        result["error"] = str(exc)
+                        errors.append(
+                            {"image_id": img_id, "stage": "ingest", "error": str(exc)}
+                        )
+
+                    result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                    results[str(img_id)] = result
+                    q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
+            finally:
+                db.close()
+
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
+            ok_count = sum(1 for v in results.values() if v.get("status") == "ingested")
+            q.put(("complete", {
+                "status": "ok" if not errors else "partial",
+                "timing": {
+                    "duration_ms": elapsed_ms,
+                    "per_image_avg_ms": round(elapsed_ms / max(len(parsed_ids), 1)),
+                },
+                "data": {
+                    "total": len(parsed_ids),
+                    "ingested": ok_count,
+                    "skipped": sum(1 for v in results.values() if v.get("status") == "skipped"),
+                    "failed": sum(1 for v in results.values() if v.get("status") == "failed"),
+                    "results": results,
+                },
+                "errors": errors,
+            }))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while thread.is_alive() or not q.empty():
+            try:
+                msg = q.get(timeout=0.2)
+            except queue.Empty:
                 continue
 
-            try:
-                # Check for existing records with the same file hash
-                temp_hash = _sha256_file(prepared.temp_path)
-                existing_records = _find_existing_by_file_hash(db, temp_hash)
+            kind = msg[0]
+            if kind == "progress":
+                _, img_id, done, timing_ms, status, err = msg
+                yield _sse({
+                    "type": "progress",
+                    "image_id": img_id,
+                    "done": done,
+                    "total": len(parsed_ids),
+                    "timing_ms": timing_ms,
+                    "status": status,
+                    "error": err,
+                })
+            elif kind == "complete":
+                yield _sse({
+                    "type": "complete",
+                    **msg[1],
+                })
+                return
 
-                if existing_records:
-                    # Duplicate asset — create independent record in civitai_source_variants
-                    ingest_result = _ingest_civitai_duplicate_asset(
-                        db,
-                        prepared=prepared,
-                        existing_records=existing_records,
-                        attach_collection_id=payload.collection_id,
-                    )
-                else:
-                    # Normal ingest — no hash collision
-                    ingest_result = _ingest_prepared_civitai_import(
-                        db,
-                        prepared=prepared,
-                        attach_collection_id=payload.collection_id,
-                    )
+        thread.join(timeout=5)
 
-                db.commit()
-                result["status"] = "ingested"
-                result["ingest_result"] = ingest_result
-                # Clean up session store
-                _sync_lab_prepared.pop(img_id, None)
-            except Exception as exc:
-                db.rollback()
-                result["status"] = "failed"
-                result["error"] = str(exc)
-                errors.append(
-                    {"image_id": img_id, "stage": "ingest", "error": str(exc)}
-                )
-
-            result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
-            results.append(result)
-    finally:
-        db.close()
-
-    elapsed_ms = round((time.monotonic() - t0) * 1000)
-    ok_count = sum(1 for r in results if r["status"] == "ingested")
-    return {
-        "status": "ok" if not errors else "partial",
-        "timing": {
-            "duration_ms": elapsed_ms,
-            "per_image_avg_ms": round(elapsed_ms / max(len(payload.image_ids), 1)),
-        },
-        "data": {
-            "total": len(payload.image_ids),
-            "ingested": ok_count,
-            "skipped": sum(1 for r in results if r["status"] == "skipped"),
-            "failed": sum(1 for r in results if r["status"] == "failed"),
-            "results": results,
-        },
-        "errors": errors,
-    }
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/sync-lab/collection-status/{collection_id}", response_model=dict)

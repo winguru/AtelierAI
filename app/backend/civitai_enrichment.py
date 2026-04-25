@@ -197,6 +197,22 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
         if author_id is not None:
             data["author_id"] = author_id
 
+        # Detect deleted CivitAI accounts — username becomes "[deleted]"
+        # but the user ID and deletedAt timestamp remain.
+        deleted_at = (
+            basic_user.get("deletedAt") if isinstance(basic_user, dict) else None
+        )
+        if deleted_at is not None:
+            data["author_deleted"] = True
+            # Preserve the original username before CivitAI replaced it.
+            if author_name and author_name != "[deleted]":
+                data["author_original_name"] = author_name
+            # Build a synthetic name for fully scrubbed accounts (username null).
+            if not data.get("author_name") and author_id is not None:
+                data["author_name"] = f"[deleted:{author_id}]"
+        else:
+            data["author_deleted"] = False
+
         data["source_url"] = source_url
         data["image_id"] = image_id
         if isinstance(basic_info, dict):

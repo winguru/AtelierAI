@@ -856,6 +856,17 @@ h1 {
     padding: 0 1px;
 }
 
+.search-ac-item .ac-count {
+    font-size: 0.72rem;
+    color: var(--ink-muted, #888);
+    background: var(--bg-surface, rgba(255,255,255,0.06));
+    padding: 1px 5px;
+    border-radius: 8px;
+    margin-left: 0.4rem;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
 .search-ac-spinner {
     display: flex;
     align-items: center;
@@ -3508,4 +3519,11 @@ h1 {
 .civitai-auth-section .btn-sm {
     font-size: 0.78rem;
     padding: 0.25rem 0.6rem;
+}
+
+/* ── Deleted user styling ── */
+.deleted-user {
+    text-decoration: line-through;
+    opacity: 0.6;
+    font-style: italic;
 }

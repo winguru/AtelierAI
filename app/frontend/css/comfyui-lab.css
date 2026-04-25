@@ -1,0 +1,173 @@
+/* ── ComfyUI Lab ─────────────────────────────────────────── */
+
+/* Iframe workspace */
+.comfyui-workspace {
+  margin-top: 1rem;
+}
+
+.iframe-wrapper {
+  position: relative;
+  width: 100%;
+  min-height: 600px;
+  border: 1px solid var(--stroke, rgba(67, 83, 96, 0.18));
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel, rgba(255, 252, 246, 0.86));
+}
+
+#iframe-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  cursor: grabbing;
+  /* Nearly invisible – only needed for cross-origin interception */
+  background: transparent;
+  border: 2px dashed transparent;
+  border-radius: 8px;
+  pointer-events: auto;
+}
+
+#iframe-overlay.is-drag-active {
+  background: rgba(15, 118, 110, 0.08);
+  border-color: var(--accent, #0f766e);
+}
+
+#comfyui-iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 600px;
+  border: none;
+  display: block;
+}
+
+#comfyui-iframe.is-hidden {
+  display: none;
+}
+
+.iframe-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--ink-soft, #5f6d78);
+  font-size: 1rem;
+  padding: 2rem;
+}
+
+.iframe-placeholder.is-hidden {
+  display: none;
+}
+
+/* Image preview inside controls */
+.control-preview-panel .preview-image-wrap {
+  margin-top: 0.75rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.control-preview-panel .preview-image-wrap img {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 6px;
+  border: 1px solid var(--stroke, rgba(67, 83, 96, 0.18));
+  cursor: grab;
+  object-fit: contain;
+}
+
+.control-preview-panel .preview-image-wrap img:active {
+  cursor: grabbing;
+}
+
+.control-preview-panel .preview-image-meta {
+  font-size: 0.82rem;
+  color: var(--ink-soft, #5f6d78);
+  line-height: 1.5;
+}
+
+.control-preview-panel .preview-image-meta code {
+  background: var(--accent-soft, rgba(15, 118, 110, 0.14));
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+
+/* Drop log */
+.drop-log {
+  max-height: 200px;
+  overflow-y: auto;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--ink-soft, #5f6d78);
+}
+
+.drop-log-entry {
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--stroke, rgba(67, 83, 96, 0.1));
+}
+
+.drop-log-entry:last-child {
+  border-bottom: none;
+}
+
+.drop-log-entry .log-time {
+  color: var(--accent, #0f766e);
+  margin-right: 0.5rem;
+}
+
+.drop-log-entry .log-ok {
+  color: var(--ok, #2f855a);
+}
+
+.drop-log-entry .log-err {
+  color: var(--error, #b42318);
+}
+
+/* Wide card for ComfyUI URL */
+.control-card-wide {
+  grid-column: 1 / -1;
+}
+
+/* ── Badges ──────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-left: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge.wip {
+  background: var(--warn, #e9a23b);
+  color: #fff;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .comfyui-workspace {
+    margin-top: 0.5rem;
+  }
+
+  .iframe-wrapper {
+    min-height: 400px;
+  }
+
+  #comfyui-iframe {
+    min-height: 400px;
+  }
+}

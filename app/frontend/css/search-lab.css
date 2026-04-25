@@ -1036,3 +1036,10 @@ body[data-theme="dark"] .tag-chip {
         max-height: calc(100vh - 14rem);
     }
 }
+
+/* ── Deleted user styling ── */
+.deleted-user {
+    text-decoration: line-through;
+    opacity: 0.6;
+    font-style: italic;
+}

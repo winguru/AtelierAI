@@ -47,6 +47,7 @@ class ImageModel(Base):
     # Attribution & Licensing
     source_url = Column(Text)
     source_site = Column(String)
+    civitai_image_id = Column(Integer, nullable=True, index=True)
     civitai_uuid = Column(String, nullable=True, index=True)
     civitai_hash = Column(String, nullable=True, index=True)
     blurhash = Column(String, nullable=True)
@@ -108,6 +109,9 @@ class ImageModel(Base):
                 "id": self.artist.id,
                 "name": self.artist.name,
                 "nickname": self.artist.nickname,
+                "civitai_user_id": self.artist.civitai_user_id,
+                "civitai_user_deleted": self.artist.civitai_user_deleted,
+                "civitai_user_original_name": self.artist.civitai_user_original_name,
             }
 
         # Safely access the license information
@@ -430,7 +434,10 @@ class Artist(Base):
     deviantart_url = Column(String)
     civitai_url = Column(String)
     pixiv_url = Column(String)
-    # Add any other social/handle URLs you want
+    # CivitAI user identity — survives account deletion
+    civitai_user_id = Column(Integer, unique=True, nullable=True, index=True)
+    civitai_user_deleted = Column(Boolean, nullable=True, default=False)
+    civitai_user_original_name = Column(String, nullable=True)
 
     # Relationship back to images
     images = relationship("ImageModel", back_populates="artist")

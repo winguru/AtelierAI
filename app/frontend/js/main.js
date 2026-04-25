@@ -222,9 +222,16 @@ document.addEventListener('DOMContentLoaded', () => {
         fullscreenQueuedDelta: null,
         galleryIndexHint: null,
         searchRunId: 0,
+        // Prefetch state: holds a pre-fetched next page so the UI can
+        // consume it instantly without waiting for a network round-trip.
+        _prefetchResult: null,       // { page: Array, filteredCount: number, nextCursor: string|null }
+        _prefetchCursor: null,       // the cursor value the prefetch was started with
+        _prefetchSignature: null,    // activeServerFilterSignature at prefetch time
+        _prefetchAbortController: null,
         // Lower page size is intentional for testing end-of-library UI transitions.
         pageSize: TEST_PAGE_SIZE,
         offset: 0,
+        cursor: null,
         hasMore: true,
         loadingPage: false,
         infiniteEnabled: readStoredBool(STORAGE_KEYS.infinite, true),
@@ -1453,12 +1460,33 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        // Collect missing-data conditions (absent mode → server "no <field>" format).
+        const missingData = [];
+        for (const entry of getAdvancedFilterValues('missingData')) {
+            const colonIdx = entry.indexOf(':');
+            if (colonIdx < 0) continue;
+            const mode = entry.substring(0, colonIdx).toLowerCase();
+            const label = entry.substring(colonIdx + 1);
+            if (mode === 'absent') {
+                const norm = normalizeDetailFilterValue(label);
+                // Convert "Artist" → "no artist", matching server _normalize_missing_data_key
+                const serverKey = norm && !norm.startsWith('no ') ? `no ${norm}` : norm;
+                if (serverKey) missingData.push(serverKey);
+            }
+        }
+
+        // Collect missing-source conditions from the missing source filter toggles.
+        const missingSources = [];
+        for (const [source, active] of Object.entries(state.missingSourceFilter || {})) {
+            if (active) missingSources.push(source);
+        }
+
         // Combine include + exclude arrays for has-filter checks
         const artistNames = [...includeArtists, ...excludeArtists];
         const collectionNames = [...includeCollections, ...excludeCollections];
 
         const hasSupportedStructuredFilters = Boolean(
-            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || a1111Hires || a1111RegionalPrompter || a1111Adetailer || includeTags.length || excludeTags.length
+            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || a1111Hires || a1111RegionalPrompter || a1111Adetailer || includeTags.length || excludeTags.length || missingData.length || missingSources.length
         );
 
         const normalizedQuery = String(query || '').trim();
@@ -1482,6 +1510,8 @@ document.addEventListener('DOMContentLoaded', () => {
             a1111Adetailer: a1111Adetailer ? [a1111Adetailer] : null,
             includeTags,
             excludeTags,
+            missingData,
+            missingSources,
             signature: JSON.stringify({
                 search: normalizedQuery,
                 generationSoftwares,
@@ -1498,6 +1528,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 a1111Adetailer,
                 includeTags,
                 excludeTags,
+                missingData,
+                missingSources,
             }),
         };
 
@@ -1512,13 +1544,20 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function buildImagesRequestUrl(skip, limit) {
+    function buildImagesRequestUrl(skip, limit, cursor = null) {
         const params = new URLSearchParams({
-            skip: String(skip),
             limit: String(limit),
             sort_by: state.sortOrder,
             group_variants: state.groupVariantsEnabled ? 'true' : 'false',
         });
+
+        // Use cursor-based pagination when a cursor is available;
+        // otherwise fall back to legacy offset pagination.
+        if (cursor != null) {
+            params.set('cursor', String(cursor));
+        } else {
+            params.set('skip', String(skip));
+        }
 
         // Always include NSFW visibility preference to constrain the base catalog.
         _appendNsfwVisibilityParams(params);
@@ -1555,6 +1594,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (config.excludeTags && config.excludeTags.length) {
                 config.excludeTags.forEach((value) => params.append('exclude_tag', value));
+            }
+            if (config.missingData && config.missingData.length) {
+                config.missingData.forEach((value) => params.append('missing_data', value));
+            }
+            if (config.missingSources && config.missingSources.length) {
+                config.missingSources.forEach((value) => params.append('missing_source', value));
             }
         }
 
@@ -1600,6 +1645,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (config.excludeTags && config.excludeTags.length) {
                 config.excludeTags.forEach((value) => params.append('exclude_tag', value));
+            }
+            if (config.missingData && config.missingData.length) {
+                config.missingData.forEach((value) => params.append('missing_data', value));
+            }
+            if (config.missingSources && config.missingSources.length) {
+                config.missingSources.forEach((value) => params.append('missing_source', value));
             }
         }
 
@@ -4537,7 +4588,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        if (!imageMatchesMissingDataFilter(image)) {
+        // When server handles missing-data filters, skip client-side check.
+        const serverHandledMissingData = Boolean(state.serverFilterMode
+            && state.activeServerFilterConfig?.missingData?.length);
+        if (!serverHandledMissingData && !imageMatchesMissingDataFilter(image)) {
             return false;
         }
 
@@ -4735,6 +4789,68 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    /**
+     * Dynamically filter the tag datalist as the user types.
+     * Native <datalist> with 8000+ options causes browsers to truncate
+     * suggestions before showing user tags.  This keeps the list small
+     * and focused on what the user is actually typing.
+     */
+    const DATALIST_TAG_LIMIT = 200;
+    let _tagDatalistAllOptions = []; // cached full tag list
+
+    function _refreshTagDatalistCache() {
+        _tagDatalistAllOptions = getSortedUniqueDisplayValues([
+            ...(Array.isArray(state.filterOptions?.tagNames) ? state.filterOptions.tagNames : []),
+            ...getAdvancedFilterValues('tags').map((entry) => _parseModePrefixEntry(entry).name),
+        ]);
+    }
+
+    function _filterTagDatalist(datalist, query) {
+        if (!datalist) { return; }
+        if (!_tagDatalistAllOptions.length && state.filterOptions?.tagNames?.length) {
+            _refreshTagDatalistCache();
+        }
+        const q = (query || '').trim().toLowerCase();
+        let matches;
+        if (!q) {
+            // No query yet — show user tags first, then others (capped)
+            const userTags = new Set(
+                Array.isArray(state.filterOptions?.tagNamesBySource?.user)
+                    ? state.filterOptions.tagNamesBySource.user : []
+            );
+            const userFirst = [];
+            const rest = [];
+            _tagDatalistAllOptions.forEach((tag) => {
+                (userTags.has(tag) ? userFirst : rest).push(tag);
+            });
+            matches = [...userFirst, ...rest];
+        } else {
+            // Filter by substring match
+            matches = _tagDatalistAllOptions.filter((tag) =>
+                tag.toLowerCase().includes(q)
+            );
+        }
+        // Cap to prevent browser slowdown
+        matches = matches.slice(0, DATALIST_TAG_LIMIT);
+
+        datalist.innerHTML = '';
+        matches.forEach((value) => {
+            const option = document.createElement('option');
+            option.value = value;
+            datalist.appendChild(option);
+        });
+    }
+
+    function wireDynamicTagDatalist(input, datalist) {
+        if (!input || !datalist) { return; }
+        input.addEventListener('input', () => {
+            _filterTagDatalist(datalist, input.value);
+        });
+        input.addEventListener('focus', () => {
+            _filterTagDatalist(datalist, input.value);
+        });
+    }
+
     // ── Search autocomplete ────────────────────────────────────────────
 
     function getSearchDebounceMs(text) {
@@ -4748,6 +4864,40 @@ document.addEventListener('DOMContentLoaded', () => {
     async function fetchSuggestions(query) {
         const params = new URLSearchParams({ q: query, limit: '15' });
         _appendNsfwVisibilityParams(params);
+
+        // Send active filter context so suggestions are scoped to the filtered gallery subset.
+        // Do NOT send config.search — it duplicates the `q` param and would narrow the image
+        // pool to only images matching the text search, causing incorrect counts and missing
+        // tag suggestions.
+        const config = state.activeServerFilterConfig;
+        if (config) {
+            config.generationSoftwares.forEach((v) => params.append('generation_software', v));
+            config.sourceSites.forEach((v) => params.append('source_site', v));
+            config.mimetypes.forEach((v) => params.append('mimetype', v));
+            config.nsfwRatings.forEach((v) => params.append('nsfw_rating', v));
+            config.nsfwSafety.forEach((v) => params.append('nsfw_safety', v));
+            config.artistNames.forEach((v) => params.append('artist_name', v));
+            config.collectionNames.forEach((v) => params.append('collection_name', v));
+            if (config.excludeArtists && config.excludeArtists.length)
+                config.excludeArtists.forEach((v) => params.append('exclude_artist_name', v));
+            if (config.excludeCollections && config.excludeCollections.length)
+                config.excludeCollections.forEach((v) => params.append('exclude_collection_name', v));
+            if (config.a1111Hires && config.a1111Hires.length)
+                config.a1111Hires.forEach((v) => params.append('a1111_hires', v));
+            if (config.a1111RegionalPrompter && config.a1111RegionalPrompter.length)
+                config.a1111RegionalPrompter.forEach((v) => params.append('a1111_regional_prompter', v));
+            if (config.a1111Adetailer && config.a1111Adetailer.length)
+                config.a1111Adetailer.forEach((v) => params.append('a1111_adetailer', v));
+            if (config.includeTags && config.includeTags.length)
+                config.includeTags.forEach((v) => params.append('include_tag', v));
+            if (config.excludeTags && config.excludeTags.length)
+                config.excludeTags.forEach((v) => params.append('exclude_tag', v));
+            if (config.missingData && config.missingData.length)
+                config.missingData.forEach((v) => params.append('missing_data', v));
+            if (config.missingSources && config.missingSources.length)
+                config.missingSources.forEach((v) => params.append('missing_source', v));
+        }
+
         const response = await fetch(`/search/suggest?${params.toString()}`);
         if (!response.ok) return { collections: [], artists: [], tags: [] };
         return response.json();
@@ -4798,7 +4948,11 @@ document.addEventListener('DOMContentLoaded', () => {
             groupLabel.textContent = group.label;
             searchAutocomplete.appendChild(groupLabel);
 
-            for (const name of group.items) {
+            for (const item of group.items) {
+                // Support both legacy string format and new {name, count} objects
+                const name = typeof item === 'string' ? item : item.name;
+                const count = typeof item === 'object' && item.count != null ? item.count : null;
+
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'search-ac-item';
@@ -4816,6 +4970,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 nameSpan.className = 'ac-name';
                 nameSpan.appendChild(highlightMatch(name, query));
                 btn.appendChild(nameSpan);
+
+                if (count !== null) {
+                    const countSpan = document.createElement('span');
+                    countSpan.className = 'ac-count';
+                    countSpan.textContent = String(count);
+                    btn.appendChild(countSpan);
+                }
 
                 btn.addEventListener('mousedown', (e) => {
                     e.preventDefault(); // prevent blur
@@ -4872,7 +5033,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (searchInput) searchInput.value = '';
 
         // For tags, the label displayed in toast is 'tag'; for others derive from category
-        const labelMap = { collections: 'collection', artistName: 'author', tags: 'tag' };
+        const labelMap = { collections: 'collection', artistName: 'artist', tags: 'tag' };
         const label = labelMap[category] || category;
         await addAdvancedFilterValue(category, value, label);
     }
@@ -5014,7 +5175,9 @@ document.addEventListener('DOMContentLoaded', () => {
         renderAdvancedFilterSelectedChips(advancedCollectionSelected, 'collections');
         renderDataExtractionPills(advancedMissingDataPills);
         populateDatalist(advancedAuthorOptions, authorOptions);
-        populateDatalist(advancedTagOptions, tagOptions);
+        // Tag datalist is managed dynamically by wireDynamicTagDatalist
+        _refreshTagDatalistCache();
+        _filterTagDatalist(advancedTagOptions, advancedTagInput?.value);
         populateDatalist(advancedCollectionOptions, collectionOptions);
 
         if (advancedFiltersSummary) {
@@ -7096,7 +7259,14 @@ document.addEventListener('DOMContentLoaded', () => {
             const shouldFullRender = force || filterChanged || !galleryGrid.querySelector('.tile');
             if (shouldFullRender) {
                 renderAdvancedFilters();
-                renderGallery();
+                // Use append-only render when the gallery grew but nothing else
+                // changed — avoids a full innerHTML wipe when adding a new page.
+                const existingTileCount = galleryGrid.querySelectorAll('.tile').length;
+                const isAppend = !force
+                    && existingTileCount > 0
+                    && existingTileCount < state.filteredImages.length
+                    && !selectionChanged;
+                renderGallery({ appendOnly: isAppend });
             } else if (selectionChanged) {
                 updateGallerySelectionTiles();
             }
@@ -8567,6 +8737,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     return formatGroupDisplayValue(nextArtistValues);
                 },
             }),
+            ...(image.artist_deleted
+                ? [renderMetaItem('⚠️ Account', `${image.artist_original_name || image.artist_name || '(deleted user)'} — CivitAI account deleted`, { spanTwo: true })]
+                : []),
             renderEditableMetaItem({
                 label: 'Artist Profile',
                 value: formatGroupDisplayValue(artistProfileValues),
@@ -8638,7 +8811,8 @@ document.addEventListener('DOMContentLoaded', () => {
         scheduleGalleryGridHeightSync();
     }
 
-    function renderGallery() {
+    function renderGallery(options = {}) {
+        const appendOnly = options.appendOnly === true;
         renderImageCountControl();
 
         updateSelectionUi();
@@ -8654,154 +8828,183 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // Append-only mode: only create tiles for newly added images.
+        // This avoids a full innerHTML wipe when just adding the next page.
+        const existingTileCount = galleryGrid.querySelectorAll('.tile').length;
+
+        if (appendOnly && existingTileCount > 0 && existingTileCount < state.filteredImages.length) {
+            // Incremental append — skip the full rebuild.
+            const fragment = document.createDocumentFragment();
+            const startIndex = existingTileCount;
+
+            for (let i = startIndex; i < state.filteredImages.length; i++) {
+                const image = state.filteredImages[i];
+                const tile = buildTileElement(image);
+                if (tile) fragment.appendChild(tile);
+            }
+
+            galleryGrid.appendChild(fragment);
+            scheduleGalleryGridHeightSync();
+            return;
+        }
+
         galleryGrid.querySelectorAll('video').forEach((node) => releaseVideoElement(node));
         galleryGrid.innerHTML = '';
         const fragment = document.createDocumentFragment();
 
         state.filteredImages.forEach((image) => {
-            const caption = pickCaption(image);
-            const tile = document.createElement('button');
-            const isSelected = state.selectedKeys.has(image.__key);
-            const isActive = state.selectedKey === image.__key;
-            const variantCount = getVariantCount(image);
-            tile.className = `tile ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}`.trim();
-            tile.type = 'button';
-            tile.dataset.key = image.__key;
-            tile.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
-            tile.setAttribute('aria-current', isActive ? 'true' : 'false');
-
-            if (state.selectedKeys.size > 0) {
-                const selectionIndicator = document.createElement('span');
-                selectionIndicator.className = 'tile-selection-indicator';
-                selectionIndicator.setAttribute('aria-hidden', 'true');
-                tile.appendChild(selectionIndicator);
-            }
-
-            if (variantCount > 1) {
-                tile.classList.add('has-variant-badge');
-                const variantBadge = document.createElement('span');
-                variantBadge.className = 'tile-variant-badge';
-                variantBadge.textContent = `${getActiveVariantIndex(image) + 1}/${variantCount}`;
-                tile.appendChild(variantBadge);
-            }
-
-            const mediaUrl = getMediaUrlForDisplay(image);
-            const videoMode = shouldRenderAsVideo(image, mediaUrl);
-
-            let mediaNode;
-            if (videoMode) {
-                const posterImage = document.createElement('img');
-                posterImage.loading = 'lazy';
-                posterImage.decoding = 'async';
-                posterImage.alt = safeText(caption);
-
-                const video = document.createElement('video');
-                video.muted = true;
-                video.loop = true;
-                video.playsInline = true;
-                video.preload = 'none';
-                video.disablePictureInPicture = true;
-                video.tabIndex = -1;
-                video.setAttribute('aria-hidden', 'true');
-                tile.classList.add('video-tile');
-
-                const placeholder = document.createElement('span');
-                placeholder.className = 'tile-video-placeholder';
-                placeholder.textContent = 'Preview on hover';
-
-                const beginPreview = () => startTileVideoPreview(tile, video, mediaUrl);
-                const endPreview = () => stopTileVideoPreview(tile, video);
-
-                tile.addEventListener('pointerenter', beginPreview);
-                tile.addEventListener('pointerleave', endPreview);
-                tile.addEventListener('focus', beginPreview);
-                tile.addEventListener('blur', endPreview);
-
-                const directPosterUrl = getVideoPosterUrl(image);
-                if (directPosterUrl) {
-                    applyTileVideoPoster(tile, posterImage, video, directPosterUrl);
-                } else {
-                    applyTileVideoPoster(tile, posterImage, video, '');
-                    observeTileForPosterCapture(tile, image, posterImage, video, mediaUrl);
-                }
-                observeTileForAnimatedThumbnail(tile, image, posterImage, mediaUrl);
-
-                mediaNode = null;
-                tile.appendChild(posterImage);
-                tile.appendChild(video);
-                tile.appendChild(placeholder);
-            } else {
-                const img = document.createElement('img');
-                img.loading = 'lazy';
-                img.alt = safeText(caption);
-                img.src = mediaUrl;
-                wireImageDragPayload(img, () => image);
-
-                // BlurHash canvas placeholder
-                const blurhashValue = image.blurhash || image.civitai_hash;
-                if (blurhashValue && typeof BlurHashDecode !== 'undefined') {
-                    try {
-                        const canvas = document.createElement('canvas');
-                        canvas.className = 'blurhash-canvas';
-                        canvas.width = 32;
-                        canvas.height = 32;
-                        const ctx = canvas.getContext('2d');
-                        const pixels = BlurHashDecode.decode(blurhashValue, 32, 32);
-                        if (pixels) {
-                            const imageData = new ImageData(pixels, 32, 32);
-                            ctx.putImageData(imageData, 0, 0);
-                            tile.appendChild(canvas);
-                            img.classList.add('fade-in');
-                            img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
-                        }
-                    } catch (_) { /* non-critical; skip placeholder */ }
-                }
-
-                mediaNode = img;
-            }
-
-            const captionSpan = document.createElement('span');
-            captionSpan.className = 'tile-caption';
-
-            const primaryCaption = document.createElement('span');
-            primaryCaption.className = 'tile-caption-primary';
-            primaryCaption.textContent = safeText(caption);
-            captionSpan.appendChild(primaryCaption);
-
-            if (variantCount > 1 || image.variant_label) {
-                const secondaryCaption = document.createElement('span');
-                secondaryCaption.className = 'tile-caption-secondary';
-                secondaryCaption.textContent = safeText(
-                    image.variant_label || `Variant ${getActiveVariantIndex(image) + 1}`,
-                    '',
-                );
-                captionSpan.appendChild(secondaryCaption);
-            }
-
-            const collectionNames = Array.isArray(image.collection_names)
-                ? image.collection_names.filter((name) => typeof name === 'string' && name.trim())
-                : [];
-            if (collectionNames.length) {
-                const collectionsOverlay = document.createElement('div');
-                collectionsOverlay.className = 'tile-collections';
-                collectionNames.slice(0, 5).forEach((name) => {
-                    const item = document.createElement('span');
-                    item.className = 'tile-collection-item';
-                    item.textContent = name;
-                    collectionsOverlay.appendChild(item);
-                });
-                tile.appendChild(collectionsOverlay);
-            }
-
-            if (mediaNode) {
-                tile.appendChild(mediaNode);
-            }
-            tile.appendChild(captionSpan);
-            fragment.appendChild(tile);
+            const tile = buildTileElement(image);
+            if (tile) fragment.appendChild(tile);
         });
 
         galleryGrid.appendChild(fragment);
         scheduleGalleryGridHeightSync();
+    }
+
+    /**
+     * Build a single gallery tile DOM element for the given image object.
+     * Extracted from renderGallery to support incremental appends.
+     */
+    function buildTileElement(image) {
+        const caption = pickCaption(image);
+        const tile = document.createElement('button');
+        const isSelected = state.selectedKeys.has(image.__key);
+        const isActive = state.selectedKey === image.__key;
+        const variantCount = getVariantCount(image);
+        tile.className = `tile ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}`.trim();
+        tile.type = 'button';
+        tile.dataset.key = image.__key;
+        tile.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+        tile.setAttribute('aria-current', isActive ? 'true' : 'false');
+
+        if (state.selectedKeys.size > 0) {
+            const selectionIndicator = document.createElement('span');
+            selectionIndicator.className = 'tile-selection-indicator';
+            selectionIndicator.setAttribute('aria-hidden', 'true');
+            tile.appendChild(selectionIndicator);
+        }
+
+        if (variantCount > 1) {
+            tile.classList.add('has-variant-badge');
+            const variantBadge = document.createElement('span');
+            variantBadge.className = 'tile-variant-badge';
+            variantBadge.textContent = `${getActiveVariantIndex(image) + 1}/${variantCount}`;
+            tile.appendChild(variantBadge);
+        }
+
+        const mediaUrl = getMediaUrlForDisplay(image);
+        const videoMode = shouldRenderAsVideo(image, mediaUrl);
+
+        let mediaNode;
+        if (videoMode) {
+            const posterImage = document.createElement('img');
+            posterImage.loading = 'lazy';
+            posterImage.decoding = 'async';
+            posterImage.alt = safeText(caption);
+
+            const video = document.createElement('video');
+            video.muted = true;
+            video.loop = true;
+            video.playsInline = true;
+            video.preload = 'none';
+            video.disablePictureInPicture = true;
+            video.tabIndex = -1;
+            video.setAttribute('aria-hidden', 'true');
+            tile.classList.add('video-tile');
+
+            const placeholder = document.createElement('span');
+            placeholder.className = 'tile-video-placeholder';
+            placeholder.textContent = 'Preview on hover';
+
+            const beginPreview = () => startTileVideoPreview(tile, video, mediaUrl);
+            const endPreview = () => stopTileVideoPreview(tile, video);
+
+            tile.addEventListener('pointerenter', beginPreview);
+            tile.addEventListener('pointerleave', endPreview);
+            tile.addEventListener('focus', beginPreview);
+            tile.addEventListener('blur', endPreview);
+
+            const directPosterUrl = getVideoPosterUrl(image);
+            if (directPosterUrl) {
+                applyTileVideoPoster(tile, posterImage, video, directPosterUrl);
+            } else {
+                applyTileVideoPoster(tile, posterImage, video, '');
+                observeTileForPosterCapture(tile, image, posterImage, video, mediaUrl);
+            }
+            observeTileForAnimatedThumbnail(tile, image, posterImage, mediaUrl);
+
+            mediaNode = null;
+            tile.appendChild(posterImage);
+            tile.appendChild(video);
+            tile.appendChild(placeholder);
+        } else {
+            const img = document.createElement('img');
+            img.loading = 'lazy';
+            img.alt = safeText(caption);
+            img.src = mediaUrl;
+            wireImageDragPayload(img, () => image);
+
+            // BlurHash canvas placeholder
+            const blurhashValue = image.blurhash || image.civitai_hash;
+            if (blurhashValue && typeof BlurHashDecode !== 'undefined') {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'blurhash-canvas';
+                    canvas.width = 32;
+                    canvas.height = 32;
+                    const ctx = canvas.getContext('2d');
+                    const pixels = BlurHashDecode.decode(blurhashValue, 32, 32);
+                    if (pixels) {
+                        const imageData = new ImageData(pixels, 32, 32);
+                        ctx.putImageData(imageData, 0, 0);
+                        tile.appendChild(canvas);
+                        img.classList.add('fade-in');
+                        img.addEventListener('load', () => img.classList.add('loaded'), { once: true });
+                    }
+                } catch (_) { /* non-critical; skip placeholder */ }
+            }
+
+            mediaNode = img;
+        }
+
+        const captionSpan = document.createElement('span');
+        captionSpan.className = 'tile-caption';
+
+        const primaryCaption = document.createElement('span');
+        primaryCaption.className = 'tile-caption-primary';
+        primaryCaption.textContent = safeText(caption);
+        captionSpan.appendChild(primaryCaption);
+
+        if (variantCount > 1 || image.variant_label) {
+            const secondaryCaption = document.createElement('span');
+            secondaryCaption.className = 'tile-caption-secondary';
+            secondaryCaption.textContent = safeText(
+                image.variant_label || `Variant ${getActiveVariantIndex(image) + 1}`,
+                '',
+            );
+            captionSpan.appendChild(secondaryCaption);
+        }
+
+        const collectionNames = Array.isArray(image.collection_names)
+            ? image.collection_names.filter((name) => typeof name === 'string' && name.trim())
+            : [];
+        if (collectionNames.length) {
+            const collectionsOverlay = document.createElement('div');
+            collectionsOverlay.className = 'tile-collections';
+            collectionNames.slice(0, 5).forEach((name) => {
+                const item = document.createElement('span');
+                item.className = 'tile-collection-item';
+                item.textContent = name;
+                collectionsOverlay.appendChild(item);
+            });
+            tile.appendChild(collectionsOverlay);
+        }
+
+        if (mediaNode) {
+            tile.appendChild(mediaNode);
+        }
+        tile.appendChild(captionSpan);
+        return tile;
     }
 
     function computeFilteredImages(query) {
@@ -8815,12 +9018,19 @@ document.addEventListener('DOMContentLoaded', () => {
             && (state.activeServerFilterConfig.includeTags?.length
                 || state.activeServerFilterConfig.excludeTags?.length));
 
+        // When server handles missing-data and missing-source filters, skip
+        // client-side checks for those as well.
+        const serverHandledMissingData = Boolean(state.serverFilterMode
+            && state.activeServerFilterConfig?.missingData?.length);
+        const serverHandledMissingSource = Boolean(state.serverFilterMode
+            && state.activeServerFilterConfig?.missingSources?.length);
+
         return state.allImages.filter((image) => {
             if (!skipTagFilters && !imageMatchesTreeTagFilter(image)) {
                 return false;
             }
 
-            if (!imageMatchesMissingSourceFilter(image)) {
+            if (!serverHandledMissingSource && !imageMatchesMissingSourceFilter(image)) {
                 return false;
             }
 
@@ -8896,6 +9106,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const artistName = String(image.artist_name || '').trim();
         if (!artistName) {
+            return null;
+        }
+
+        // Deleted users have synthetic names like [deleted:12345] — no real profile.
+        if (/^\[deleted:\d+\]$/.test(artistName)) {
             return null;
         }
 
@@ -9232,12 +9447,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     state.filteredImages = [];
                     state.filteredMatchCount = 0;
                     state.offset = 0;
+                    state.cursor = null;
                     state.hasMore = true;
                     state.loadingPage = false;
                     state.lastRenderedGallerySignature = null;
                     state.lastRenderedFilterSignature = null;
                     state.lastRenderedSelectionSignature = null;
                     state.lastRenderedDetailKey = null;
+                    _clearPrefetch();
                     galleryGrid.innerHTML = '';
                     updatePagingUi();
 
@@ -9308,6 +9525,83 @@ document.addEventListener('DOMContentLoaded', () => {
         scheduleGalleryGridHeightSync();
     }
 
+    /**
+     * Cancel any in-flight prefetch and clear cached result.
+     */
+    function _clearPrefetch() {
+        if (state._prefetchAbortController) {
+            state._prefetchAbortController.abort();
+            state._prefetchAbortController = null;
+        }
+        state._prefetchResult = null;
+        state._prefetchCursor = null;
+        state._prefetchSignature = null;
+    }
+
+    /**
+     * Kick off a background fetch for the next page using the given cursor.
+     * The result is stored in state._prefetchResult for loadNextPage to
+     * consume instantly on the next call.
+     */
+    function _schedulePrefetch(nextCursor) {
+        // Don't prefetch when there are no more pages.
+        if (nextCursor == null || !state.hasMore) {
+            return;
+        }
+        // Don't replace an existing prefetch for the same cursor.
+        if (state._prefetchResult && state._prefetchCursor === nextCursor) {
+            return;
+        }
+        // Cancel any previous in-flight prefetch.
+        _clearPrefetch();
+
+        const sig = state.activeServerFilterSignature;
+        const controller = new AbortController();
+        state._prefetchAbortController = controller;
+        state._prefetchCursor = nextCursor;
+        state._prefetchSignature = sig;
+
+        // Capture the offset at prefetch time so toClientImage indices are correct.
+        const prefetchOffset = state.offset;
+
+        fetch(buildImagesRequestUrl(prefetchOffset, state.pageSize, nextCursor), {
+            cache: 'no-store',
+            signal: controller.signal,
+        })
+            .then((response) => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const filteredCountHeader = response.headers.get('X-Filtered-Count');
+                const nextCursorHeader = response.headers.get('X-Next-Cursor');
+                return response.json().then((page) => ({
+                    page,
+                    filteredCount: filteredCountHeader,
+                    nextCursor: nextCursorHeader,
+                }));
+            })
+            .then((result) => {
+                // Only cache if the filter hasn't changed and the cursor still matches.
+                if (
+                    state.activeServerFilterSignature !== sig ||
+                    state._prefetchCursor !== nextCursor
+                ) {
+                    return; // stale — discard
+                }
+                const normalizedPage = Array.isArray(result.page)
+                    ? result.page.map((img, idx) => toClientImage(img, prefetchOffset + idx))
+                    : [];
+                state._prefetchResult = {
+                    page: normalizedPage,
+                    filteredCount: result.filteredCount,
+                    nextCursor: result.nextCursor,
+                };
+            })
+            .catch((err) => {
+                if (err.name === 'AbortError') return;
+                // Silently discard — loadNextPage will just do a live fetch.
+                console.warn('[prefetch] failed:', err.message);
+            });
+    }
+
     async function loadNextPage(options = {}) {
         const recomputeFilter = options.recomputeFilter !== false;
         if (state.loadingPage || !state.hasMore) {
@@ -9325,24 +9619,49 @@ document.addEventListener('DOMContentLoaded', () => {
         const filterSignatureAtRequest = state.activeServerFilterSignature;
 
         try {
-            const response = await fetch(buildImagesRequestUrl(state.offset, state.pageSize), {
-                cache: 'no-store',
-            });
+            let normalizedPage;
+            let filteredCountHeader;
+            let nextCursorHeader;
 
-            // Stale response — the filter changed while we were fetching.
-            if (state.activeServerFilterSignature !== filterSignatureAtRequest) {
-                return;
+            // Check for a usable prefetch result first.
+            const prefetchUsable =
+                state._prefetchResult &&
+                state._prefetchSignature === filterSignatureAtRequest &&
+                state._prefetchCursor === state.cursor;
+
+            if (prefetchUsable) {
+                // Consume the prefetch instantly — no network wait.
+                const cached = state._prefetchResult;
+                state._prefetchResult = null;
+                state._prefetchCursor = null;
+                state._prefetchSignature = null;
+                normalizedPage = cached.page;
+                filteredCountHeader = cached.filteredCount;
+                nextCursorHeader = cached.nextCursor;
+            } else {
+                // Discard stale prefetch.
+                _clearPrefetch();
+
+                const response = await fetch(buildImagesRequestUrl(state.offset, state.pageSize, state.cursor), {
+                    cache: 'no-store',
+                });
+
+                // Stale response — the filter changed while we were fetching.
+                if (state.activeServerFilterSignature !== filterSignatureAtRequest) {
+                    return;
+                }
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const page = await response.json();
+                filteredCountHeader = response.headers.get('X-Filtered-Count');
+                nextCursorHeader = response.headers.get('X-Next-Cursor');
+                normalizedPage = Array.isArray(page)
+                    ? page.map((img, idx) => toClientImage(img, state.offset + idx))
+                    : [];
             }
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            const page = await response.json();
-            const filteredCountHeader = response.headers.get('X-Filtered-Count');
-            const normalizedPage = Array.isArray(page)
-                ? page.map((img, idx) => toClientImage(img, state.offset + idx))
-                : [];
 
             if (state.serverFilterMode) {
                 state.filteredMatchCount = Number(filteredCountHeader || normalizedPage.length) || 0;
@@ -9350,7 +9669,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             state.allImages = state.allImages.concat(normalizedPage);
             state.offset += normalizedPage.length;
-            if (state.serverFilterMode) {
+
+            // Cursor-based pagination: use X-Next-Cursor header to determine hasMore.
+            if (state.cursor != null || nextCursorHeader != null) {
+                state.cursor = nextCursorHeader ? Number(nextCursorHeader) : null;
+                state.hasMore = state.cursor != null;
+            } else if (state.serverFilterMode) {
                 state.hasMore = state.offset < state.filteredMatchCount;
             } else if (normalizedPage.length < state.pageSize) {
                 state.hasMore = false;
@@ -9358,6 +9682,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!state.selectedKey && state.selectedKeys.size === 0 && state.allImages.length) {
                 assignSingleSelection(state.allImages[0].__key);
+            }
+
+            // After successfully loading a page, prefetch the next one
+            // in the background so the next loadNextPage() is instant.
+            if (state.hasMore && state.cursor != null) {
+                _schedulePrefetch(state.cursor);
             }
 
             if (recomputeFilter) {
@@ -9383,14 +9713,40 @@ document.addEventListener('DOMContentLoaded', () => {
         const licenses = await licensesRes.json();
 
         state.artistNames = artists
-            .map((artist) => (artist && typeof artist.name === 'string' ? artist.name : ''))
+            .flatMap((artist) => {
+                if (!artist || typeof artist.name !== 'string') return [];
+                const names = [artist.name];
+                // Include original name for deleted CivitAI users so they're findable
+                if (artist.civitai_user_deleted && artist.civitai_user_original_name) {
+                    names.push(artist.civitai_user_original_name);
+                }
+                return names;
+            })
             .filter((name) => name.length > 0);
 
         artistDatalist.innerHTML = '';
         artists.forEach((artist) => {
             const option = document.createElement('option');
             option.value = artist.name;
+            if (artist.civitai_user_deleted) {
+                const orig = artist.civitai_user_original_name || artist.name;
+                option.textContent = `🗑 ${orig}`;
+            }
             artistDatalist.appendChild(option);
+            // Also add original name as a separate option for deleted users
+            if (artist.civitai_user_deleted && artist.civitai_user_original_name) {
+                const origOption = document.createElement('option');
+                origOption.value = artist.civitai_user_original_name;
+                origOption.textContent = `🗑 ${artist.civitai_user_original_name}`;
+                artistDatalist.appendChild(origOption);
+            }
+            // For deleted users, also add the civitai user ID as a searchable alias
+            if (artist.civitai_user_deleted && artist.civitai_user_id) {
+                const idOption = document.createElement('option');
+                idOption.value = String(artist.civitai_user_id);
+                idOption.textContent = `🗑 CivitAI user #${artist.civitai_user_id}`;
+                artistDatalist.appendChild(idOption);
+            }
         });
 
         licenses.forEach((license) => {
@@ -9450,12 +9806,14 @@ document.addEventListener('DOMContentLoaded', () => {
         state.activeServerFilterSignature = null;
         state.activeServerFilterConfig = null;
         state.offset = 0;
+        state.cursor = null;
         state.hasMore = true;
         state.loadingPage = false;
         state.lastRenderedGallerySignature = null;
         state.lastRenderedFilterSignature = null;
         state.lastRenderedSelectionSignature = null;
         state.lastRenderedDetailKey = null;
+        _clearPrefetch();
         galleryGrid.innerHTML = '';
         updatePagingUi();
 
@@ -9589,9 +9947,10 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    wireAdvancedFilterInput(advancedAuthorInput, advancedAuthorAddBtn, 'artistName', 'author');
+    wireAdvancedFilterInput(advancedAuthorInput, advancedAuthorAddBtn, 'artistName', 'artist');
     wireAdvancedFilterInput(advancedTagInput, advancedTagAddBtn, 'tags', 'tag');
     wireAdvancedFilterInput(advancedCollectionInput, advancedCollectionAddBtn, 'collections', 'collection');
+    wireDynamicTagDatalist(advancedTagInput, advancedTagOptions);
 
     searchInput.addEventListener('input', () => {
         if (searchDebounceTimer !== null) {
@@ -9902,7 +10261,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const distanceToBottom = galleryGrid.scrollHeight - galleryGrid.scrollTop - galleryGrid.clientHeight;
-        if (distanceToBottom < 240) {
+        // Trigger early (~3 viewport heights from bottom) so prefetched data is
+        // rendered into the DOM before the user scrolls far enough to see the gap.
+        const earlyTrigger = galleryGrid.clientHeight * 3;
+        if (distanceToBottom < Math.max(earlyTrigger, 240)) {
             loadNextPage();
         }
     });

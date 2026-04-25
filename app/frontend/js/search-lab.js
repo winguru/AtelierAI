@@ -588,9 +588,11 @@
     els.detail_title.textContent = hit.prompt
       ? (hit.prompt.length > 100 ? hit.prompt.substring(0, 100) + '…' : hit.prompt)
       : `Image #${hit.id}`;
-    els.detail_subtitle.textContent = [
-      hit.user?.username ? `by ${hit.user.username}` : '',
-      hit.baseModel || '',
+    const userName = hit.user?.username || '';
+    const userDeleted = !!(hit.user?.deletedAt);
+    els.detail_subtitle.innerHTML = [
+      userName ? (userDeleted ? `by <span class="deleted-user">${userName.replace(/</g,'&lt;')}</span>` : `by ${userName.replace(/</g,'&lt;')}`) : '',
+      (hit.baseModel || '').replace(/</g,'&lt;'),
       hit.createdAt ? new Date(hit.createdAt).toLocaleDateString() : '',
     ].filter(Boolean).join(' · ');
 
@@ -618,7 +620,7 @@
       ['Width × Height', hit.width && hit.height ? `${hit.width} × ${hit.height}` : '—'],
       ['Base Model', hit.baseModel || '—'],
       ['Type', hit.type || '—'],
-      ['User', hit.user?.username || '—'],
+      ['User', (hit.user?.deletedAt ? '🗑 ' : '') + (hit.user?.username || '—')],
       ['Created', hit.createdAt ? new Date(hit.createdAt).toLocaleString() : '—'],
       ['Aspect Ratio', hit.aspectRatio || '—'],
       ['Hash', hit.hash || '—'],

@@ -89,6 +89,9 @@ class ImageModel(Base):
     # User-defined tags (persisted in both DB column and sidecar JSON)
     user_tags = Column(JSON, nullable=True)
 
+    # User-defined negative tags (things the user explicitly wants excluded)
+    user_negative_tags = Column(JSON, nullable=True)
+
     # Promoted metadata columns (authoritative; backfilled from json_metadata/sidecar)
     generation_software = Column(String, nullable=True)
     civitai_nsfw_level = Column(Integer, nullable=True)  # 1=PG, 2=PG13, 4=R, 8=X, 16=XXX

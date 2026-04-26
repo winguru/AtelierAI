@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Optional
 
-from sqlalchemy import exists, false as sa_false, func, or_, select, text
+from sqlalchemy import false as sa_false, func, or_, select, text
 
 from services import a1111_parser_service as _a1111_svc
 
@@ -19,8 +19,6 @@ from models import (
     ImageCollectionMembership,
     ImageConceptObservation,
     ImageModel,
-    ImageTag,
-    Tag,
 )
 
 
@@ -336,13 +334,14 @@ class ImageQueryService:
     ) -> Optional[list[int]]:
         """Filter images by exact tag name match across all tag sources.
 
-        Looks up tags via four FK paths:
-          1. Tag.name -> ImageTag.image_id  (legacy image_tags table)
+        Looks up tags via two FK paths:
+          1. AuthorityTerm.normalized_external_name
+             -> ImageConceptObservation.authority_term_id -> image_id
+             (the primary path — all authorities including user go through
+             authority_terms + observations)
           2. Concept.canonical_name / ConceptAlias.normalized_alias
-             -> ImageConceptObservation.image_id  (taxonomy observations)
-          3. AuthorityTerm.external_name -> ImageConceptObservation.image_id
-             (external authority tags with direct observations)
-          4. ImageModel.user_tags JSON array  (user-assigned tags)
+             -> ImageConceptObservation.concept_id -> image_id
+             (supplementary: concept-branch matching for taxonomy navigation)
 
         For include_tags: image must have ALL listed tags (AND semantics).
         For exclude_tags: image must have NONE of the listed tags.
@@ -361,39 +360,9 @@ class ImageQueryService:
             """Return image IDs that carry *tag_name* from any tag source."""
             ids: set[int] = set()
 
-            # Path 1: Tag.name -> image_tags
-            tag_ids = [
-                row[0]
-                for row in session.query(Tag.id).filter(func.lower(Tag.name) == tag_name)
-            ]
-            if tag_ids:
-                for row in session.query(ImageTag.image_id).filter(
-                    ImageTag.tag_id.in_(tag_ids)
-                ):
-                    ids.add(row[0])
-
-            # Path 2a: Concept.canonical_name -> image_concept_observations
-            concept_ids: set[int] = set()
-            for row in session.query(Concept.id).filter(
-                func.lower(Concept.canonical_name) == tag_name
-            ):
-                concept_ids.add(row[0])
-
-            # Path 2b: ConceptAlias.normalized_alias -> concept -> observations
-            for row in session.query(ConceptAlias.concept_id).filter(
-                func.lower(ConceptAlias.normalized_alias) == tag_name
-            ):
-                concept_ids.add(row[0])
-
-            if concept_ids:
-                for row in session.query(ImageConceptObservation.image_id).filter(
-                    ImageConceptObservation.concept_id.in_(list(concept_ids))
-                ).distinct():
-                    ids.add(row[0])
-
-            # Path 2c: AuthorityTerm.external_name -> ImageConceptObservation
-            # Tags from external authorities (e.g. CivitAI) may exist as authority_terms
-            # with observations linked directly, even without a matching concept.
+            # Primary path: AuthorityTerm -> ImageConceptObservation
+            # All tag authorities (civitai, danbooru, user, prompt, ai_agent)
+            # store their tags as authority_terms with observations.
             at_ids = [
                 row[0]
                 for row in session.query(AuthorityTerm.id).filter(
@@ -406,21 +375,25 @@ class ImageQueryService:
                 ).distinct():
                     ids.add(row[0])
 
-            # Path 3: ImageModel.user_tags JSON array (user-assigned tags).
-            # Uses json_each to expand the JSON array and match case-insensitively.
-            try:
-                for row in session.execute(
-                    text(
-                        "SELECT DISTINCT images.id FROM images, json_each(images.user_tags) "
-                        "WHERE LOWER(json_each.value) = :tag"
-                    ),
-                    {"tag": tag_name},
-                ):
+            # Supplementary path: Concept / ConceptAlias -> observations
+            # Covers concept-branch matching where the concept has a different
+            # canonical name or alias than the authority_term external_name.
+            concept_ids: set[int] = set()
+            for row in session.query(Concept.id).filter(
+                func.lower(Concept.canonical_name) == tag_name
+            ):
+                concept_ids.add(row[0])
+
+            for row in session.query(ConceptAlias.concept_id).filter(
+                func.lower(ConceptAlias.normalized_alias) == tag_name
+            ):
+                concept_ids.add(row[0])
+
+            if concept_ids:
+                for row in session.query(ImageConceptObservation.image_id).filter(
+                    ImageConceptObservation.concept_id.in_(list(concept_ids))
+                ).distinct():
                     ids.add(row[0])
-            except Exception:
-                # json_each may fail if user_tags is NULL or not a valid JSON array;
-                # just skip this path.
-                pass
 
             return ids
 
@@ -895,18 +868,6 @@ class ImageQueryService:
             ):
                 matched.add(row[0])
 
-        # Tags (name)
-        matching_tag_ids = [
-            row[0]
-            for row in session.query(Tag.id).filter(func.lower(Tag.name).like(like_term))
-        ]
-        if matching_tag_ids:
-            for row in (
-                session.query(ImageTag.image_id)
-                .filter(ImageTag.tag_id.in_(matching_tag_ids))
-            ):
-                matched.add(row[0])
-
         # Artists (name)
         matching_artist_ids = [
             row[0]
@@ -947,20 +908,6 @@ class ImageQueryService:
                 .filter(ImageCollectionMembership.collection_id.in_(matching_collection_ids))
             ):
                 matched.add(row[0])
-
-        # user_tags JSON array — uses SQLite json_each for substring search
-        try:
-            for row in session.execute(
-                text(
-                    "SELECT DISTINCT images.id FROM images, json_each(images.user_tags) "
-                    "WHERE LOWER(json_each.value) LIKE :pattern"
-                ),
-                {"pattern": like_term},
-            ):
-                matched.add(row[0])
-        except Exception:
-            # json_each may fail if user_tags is NULL or malformed; skip.
-            pass
 
         # ---- Phase 2: fast column scans on images table ----
         _t1 = _time.perf_counter()

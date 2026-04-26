@@ -675,15 +675,19 @@ def _build_missing_data_condition(key: str) -> list:
             )
         ]
     if key == "no tags":
-        # No user_tags, no image_tags entries, and no civitai tags in json_metadata
+        # No user-tag observations exist for this image (user authority only).
         return [
-            sa.and_(
-                sa.or_(Im.user_tags.is_(None), Im.user_tags == "[]"),
-                ~Im.id.in_(
-                    sa.select(ImageTag.image_id).where(
-                        ImageTag.image_id == Im.id
+            ~Im.id.in_(
+                sa.select(ImageConceptObservation.image_id).where(
+                    sa.and_(
+                        ImageConceptObservation.image_id == Im.id,
+                        ImageConceptObservation.authority_id == (
+                            sa.select(TagAuthority.id).where(
+                                TagAuthority.name == "user"
+                            )
+                        ),
                     )
-                ),
+                )
             )
         ]
     # Unknown condition – no filter.
@@ -747,11 +751,20 @@ def _build_missing_source_condition(source: str) -> list:
     source_lower = (source or "").strip().lower()
 
     if source_lower == "civitai":
-        # Civitai tags come via the image_tags join table (imported).
-        # Image is missing civitai source when it has NO image_tags entries.
+        # Civitai tags come via image_concept_observations linked to
+        # authority_terms under the 'civitai' authority.
         return [
             ~Im.id.in_(
-                sa.select(ImageTag.image_id)
+                sa.select(ImageConceptObservation.image_id).where(
+                    sa.and_(
+                        ImageConceptObservation.image_id == Im.id,
+                        ImageConceptObservation.authority_id == (
+                            sa.select(TagAuthority.id).where(
+                                TagAuthority.name == "civitai"
+                            )
+                        ),
+                    )
+                )
             )
         ]
     if source_lower == "danbooru":
@@ -770,12 +783,19 @@ def _build_missing_source_condition(source: str) -> list:
             Im.has_generation_prompt == False,  # noqa: E712
         ]
     if source_lower == "user":
-        # User tags are stored in user_tags JSON column.
+        # User tags are stored as observations under the 'user' authority.
         return [
-            sa.or_(
-                Im.user_tags.is_(None),
-                Im.user_tags == "[]",
-                Im.user_tags == "null",
+            ~Im.id.in_(
+                sa.select(ImageConceptObservation.image_id).where(
+                    sa.and_(
+                        ImageConceptObservation.image_id == Im.id,
+                        ImageConceptObservation.authority_id == (
+                            sa.select(TagAuthority.id).where(
+                                TagAuthority.name == "user"
+                            )
+                        ),
+                    )
+                )
             )
         ]
     return []
@@ -888,6 +908,139 @@ def _main() -> None:
 
 def _active_image_filter():
     return (ImageModel.image_status.is_(None)) | (ImageModel.image_status == "active")
+
+
+def _sync_user_tag_observations(
+    db: Session,
+    *,
+    image_id: int,
+    user_tags: list[str] | None,
+    user_negative_tags: list[str] | None,
+    touched_fields: set,
+) -> None:
+    """Upsert authority_terms + image_concept_observations for user tags.
+
+    Called from the PATCH /images/{file_hash} endpoint whenever user_tags or
+    user_negative_tags are part of the update payload.  Ensures the relational
+    observation rows stay in sync with the JSON column values so that tag
+    filtering and counting work without json_each().
+    """
+    from models import (
+        AuthorityTerm,
+        ImageConceptObservation,
+        ObservationCertainty,
+        ObservationSource,
+        TagAuthority,
+    )
+
+    # Only run when at least one of the tag fields was touched.
+    if (
+        ImageModel.user_tags not in touched_fields
+        and ImageModel.user_negative_tags not in touched_fields
+    ):
+        return
+
+    user_authority = (
+        db.query(TagAuthority).filter(TagAuthority.name == "user").first()
+    )
+    if user_authority is None:
+        return
+    user_authority_id = user_authority.id
+
+    now = datetime.now()
+
+    # Build desired state: {(normalized_name, is_present)}
+    desired: dict[tuple[str, bool], str] = {}  # (normalized, is_present) → display_name
+    if isinstance(user_tags, list):
+        for tag in user_tags:
+            name = str(tag or "").strip()
+            if name:
+                desired[(name.lower(), True)] = name
+    if isinstance(user_negative_tags, list):
+        for tag in user_negative_tags:
+            name = str(tag or "").strip()
+            if name:
+                desired[(name.lower(), False)] = name
+
+    # Collect existing authority_terms for the user authority.
+    existing_terms: dict[str, int] = {}
+    for term in (
+        db.query(AuthorityTerm.id, AuthorityTerm.normalized_external_name)
+        .filter(AuthorityTerm.authority_id == user_authority_id)
+        .all()
+    ):
+        existing_terms[term.normalized_external_name] = term.id
+
+    # Collect existing observations for this image under user authority.
+    existing_obs: dict[tuple[int, bool], int] = {}  # (term_id, is_present) → obs_id
+    for row in db.query(
+        ImageConceptObservation.id,
+        ImageConceptObservation.authority_term_id,
+        ImageConceptObservation.is_present,
+    ).filter(
+        ImageConceptObservation.image_id == image_id,
+        ImageConceptObservation.authority_id == user_authority_id,
+        ImageConceptObservation.authority_term_id.isnot(None),
+    ).all():
+        existing_obs[(row.authority_term_id, row.is_present)] = row.id
+
+    # Determine which desired term_ids we need.
+    desired_term_ids: set[int] = set()
+    for (normalized, _is_present), _display_name in desired.items():
+        term_id = existing_terms.get(normalized)
+        if term_id is None:
+            term = AuthorityTerm(
+                authority_id=user_authority_id,
+                external_tag_id=None,
+                external_name=_display_name,
+                normalized_external_name=normalized,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(term)
+            db.flush()
+            term_id = term.id
+            existing_terms[normalized] = term_id
+        desired_term_ids.add(term_id)
+
+    # Create observations for desired (term_id, is_present) pairs that don't exist.
+    for (normalized, is_present), _display_name in desired.items():
+        term_id = existing_terms[normalized]
+        if (term_id, is_present) not in existing_obs:
+            obs = ImageConceptObservation(
+                image_id=image_id,
+                concept_id=None,
+                authority_id=user_authority_id,
+                authority_term_id=term_id,
+                source_type=ObservationSource.IMPORT,
+                certainty_label=ObservationCertainty.LIKELY,
+                is_present=is_present,
+                is_curated=False,
+                confidence=None,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(obs)
+
+    # Remove stale observations: observations whose (term_id, is_present) is
+    # no longer in the desired set.
+    stale_obs_ids: set[int] = set()
+    for (term_id, is_present), obs_id in existing_obs.items():
+        normalized = None
+        for (n, ip), _ in desired.items():
+            if existing_terms.get(n) == term_id and ip == is_present:
+                normalized = n
+                break
+        if (term_id, is_present) not in {
+            (existing_terms.get(n), ip)
+            for (n, ip) in desired
+        }:
+            stale_obs_ids.add(obs_id)
+
+    if stale_obs_ids:
+        db.query(ImageConceptObservation).filter(
+            ImageConceptObservation.id.in_(stale_obs_ids)
+        ).delete(synchronize_session=False)
 
 
 def _commit_with_lock_retry(db: Session, context: str = "database write") -> None:
@@ -1045,6 +1198,185 @@ def _ensure_user_tags_column() -> None:
             connection.execute(text("ALTER TABLE images ADD COLUMN user_tags JSON"))
 
 
+def _ensure_user_negative_tags_column() -> None:
+    """Add user_negative_tags JSON column for existing sqlite databases."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+
+        if "user_negative_tags" not in existing:
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN user_negative_tags JSON")
+            )
+
+
+def _ensure_observation_authority_term_unique_index() -> None:
+    """Add a unique index on (image_id, authority_term_id) for observations.
+
+    The existing uq_obs_image_concept_authority constraint on
+    (image_id, concept_id, authority_id) does not prevent duplicates when
+    concept_id is NULL (SQLite treats NULLs as distinct in unique constraints).
+    Since user-tag observations will have NULL concept_id, we need a unique
+    index on authority_term_id instead.
+    """
+    with engine.begin() as connection:
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA index_list(image_concept_observations)")
+            ).fetchall()
+        }
+        if "uq_obs_image_authority_term" not in indexes:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_obs_image_authority_term "
+                    "ON image_concept_observations (image_id, authority_term_id) "
+                    "WHERE authority_term_id IS NOT NULL"
+                )
+            )
+
+
+def _backfill_user_tags_to_observations() -> None:
+    """One-time migration: convert user_tags and user_negative_tags JSON into
+    authority_terms + image_concept_observations rows under the 'user' authority.
+
+    This makes user tags queryable via the same observation path as every other
+    tag authority, enabling proper joins and filtering without json_each().
+    """
+
+    from models import (
+        AuthorityTerm,
+        ImageConceptObservation,
+        ObservationCertainty,
+        ObservationSource,
+        TagAuthority,
+    )
+
+    with SessionLocal() as db:
+        # Resolve the 'user' authority (id=3).
+        user_authority = (
+            db.query(TagAuthority).filter(TagAuthority.name == "user").first()
+        )
+        if user_authority is None:
+            print("   Skipping user_tags observation backfill: no 'user' authority.")
+            return
+        user_authority_id = user_authority.id
+
+        # Collect all images with user_tags or user_negative_tags JSON.
+        images = (
+            db.query(
+                ImageModel.id,
+                ImageModel.user_tags,
+                ImageModel.user_negative_tags,
+            )
+            .filter(
+                sa.or_(
+                    ImageModel.user_tags.isnot(None),
+                    ImageModel.user_negative_tags.isnot(None),
+                )
+            )
+            .all()
+        )
+
+        if not images:
+            print("   No images with user tags to backfill.")
+            return
+
+        # Build a cache of existing user authority_terms by normalized name.
+        existing_terms: dict[str, int] = {}
+        for term in (
+            db.query(
+                AuthorityTerm.id,
+                AuthorityTerm.normalized_external_name,
+            )
+            .filter(AuthorityTerm.authority_id == user_authority_id)
+            .all()
+        ):
+            existing_terms[term.normalized_external_name] = term.id
+
+        # Build a set of existing (image_id, authority_term_id) to skip dupes.
+        existing_obs: set[tuple[int, int]] = set()
+        for row in db.query(
+            ImageConceptObservation.image_id,
+            ImageConceptObservation.authority_term_id,
+        ).filter(
+            ImageConceptObservation.authority_id == user_authority_id,
+            ImageConceptObservation.authority_term_id.isnot(None),
+        ).all():
+            existing_obs.add((row.image_id, row.authority_term_id))
+
+        now = datetime.now()
+        terms_created = 0
+        obs_created = 0
+        skipped = 0
+
+        for img_id, user_tags, user_negative_tags in images:
+            tag_pairs: list[tuple[list[str] | None, bool]] = [
+                (user_tags, True),
+                (user_negative_tags, False),
+            ]
+
+            for tags_json, is_present in tag_pairs:
+                if not isinstance(tags_json, list):
+                    continue
+                for raw_tag in tags_json:
+                    tag_name = str(raw_tag or "").strip()
+                    if not tag_name:
+                        continue
+                    normalized = tag_name.lower()
+
+                    # Find or create authority_term.
+                    term_id = existing_terms.get(normalized)
+                    if term_id is None:
+                        term = AuthorityTerm(
+                            authority_id=user_authority_id,
+                            external_tag_id=None,
+                            external_name=tag_name,
+                            normalized_external_name=normalized,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        db.add(term)
+                        db.flush()
+                        term_id = term.id
+                        existing_terms[normalized] = term_id
+                        terms_created += 1
+
+                    # Check for existing observation.
+                    if (img_id, term_id) in existing_obs:
+                        skipped += 1
+                        continue
+
+                    obs = ImageConceptObservation(
+                        image_id=img_id,
+                        concept_id=None,
+                        authority_id=user_authority_id,
+                        authority_term_id=term_id,
+                        source_type=ObservationSource.IMPORT,
+                        certainty_label=ObservationCertainty.LIKELY,
+                        is_present=is_present,
+                        is_curated=False,
+                        confidence=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(obs)
+                    existing_obs.add((img_id, term_id))
+                    obs_created += 1
+
+        if obs_created or terms_created:
+            db.commit()
+            print(
+                f"   Backfilled user_tags → observations: "
+                f"{terms_created} terms, {obs_created} observations "
+                f"({skipped} already existed)."
+            )
+        else:
+            print("   All user tags already have observations.")
+
+
 def _backfill_user_tags_from_sidecars() -> None:
     """One-time migration: copy user_tags from sidecar JSON files into the DB column."""
     import json as _json
@@ -1073,6 +1405,14 @@ def _backfill_user_tags_from_sidecars() -> None:
                 if isinstance(sc_user_tags, list) and sc_user_tags:
                     db.query(ImageModel).filter(ImageModel.id == img_id).update(
                         {ImageModel.user_tags: _json.dumps(sc_user_tags)},
+                        synchronize_session="fetch",
+                    )
+                    updated += 1
+                # Also backfill user_negative_tags from sidecar if missing in DB.
+                sc_neg_tags = sidecar.get("user_negative_tags")
+                if isinstance(sc_neg_tags, list) and sc_neg_tags:
+                    db.query(ImageModel).filter(ImageModel.id == img_id).update(
+                        {ImageModel.user_negative_tags: _json.dumps(sc_neg_tags)},
                         synchronize_session="fetch",
                     )
                     updated += 1
@@ -1679,17 +2019,6 @@ def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, lis
         if source_key in by_source and external_name:
             by_source[source_key].add(_normalize_gallery_tag_text(external_name))
 
-    # --- Supplemental: user_tags column not yet in authority_terms ---
-    existing_user_term_names: set[str] = by_source.get("user", set())
-    user_rows = db.query(ImageModel.user_tags).filter(_active_image_filter()).all()
-    for (user_tags_col,) in user_rows:
-        if not isinstance(user_tags_col, list):
-            continue
-        for tag in user_tags_col:
-            normalized = _normalize_gallery_tag_text(str(tag))
-            if normalized and normalized not in existing_user_term_names:
-                by_source["user"].add(normalized)
-
     return {
         source: sorted(name for name in names if name)
         for source, names in by_source.items()
@@ -1738,22 +2067,6 @@ def _gallery_tag_usage_counts_by_source_from_observations(
             normalized = _normalize_gallery_tag_text(external_name)
             if normalized:
                 by_source[source_key][normalized] = int(image_count)
-
-    # --- Supplemental: user_tags column not yet in authority_terms ---
-    existing_user_term_names: set[str] = set(by_source.get("user", {}).keys())
-    user_rows = db.query(ImageModel.user_tags).filter(_active_image_filter()).all()
-    user_tag_name_counts: dict[str, int] = {}
-    for (user_tags_col,) in user_rows:
-        if not isinstance(user_tags_col, list):
-            continue
-        for tag in user_tags_col:
-            normalized = _normalize_gallery_tag_text(str(tag))
-            if normalized and normalized not in existing_user_term_names:
-                user_tag_name_counts[normalized] = (
-                    user_tag_name_counts.get(normalized, 0) + 1
-                )
-    for name, count in user_tag_name_counts.items():
-        by_source["user"][name] = count
 
     return {
         source: {name: counts[name] for name in sorted(counts)}
@@ -11602,6 +11915,9 @@ def _load_display_image_items(
         db_user_tags = getattr(image, "user_tags", None)
         if isinstance(db_user_tags, list) and db_user_tags:
             merged["user_tags"] = db_user_tags
+        db_user_neg_tags = getattr(image, "user_negative_tags", None)
+        if isinstance(db_user_neg_tags, list) and db_user_neg_tags:
+            merged["user_negative_tags"] = db_user_neg_tags
         display_items.extend(
             _build_display_items_for_image(
                 image, merged, group_variants=group_variants,
@@ -13414,6 +13730,9 @@ async def lifespan(app: FastAPI):
     _ensure_civitai_uuid_column()
     _ensure_civitai_hash_column()
     _ensure_user_tags_column()
+    _ensure_user_negative_tags_column()
+    _ensure_observation_authority_term_unique_index()
+    _backfill_user_tags_to_observations()
     _ensure_image_variant_columns()
     _ensure_promoted_metadata_columns()
     _ensure_original_file_name_column()
@@ -17275,6 +17594,7 @@ def update_image(
             seen_negative_tags.add(normalized_tag)
             normalized_negative_tags.append(normalized_tag)
         sidecar_additional_data["user_negative_tags"] = normalized_negative_tags
+        update_values[ImageModel.user_negative_tags] = normalized_negative_tags
 
     if payload.user_nsfw_rating is not None:
         raw_rating = payload.user_nsfw_rating.strip().lower()
@@ -17318,6 +17638,27 @@ def update_image(
 
     try:
         db.flush()
+
+        # Sync user-tag observations: create/upsert authority_terms and
+        # observations for positive user_tags (is_present=True) and negative
+        # user_tags (is_present=False).  Remove stale observations for tags
+        # no longer in the list.
+        _sync_user_tag_observations(
+            db,
+            image_id=image.id,
+            user_tags=(
+                update_values.get(ImageModel.user_tags)
+                if ImageModel.user_tags in update_values
+                else image.user_tags
+            ),
+            user_negative_tags=(
+                update_values.get(ImageModel.user_negative_tags)
+                if ImageModel.user_negative_tags in update_values
+                else getattr(image, "user_negative_tags", None)
+            ),
+            touched_fields=set(update_values.keys()),
+        )
+
         db.refresh(image)
         processor = ImageProcessor(str(image_path), db, IMAGE_LIBRARY_PATH)
         processor.save_json_metadata(
@@ -17338,10 +17679,15 @@ def update_image(
             raise HTTPException(status_code=404, detail="Image not found after update")
 
         sidecar_artist_profile = None
-        sidecar_user_negative_tags: list[str] = []
-        # Prefer DB column for user_tags (always up-to-date after the commit above).
+        # Prefer DB columns for user_tags and user_negative_tags (always
+        # up-to-date after the commit above).
         response_user_tags: list[str] = (
             list(image.user_tags) if isinstance(image.user_tags, list) else []
+        )
+        response_user_negative_tags: list[str] = (
+            list(image.user_negative_tags)
+            if isinstance(image.user_negative_tags, list)
+            else []
         )
         sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(image.file_path)).with_suffix(
             ".json"
@@ -17352,16 +17698,8 @@ def update_image(
                     sidecar_data = json.load(f)
                 if isinstance(sidecar_data, dict):
                     sidecar_artist_profile = sidecar_data.get("artist_profile")
-                    raw_negative_tags = sidecar_data.get("user_negative_tags")
-                    if isinstance(raw_negative_tags, list):
-                        sidecar_user_negative_tags = [
-                            str(item).strip().lower()
-                            for item in raw_negative_tags
-                            if str(item or "").strip()
-                        ]
             except (OSError, json.JSONDecodeError):
                 sidecar_artist_profile = None
-                sidecar_user_negative_tags = []
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -17377,7 +17715,7 @@ def update_image(
         "artist_name": image.artist.name if image.artist is not None else None,
         "artist_profile": sidecar_artist_profile,
         "user_tags": response_user_tags,
-        "user_negative_tags": sidecar_user_negative_tags,
+        "user_negative_tags": response_user_negative_tags,
         "user_nsfw_rating": image.user_nsfw_rating,
         "user_nsfw_safety_class": image.user_nsfw_safety_class,
     }
@@ -21983,6 +22321,7 @@ def _rescan_civitai_observations_inner(
                     new_tags += 1
                     known_term_names.add(norm)
         except Exception as exc:
+            db.rollback()
             error_count += 1
             yield emit("error_event", {
                 "current_image": idx, "file": json_file.name,
@@ -21993,9 +22332,11 @@ def _rescan_civitai_observations_inner(
         if not dry_run:
             try:
                 image_stem = json_file.stem
+                # file_path includes the extension (e.g. "abc123.png"),
+                # sidecar stem is just the hash ("abc123").
                 image_row = (
                     db.query(ImageModel.id)
-                    .filter(ImageModel.file_path == image_stem)
+                    .filter(ImageModel.file_path.like(image_stem + ".%"))
                     .first()
                 )
                 if image_row is not None:
@@ -22011,29 +22352,29 @@ def _rescan_civitai_observations_inner(
                             tag_norms.add(_normalize_taxonomy_text(raw_name))
 
                     if tag_norms and authority:
-                        # Find resolved terms (those with concept_id)
-                        resolved_terms = (
+                        # Find all matching terms (with or without concept_id).
+                        matched_terms = (
                             db.query(AuthorityTerm)
                             .filter(
                                 AuthorityTerm.authority_id == authority.id,
                                 AuthorityTerm.normalized_external_name.in_(tag_norms),
-                                AuthorityTerm.concept_id.isnot(None),
                             )
                             .all()
                         )
 
-                        for term in resolved_terms:
-                            concept_id = term.concept_id
-                            if concept_id is None:
-                                continue
+                        # Track concept_ids queued in this batch to prevent
+                        # UNIQUE constraint violations from multiple terms
+                        # mapping to the same concept for the same image.
+                        seen_concept_ids: set[int] = set()
 
-                            # Idempotent: check for existing observation
+                        for term in matched_terms:
+                            # Idempotent: skip if an observation already exists
+                            # for this (image, term) pair.
                             existing = (
                                 db.query(ImageConceptObservation.id)
                                 .filter(
                                     ImageConceptObservation.image_id == image_id,
-                                    ImageConceptObservation.concept_id == concept_id,
-                                    ImageConceptObservation.authority_id == authority.id,
+                                    ImageConceptObservation.authority_term_id == term.id,
                                 )
                                 .first()
                             )
@@ -22041,9 +22382,31 @@ def _rescan_civitai_observations_inner(
                                 observations_skipped += 1
                                 continue
 
+                            # Guard the (image_id, concept_id, authority_id)
+                            # unique constraint.  Two terms may map to the same
+                            # concept — check in-memory set first (covers
+                            # pending session additions), then committed DB.
+                            if term.concept_id is not None:
+                                if term.concept_id in seen_concept_ids:
+                                    observations_skipped += 1
+                                    continue
+                                dup_concept = (
+                                    db.query(ImageConceptObservation.id)
+                                    .filter(
+                                        ImageConceptObservation.image_id == image_id,
+                                        ImageConceptObservation.concept_id == term.concept_id,
+                                        ImageConceptObservation.authority_id == authority.id,
+                                    )
+                                    .first()
+                                )
+                                if dup_concept is not None:
+                                    observations_skipped += 1
+                                    continue
+                                seen_concept_ids.add(term.concept_id)
+
                             db.add(ImageConceptObservation(
                                 image_id=image_id,
-                                concept_id=concept_id,
+                                concept_id=term.concept_id,
                                 authority_id=authority.id,
                                 authority_term_id=term.id,
                                 source_type=ObservationSource.IMPORT,
@@ -22058,6 +22421,7 @@ def _rescan_civitai_observations_inner(
                         if observations_created:
                             db.flush()
             except Exception as exc:
+                db.rollback()
                 error_count += 1
                 yield emit("error_event", {
                     "current_image": idx, "file": json_file.name,

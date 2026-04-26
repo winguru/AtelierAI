@@ -9444,6 +9444,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 try {
                     state.allImages = [];
+                    state._seenKeys = new Set();
                     state.filteredImages = [];
                     state.filteredMatchCount = 0;
                     state.offset = 0;
@@ -9667,8 +9668,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.filteredMatchCount = Number(filteredCountHeader || normalizedPage.length) || 0;
             }
 
-            state.allImages = state.allImages.concat(normalizedPage);
-            state.offset += normalizedPage.length;
+            // Deduplicate by __key before concat — defense in depth against
+            // any residual duplicate gallery_item_key from the backend.
+            if (!state._seenKeys) state._seenKeys = new Set();
+            for (const img of state.allImages) state._seenKeys.add(img.__key);
+            const dedupedPage = normalizedPage.filter(img => !state._seenKeys.has(img.__key));
+            for (const img of dedupedPage) state._seenKeys.add(img.__key);
+
+            state.allImages = state.allImages.concat(dedupedPage);
+            state.offset += dedupedPage.length;
 
             // Cursor-based pagination: use X-Next-Cursor header to determine hasMore.
             if (state.cursor != null || nextCursorHeader != null) {
@@ -9796,6 +9804,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         state.galleryRefreshInFlight = true;
         state.allImages = [];
+        state._seenKeys = new Set();
         state.filteredImages = [];
         state.filteredMatchCount = 0;
         state.totalImageCount = 0;

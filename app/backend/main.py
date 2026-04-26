@@ -32,9 +32,10 @@ from fastapi import (
     status,
     Body,
 )
-from typing import Any, Callable, List, Optional, Literal, cast
+from typing import Any, Callable, Generator, List, Optional, Literal, cast
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlparse
+from uuid import uuid4
 
 import requests
 from PIL import Image
@@ -61,12 +62,16 @@ from models import (
     ImageModel,
     CollectionModel,
     ImageCollectionMembership,
+    ImageVariantGroupMembership,
+    VariantGroup,
     Tag,
     ImageTag,
     Concept,
     ConceptAlias,
     AuthorityTerm,
     ImageConceptObservation,
+    ObservationCertainty,
+    ObservationSource,
     TagAuthority,
     DatasetImage,
     AnalysisData,
@@ -139,6 +144,9 @@ from schemas import (
     ParityCandidateAuditRequest,
     CivitaiSearchRequest,
     SyncLabAnalyzeRequest,
+    VariantGroupCreateRequest,
+    VariantGroupUpdateRequest,
+    VariantGroupAddMembersRequest,
 )
 
 IMAGE_LIBRARY_PATH = str(getattr(app_config, "IMAGE_LIBRARY_PATH", "image_library"))
@@ -8200,6 +8208,10 @@ def _ensure_civitai_metadata_for_existing_image(
                 db.commit()
             except Exception:
                 db.rollback()
+
+        # Even on the fast path, observations may be missing.
+        merged_payload = {**db_json, **sidecar_data}
+        _hydrate_observations_from_payload(db, image, merged_payload)
         return False
 
     civitai_data = fetch_civitai_image_data(source_url)
@@ -8261,7 +8273,113 @@ def _ensure_civitai_metadata_for_existing_image(
         image,
         additional_data={"civitai": civitai_data},
     )
+
+    # Hydrate observations for this image from the newly enriched tags.
+    # Only creates observations for authority_terms that already have a
+    # concept_id — tags without concepts are left for manual curation.
+    _hydrate_observations_from_payload(db, image, merged_json)
+
     return True
+
+
+def _hydrate_observations_from_payload(
+    db: Session,
+    image: ImageModel,
+    merged_payload: dict,
+) -> None:
+    """Create observations for tags in *merged_payload* that have no observation row yet.
+
+    Only links to authority_terms with an existing ``concept_id``; tags
+    without a mapped concept are intentionally skipped.
+    """
+    # Fast bail-out: already has observations
+    if (
+        db.query(ImageConceptObservation.id)
+        .filter(ImageConceptObservation.image_id == image.id)
+        .limit(1)
+        .first()
+    ):
+        return
+
+    gallery_tag_svc = GalleryTagService()
+    tax = TaxonomyService()
+
+    tags_by_source = gallery_tag_svc.extract_image_scope_tag_names(
+        merged_payload,
+        normalize_taxonomy_text=tax.normalize_text,
+    )
+    if not any(tags_by_source.values()):
+        return
+
+    now = datetime.utcnow()
+    _seen: set[tuple[int, int, int]] = set()
+
+    try:
+        for source, tag_names in tags_by_source.items():
+            if not tag_names:
+                continue
+
+            authority = tax.get_or_create_authority(db, source)
+            authority_id = int(authority.id)
+            normalized_names = {
+                tax.normalize_text(n): n for n in tag_names if n
+            }
+            if not normalized_names:
+                continue
+
+            # Batch-load authority_terms that already have concept_id set
+            terms = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority_id,
+                    AuthorityTerm.normalized_external_name.in_(normalized_names),
+                    AuthorityTerm.concept_id.isnot(None),
+                )
+                .all()
+            )
+
+            for term in terms:
+                concept_id = term.concept_id
+                if concept_id is None:
+                    continue
+
+                obs_key = (int(image.id), int(concept_id), authority_id)
+                if obs_key in _seen:
+                    continue
+
+                existing = (
+                    db.query(ImageConceptObservation.id)
+                    .filter(
+                        ImageConceptObservation.image_id == image.id,
+                        ImageConceptObservation.concept_id == concept_id,
+                        ImageConceptObservation.authority_id == authority_id,
+                    )
+                    .first()
+                )
+                if existing is not None:
+                    _seen.add(obs_key)
+                    continue
+
+                db.add(
+                    ImageConceptObservation(
+                        image_id=int(image.id),
+                        concept_id=int(concept_id),
+                        authority_id=authority_id,
+                        authority_term_id=int(term.id),
+                        source_type=ObservationSource.IMPORT,
+                        certainty_label=ObservationCertainty.LIKELY,
+                        is_present=True,
+                        is_curated=False,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                _seen.add(obs_key)
+
+        db.flush()
+    except Exception as exc:
+        db.rollback()
+        print(f"Warning: observation hydration failed for image {image.id}: {exc}")
 
 
 def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
@@ -10938,7 +11056,10 @@ def _merge_display_item_variant(
 
 
 def _build_grouped_display_item(
-    image: ImageModel, merged_payload: dict[str, Any], variants: list[dict[str, Any]]
+    image: ImageModel,
+    merged_payload: dict[str, Any],
+    variants: list[dict[str, Any]],
+    variant_group_id: Optional[int] = None,
 ) -> dict[str, Any]:
     group_key = _variant_group_key_for_image(image, merged_payload)
     default_variant = variants[0] if variants else {}
@@ -10951,7 +11072,13 @@ def _build_grouped_display_item(
     base_payload["variants"] = variants
     base_payload["default_variant_key"] = default_variant.get("variant_key")
     base_payload["active_variant_key"] = default_variant.get("variant_key")
-    base_payload["gallery_item_key"] = f"group:{group_key}"
+    # Use variant_group.id for unique identity when available, falling back
+    # to the legacy hash-based key for backward compatibility.
+    if variant_group_id is not None:
+        base_payload["gallery_item_key"] = f"group:{variant_group_id}"
+        base_payload["variant_group_id"] = variant_group_id
+    else:
+        base_payload["gallery_item_key"] = f"group:{group_key}"
     base_payload["display_mode"] = "grouped"
     base_payload["variant_index"] = 0
     return _merge_display_item_variant(base_payload, default_variant)
@@ -10980,13 +11107,17 @@ def _build_flat_variant_display_items(
 
 
 def _build_display_items_for_image(
-    image: ImageModel, merged_payload: dict[str, Any], *, group_variants: bool
+    image: ImageModel,
+    merged_payload: dict[str, Any],
+    *,
+    group_variants: bool,
+    variant_group_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     variants = _build_image_variants(image, merged_payload)
     if not variants:
         return []
     if group_variants:
-        return [_build_grouped_display_item(image, merged_payload, variants)]
+        return [_build_grouped_display_item(image, merged_payload, variants, variant_group_id=variant_group_id)]
     return _build_flat_variant_display_items(image, merged_payload, variants)
 
 
@@ -11066,23 +11197,46 @@ def _load_filtered_image_keys(
             return []
 
     rows = (
-        images_query.with_entities(ImageModel.file_hash, ImageModel.variant_group_key)
+        images_query.with_entities(ImageModel.id, ImageModel.file_hash, ImageModel.variant_group_key)
         .order_by(ImageModel.id.asc())
         .all()
     )
 
     if group_variants:
+        # Pre-load variant group memberships for all matching images.
+        image_ids = [row_id for row_id, _, _ in rows]
+        image_to_vg: dict[int, int] = {}
+        if image_ids:
+            try:
+                vg_rows = (
+                    db.query(
+                        ImageVariantGroupMembership.image_id,
+                        ImageVariantGroupMembership.group_id,
+                    )
+                    .filter(ImageVariantGroupMembership.image_id.in_(image_ids))
+                    .all()
+                )
+                for img_id, grp_id in vg_rows:
+                    if img_id not in image_to_vg:
+                        image_to_vg[img_id] = grp_id
+            except Exception:
+                pass  # Fall back to legacy hash-based keys
+
         seen: set[str] = set()
         keys: list[str] = []
-        for file_hash, variant_group_key in rows:
-            group_key = (variant_group_key or "").strip() or str(file_hash or "")
-            item_key = f"group:{group_key}"
+        for row_id, file_hash, variant_group_key in rows:
+            vg_id = image_to_vg.get(row_id)
+            if vg_id is not None:
+                item_key = f"group:{vg_id}"
+            else:
+                group_key = (variant_group_key or "").strip() or str(file_hash or "")
+                item_key = f"group:{group_key}"
             if item_key not in seen:
                 seen.add(item_key)
                 keys.append(item_key)
         return keys
     else:
-        return [str(file_hash) for file_hash, _ in rows if file_hash]
+        return [str(file_hash) for _, file_hash, _ in rows if file_hash]
 
 
 def _merge_duplicate_grouped_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -11170,6 +11324,7 @@ def _load_display_image_items(
     a1111_adetailer: Optional[list[str]] = None,
     include_tag: Optional[list[str]] = None,
     exclude_tag: Optional[list[str]] = None,
+    variant_group_id: Optional[list[int]] = None,
     group_variants: bool,
     skip: int = 0,
     limit: Optional[int] = None,
@@ -11206,6 +11361,7 @@ def _load_display_image_items(
             "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
             "include_tag": _normalize_cache_list(include_tag),
             "exclude_tag": _normalize_cache_list(exclude_tag),
+            "variant_group_id": _normalize_cache_list(variant_group_id),
             "group_variants": bool(group_variants),
             "skip": skip,
             "limit": limit,
@@ -11332,6 +11488,24 @@ def _load_display_image_items(
         else:
             images_query = images_query.filter(text("1 = 0"))
 
+    # --- variant_group_id filter ------------------------------------------
+    # When variant_group_id is specified, constrain results to images that
+    # belong to at least one of the specified variant groups.
+    if variant_group_id:
+        try:
+            vg_image_ids = [
+                row[0]
+                for row in db.query(ImageVariantGroupMembership.image_id)
+                .filter(ImageVariantGroupMembership.group_id.in_(variant_group_id))
+                .all()
+            ]
+            if vg_image_ids:
+                images_query = images_query.filter(ImageModel.id.in_(vg_image_ids))
+            else:
+                images_query = images_query.filter(text("1 = 0"))
+        except Exception:
+            pass  # variant_groups tables may not exist yet
+
     if sort_by == "last_added":
         images_query = images_query.order_by(ImageModel.id.desc())
     else:
@@ -11369,6 +11543,32 @@ def _load_display_image_items(
     _t6 = _time.perf_counter()
     print(f"[PERF] main query exec: {_t6-_t5:.3f}s  images={len(images)}")
 
+    # --- Pre-load variant group memberships for fetched images ------------
+    # Map image_id → first variant_group_id.  When grouping is enabled, the
+    # gallery_item_key uses variant_group.id instead of file_hash, which
+    # guarantees unique keys and eliminates the cycling bug caused by hash
+    # collisions across different groups.
+    image_to_variant_group: dict[int, int] = {}
+    if group_variants and images:
+        try:
+            image_ids = [img.id for img in images]
+            membership_rows = (
+                db.query(
+                    ImageVariantGroupMembership.image_id,
+                    ImageVariantGroupMembership.group_id,
+                )
+                .filter(ImageVariantGroupMembership.image_id.in_(image_ids))
+                .all()
+            )
+            for img_id, grp_id in membership_rows:
+                # An image can be in multiple groups; use the first one found.
+                if img_id not in image_to_variant_group:
+                    image_to_variant_group[img_id] = grp_id
+        except Exception:
+            # If variant_groups tables don't exist yet (pre-migration),
+            # silently fall back to legacy hash-based grouping.
+            pass
+
     display_items: list[dict[str, Any]] = []
     for image in images:
         db_dict = ImageData.from_db_record(image).to_dict()
@@ -11403,7 +11603,10 @@ def _load_display_image_items(
         if isinstance(db_user_tags, list) and db_user_tags:
             merged["user_tags"] = db_user_tags
         display_items.extend(
-            _build_display_items_for_image(image, merged, group_variants=group_variants)
+            _build_display_items_for_image(
+                image, merged, group_variants=group_variants,
+                variant_group_id=image_to_variant_group.get(image.id),
+            )
         )
 
     # Merge display items that share the same gallery_item_key (duplicate
@@ -11420,11 +11623,14 @@ def _load_display_image_items(
     if use_cursor and limit is not None:
         if len(display_items) > limit:
             display_items = display_items[:limit]
-        # Derive the next cursor from the last item's base_image_id.
-        if display_items:
-            last_item = display_items[-1]
-            next_cursor = last_item.get("base_image_id")
-            # If the page is short, there are no more results.
+        # Derive next cursor from the LAST DB row consumed (max image ID),
+        # NOT from the display item's base_image_id.  This ensures the
+        # cursor advances past every grouped/merged DB row so the next page
+        # starts after all consumed images — fixing the fullscreen cycling bug
+        # where the cursor would land on the first image of a merged group.
+        if display_items and images:
+            next_cursor = images[-1].id
+            # If the page is short (fewer items than limit), no more results.
             if len(display_items) < limit:
                 next_cursor = None
 
@@ -16783,6 +16989,7 @@ def read_images(
     a1111_adetailer: Optional[list[str]] = Query(default=None),
     include_tag: Optional[list[str]] = Query(default=None),
     exclude_tag: Optional[list[str]] = Query(default=None),
+    variant_group_id: Optional[list[int]] = Query(default=None),
     cursor: Optional[int] = None,
     missing_data: Optional[list[str]] = Query(default=None),
     missing_source: Optional[list[str]] = Query(default=None),
@@ -16819,6 +17026,7 @@ def read_images(
             "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
             "include_tag": _normalize_cache_list(include_tag),
             "exclude_tag": _normalize_cache_list(exclude_tag),
+            "variant_group_id": _normalize_cache_list(variant_group_id),
             "cursor": cursor,
             "missing_data": _normalize_cache_list(missing_data),
             "missing_source": _normalize_cache_list(missing_source),
@@ -16860,6 +17068,7 @@ def read_images(
         a1111_adetailer=a1111_adetailer,
         include_tag=include_tag,
         exclude_tag=exclude_tag,
+        variant_group_id=variant_group_id,
         group_variants=group_variants,
         skip=skip,
         limit=limit,
@@ -18676,6 +18885,257 @@ def get_filter_options(
     }
     _search_cache_put(cache_key, payload, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Variant Group API
+# ---------------------------------------------------------------------------
+
+
+def _serialize_variant_group(group: VariantGroup) -> dict:
+    """Serialize a VariantGroup to a JSON-friendly dict."""
+    return {
+        "id": group.id,
+        "group_key": group.group_key,
+        "group_type": group.group_type,
+        "group_label": group.group_label,
+        "cover_image_id": group.cover_image_id,
+        "cover_preference": group.cover_preference,
+        "created_at": group.created_at.isoformat() if group.created_at else None,
+        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
+    }
+
+
+@app.get("/variant-groups/", response_model=List[dict])
+def list_variant_groups(
+    group_type: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List all variant groups, optionally filtered by type."""
+    query = db.query(VariantGroup)
+    if group_type:
+        query = query.filter(VariantGroup.group_type == group_type)
+    groups = query.order_by(VariantGroup.created_at.desc()).all()
+
+    result = []
+    for g in groups:
+        member_count = (
+            db.query(func.count(ImageVariantGroupMembership.image_id))
+            .filter(ImageVariantGroupMembership.group_id == g.id)
+            .scalar()
+        ) or 0
+        serialized = _serialize_variant_group(g)
+        serialized["member_count"] = member_count
+        result.append(serialized)
+    return result
+
+
+@app.get("/variant-groups/{group_id}", response_model=dict)
+def get_variant_group(group_id: int, db: Session = Depends(get_db)):
+    """Get a variant group with its member list."""
+    group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Variant group not found.")
+
+    memberships = (
+        db.query(ImageVariantGroupMembership)
+        .filter(ImageVariantGroupMembership.group_id == group_id)
+        .order_by(ImageVariantGroupMembership.sort_index)
+        .all()
+    )
+    result = _serialize_variant_group(group)
+    result["members"] = [
+        {
+            "image_id": m.image_id,
+            "role_in_group": m.role_in_group,
+            "sort_index": m.sort_index,
+            "source": m.source,
+        }
+        for m in memberships
+    ]
+    result["member_count"] = len(memberships)
+    return result
+
+
+@app.post("/variant-groups/", response_model=dict, status_code=201)
+def create_variant_group(payload: VariantGroupCreateRequest, db: Session = Depends(get_db)):
+    """Create a new variant group, optionally with initial member images."""
+    group_key = f"manual:{uuid4().hex[:12]}"
+    group = VariantGroup(
+        group_key=group_key,
+        group_type=payload.group_type,
+        group_label=payload.group_label,
+        cover_preference="sort_order",
+    )
+    db.add(group)
+    db.flush()
+
+    for idx, image_id in enumerate(payload.image_ids):
+        image = db.query(ImageModel).filter(ImageModel.id == image_id).first()
+        if image is None:
+            raise HTTPException(
+                status_code=400, detail=f"Image {image_id} not found."
+            )
+        membership = ImageVariantGroupMembership(
+            image_id=image_id,
+            group_id=group.id,
+            role_in_group="member",
+            sort_index=idx,
+            source="manual",
+        )
+        db.add(membership)
+
+    db.commit()
+    db.refresh(group)
+    result = _serialize_variant_group(group)
+    result["member_count"] = len(payload.image_ids)
+    return result
+
+
+@app.patch("/variant-groups/{group_id}", response_model=dict)
+def update_variant_group(
+    group_id: int, payload: VariantGroupUpdateRequest, db: Session = Depends(get_db)
+):
+    """Update a variant group's label, cover image, or cover preference."""
+    group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Variant group not found.")
+
+    if payload.group_label is not None:
+        group.group_label = payload.group_label
+    if payload.cover_image_id is not None:
+        # Validate that the cover image is a member of this group
+        membership = (
+            db.query(ImageVariantGroupMembership)
+            .filter(
+                ImageVariantGroupMembership.group_id == group_id,
+                ImageVariantGroupMembership.image_id == payload.cover_image_id,
+            )
+            .first()
+        )
+        if membership is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Cover image must be a member of this variant group.",
+            )
+        group.cover_image_id = payload.cover_image_id
+    if payload.cover_preference is not None:
+        group.cover_preference = payload.cover_preference
+
+    db.commit()
+    db.refresh(group)
+    return _serialize_variant_group(group)
+
+
+@app.delete("/variant-groups/{group_id}", response_model=dict)
+def delete_variant_group(group_id: int, db: Session = Depends(get_db)):
+    """Delete a variant group and all its memberships. Images are not deleted."""
+    group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Variant group not found.")
+
+    db.query(ImageVariantGroupMembership).filter(
+        ImageVariantGroupMembership.group_id == group_id
+    ).delete(synchronize_session=False)
+    db.delete(group)
+    db.commit()
+    return {"message": "Variant group deleted.", "group_id": group_id}
+
+
+@app.post("/variant-groups/{group_id}/members", response_model=dict)
+def add_members_to_variant_group(
+    group_id: int,
+    payload: VariantGroupAddMembersRequest,
+    db: Session = Depends(get_db),
+):
+    """Add image(s) to an existing variant group."""
+    group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Variant group not found.")
+
+    max_sort = (
+        db.query(func.max(ImageVariantGroupMembership.sort_index))
+        .filter(ImageVariantGroupMembership.group_id == group_id)
+        .scalar()
+    ) or 0
+
+    added = 0
+    for idx, image_id in enumerate(payload.image_ids):
+        image = db.query(ImageModel).filter(ImageModel.id == image_id).first()
+        if image is None:
+            raise HTTPException(
+                status_code=400, detail=f"Image {image_id} not found."
+            )
+        # Skip if already a member
+        existing = (
+            db.query(ImageVariantGroupMembership)
+            .filter(
+                ImageVariantGroupMembership.group_id == group_id,
+                ImageVariantGroupMembership.image_id == image_id,
+            )
+            .first()
+        )
+        if existing:
+            continue
+
+        membership = ImageVariantGroupMembership(
+            image_id=image_id,
+            group_id=group_id,
+            role_in_group=payload.role_in_group or "member",
+            sort_index=max_sort + idx + 1,
+            source="manual",
+        )
+        db.add(membership)
+        added += 1
+
+    db.commit()
+    return {
+        "message": f"Added {added} image(s) to variant group.",
+        "group_id": group_id,
+        "added": added,
+    }
+
+
+@app.delete("/variant-groups/{group_id}/members/{image_id}", response_model=dict)
+def remove_member_from_variant_group(
+    group_id: int, image_id: int, db: Session = Depends(get_db)
+):
+    """Remove an image from a variant group. Deletes the group if it was the last member."""
+    group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Variant group not found.")
+
+    membership = (
+        db.query(ImageVariantGroupMembership)
+        .filter(
+            ImageVariantGroupMembership.group_id == group_id,
+            ImageVariantGroupMembership.image_id == image_id,
+        )
+        .first()
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=404, detail="Image is not a member of this variant group."
+        )
+
+    db.delete(membership)
+
+    # Check if group is now empty
+    remaining = (
+        db.query(func.count(ImageVariantGroupMembership.image_id))
+        .filter(ImageVariantGroupMembership.group_id == group_id)
+        .scalar()
+    )
+    if remaining == 0:
+        db.delete(group)
+
+    db.commit()
+    return {
+        "message": "Image removed from variant group.",
+        "group_id": group_id,
+        "image_id": image_id,
+        "group_deleted": remaining == 0,
+    }
 
 
 @app.get("/collections/", response_model=List[dict])
@@ -21374,6 +21834,267 @@ def taxonomy_tag_maint_bulk_delete(
         "deleted": deleted_count,
         "dry_run": payload.dry_run,
     }
+
+
+@app.get("/taxonomy/tag-maint/civitai/rescan-observations")
+def taxonomy_tag_maint_rescan_civitai_observations(
+    dry_run: bool = Query(False, description="Preview changes without committing"),
+):
+    """SSE endpoint: rescan gallery sidecar JSON files to populate CivitAI
+    authority_terms and image_concept_observations.
+
+    Emits ``progress`` events per image and a final ``complete`` event with
+    aggregated statistics.  Individual per-image errors are emitted as
+    ``error_event`` so the client can continue scanning.
+    """
+
+    def _sse_event(event: str, data: dict) -> str:
+        payload = json.dumps(data)
+        return f"event: {event}\ndata: {payload}\n\n"
+
+    def event_stream():
+        db = SessionLocal()
+        try:
+            yield from _rescan_civitai_observations_inner(db, dry_run, _sse_event)
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _rescan_civitai_observations_inner(
+    db: Session,
+    dry_run: bool,
+    emit: Callable[[str, dict], str],
+) -> Generator[str, None, None]:
+    """Generator that yields SSE events for the CivitAI observation rescan.
+
+    Separated from the route handler so the ``db`` session lifetime is
+    explicit (created/closed in ``event_stream`` wrapper).
+    """
+    library_path = Path(IMAGE_LIBRARY_PATH)
+    if not library_path.is_dir():
+        yield emit("error_event", {"error": "Image library path not found.", "current_image": 0})
+        yield emit("complete", {
+            "total_images": 0, "tags_processed": 0, "unique_tags": 0,
+            "pre_existing_tags": 0, "new_tags": 0,
+            "observations_created": 0, "observations_skipped": 0,
+            "errors": 1, "dry_run": dry_run,
+        })
+        return
+
+    # Collect all sidecar files first for accurate total count
+    sidecar_files = sorted(library_path.glob("*.json"))
+    total_images = len(sidecar_files)
+
+    # Running counters
+    tags_processed = 0
+    unique_tag_names: set[str] = set()
+    pre_existing_tags = 0
+    new_tags = 0
+    observations_created = 0
+    observations_skipped = 0
+    error_count = 0
+
+    # Pre-load CivitAI authority and known term names
+    authority = _get_or_create_authority(db, "civitai")
+    known_term_names: set[str] = set()
+    if authority:
+        rows = db.query(AuthorityTerm.normalized_external_name).filter(
+            AuthorityTerm.authority_id == authority.id
+        ).all()
+        known_term_names = {r[0] for r in rows if r[0]}
+
+    now = datetime.utcnow()
+
+    for idx, json_file in enumerate(sidecar_files, start=1):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            error_count += 1
+            yield emit("error_event", {
+                "current_image": idx, "file": json_file.name, "error": str(exc),
+            })
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        if not isinstance(data, dict):
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        civitai = data.get("civitai")
+        if not isinstance(civitai, dict):
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        tags = civitai.get("tags")
+        if not isinstance(tags, list) or not tags:
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        # ── Step 1: Upsert authority terms ──
+        try:
+            stats = _upsert_civitai_authority_terms(db, civitai)
+            tags_processed += stats.get("terms_upserted", 0)
+
+            # Track unique / pre-existing / new
+            for tag in tags:
+                if not isinstance(tag, dict):
+                    continue
+                raw_name = str(tag.get("name") or "").strip()
+                if not raw_name:
+                    continue
+                norm = _normalize_taxonomy_text(raw_name)
+                if norm in unique_tag_names:
+                    continue
+                unique_tag_names.add(norm)
+                if norm in known_term_names:
+                    pre_existing_tags += 1
+                else:
+                    new_tags += 1
+                    known_term_names.add(norm)
+        except Exception as exc:
+            error_count += 1
+            yield emit("error_event", {
+                "current_image": idx, "file": json_file.name,
+                "error": f"upsert_terms: {exc}",
+            })
+
+        # ── Step 2: Create observations for resolved terms ──
+        if not dry_run:
+            try:
+                image_stem = json_file.stem
+                image_row = (
+                    db.query(ImageModel.id)
+                    .filter(ImageModel.file_path == image_stem)
+                    .first()
+                )
+                if image_row is not None:
+                    image_id = image_row[0]
+
+                    # Load normalized tag names from civitai tags
+                    tag_norms = set()
+                    for tag in tags:
+                        if not isinstance(tag, dict):
+                            continue
+                        raw_name = str(tag.get("name") or "").strip()
+                        if raw_name:
+                            tag_norms.add(_normalize_taxonomy_text(raw_name))
+
+                    if tag_norms and authority:
+                        # Find resolved terms (those with concept_id)
+                        resolved_terms = (
+                            db.query(AuthorityTerm)
+                            .filter(
+                                AuthorityTerm.authority_id == authority.id,
+                                AuthorityTerm.normalized_external_name.in_(tag_norms),
+                                AuthorityTerm.concept_id.isnot(None),
+                            )
+                            .all()
+                        )
+
+                        for term in resolved_terms:
+                            concept_id = term.concept_id
+                            if concept_id is None:
+                                continue
+
+                            # Idempotent: check for existing observation
+                            existing = (
+                                db.query(ImageConceptObservation.id)
+                                .filter(
+                                    ImageConceptObservation.image_id == image_id,
+                                    ImageConceptObservation.concept_id == concept_id,
+                                    ImageConceptObservation.authority_id == authority.id,
+                                )
+                                .first()
+                            )
+                            if existing is not None:
+                                observations_skipped += 1
+                                continue
+
+                            db.add(ImageConceptObservation(
+                                image_id=image_id,
+                                concept_id=concept_id,
+                                authority_id=authority.id,
+                                authority_term_id=term.id,
+                                source_type=ObservationSource.IMPORT,
+                                certainty_label=ObservationCertainty.LIKELY,
+                                is_present=True,
+                                is_curated=False,
+                                created_at=now,
+                                updated_at=now,
+                            ))
+                            observations_created += 1
+
+                        if observations_created:
+                            db.flush()
+            except Exception as exc:
+                error_count += 1
+                yield emit("error_event", {
+                    "current_image": idx, "file": json_file.name,
+                    "error": f"observations: {exc}",
+                })
+
+        # Emit progress after each image
+        yield emit("progress", {
+            "current_image": idx, "total_images": total_images,
+            "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+            "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+            "observations_created": observations_created,
+            "observations_skipped": observations_skipped,
+        })
+
+    # Commit all changes at the end
+    if not dry_run and (observations_created > 0 or tags_processed > 0):
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            yield emit("error_event", {
+                "current_image": total_images, "error": f"commit failed: {exc}",
+            })
+
+    # Final event
+    yield emit("complete", {
+        "total_images": total_images,
+        "tags_processed": tags_processed,
+        "unique_tags": len(unique_tag_names),
+        "pre_existing_tags": pre_existing_tags,
+        "new_tags": new_tags,
+        "observations_created": observations_created,
+        "observations_skipped": observations_skipped,
+        "errors": error_count,
+        "dry_run": dry_run,
+    })
 
 
 @app.post("/taxonomy/tag-maint/civitai/backfill-tag-ids")

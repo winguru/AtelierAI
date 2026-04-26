@@ -47,6 +47,8 @@ from models import (
     Concept,
     ImageConceptObservation,
     ImageModel,
+    ObservationCertainty,
+    ObservationSource,
     TagAuthority,
 )
 
@@ -372,11 +374,9 @@ def _create_observations(
                     concept_id=concept_id,
                     authority_id=authority_id,
                     authority_term_id=term_id,
-                    source_type="import",
-                    source_label=f"backfill from {source}",
-                    certainty_label="likely",
-                    dimension="general",
-                    polarity="present",
+                    source_type=ObservationSource.IMPORT,
+                    certainty_label=ObservationCertainty.LIKELY,
+                    is_present=True,
                     is_curated=False,
                     created_at=now,
                     updated_at=now,

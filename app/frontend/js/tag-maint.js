@@ -423,6 +423,123 @@
     }
   });
 
+  // ── Rescan (SSE) ──
+  const rescanBtn = document.getElementById('rescan-btn');
+  const rescanDryRun = document.getElementById('rescan-dry-run');
+  const rescanStatus = document.getElementById('rescan-status');
+  const rescanProgressWrap = document.getElementById('rescan-progress-wrap');
+  const rescanProgressBar = document.getElementById('rescan-progress-bar');
+  const rescanProgressLabel = document.getElementById('rescan-progress-label');
+  const rescanMetrics = document.getElementById('rescan-metrics');
+  const rescanResults = document.getElementById('rescan-results');
+  const rescanCard = document.getElementById('rescan-card');
+  let rescanEventSource = null;
+
+  function setRescanStatus(text, type) {
+    rescanStatus.textContent = text;
+    rescanStatus.className = `step-status ${type}`;
+  }
+
+  function updateRescanMetric(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function resetRescanUI() {
+    setRescanStatus('', '');
+    rescanProgressWrap.hidden = true;
+    rescanProgressBar.style.width = '0%';
+    rescanProgressLabel.textContent = '0 / 0 images';
+    rescanMetrics.hidden = true;
+    rescanResults.hidden = true;
+    rescanResults.textContent = '';
+    updateRescanMetric('metric-tags-processed', '0');
+    updateRescanMetric('metric-unique-tags', '0');
+    updateRescanMetric('metric-preexisting', '0');
+    updateRescanMetric('metric-new-tags', '0');
+    updateRescanMetric('metric-obs-created', '0');
+    updateRescanMetric('metric-obs-skipped', '0');
+  }
+
+  if (rescanBtn) {
+    rescanBtn.addEventListener('click', async () => {
+      if (rescanEventSource) {
+        rescanEventSource.close();
+        rescanEventSource = null;
+      }
+      resetRescanUI();
+
+      const dryRun = rescanDryRun ? rescanDryRun.checked : false;
+      rescanBtn.disabled = true;
+      rescanCard.classList.add('active');
+      setRescanStatus(dryRun ? 'Dry run: scanning gallery sidecars…' : 'Scanning gallery sidecars…', 'info');
+      rescanProgressWrap.hidden = false;
+      rescanMetrics.hidden = false;
+
+      const url = `/taxonomy/tag-maint/civitai/rescan-observations?dry_run=${dryRun ? '1' : '0'}`;
+
+      rescanEventSource = new EventSource(url);
+
+      rescanEventSource.addEventListener('progress', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          const pct = d.total_images > 0 ? Math.round((d.current_image / d.total_images) * 100) : 0;
+          rescanProgressBar.style.width = `${pct}%`;
+          rescanProgressLabel.textContent = `${d.current_image} / ${d.total_images} images (${pct}%)`;
+          updateRescanMetric('metric-tags-processed', d.tags_processed ?? 0);
+          updateRescanMetric('metric-unique-tags', d.unique_tags ?? 0);
+          updateRescanMetric('metric-preexisting', d.pre_existing_tags ?? 0);
+          updateRescanMetric('metric-new-tags', d.new_tags ?? 0);
+          updateRescanMetric('metric-obs-created', d.observations_created ?? 0);
+          updateRescanMetric('metric-obs-skipped', d.observations_skipped ?? 0);
+        } catch (_) { /* ignore parse errors */ }
+      });
+
+      rescanEventSource.addEventListener('error_event', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          rescanResults.hidden = false;
+          rescanResults.textContent += `Error (image ${d.current_image}): ${d.error}\n`;
+        } catch (_) { /* ignore */ }
+      });
+
+      rescanEventSource.addEventListener('complete', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          rescanProgressBar.style.width = '100%';
+          rescanProgressLabel.textContent = `${d.total_images} / ${d.total_images} images (100%)`;
+          updateRescanMetric('metric-tags-processed', d.tags_processed ?? 0);
+          updateRescanMetric('metric-unique-tags', d.unique_tags ?? 0);
+          updateRescanMetric('metric-preexisting', d.pre_existing_tags ?? 0);
+          updateRescanMetric('metric-new-tags', d.new_tags ?? 0);
+          updateRescanMetric('metric-obs-created', d.observations_created ?? 0);
+          updateRescanMetric('metric-obs-skipped', d.observations_skipped ?? 0);
+
+          const prefix = d.dry_run ? '[DRY RUN] ' : '';
+          setRescanStatus(`${prefix}Rescan complete. ${d.total_images} images processed, ${d.unique_tags} unique tags, ${d.observations_created} observations created.`, 'success');
+          toast(`${prefix}Rescan complete.`, 'success');
+        } catch (_) { /* ignore */ }
+
+        rescanEventSource.close();
+        rescanEventSource = null;
+        rescanBtn.disabled = false;
+        rescanCard.classList.remove('active');
+
+        if (!dryRun) loadTable();
+      });
+
+      rescanEventSource.onerror = () => {
+        setRescanStatus('Connection lost or server error.', 'error');
+        if (rescanEventSource) {
+          rescanEventSource.close();
+          rescanEventSource = null;
+        }
+        rescanBtn.disabled = false;
+        rescanCard.classList.remove('active');
+      };
+    });
+  }
+
   // ── Init ──
   loadTable();
 })();

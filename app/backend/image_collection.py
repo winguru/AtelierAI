@@ -5,7 +5,17 @@ from datetime import date, datetime
 
 from PIL import Image
 from sqlalchemy.orm import Session
-from models import AuthorityTerm, ImageConceptObservation, ImageModel, TagAuthority
+from sqlalchemy import func
+from models import (
+    AuthorityTerm,
+    ImageConceptObservation,
+    ImageModel,
+    ObservationCertainty,
+    ObservationSource,
+    TagAuthority,
+    VariantGroup,
+    ImageVariantGroupMembership,
+)
 from image_processor import ImageProcessor, sanitize_display_filename
 from atelierai.config import IMAGE_LIBRARY_PATH
 from atelierai.utils.prompt_phrases import (
@@ -18,6 +28,7 @@ from image_data import ImageData
 from civitai_enrichment import is_civitai_image_url, fetch_civitai_image_data
 from services.gallery_tag_service import GalleryTagService
 from services.metadata_extraction import extract_civitai_nsfw_level
+from services.taxonomy_service import TaxonomyService
 
 try:
     import blurhash  # pyright: ignore[reportMissingImports]
@@ -585,6 +596,124 @@ class ImageCollection:
                 f"Could not backfill filename for {image_path.name}: {e}"
             )
 
+    def _hydrate_missing_observations_if_needed(
+        self,
+        db_record: ImageModel,
+        image_path: Path,
+        processor: ImageProcessor,
+    ) -> None:
+        """Create image_concept_observations for tags present in json_metadata
+        but not yet represented in the relational observation table.
+
+        Only creates observations for authority_terms that already have a
+        ``concept_id``.  Tags without a linked concept are skipped so they
+        can be manually assigned later.
+        """
+        # Build the merged payload (DB record + sidecar JSON)
+        sidecar_data = self._load_sidecar_json(image_path.with_suffix(".json"))
+        merged_payload = {
+            **ImageData.from_db_record(db_record).to_dict(),
+            **(sidecar_data if isinstance(sidecar_data, dict) else {}),
+        }
+
+        tags_by_source = self.gallery_tag_service.extract_image_scope_tag_names(
+            merged_payload,
+            normalize_taxonomy_text=self._normalize_text,
+        )
+
+        if not any(tags_by_source.values()):
+            return
+
+        self.results["observation_hydration_attempts"] = self.results.get(
+            "observation_hydration_attempts", 0
+        ) + 1
+
+        tax = TaxonomyService()
+        now = datetime.utcnow()
+        observations_created = 0
+        observations_skipped = 0
+        _seen: set[tuple[int, int, int]] = set()
+
+        try:
+            for source, tag_names in tags_by_source.items():
+                if not tag_names:
+                    continue
+
+                authority = tax.get_or_create_authority(self.db, source)
+                authority_id = int(authority.id)
+                normalized_names = {self._normalize_text(n): n for n in tag_names if n}
+
+                if not normalized_names:
+                    continue
+
+                # Batch-load matching authority_terms that have concept_id set
+                terms = (
+                    self.db.query(AuthorityTerm)
+                    .filter(
+                        AuthorityTerm.authority_id == authority_id,
+                        AuthorityTerm.normalized_external_name.in_(normalized_names),
+                        AuthorityTerm.concept_id.isnot(None),
+                    )
+                    .all()
+                )
+
+                for term in terms:
+                    concept_id = term.concept_id
+                    if concept_id is None:
+                        continue
+
+                    obs_key = (db_record.id, concept_id, authority_id)
+                    if obs_key in _seen:
+                        continue
+
+                    # Check for existing observation (idempotent)
+                    existing = (
+                        self.db.query(ImageConceptObservation.id)
+                        .filter(
+                            ImageConceptObservation.image_id == db_record.id,
+                            ImageConceptObservation.concept_id == concept_id,
+                            ImageConceptObservation.authority_id == authority_id,
+                        )
+                        .first()
+                    )
+                    if existing is not None:
+                        _seen.add(obs_key)
+                        observations_skipped += 1
+                        continue
+
+                    self.db.add(
+                        ImageConceptObservation(
+                            image_id=db_record.id,
+                            concept_id=concept_id,
+                            authority_id=authority_id,
+                            authority_term_id=term.id,
+                            source_type=ObservationSource.IMPORT,
+                            certainty_label=ObservationCertainty.LIKELY,
+                            is_present=True,
+                            is_curated=False,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    _seen.add(obs_key)
+                    observations_created += 1
+
+            if observations_created:
+                self.db.flush()
+
+            self.results["observations_created"] = self.results.get(
+                "observations_created", 0
+            ) + observations_created
+            self.results["observations_skipped"] = self.results.get(
+                "observations_skipped", 0
+            ) + observations_skipped
+
+        except Exception as e:
+            self.db.rollback()
+            self.error_messages.append(
+                f"Could not hydrate observations for {image_path.name}: {e}"
+            )
+
     @staticmethod
     def _load_sidecar_json(sidecar_path: Path) -> dict[str, Any]:
         """Load sidecar JSON data, returning an empty dict on read/parse issues."""
@@ -685,6 +814,7 @@ class ImageCollection:
             db_record, image_path, processor
         )
         self._backfill_filename_if_needed(db_record, image_path, processor)
+        self._hydrate_missing_observations_if_needed(db_record, image_path, processor)
 
     @staticmethod
     def _local_perceptual_metadata_present(payload: Any) -> bool:
@@ -1229,6 +1359,189 @@ class ImageCollection:
 
         return candidates
 
+    def _ensure_variant_group_for_hash(self, new_image: ImageModel) -> None:
+        """Auto-create a hash_duplicate variant group when file_hash matches an existing image.
+
+        If another active image shares the same file_hash, ensures both images belong
+        to the same variant group (creating the group if needed). Idempotent — safe to
+        call multiple times.
+        """
+        if not new_image.file_hash or not new_image.id:
+            return
+
+        try:
+            # Find other active images with the same file_hash
+            sibling = (
+                self.db.query(ImageModel)
+                .filter(
+                    ImageModel.file_hash == new_image.file_hash,
+                    ImageModel.id != new_image.id,
+                    ImageModel.image_status != "tombstoned",
+                )
+                .first()
+            )
+            if sibling is None:
+                return  # No duplicate, nothing to group
+
+            group_key = f"hash:{new_image.file_hash}"
+
+            # Check if a variant group already exists for this hash
+            existing_group = (
+                self.db.query(VariantGroup)
+                .filter(VariantGroup.group_key == group_key)
+                .first()
+            )
+
+            if existing_group is None:
+                # Create new variant group
+                existing_group = VariantGroup(
+                    group_key=group_key,
+                    group_type="hash_duplicate",
+                    group_label="Duplicate File",
+                    cover_preference="sort_order",
+                )
+                self.db.add(existing_group)
+                self.db.flush()  # Need group ID for memberships
+
+                # Add the sibling (previously existing image) as first member
+                sibling_membership = ImageVariantGroupMembership(
+                    image_id=sibling.id,
+                    group_id=existing_group.id,
+                    role_in_group="member",
+                    sort_index=0,
+                    source="auto_hash",
+                )
+                self.db.add(sibling_membership)
+
+            # Check if new_image is already a member of this group
+            existing_membership = (
+                self.db.query(ImageVariantGroupMembership)
+                .filter(
+                    ImageVariantGroupMembership.image_id == new_image.id,
+                    ImageVariantGroupMembership.group_id == existing_group.id,
+                )
+                .first()
+            )
+            if existing_membership is None:
+                # Get next sort index
+                max_sort = (
+                    self.db.query(func.max(ImageVariantGroupMembership.sort_index))
+                    .filter(
+                        ImageVariantGroupMembership.group_id == existing_group.id
+                    )
+                    .scalar()
+                ) or 0
+
+                new_membership = ImageVariantGroupMembership(
+                    image_id=new_image.id,
+                    group_id=existing_group.id,
+                    role_in_group="member",
+                    sort_index=max_sort + 1,
+                    source="auto_hash",
+                )
+                self.db.add(new_membership)
+
+            self.db.flush()
+            print(
+                f"Auto-grouped image {new_image.id} into variant group "
+                f"'{group_key}' (group_id={existing_group.id})"
+            )
+        except Exception as exc:
+            # Fail open — never block image import
+            print(f"Warning: could not auto-create variant group: {exc}")
+
+    def _ensure_variant_group_for_civitai_hash(
+        self, db_record: ImageModel, civitai_hash: str
+    ) -> None:
+        """Auto-create a civitai_multi_resource variant group when civitai_hash matches an existing image.
+
+        If another active image shares the same civitai_hash, ensures both images belong
+        to the same variant group (creating the group if needed). Idempotent — safe to
+        call multiple times.
+        """
+        if not civitai_hash or not db_record.id:
+            return
+
+        try:
+            # Find other active images with the same civitai_hash
+            sibling = (
+                self.db.query(ImageModel)
+                .filter(
+                    ImageModel.civitai_hash == civitai_hash,
+                    ImageModel.id != db_record.id,
+                    ImageModel.image_status != "tombstoned",
+                )
+                .first()
+            )
+            if sibling is None:
+                return  # No duplicate, nothing to group
+
+            group_key = f"civitai:{civitai_hash}"
+
+            # Check if a variant group already exists for this hash
+            existing_group = (
+                self.db.query(VariantGroup)
+                .filter(VariantGroup.group_key == group_key)
+                .first()
+            )
+
+            if existing_group is None:
+                # Create new variant group
+                existing_group = VariantGroup(
+                    group_key=group_key,
+                    group_type="civitai_multi_resource",
+                    group_label="CivitAI Multi-Resource",
+                    cover_preference="sort_order",
+                )
+                self.db.add(existing_group)
+                self.db.flush()  # Need group ID for memberships
+
+                # Add the sibling (previously existing image) as first member
+                sibling_membership = ImageVariantGroupMembership(
+                    image_id=sibling.id,
+                    group_id=existing_group.id,
+                    role_in_group="member",
+                    sort_index=0,
+                    source="auto_civitai",
+                )
+                self.db.add(sibling_membership)
+
+            # Check if db_record is already a member of this group
+            existing_membership = (
+                self.db.query(ImageVariantGroupMembership)
+                .filter(
+                    ImageVariantGroupMembership.image_id == db_record.id,
+                    ImageVariantGroupMembership.group_id == existing_group.id,
+                )
+                .first()
+            )
+            if existing_membership is None:
+                max_sort = (
+                    self.db.query(func.max(ImageVariantGroupMembership.sort_index))
+                    .filter(
+                        ImageVariantGroupMembership.group_id == existing_group.id
+                    )
+                    .scalar()
+                ) or 0
+
+                new_membership = ImageVariantGroupMembership(
+                    image_id=db_record.id,
+                    group_id=existing_group.id,
+                    role_in_group="member",
+                    sort_index=max_sort + 1,
+                    source="auto_civitai",
+                )
+                self.db.add(new_membership)
+
+            self.db.flush()
+            print(
+                f"Auto-grouped image {db_record.id} into CivitAI variant group "
+                f"'{group_key}' (group_id={existing_group.id})"
+            )
+        except Exception as exc:
+            # Fail open — never block enrichment
+            print(f"Warning: could not auto-create CivitAI variant group: {exc}")
+
     def _import_new_image_with_processor(
         self,
         processor: ImageProcessor,
@@ -1294,6 +1607,10 @@ class ImageCollection:
             image_path=processor.original_path,
             processor=processor,
         )
+
+        # Auto-create hash_duplicate variant group if another active image
+        # shares the same file_hash.
+        self._ensure_variant_group_for_hash(new_image)
 
         self.results["images_added"] += 1
         return new_image, final_file_path
@@ -1712,6 +2029,11 @@ class ImageCollection:
         self.db.flush()
         self.db.refresh(db_record)
 
+        # Auto-create civitai_multi_resource variant group if another image
+        # shares the same civitai_hash.
+        if civitai_hash:
+            self._ensure_variant_group_for_civitai_hash(db_record, civitai_hash)
+
         processor.save_json_metadata(
             image_path,
             db_record,
@@ -1928,6 +2250,8 @@ class ImageCollection:
         except Exception:
             self.db.rollback()
             raise
+        # Auto-create hash_duplicate variant group if another image shares file_hash
+        self._ensure_variant_group_for_hash(new_image)
         self.results["images_added"] += 1
         self.results["json_db_entries_added"] += 1
 

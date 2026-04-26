@@ -104,10 +104,10 @@ def find_candidates(db: Session, include_tagged: bool) -> list[Candidate]:
     return candidates
 
 
-def delete_concepts(db: Session, candidates: list[Candidate]) -> tuple[int, int, int, int, int]:
+def delete_concepts(db: Session, candidates: list[Candidate]) -> tuple[int, int, int, int, int, int]:
     concept_ids = [c.concept_id for c in candidates]
     if not concept_ids:
-        return (0, 0, 0, 0, 0)
+        return (0, 0, 0, 0, 0, 0)
 
     # Unlink optional references first.
     terms_unlinked = (
@@ -127,11 +127,25 @@ def delete_concepts(db: Session, candidates: list[Candidate]) -> tuple[int, int,
         .filter(ConceptGroupMembership.concept_id.in_(concept_ids))
         .delete(synchronize_session=False)
     )
+
+    # Observations with an authority_term_id are valuable for tag filtering
+    # (Path 2c in filter_image_ids_by_tag_names).  Unlink concept_id instead
+    # of deleting so that authority-term-based filtering continues to work.
+    observations_unlinked = (
+        db.query(ImageConceptObservation)
+        .filter(ImageConceptObservation.concept_id.in_(concept_ids))
+        .filter(ImageConceptObservation.authority_term_id.isnot(None))
+        .update({ImageConceptObservation.concept_id: None}, synchronize_session=False)
+    )
+
+    # Observations without an authority_term_id have no other useful link;
+    # they can be safely deleted.
     observations_deleted = (
         db.query(ImageConceptObservation)
         .filter(ImageConceptObservation.concept_id.in_(concept_ids))
         .delete(synchronize_session=False)
     )
+
     concepts_deleted = (
         db.query(Concept)
         .filter(Concept.id.in_(concept_ids))
@@ -144,6 +158,7 @@ def delete_concepts(db: Session, candidates: list[Candidate]) -> tuple[int, int,
         int(aliases_deleted or 0),
         int(memberships_deleted or 0),
         int(observations_deleted or 0),
+        int(observations_unlinked or 0),
     )
 
 
@@ -172,7 +187,7 @@ def main() -> int:
             print("No changes applied. Re-run with --apply to execute.")
             return 0
 
-        deleted, terms_unlinked, aliases_deleted, memberships_deleted, observations_deleted = delete_concepts(db, candidates)
+        deleted, terms_unlinked, aliases_deleted, memberships_deleted, observations_deleted, observations_unlinked = delete_concepts(db, candidates)
         db.commit()
 
         print("Completed:")
@@ -181,6 +196,7 @@ def main() -> int:
         print(f"  concept aliases deleted: {aliases_deleted}")
         print(f"  group memberships deleted: {memberships_deleted}")
         print(f"  observations deleted: {observations_deleted}")
+        print(f"  observations unlinked (preserved): {observations_unlinked}")
         return 0
     except Exception as exc:
         db.rollback()

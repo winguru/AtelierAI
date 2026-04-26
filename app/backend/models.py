@@ -1,3 +1,5 @@
+import enum
+
 from sqlalchemy import (
     Boolean,
     Column,
@@ -11,9 +13,28 @@ from sqlalchemy import (
     JSON,
     Enum,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import relationship
 from database import Base
+
+
+# ---------------------------------------------------------------------------
+# IntEnum types for ImageConceptObservation compact storage
+# ---------------------------------------------------------------------------
+
+class ObservationSource(enum.IntEnum):
+    """Origin of a tag observation on an image."""
+    IMPORT = 1       # tag imported during scan/ingestion/backfill
+    # Future: RESCAN = 2, USER = 3, ANALYSIS = 4
+
+
+class ObservationCertainty(enum.IntEnum):
+    """How confident we are that this observation is correct."""
+    UNSPECIFIED = 0
+    LIKELY = 1       # default — tag came from external source
+    CONFIRMED = 2    # user verified
+    # Future: UNCERTAIN = 3
 
 # 1. Define the values in a single, constant tuple. This is the source of truth.
 COLLECTION_TYPE_VALUES = ("public", "paid", "private", "user_created")
@@ -91,6 +112,9 @@ class ImageModel(Base):
         "CollectionModel", secondary="image_collections", back_populates="images"
     )
     artist = relationship("Artist", back_populates="images")
+    variant_groups = relationship(
+        "VariantGroup", secondary="image_variant_groups", back_populates="images"
+    )
     generation_processes = relationship(
         "GenerationProcess",
         back_populates="image",
@@ -294,20 +318,16 @@ class ImageConceptObservation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     image_id = Column(Integer, ForeignKey("images.id"), nullable=False, index=True)
-    concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=False, index=True)
+    concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=True, index=True)
     authority_id = Column(Integer, ForeignKey("tag_authorities.id"), nullable=True, index=True)
     authority_term_id = Column(Integer, ForeignKey("authority_terms.id"), nullable=True, index=True)
     tool_id = Column(Integer, ForeignKey("tools.id"), nullable=True, index=True)
     analysis_data_id = Column(Integer, ForeignKey("analysis_data.id"), nullable=True, index=True)
-    source_type = Column(String, nullable=False, default="user")
-    source_label = Column(String)
-    certainty_label = Column(String, nullable=False, default="likely")
-    confidence = Column(Float, nullable=True)
-    dimension = Column(String, nullable=False, default="general")
-    polarity = Column(String, nullable=False, default="present")
+    source_type = Column(Integer, nullable=False, default=ObservationSource.IMPORT)
+    certainty_label = Column(Integer, nullable=False, default=ObservationCertainty.LIKELY)
+    is_present = Column(Boolean, nullable=False, default=True)
     is_curated = Column(Boolean, nullable=False, default=False)
-    evidence_text = Column(Text)
-    metadata_json = Column(JSON)
+    confidence = Column(Float, nullable=True)
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 
@@ -319,8 +339,6 @@ class ImageConceptObservation(Base):
     analysis_data = relationship("AnalysisData")
 
     __table_args__ = (
-        Index("ix_obs_image_dimension", "image_id", "dimension"),
-        Index("ix_obs_concept_dimension", "concept_id", "dimension"),
         UniqueConstraint(
             "image_id", "concept_id", "authority_id",
             name="uq_obs_image_concept_authority",
@@ -781,3 +799,38 @@ class GenerationMatchAttempt(Base):
 class SchemaVersion(Base):
     __tablename__ = "schema_version"
     version_num = Column(String, primary_key=True)
+
+
+class VariantGroup(Base):
+    """A named group of related images (hash duplicates, img2img pairs, seed families, etc.).
+
+    Images can belong to multiple groups via the image_variant_groups junction table.
+    Each group has a unique group_key for deterministic identity and a group_type
+    describing how the relationship was established.
+    """
+    __tablename__ = "variant_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_key = Column(String, unique=True, index=True, nullable=False)
+    group_type = Column(String, index=True, nullable=False)  # "hash_duplicate" | "civitai_multi_resource" | "img2img" | "seed_family" | "manual"
+    group_label = Column(String, nullable=True)
+    cover_image_id = Column(Integer, ForeignKey("images.id"), nullable=True)
+    cover_preference = Column(String, nullable=False, default="sort_order")  # "sort_order" | "video_first" | "base_first" | "manual"
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # Relationships
+    images = relationship(
+        "ImageModel", secondary="image_variant_groups", back_populates="variant_groups"
+    )
+
+
+class ImageVariantGroupMembership(Base):
+    """Junction table linking images to variant groups with role and source metadata."""
+    __tablename__ = "image_variant_groups"
+
+    image_id = Column(Integer, ForeignKey("images.id"), primary_key=True)
+    group_id = Column(Integer, ForeignKey("variant_groups.id"), primary_key=True)
+    role_in_group = Column(String, nullable=False, default="member")  # "primary" | "base" | "result" | "seed_variant" | "member"
+    sort_index = Column(Integer, nullable=False, default=0)
+    source = Column(String, nullable=False, default="manual")  # "auto_hash" | "auto_seed" | "auto_img2img" | "auto_civitai" | "manual"

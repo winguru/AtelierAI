@@ -138,6 +138,26 @@ class GenerationTemplatePathMapping(BaseModel):
     default_value: Optional[Any] = None
 
 
+# --- Variant Group Schemas ---
+
+
+class VariantGroupCreateRequest(BaseModel):
+    group_type: str  # "hash_duplicate" | "civitai_multi_resource" | "img2img" | "manual"
+    group_label: Optional[str] = None
+    image_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+class VariantGroupUpdateRequest(BaseModel):
+    group_label: Optional[str] = None
+    cover_image_id: Optional[int] = None
+    cover_preference: Optional[str] = None
+
+
+class VariantGroupAddMembersRequest(BaseModel):
+    image_ids: list[int] = Field(min_length=1, max_length=500)
+    role_in_group: Optional[str] = "member"
+
+
 class GenerationTemplateImportRequest(BaseModel):
     name: str
     description: Optional[str] = None

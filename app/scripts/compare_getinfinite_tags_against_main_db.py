@@ -39,6 +39,21 @@ def _normalize_name(value: str | None) -> str:
     return " ".join(text.split()).lower()
 
 
+def _validate_table_name(name: str) -> None:
+    """Reject table names that contain characters outside [A-Za-z0-9_].
+
+    All three helper functions that build SQL strings by interpolating a
+    table name (e.g. f"SELECT ... FROM {name}_image_tags") call this guard
+    so that --table-name cannot be used as a SQL injection vector.
+    """
+    import re
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError(
+            f"Invalid table name {name!r}. "
+            "Only letters, digits, and underscores are allowed."
+        )
+
+
 def _slugify(value: str) -> str:
     base = "".join(ch.lower() if ch.isalnum() else "-" for ch in value)
     collapsed = "-".join(part for part in base.split("-") if part)
@@ -46,6 +61,7 @@ def _slugify(value: str) -> str:
 
 
 def _get_extracted_tag_ids(extracted_db_path: Path, table_name: str) -> set[int]:
+    _validate_table_name(table_name)
     image_tags_table = f"{table_name}_image_tags"
 
     conn = sqlite3.connect(extracted_db_path)
@@ -85,6 +101,7 @@ def _get_extracted_tag_ids(extracted_db_path: Path, table_name: str) -> set[int]
 
 
 def _get_extracted_tag_counts(extracted_db_path: Path, table_name: str) -> dict[int, int]:
+    _validate_table_name(table_name)
     image_tags_table = f"{table_name}_image_tags"
 
     conn = sqlite3.connect(extracted_db_path)
@@ -196,32 +213,34 @@ def _iter_civitai_tag_ids_from_metadata(metadata: Any) -> list[int]:
 
 
 def _get_main_civitai_tag_counts(main_db_path: Path) -> tuple[dict[int, int], dict[str, int]]:
+    id_counts: dict[int, int] = {}
+    name_counts: dict[str, int] = {}
+
     conn = sqlite3.connect(main_db_path)
     try:
-        rows = conn.execute(
+        cursor = conn.execute(
             "SELECT json_metadata FROM images WHERE json_metadata IS NOT NULL"
-        ).fetchall()
+        )
+        # Stream rows to avoid pulling all json_metadata blobs into memory at once.
+        for (raw_metadata,) in cursor:
+            metadata = _coerce_metadata_dict(raw_metadata)
+            if not metadata:
+                continue
+
+            tag_ids = _iter_civitai_tag_ids_from_metadata(metadata)
+            if tag_ids:
+                for tag_id in tag_ids:
+                    id_counts[tag_id] = int(id_counts.get(tag_id, 0)) + 1
+                continue
+
+            for tag_name in _iter_civitai_tag_names_from_metadata(metadata):
+                normalized = _normalize_name(tag_name)
+                if not normalized:
+                    continue
+                name_counts[normalized] = int(name_counts.get(normalized, 0)) + 1
     finally:
         conn.close()
 
-    id_counts: dict[int, int] = {}
-    name_counts: dict[str, int] = {}
-    for (raw_metadata,) in rows:
-        metadata = _coerce_metadata_dict(raw_metadata)
-        if not metadata:
-            continue
-
-        tag_ids = _iter_civitai_tag_ids_from_metadata(metadata)
-        if tag_ids:
-            for tag_id in tag_ids:
-                id_counts[tag_id] = int(id_counts.get(tag_id, 0)) + 1
-            continue
-
-        for tag_name in _iter_civitai_tag_names_from_metadata(metadata):
-            normalized = _normalize_name(tag_name)
-            if not normalized:
-                continue
-            name_counts[normalized] = int(name_counts.get(normalized, 0)) + 1
     return id_counts, name_counts
 
 
@@ -354,12 +373,32 @@ def _get_known_civitai_tag_ids(main_db_path: Path, authority_name: str) -> set[i
     return out
 
 
+def _extract_trpc_result(raw_response: Any) -> Any:
+    """Extract the tRPC result payload from a raw envelope dict.
+
+    Replicates the success-path extraction used by CivitaiAPI._make_request so
+    probe helpers can derive a parsed result from the raw response without
+    issuing a second HTTP request.
+    """
+    if not isinstance(raw_response, dict):
+        return None
+    result_wrapper = raw_response.get("result")
+    if not isinstance(result_wrapper, dict):
+        return None
+    result_data = result_wrapper.get("data")
+    if isinstance(result_data, dict) and "json" in result_data:
+        return result_data["json"]
+    return result_data
+
+
 def _probe_tag_get_by_id(tag_id: int, output_path: Path) -> dict[str, Any]:
     api = CivitaiAPI.get_instance()
     payload = {"id": int(tag_id), "authed": True}
 
-    parsed_response = api._make_request(endpoint="tag.getById", payload_data=payload)
+    # One HTTP call; derive the parsed result from the envelope rather than
+    # making a second request via _make_request.
     raw_response = api._make_raw_request(endpoint="tag.getById", payload_data=payload)
+    parsed_response = _extract_trpc_result(raw_response)
 
     result = {
         "tag_id": int(tag_id),
@@ -375,6 +414,7 @@ def _probe_tag_get_by_id(tag_id: int, output_path: Path) -> dict[str, Any]:
 
 
 def _find_first_image_for_tag(extracted_db_path: Path, table_name: str, tag_id: int) -> int | None:
+    _validate_table_name(table_name)
     image_tags_table = f"{table_name}_image_tags"
 
     conn = sqlite3.connect(extracted_db_path)
@@ -428,8 +468,9 @@ def _probe_tag_get_votable_tags(
     api = CivitaiAPI.get_instance()
     payload = {"id": int(image_id), "type": "image", "authed": True}
 
-    parsed_response = api._make_request(endpoint="tag.getVotableTags", payload_data=payload)
+    # One HTTP call; derive the parsed result from the envelope.
     raw_response = api._make_raw_request(endpoint="tag.getVotableTags", payload_data=payload)
+    parsed_response = _extract_trpc_result(raw_response)
 
     matched_tag = None
     if isinstance(parsed_response, list):
@@ -577,7 +618,10 @@ def _sample_unknown_tags_with_metadata(
 
 
 def _validate_sampled_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    required_fields = ["id", "name", "type", "nsfwLevel", "automated", "concrete"]
+    # "id" is always set unconditionally by the sampling loop, so it adds no
+    # signal to coverage reporting.  Only track fields that may genuinely be
+    # missing from the API response.
+    required_fields = ["name", "type", "nsfwLevel", "automated", "concrete"]
     coverage = {field: 0 for field in required_fields}
     mismatched_ids = 0
 
@@ -622,7 +666,6 @@ def _ensure_authority(conn: sqlite3.Connection, authority_name: str) -> int:
     if row:
         return int(row[0])
 
-    now_iso = _utcnow_iso()
     defaults = {
         "civitai": (
             "CivitAI native tag authority and IDs.",
@@ -770,27 +813,34 @@ def _upsert_authority_term(
             or _parse_int(by_external[3]) != concept_id
             or (by_external[4] or "") != metadata_json
         )
-        conn.execute(
-            """
-            UPDATE authority_terms
-            SET external_name = ?,
-                normalized_external_name = ?,
-                concept_id = ?,
-                metadata_json = ?,
-                updated_at = ?,
-                last_seen_at = ?
-            WHERE id = ?
-            """,
-            (
-                external_name,
-                normalized_external_name,
-                concept_id,
-                metadata_json,
-                now_iso,
-                now_iso,
-                term_id,
-            ),
-        )
+        if changed:
+            conn.execute(
+                """
+                UPDATE authority_terms
+                SET external_name = ?,
+                    normalized_external_name = ?,
+                    concept_id = ?,
+                    metadata_json = ?,
+                    updated_at = ?,
+                    last_seen_at = ?
+                WHERE id = ?
+                """,
+                (
+                    external_name,
+                    normalized_external_name,
+                    concept_id,
+                    metadata_json,
+                    now_iso,
+                    now_iso,
+                    term_id,
+                ),
+            )
+        else:
+            # Touch last_seen_at only — no data changed, so updated_at must not advance.
+            conn.execute(
+                "UPDATE authority_terms SET last_seen_at = ? WHERE id = ?",
+                (now_iso, term_id),
+            )
         return "updated" if changed else "seen"
 
     by_name = conn.execute(
@@ -1119,8 +1169,11 @@ def main() -> None:
         "--import-main-db",
         action="store_true",
         help=(
-            "Upsert sampled unknown tags into main DB taxonomy tables "
-            "(concepts/concept_aliases/authority_terms)."
+            "Sync CivitAI tag counts (post_count / extracted_post_count / main_gallery_count) "
+            "for all existing authority_terms, then upsert any sampled unknown tags into the "
+            "taxonomy tables (concepts / concept_aliases / authority_terms). "
+            "Count sync always runs; tag upsert requires sampled rows from "
+            "--sample-unknown-count or --import-sample-json."
         ),
     )
     parser.add_argument(

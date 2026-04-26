@@ -14,6 +14,7 @@ from sqlalchemy import (
     Enum,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import relationship
 from database import Base
@@ -346,6 +347,19 @@ class ImageConceptObservation(Base):
             "image_id", "concept_id", "authority_id",
             name="uq_obs_image_concept_authority",
         ),
+        # Partial unique: one observation per (image, term) — null term allowed
+        Index(
+            "uq_obs_image_authority_term",
+            "image_id", "authority_term_id",
+            unique=True,
+            sqlite_where=text("authority_term_id IS NOT NULL"),
+        ),
+        # Covering: term → image (tag filtering/counting without table lookup)
+        Index("ix_obs_term_image", "authority_term_id", "image_id"),
+        # Covering: concept+authority → image (concept-branch filtering)
+        Index("ix_obs_concept_auth_image", "concept_id", "authority_id", "image_id"),
+        # Covering: authority+term → image (gallery tag counting by source)
+        Index("ix_obs_authority_term_image", "authority_id", "authority_term_id", "image_id"),
     )
 
 

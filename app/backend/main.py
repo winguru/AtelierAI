@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import time
 import threading
+import urllib.parse as _urlparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1987,9 +1988,9 @@ def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, lis
     ``_gallery_tag_names_by_source_db_only`` — but entirely from relational
     tables with no JSON parsing.
 
-    User-assigned tags that exist only in the ``ImageModel.user_tags`` column
-    (not yet back-filled into authority_terms) are merged in so nothing is
-    lost.
+    Note: user tags are kept in sync with observations via
+    ``_sync_user_tag_observations``; any user_tags not yet back-filled into
+    authority_terms will not appear here until that sync runs.
     """
     by_source: dict[str, set[str]] = {
         "civitai": set(),
@@ -8977,11 +8978,11 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
                 db_col.civitai_last_full_item_count
                 or db_col.civitai_head_item_count
             )
-            if db_col.civitai_last_synced_at:
+            if db_col.civitai_last_synced_at is not None:
                 col["lastSyncedAt"] = _isoformat_or_none(
                     db_col.civitai_last_synced_at
                 )
-            if db_col.civitai_last_full_scan_at:
+            if db_col.civitai_last_full_scan_at is not None:
                 col["lastFullScanAt"] = _isoformat_or_none(
                     db_col.civitai_last_full_scan_at
                 )
@@ -10409,7 +10410,7 @@ def _ingest_prepared_civitai_import(
         )
 
         # Update artist with CivitAI identity if we have author_id
-        if prepared.author_id is not None:
+        if image is not None and prepared.author_id is not None:
             if image.artist_id is not None:
                 # Update existing artist with CivitAI identity
                 artist_obj = db.query(Artist).filter(Artist.id == image.artist_id).first()
@@ -10418,11 +10419,11 @@ def _ingest_prepared_civitai_import(
                     if artist_obj.civitai_user_id is None:
                         artist_obj.civitai_user_id = prepared.author_id
                         dirty = True
-                    if prepared.author_deleted and not artist_obj.civitai_user_deleted:
+                    if prepared.author_deleted and artist_obj.civitai_user_deleted is not True:
                         artist_obj.civitai_user_deleted = True
                         if (
                             prepared.author_original_name
-                            and not artist_obj.civitai_user_original_name
+                            and artist_obj.civitai_user_original_name is None
                         ):
                             artist_obj.civitai_user_original_name = (
                                 prepared.author_original_name
@@ -13866,8 +13867,6 @@ async def read_comfyui_lab():
 # ── ComfyUI proxy ─────────────────────────────────────────────
 # Forwards requests to a ComfyUI instance to avoid CORS issues
 # from the browser.  The ComfyUI URL is passed via ?target= query param.
-
-import urllib.parse as _urlparse
 
 _PROXY_TIMEOUT = 30  # seconds
 
@@ -18751,6 +18750,38 @@ def search_suggest(
     if not needle:
         return {"collections": [], "artists": [], "tags": []}
 
+    # Short-lived cache per unique (query + all filter params) combination.
+    # Debounced autocomplete still fires many requests at the same prefix;
+    # 15 s TTL keeps suggestions fresh without re-running 7 SQL queries on
+    # every keystroke.
+    suggest_cache_key = _build_search_cache_key(
+        "suggest",
+        payload={
+            "q": needle,
+            "limit": limit,
+            "nsfw_rating": _normalize_cache_list(nsfw_rating),
+            "nsfw_safety": _normalize_cache_list(nsfw_safety),
+            "search": (search or "").strip().lower(),
+            "generation_software": _normalize_cache_list(generation_software),
+            "source_site": _normalize_cache_list(source_site),
+            "mimetype": _normalize_cache_list(mimetype),
+            "artist_name": _normalize_cache_list(artist_name),
+            "collection_name": _normalize_cache_list(collection_name),
+            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
+            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
+            "a1111_hires": _normalize_cache_list(a1111_hires),
+            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
+            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
+            "include_tag": _normalize_cache_list(include_tag),
+            "exclude_tag": _normalize_cache_list(exclude_tag),
+            "missing_data": _normalize_cache_list(missing_data),
+            "missing_source": _normalize_cache_list(missing_source),
+        },
+    )
+    cached_suggest = _search_cache_get(suggest_cache_key)
+    if isinstance(cached_suggest, dict):
+        return cached_suggest
+
     like_pattern = f"%{needle}%"
 
     # --- Build the constrained image ID set from filter context ---
@@ -18827,25 +18858,31 @@ def search_suggest(
         missing_source_filtered,
     ):
         if fids is not None:
+            # Convert to set so & intersection works regardless of whether the
+            # previous value was a list or a set (all filter helpers return list[int]).
+            fids_set: set[int] = set(fids)
             constrained_ids = (
-                fids if constrained_ids is None else constrained_ids & fids
+                fids_set if constrained_ids is None else constrained_ids & fids_set
             )
 
-    # Final set of image IDs that suggestions must be linked to
+    # Build the final image-ID constraint as a SQL subquery.
+    # When no filters are active (constrained_ids is None), avoid materialising
+    # all image IDs into Python and passing them back as a literal IN(…) list.
+    # That pattern generates enormous SQL for large galleries and defeats SQLite
+    # index lookups on image_concept_observations.
     if constrained_ids is not None:
-        allowed_ids = constrained_ids
-    else:
-        allowed_ids = set(
-            row[0]
-            for row in db.query(ImageModel.id).filter(_active_image_filter()).all()
+        if not constrained_ids:
+            return {"collections": [], "artists": [], "tags": []}
+        allowed_ids_sub = (
+            db.query(ImageModel.id)
+            .filter(ImageModel.id.in_(constrained_ids))
+            .subquery()
         )
-
-    if not allowed_ids:
-        return {"collections": [], "artists": [], "tags": []}
-
-    allowed_ids_sub = (
-        db.query(ImageModel.id).filter(ImageModel.id.in_(allowed_ids)).subquery()
-    )
+    else:
+        # No active filters — use _active_image_filter() as a real SQL subquery.
+        allowed_ids_sub = (
+            db.query(ImageModel.id).filter(_active_image_filter()).subquery()
+        )
 
     # --- Collections with counts ---
     collection_rows = (
@@ -18979,7 +19016,7 @@ def search_suggest(
     try:
         ut_results = (
             db.query(ImageModel.user_tags)
-            .filter(ImageModel.id.in_(allowed_ids))
+            .filter(ImageModel.id.in_(allowed_ids_sub))
             .all()
         )
         user_tag_counts: dict[str, int] = {}
@@ -19008,13 +19045,15 @@ def search_suggest(
         key=lambda t: (-t["count"], t["name"].lower()),
     )[:limit]
 
-    return {
+    result = {
         "collections": [
             {"name": name, "count": int(cnt)} for name, cnt in collection_rows
         ],
         "artists": [{"name": name, "count": int(cnt)} for name, cnt in artist_rows],
         "tags": sorted_tags,
     }
+    _search_cache_put(suggest_cache_key, result, ttl_seconds=15.0)
+    return result
 
 
 @app.get("/filters/options", response_model=dict)
@@ -19239,8 +19278,8 @@ def _serialize_variant_group(group: VariantGroup) -> dict:
         "group_label": group.group_label,
         "cover_image_id": group.cover_image_id,
         "cover_preference": group.cover_preference,
-        "created_at": group.created_at.isoformat() if group.created_at else None,
-        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
+        "created_at": group.created_at.isoformat() if group.created_at is not None else None,
+        "updated_at": group.updated_at.isoformat() if group.updated_at is not None else None,
     }
 
 
@@ -21981,12 +22020,22 @@ def taxonomy_tag_maint_list(
         "id": AuthorityTerm.id,
         "name": AuthorityTerm.external_name,
         "ext_id": AuthorityTerm.external_tag_id,
+        "concept_id": AuthorityTerm.concept_id,
     }
-    sort_expr = col_map.get(sort_col, AuthorityTerm.external_name)
-    if sort_dir.strip().lower() == "desc":
-        sort_expr = sort_expr.desc()
+
+    sort_direction = (sort_dir or "asc").strip().lower()
+    if sort_direction not in {"asc", "desc"}:
+        sort_direction = "asc"
+
+    # post_count is nested in metadata_json — use SQLite JSON extraction for sorting
+    if sort_col == "post_count":
+        post_count_expr = func.json_extract(AuthorityTerm.metadata_json, "$.post_count")
+        sort_expr = (
+            post_count_expr.desc() if sort_direction == "desc" else post_count_expr.asc()
+        )
     else:
-        sort_expr = sort_expr.asc()
+        sort_expr = col_map.get(sort_col, AuthorityTerm.external_name)
+        sort_expr = sort_expr.desc() if sort_direction == "desc" else sort_expr.asc()
 
     term_rows = (
         q.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size).all()
@@ -22762,7 +22811,7 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
 
         # Also check for rows that haven't been backfilled yet — match by
         # source_url using the old batched-URL approach.
-        matched_ids = {row.civitai_image_id for row in rows if row.civitai_image_id}
+        matched_ids = {row.civitai_image_id for row in rows if row.civitai_image_id is not None}
         unmatched_ids = [iid for iid in image_ids if iid not in matched_ids]
 
         if unmatched_ids:
@@ -22784,10 +22833,10 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
                     .all()
                 )
                 for row in url_rows:
-                    if row.civitai_image_id and row.civitai_image_id not in matched_ids:
+                    if row.civitai_image_id is not None and row.civitai_image_id not in matched_ids:
                         rows.append(row)
                         matched_ids.add(row.civitai_image_id)
-                    elif not row.civitai_image_id:
+                    elif row.civitai_image_id is None:
                         # Not yet backfilled — extract from URL and include.
                         src = str(getattr(row, "source_url", "") or "")
                         m = re.search(r"/images/(\d+)", src)
@@ -22800,7 +22849,7 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
         # Build a lookup dict keyed by civitai_image_id
         db_lookup: dict[int, ImageModel] = {}
         for row in rows:
-            if row.civitai_image_id:
+            if row.civitai_image_id is not None:
                 db_lookup[row.civitai_image_id] = row
             else:
                 # Legacy fallback: extract from source_url

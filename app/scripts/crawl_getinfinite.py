@@ -6,14 +6,14 @@ JSON file per image.getInfinite page. Individual image metadata is not fetched
 separately; only the paged getInfinite results are written.
 
 Supported gallery URLs:
-    https://civitai.com/images
-    https://civitai.com/videos
-    https://civitai.com/user/<username>/images
-    https://civitai.com/user/<username>/videos
-    https://civitai.com/collections/<collection_id>
-    https://civitai.com/models/<model_id>
-    https://civitai.com/models/<model_id>?modelVersionId=<model_version_id>
-    https://civitai.com/models/<model_id>?modelversion=<model_version_id>
+    https://civitai.red/images
+    https://civitai.red/videos
+    https://civitai.red/user/<username>/images
+    https://civitai.red/user/<username>/videos
+    https://civitai.red/collections/<collection_id>
+    https://civitai.red/models/<model_id>
+    https://civitai.red/models/<model_id>?modelVersionId=<model_version_id>
+    https://civitai.red/models/<model_id>?modelversion=<model_version_id>
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -31,11 +32,12 @@ from urllib.parse import parse_qs, urlparse
 from path_setup import PROJECT_ROOT  # noqa: F401 - adds src/ to sys.path
 from atelierai.civitai.civitai_api import CivitaiAPI
 
-DEFAULT_SOURCE_URL = "https://civitai.com/images"
+DEFAULT_SOURCE_URL = "https://civitai.red/images"
 DEFAULT_ORDER = "Newest"
 DEFAULT_PERIOD = "Day"
 DEFAULT_TYPES = ["image", "video"]
 DEFAULT_INCLUDE = ["cosmetics"]
+# Bitmask for CivitAI browsing level: 63 = all bits set (SFW + all NSFW tiers enabled).
 DEFAULT_BROWSING_LEVEL = 63
 DEFAULT_PERIOD_MODE = "published"
 _TRPC_MAX_RETRIES = 3
@@ -126,18 +128,21 @@ def _normalize_source_url(source_url: str) -> str:
     raw = str(source_url or "").strip()
     if not raw:
         return DEFAULT_SOURCE_URL
-    if raw.startswith("civitai.com/"):
+    # Add scheme for bare domain inputs.
+    if raw.startswith(("civitai.red/", "www.civitai.red/", "civitai.com/", "www.civitai.com/")):
         raw = f"https://{raw}"
-    elif raw.startswith("www.civitai.com/"):
-        raw = f"https://{raw}"
+    # Rewrite civitai.com (sanitized/PG-13 domain) to civitai.red (full content domain).
+    parsed = urlparse(raw)
+    if parsed.netloc in {"civitai.com", "www.civitai.com"}:
+        raw = parsed._replace(netloc="civitai.red").geturl()
     return raw
 
 
 def _parse_source_url(source_url: str, period: str, order: str) -> GalleryConfig:
     normalized_url = _normalize_source_url(source_url)
     parsed = urlparse(normalized_url)
-    if parsed.netloc not in {"civitai.com", "www.civitai.com"}:
-        raise ValueError(f"Unsupported host '{parsed.netloc}'. Expected civitai.com")
+    if parsed.netloc not in {"civitai.red", "www.civitai.red"}:
+        raise ValueError(f"Unsupported host '{parsed.netloc}'. Expected civitai.red")
 
     parts = [part for part in parsed.path.split("/") if part]
     query = parse_qs(parsed.query)
@@ -320,7 +325,8 @@ def _load_json_file(path: Path) -> Any:
 def _page_sort_key(path: Path) -> tuple[int, str]:
     match = _PAGE_FILE_RE.match(path.name)
     if not match:
-        return (0, path.name)
+        # Non-matching files (e.g. summary.json) sort after all numbered pages.
+        return (sys.maxsize, path.name)
     return (int(match.group(1)), path.name)
 
 
@@ -432,7 +438,8 @@ def _resume_state_from_page_files(output_dir: Path, config: GalleryConfig) -> di
         last_page_payload = payload
         last_page_path = page_file
 
-    assert last_page_payload is not None
+    if last_page_payload is None:
+        raise ValueError(f"No readable page files found in '{output_dir}'")
     cursor_to_request = last_page_payload.get("next_cursor")
 
     return {
@@ -448,27 +455,26 @@ def _resume_state_from_page_files(output_dir: Path, config: GalleryConfig) -> di
             if isinstance(summary_payload, dict)
             else None
         ),
-        "pages_requested": int(
-            summary_payload.get("pages_requested")
-            if isinstance(summary_payload, dict) and summary_payload.get("pages_requested") is not None
+        "pages_requested": (
+            int(summary_payload.get("pages_requested") or pages_fetched)
+            if isinstance(summary_payload, dict)
             else pages_fetched
         ),
         "pages_fetched": pages_fetched,
         "total_items": total_items,
-        "empty_first_page_retries": int(
-            summary_payload.get("empty_first_page_retries")
-            if isinstance(summary_payload, dict) and summary_payload.get("empty_first_page_retries") is not None
-            else 0
-        ),
-        "undefined_next_cursor_retries": int(
-            summary_payload.get("undefined_next_cursor_retries")
+        "empty_first_page_retries": (
+            int(summary_payload.get("empty_first_page_retries") or 0)
             if isinstance(summary_payload, dict)
-            and summary_payload.get("undefined_next_cursor_retries") is not None
             else 0
         ),
-        "anomaly_count": int(
-            summary_payload.get("anomaly_count")
-            if isinstance(summary_payload, dict) and summary_payload.get("anomaly_count") is not None
+        "undefined_next_cursor_retries": (
+            int(summary_payload.get("undefined_next_cursor_retries") or 0)
+            if isinstance(summary_payload, dict)
+            else 0
+        ),
+        "anomaly_count": (
+            int(summary_payload.get("anomaly_count") or 0)
+            if isinstance(summary_payload, dict)
             else 0
         ),
         "anomalies": list(summary_payload.get("anomalies") or []) if isinstance(summary_payload, dict) else [],
@@ -630,6 +636,8 @@ def crawl(
             return
 
     session_started_at = time.monotonic()
+    # started_at tracks total elapsed from this invocation; intentionally equal to
+    # session_started_at for now (kept separate for future per-resume-segment tracking).
     started_at = time.monotonic()
 
     def persist_state(*, completed: bool = False) -> None:
@@ -828,6 +836,10 @@ def crawl(
                         f"\n[page {pages_requested}] tRPC 429 - global backoff {backoff:.1f}s "
                         f"(attempt {attempt}/{_TRPC_MAX_RETRIES})"
                     )
+                    # No explicit sleep here: _make_raw_request calls
+                    # http_client.request() which calls _wait_for_global_backoff()
+                    # at the start of its own retry loop, blocking until the
+                    # cooldown set above expires.
                 else:
                     print(
                         f"\n[page {pages_requested}] tRPC error HTTP {status} "
@@ -1027,7 +1039,7 @@ def main() -> None:
     parser.add_argument(
         "--url",
         default=DEFAULT_SOURCE_URL,
-        help="Starting gallery URL (default: https://civitai.com/images)",
+        help="Starting gallery URL (default: https://civitai.red/images)",
     )
     parser.add_argument(
         "--period",

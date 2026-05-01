@@ -1,6 +1,10 @@
+// ── Memory ───────────────────────────────────────────────────────────────────
+// 📄 docs: app/docs/memories/image-api.md
+// 📄 docs: app/docs/memories/taxonomy-import.md
+// ──────────────────────────────────────────────────────────────────────────────
 (() => {
   const MIN_VISIBLE_PANES = 4;
-  const TREE_API_BASE = '/taxonomy/tree';
+  const TREE_API_BASE = '/api/taxonomy/tree';
   const conceptBoard = document.getElementById('concept-board');
   const tagBoard = document.getElementById('tag-board');
   const tagDetailsPanel = document.getElementById('tag-details');
@@ -668,7 +672,7 @@
   async function persistConceptRename(conceptId, canonicalName) {
     if (!state.apiReady) return;
     try {
-      await apiRequest(`/taxonomy/concepts/${Number(conceptId)}`, {
+      await apiRequest(`/api/taxonomy/concepts/${Number(conceptId)}`, {
         method: 'PATCH',
         body: JSON.stringify({ canonical_name: canonicalName }),
       });
@@ -680,7 +684,7 @@
   async function persistConceptParent(conceptId, parentKey) {
     if (!state.apiReady) return true;
     try {
-      await apiRequest(`/taxonomy/concepts/${Number(conceptId)}/parent`, {
+      await apiRequest(`/api/taxonomy/concepts/${Number(conceptId)}/parent`, {
         method: 'POST',
         body: JSON.stringify({ parent_concept_id: parentKeyToParentId(parentKey) }),
       });
@@ -693,7 +697,7 @@
   async function persistDeleteConceptBranch(conceptId) {
     if (!state.apiReady) return true;
     try {
-      await apiRequest(`/taxonomy/concepts/${Number(conceptId)}`, {
+      await apiRequest(`/api/taxonomy/concepts/${Number(conceptId)}`, {
         method: 'DELETE',
       });
       return true;
@@ -1841,7 +1845,7 @@
 
     if (state.apiReady) {
       try {
-        const result = await apiRequest('/taxonomy/concepts', {
+        const result = await apiRequest('/api/taxonomy/concepts', {
           method: 'POST',
           body: JSON.stringify({
             canonical_name: trimmed,

@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/model-reference.md
+# ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
 import os
@@ -39,10 +42,12 @@ class ModelReferenceService:
         "model": "checkpoint",
         "checkpoint": "checkpoint",
         "ckpt": "checkpoint",
+        "diffusion_model": "diffusion_model",
         "lora": "lora",
         "lycoris": "lora",
         "locon": "lora",
         "loha": "lora",
+        "dora": "dora",
         "vae": "vae",
         "upscaler": "upscaler",
         "embedding": "textualinversion",
@@ -50,9 +55,26 @@ class ModelReferenceService:
         "textual_inversion": "textualinversion",
     }
 
+    # Maps variant resource types to their parent category for
+    # broad matching (e.g. diffusion_model → checkpoint, dora → lora).
+    _RESOURCE_TYPE_PARENTS: dict[str, str] = {
+        "diffusion_model": "checkpoint",
+        "dora": "lora",
+    }
+
     def normalize_resource_type(self, value: Any) -> str:
         normalized = str(value or "other").strip().lower()
         return self._RESOURCE_TYPE_ALIASES.get(normalized, normalized or "other")
+
+    def parent_resource_type(self, value: Any) -> str:
+        """Return the parent category for a resource type.
+
+        Variant types like ``diffusion_model`` map to ``checkpoint``; ``dora``
+        maps to ``lora``.  Types without an explicit parent mapping are returned
+        unchanged.
+        """
+        normalized = self.normalize_resource_type(value)
+        return self._RESOURCE_TYPE_PARENTS.get(normalized, normalized)
 
     def normalize_display_name(self, value: Any) -> Optional[str]:
         text = str(value or "").strip()
@@ -1099,7 +1121,17 @@ class ModelReferenceService:
         page_size: int = 200,
         max_pages: int = 200,
     ) -> Any:
-        response = session.get(url, timeout=timeout_seconds)
+        # Always send page_size on the first request so the server uses our
+        # desired page size from the start.  Some endpoints (e.g. ComfyUI
+        # LoRA Manager) cap the effective page_size server-side, and if the
+        # first request omits page_size the server returns a *different*
+        # default (e.g. 20) which makes total_pages inconsistent with later
+        # requests that do include page_size.
+        response = session.get(
+            url,
+            params={"page_size": page_size},
+            timeout=timeout_seconds,
+        )
         response.raise_for_status()
         first_payload = response.json()
 
@@ -1110,6 +1142,7 @@ class ModelReferenceService:
         if not isinstance(first_items, list):
             return first_payload
 
+        total_items = self._coerce_optional_int(first_payload.get("total"))
         total_pages = self._coerce_optional_int(first_payload.get("total_pages")) or 1
         if total_pages <= 1:
             return first_payload
@@ -1142,7 +1175,11 @@ class ModelReferenceService:
 
             reported_total_pages = self._coerce_optional_int(page_payload.get("total_pages"))
             if reported_total_pages is not None:
-                total_pages = min(total_pages, reported_total_pages)
+                total_pages = reported_total_pages
+
+            # If we already have all items, stop early.
+            if total_items is not None and len(merged_items) >= total_items:
+                break
 
         merged_payload = dict(first_payload)
         merged_payload["items"] = merged_items

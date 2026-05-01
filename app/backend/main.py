@@ -1,3 +1,10 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/backend-startup.md
+# 📄 docs: app/docs/memories/image-api.md
+# 📄 docs: app/docs/memories/taxonomy-import.md
+# 📄 docs: app/docs/memories/parity-workbench.md
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
 # pyright: reportArgumentType=false, reportAssignmentType=false, reportAttributeAccessIssue=false, reportOperatorIssue=false, reportOptionalOperand=false, reportPossiblyUnboundVariable=false
 # main.py
 import argparse
@@ -65,7 +72,6 @@ from models import (
     ImageCollectionMembership,
     ImageVariantGroupMembership,
     VariantGroup,
-    Tag,
     ImageTag,
     Concept,
     ConceptAlias,
@@ -108,6 +114,11 @@ from atelierai.civitai.civitai import CivitaiPrivateScraper
 from atelierai.civitai.http_client import CivitaiRequestError
 from atelierai.task_manager import BackgroundTaskManager, TaskContext
 from atelierai.utils import PngRepacker, build_prompt_tag_payload
+from services.gallery_filter_service import (
+    apply_gallery_filter,
+    parse_gallery_filter,
+)
+from services.gallery_query import GalleryQuery
 from services.gallery_tag_service import GalleryTagService
 from services.image_query_service import ImageQueryService
 from services.metadata_extraction import extract_civitai_nsfw_level
@@ -275,6 +286,24 @@ gallery_tag_service = GalleryTagService()
 model_reference_service = ModelReferenceService()
 
 
+def _make_gallery_query(db: Session) -> GalleryQuery:
+    """Factory: build a GalleryQuery wired to this app's callables."""
+    return GalleryQuery(
+        db=db,
+        query_service=image_query_service,
+        image_library_path=IMAGE_LIBRARY_PATH,
+        image_resources_path=IMAGE_RESOURCES_PATH,
+        active_image_filter=_active_image_filter,
+        apply_image_list_filters=_apply_image_list_filters,
+        build_display_items_for_image=_build_display_items_for_image,
+        merge_duplicate_grouped_items=_merge_duplicate_grouped_items,
+        read_nsfw_ratings_for_image=_read_nsfw_ratings_for_image,
+        get_video_poster_path=get_video_poster_path,
+        get_video_thumbnail_path=get_video_thumbnail_path,
+        image_data_from_db=ImageData.from_db_record,
+    )
+
+
 @dataclass
 class _SearchCacheEntry:
     value: Any
@@ -388,6 +417,209 @@ def _on_any_session_commit(_session: Session) -> None:
     _invalidate_search_cache("db_commit")
 
 
+# ---------------------------------------------------------------------------
+# Search suggestions (autocomplete) — shared implementation
+# ---------------------------------------------------------------------------
+
+
+def search_suggest_impl(
+    body: "SuggestRequest",  # noqa: F821
+    db: Session,
+) -> dict:
+    """Return autocomplete suggestions scoped to the filtered image set.
+
+    Uses the constrained-IDs cache populated by ``POST /api/query``.
+    On cache miss the filter is resolved fresh via ``GalleryQuery``.
+    """
+    from services.query_model import SuggestRequest  # noqa: PLC0415
+
+    assert isinstance(body, SuggestRequest)
+
+    needle = body.q.strip().lower()
+    if not needle:
+        return {"collections": [], "artists": [], "tags": []}
+
+    limit = body.limit
+
+    # ── Short-lived suggest-level cache ────────────────────────────────
+    suggest_cache_key = _build_search_cache_key(
+        "suggest",
+        payload={
+            "q": needle,
+            "limit": limit,
+            "search": (body.search or "").strip().lower(),
+            "filter": body.filter.model_dump(),
+        },
+    )
+    cached_suggest = _search_cache_get(suggest_cache_key)
+    if isinstance(cached_suggest, dict):
+        return cached_suggest
+
+    like_pattern = f"%{needle}%"
+
+    # ── Resolve constrained IDs (cache-aware) ──────────────────────────
+    from services.query_model import filter_cache_key  # noqa: PLC0415
+    from utils.cache import (  # noqa: PLC0415
+        _build_search_cache_key as _util_build_key,
+        _search_cache_get as _util_cache_get,
+    )
+
+    # Try the shared constrained-IDs cache first.
+    fkey = filter_cache_key(body.filter, body.search)
+    cids_cache_key = _util_build_key(
+        "constrained_ids", payload={"filter_key": fkey},
+    )
+    cached_cids = _util_cache_get(cids_cache_key)
+    constrained_ids: Optional[set[int]] = None
+    if cached_cids is not None:
+        if isinstance(cached_cids, frozenset):
+            constrained_ids = set(cached_cids)
+        elif cached_cids != "unfiltered":
+            constrained_ids = cached_cids
+        # "unfiltered" → constrained_ids stays None
+    else:
+        # Cache miss — resolve via GalleryQuery (which also caches).
+        gq = _make_gallery_query(db)
+        constrained_ids = gq._resolve_filter(body.filter, body.search)
+
+    # ── Build the final image-ID constraint ────────────────────────────
+    if constrained_ids is not None:
+        if not constrained_ids:
+            return {"collections": [], "artists": [], "tags": []}
+
+    # ── Collections with counts ────────────────────────────────────────
+    if constrained_ids is not None:
+        collection_q = (
+            db.query(
+                CollectionModel.name,
+                func.count(func.distinct(ImageModel.id)),
+            )
+            .join(
+                ImageCollectionMembership,
+                ImageCollectionMembership.collection_id == CollectionModel.id,
+            )
+            .join(ImageModel, ImageModel.id == ImageCollectionMembership.image_id)
+            .filter(
+                ImageModel.id.in_(constrained_ids),
+                func.lower(CollectionModel.name).like(like_pattern),
+            )
+        )
+    else:
+        collection_q = (
+            db.query(
+                CollectionModel.name,
+                func.count(func.distinct(ImageModel.id)),
+            )
+            .join(
+                ImageCollectionMembership,
+                ImageCollectionMembership.collection_id == CollectionModel.id,
+            )
+            .join(ImageModel, ImageModel.id == ImageCollectionMembership.image_id)
+            .filter(
+                _active_image_filter(),
+                func.lower(CollectionModel.name).like(like_pattern),
+            )
+        )
+    collection_rows = collection_q.group_by(CollectionModel.name).order_by(
+        func.count(func.distinct(ImageModel.id)).desc(), CollectionModel.name,
+    ).limit(limit).all()
+
+    # ── Artists with counts ────────────────────────────────────────────
+    if constrained_ids is not None:
+        artist_q = (
+            db.query(
+                Artist.name,
+                func.count(func.distinct(ImageModel.id)),
+            )
+            .join(ImageModel, ImageModel.artist_id == Artist.id)
+            .filter(
+                ImageModel.id.in_(constrained_ids),
+                func.lower(Artist.name).like(like_pattern),
+            )
+        )
+    else:
+        artist_q = (
+            db.query(
+                Artist.name,
+                func.count(func.distinct(ImageModel.id)),
+            )
+            .join(ImageModel, ImageModel.artist_id == Artist.id)
+            .filter(
+                _active_image_filter(),
+                func.lower(Artist.name).like(like_pattern),
+            )
+        )
+    artist_rows = artist_q.group_by(Artist.name).order_by(
+        func.count(func.distinct(ImageModel.id)).desc(), Artist.name,
+    ).limit(limit).all()
+
+    # ── Tags with counts (UNION ALL across relational sources) ─────────
+    if constrained_ids is not None:
+        id_filter_sql = "image_id IN (" + ", ".join(
+            [":aid" + str(i) for i in range(len(constrained_ids))]
+        ) + ")"
+        bind_params: dict[str, Any] = {
+            **{f"aid{i}": oid for i, oid in enumerate(constrained_ids)},
+            "pattern": like_pattern,
+        }
+    else:
+        id_filter_sql = "1=1"
+        bind_params = {"pattern": like_pattern}
+
+    union_sql = text(f"""
+        SELECT tag_name, COUNT(DISTINCT image_id) AS cnt FROM (
+            SELECT tags.name AS tag_name, it.image_id
+            FROM tags
+            JOIN image_tags it ON it.tag_id = tags.id
+            WHERE {id_filter_sql}
+              AND LOWER(tags.name) LIKE :pattern
+            UNION ALL
+            SELECT concepts.canonical_name AS tag_name, ico.image_id
+            FROM concepts
+            JOIN image_concept_observations ico ON ico.concept_id = concepts.id
+            WHERE {id_filter_sql}
+              AND LOWER(concepts.canonical_name) LIKE :pattern
+            UNION ALL
+            SELECT concept_aliases.normalized_alias AS tag_name, ico.image_id
+            FROM concept_aliases
+            JOIN concepts c ON c.id = concept_aliases.concept_id
+            JOIN image_concept_observations ico ON ico.concept_id = c.id
+            WHERE {id_filter_sql}
+              AND LOWER(concept_aliases.normalized_alias) LIKE :pattern
+            UNION ALL
+            SELECT authority_terms.external_name AS tag_name, ico.image_id
+            FROM authority_terms
+            JOIN image_concept_observations ico
+              ON ico.authority_term_id = authority_terms.id
+            WHERE {id_filter_sql}
+              AND LOWER(authority_terms.external_name) LIKE :pattern
+        ) GROUP BY tag_name
+    """)
+    raw_rows = db.execute(union_sql, bind_params).fetchall()
+
+    # Merge: keep max count per canonical (lowered) name.
+    tag_counts: dict[str, dict[str, Any]] = {}
+    for name, cnt in raw_rows:
+        key = name.lower()
+        if key not in tag_counts or cnt > tag_counts[key]["count"]:
+            tag_counts[key] = {"name": name, "count": int(cnt)}
+
+    sorted_tags = sorted(
+        tag_counts.values(),
+        key=lambda t: (-t["count"], t["name"].lower()),
+    )[:limit]
+
+    result = {
+        "collections": [
+            {"name": name, "count": int(cnt)} for name, cnt in collection_rows
+        ],
+        "artists": [{"name": name, "count": int(cnt)} for name, cnt in artist_rows],
+        "tags": sorted_tags,
+    }
+    _search_cache_put(suggest_cache_key, result, ttl_seconds=15.0)
+    return result
+
+
 class _SuppressAccessPathFilter(logging.Filter):
     def __init__(self, blocked_method: str, blocked_prefixes: list[str]):
         super().__init__()
@@ -419,8 +651,8 @@ def _configure_uvicorn_access_logging(*, suppress_status_get_logs: bool) -> None
         if not isinstance(existing_filter, _SuppressAccessPathFilter)
     ]
     if suppress_status_get_logs:
-        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/tasks"]))
-        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/images/state"]))
+        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/tasks"]))
+        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/images/state"]))
 
 
 def _build_media_cache_headers(path: Path) -> dict[str, str]:
@@ -1424,6 +1656,203 @@ def _backfill_user_tags_from_sidecars() -> None:
             print(f"   Backfilled user_tags from sidecars for {updated} image(s).")
 
 
+def _ensure_civitai_creator_id_column() -> None:
+    """Add creator_id FK column to civitai_models if missing.
+
+    Points to the new civitai_users table. Backfills from existing
+    civitai_user_id column data.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(civitai_models)")).fetchall()
+        }
+        if "creator_id" not in existing:
+            connection.execute(
+                text("ALTER TABLE civitai_models ADD COLUMN creator_id INTEGER")
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_civitai_models_creator_id "
+                    "ON civitai_models(creator_id)"
+                )
+            )
+            # Backfill from existing civitai_user_id
+            connection.execute(
+                text(
+                    "UPDATE civitai_models SET creator_id = civitai_user_id "
+                    "WHERE creator_id IS NULL AND civitai_user_id IS NOT NULL"
+                )
+            )
+            print("Backfilled civitai_models.creator_id from civitai_user_id")
+
+
+def _ensure_base_model_id_column() -> None:
+    """Add base_model_id FK column to civitai_model_versions if missing.
+
+    Points to the new civitai_base_models table. Left NULL for now;
+    population happens via backfill script after base models are seeded.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(civitai_model_versions)")).fetchall()
+        }
+        if "base_model_id" not in existing:
+            connection.execute(
+                text("ALTER TABLE civitai_model_versions ADD COLUMN base_model_id INTEGER")
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_civitai_model_versions_base_model_id "
+                    "ON civitai_model_versions(base_model_id)"
+                )
+            )
+            print("Added civitai_model_versions.base_model_id column")
+
+
+def _seed_civitai_base_models() -> None:
+    """Seed civitai_base_models with canonical entries.
+
+    Each entry has a canonical_key (matches _normalize_base_model output),
+    a display label, optional family grouping, and sort_order for UI.
+    Idempotent — skips rows that already exist.
+    """
+    from models import CivitaiBaseModel
+
+    seeds = [
+        # key, label, base_model_type, family, sort_order
+        ("sdxl", "SDXL", "sdxl", "stable-diffusion", 10),
+        ("sd15", "SD 1.5", "sd", "stable-diffusion", 20),
+        ("sd21", "SD 2.1", "sd", "stable-diffusion", 30),
+        ("sd3", "SD 3", "sd3", "stable-diffusion", 35),
+        ("pony", "Pony", "sdxl", "pony", 40),
+        ("illustrious", "Illustrious", "sdxl", "illustrious", 50),
+        ("noobai", "NoobAI", "sdxl", "noobai", 55),
+        ("flux", "Flux", "flux", "flux", 60),
+        ("animagine", "Animagine", "sd", "animagine", 70),
+        ("cyberrealistic", "CyberRealistic", "sd", "stable-diffusion", 75),
+        ("unknown", "Unknown", None, None, 999),
+    ]
+
+    with SessionLocal() as db:
+        existing = {
+            r[0]
+            for r in db.query(CivitaiBaseModel.canonical_key).all()
+        }
+        added = 0
+        for key, label, bm_type, family, sort in seeds:
+            if key not in existing:
+                db.add(CivitaiBaseModel(
+                    canonical_key=key,
+                    label=label,
+                    base_model_type=bm_type,
+                    family=family,
+                    sort_order=sort,
+                ))
+                added += 1
+        if added:
+            db.commit()
+            print(f"Seeded {added} civitai_base_models rows")
+
+
+def _backfill_civitai_base_model_ids() -> None:
+    """Set base_model_id on civitai_model_versions by normalizing base_model.
+
+    Uses the same _normalize_base_model logic as the models tree router.
+    Auto-creates civitai_base_models rows for previously unseen keys.
+    """
+    from models import CivitaiBaseModel, CivitaiModelVersion
+    from routers.models_tree import _normalize_base_model
+
+    with SessionLocal() as db:
+        # Find versions with NULL base_model_id but non-NULL base_model
+        versions = (
+            db.query(CivitaiModelVersion)
+            .filter(
+                CivitaiModelVersion.base_model_id.is_(None),
+                CivitaiModelVersion.base_model.isnot(None),
+            )
+            .all()
+        )
+        if not versions:
+            return
+
+        # Load all existing base models into a lookup
+        bm_map: dict[str, int] = {
+            r.canonical_key: r.id
+            for r in db.query(
+                CivitaiBaseModel.id, CivitaiBaseModel.canonical_key
+            ).all()
+        }
+
+        updated = 0
+        for ver in versions:
+            key = _normalize_base_model(ver.base_model)
+            if key not in bm_map:
+                # Auto-create a row for this key
+                new_bm = CivitaiBaseModel(
+                    canonical_key=key,
+                    label=ver.base_model,
+                    sort_order=900,
+                )
+                db.add(new_bm)
+                db.flush()
+                bm_map[key] = new_bm.id
+                print(
+                    f"Auto-created civitai_base_models row: "
+                    f"{key!r} → {ver.base_model!r}"
+                )
+            ver.base_model_id = bm_map[key]
+            updated += 1
+
+        db.commit()
+        if updated:
+            print(
+                f"Backfilled base_model_id for {updated} "
+                f"civitai_model_versions"
+            )
+
+
+def _backfill_civitai_users() -> None:
+    """Populate civitai_users from existing civitai_models columns.
+
+    Extracts distinct (civitai_user_id, civitai_username,
+    civitai_user_deleted) from civitai_models and creates CivitaiUser rows.
+    """
+    from models import CivitaiUser
+
+    with SessionLocal() as db:
+        # Check if any users exist already
+        if db.query(CivitaiUser).first() is not None:
+            return
+
+        # Extract distinct users from civitai_models
+        with engine.begin() as connection:
+            rows = connection.execute(text("""
+                SELECT civitai_user_id,
+                       MAX(civitai_username) AS civitai_username,
+                       MAX(COALESCE(civitai_user_deleted, 0)) AS deleted
+                FROM civitai_models
+                WHERE civitai_user_id IS NOT NULL
+                GROUP BY civitai_user_id
+            """)).fetchall()
+
+        if not rows:
+            return
+
+        for uid, name, deleted in rows:
+            db.add(CivitaiUser(
+                civitai_user_id=uid,
+                name=name or "",
+                deleted_at=None,
+                original_name=name,
+            ))
+
+        db.commit()
+        print(f"Backfilled {len(rows)} civitai_users from existing models")
+
+
 def _ensure_file_hash_nonunique() -> None:
     """Drop the UNIQUE index on images.file_hash so CivitAI duplicate assets can coexist.
 
@@ -2122,7 +2551,6 @@ def _execute_taxonomy_bootstrap_import(
     *,
     authority_name: str,
     rows: list[dict],
-    create_missing_concepts: bool,
     dry_run: bool,
 ) -> dict:
     authority = _get_or_create_authority(db, authority_name)
@@ -2130,8 +2558,7 @@ def _execute_taxonomy_bootstrap_import(
     stats = {
         "rows_received": len(rows),
         "rows_processed": 0,
-        "concepts_created": 0,
-        "concepts_reused": 0,
+        "concepts_linked": 0,
         "aliases_created": 0,
         "authority_terms_created": 0,
         "authority_terms_updated": 0,
@@ -2166,26 +2593,20 @@ def _execute_taxonomy_bootstrap_import(
                     )
                     .first()
                 )
-                if concept is None:
-                    if not create_missing_concepts:
-                        stats["errors"].append(
-                            f"row {idx}: concept '{concept_name}' not found"
-                        )
-                        continue
-                    concept = _get_or_create_concept(db, concept_name)
-                    stats["concepts_created"] += 1
-                else:
-                    stats["concepts_reused"] += 1
+                if concept is not None:
+                    stats["concepts_linked"] += 1
 
-                if _ensure_alias_for_concept(
-                    db,
-                    concept_id=concept.id,
-                    alias_text=raw_name,
-                    alias_type="imported",
-                    authority_id=authority.id,
-                    external_tag_id=external_tag_id,
-                ):
-                    stats["aliases_created"] += 1
+                    if _ensure_alias_for_concept(
+                        db,
+                        concept_id=concept.id,
+                        alias_text=raw_name,
+                        alias_type="imported",
+                        authority_id=authority.id,
+                        external_tag_id=external_tag_id,
+                    ):
+                        stats["aliases_created"] += 1
+
+                concept_id = concept.id if concept is not None else None
 
                 term = (
                     db.query(AuthorityTerm)
@@ -2204,7 +2625,7 @@ def _execute_taxonomy_bootstrap_import(
                         external_tag_id=external_tag_id,
                         external_name=raw_name,
                         normalized_external_name=normalized_name,
-                        concept_id=concept.id,
+                        concept_id=concept_id,
                         created_at=datetime.utcnow(),
                         updated_at=datetime.utcnow(),
                         last_seen_at=datetime.utcnow(),
@@ -2223,8 +2644,8 @@ def _execute_taxonomy_bootstrap_import(
                     if str(term.normalized_external_name or "") != normalized_name:
                         term.normalized_external_name = normalized_name
                         changed = True
-                    if int(term.concept_id or 0) != int(concept.id):
-                        term.concept_id = concept.id
+                    if getattr(term, "concept_id", None) != (concept_id or 0):
+                        term.concept_id = concept_id
                         changed = True
                     term.last_seen_at = datetime.utcnow()
                     if changed:
@@ -11435,6 +11856,78 @@ def _build_display_items_for_image(
     return _build_flat_variant_display_items(image, merged_payload, variants)
 
 
+def _load_filtered_image_keys_unified(
+    db: Session,
+    *,
+    query_service: ImageQueryService,
+    included: list[str],
+    excluded: list[str],
+    hidden: list[str],
+    missing: list[str],
+    search: Optional[str],
+    group_variants: bool = True,
+) -> list[str]:
+    """Unified key generation using parse_gallery_filter / apply_gallery_filter."""
+    images_query = db.query(ImageModel).filter(_active_image_filter())
+
+    if search:
+        images_query = _apply_image_list_filters(images_query, search=search)
+
+    parsed = parse_gallery_filter(included, excluded, hidden, missing)
+    images_query, filter_constrained_ids = apply_gallery_filter(
+        images_query, parsed, db, query_service,
+    )
+
+    constrained_ids = filter_constrained_ids
+
+    if constrained_ids is not None:
+        if constrained_ids:
+            images_query = images_query.filter(ImageModel.id.in_(list(constrained_ids)))
+        else:
+            return []
+
+    rows = (
+        images_query.with_entities(ImageModel.id, ImageModel.file_hash, ImageModel.variant_group_key)
+        .order_by(ImageModel.id.asc())
+        .all()
+    )
+
+    if group_variants:
+        image_ids = [row_id for row_id, _, _ in rows]
+        image_to_vg: dict[int, int] = {}
+        if image_ids:
+            try:
+                vg_rows = (
+                    db.query(
+                        ImageVariantGroupMembership.image_id,
+                        ImageVariantGroupMembership.group_id,
+                    )
+                    .filter(ImageVariantGroupMembership.image_id.in_(image_ids))
+                    .all()
+                )
+                for img_id, grp_id in vg_rows:
+                    if img_id not in image_to_vg:
+                        image_to_vg[img_id] = grp_id
+            except Exception:
+                pass
+
+        seen: set[str] = set()
+        keys: list[str] = []
+        for row_id, file_hash, variant_group_key in rows:
+            vg_id = image_to_vg.get(row_id)
+            if vg_id is not None:
+                item_key = f"group:{vg_id}"
+            else:
+                group_key = (variant_group_key or "").strip() or str(file_hash or "")
+                item_key = f"group:{group_key}"
+            if item_key not in seen:
+                seen.add(item_key)
+                keys.append(item_key)
+        return keys
+    else:
+        return [str(file_hash) for _, file_hash, _ in rows if file_hash]
+
+
 def _load_filtered_image_keys(
     db: Session,
     *,
@@ -11617,6 +12110,221 @@ def _merge_duplicate_grouped_items(items: list[dict[str, Any]]) -> list[dict[str
 # display items, we over-fetch from the DB and trim after merging so the
 # caller always receives a full page.
 _OVERFETCH_FACTOR = 3
+
+
+def _load_display_image_items_unified(
+    db: Session,
+    *,
+    query_service: ImageQueryService,
+    included: list[str],
+    excluded: list[str],
+    hidden: list[str],
+    missing: list[str],
+    sort_by: str,
+    search: Optional[str],
+    variant_group_id: Optional[list[int]] = None,
+    group_variants: bool = True,
+    skip: int = 0,
+    limit: Optional[int] = None,
+    cursor: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], int, Optional[int]]:
+    """Unified filter path using parse_gallery_filter / apply_gallery_filter.
+
+    Returns (paginated_display_items, total_grouped_count, next_cursor)
+    using the same display-item pipeline as the legacy path but with a
+    single unified filter entry point.
+    """
+    import time as _time
+
+    _t0 = _time.perf_counter()
+
+    images_query = (
+        db.query(ImageModel)
+        .options(
+            joinedload(ImageModel.artist),
+            joinedload(ImageModel.license),
+            joinedload(ImageModel.collections),
+        )
+        .filter(_active_image_filter())
+    )
+
+    # Apply text search filter (not part of the unified filter model).
+    if search:
+        images_query = _apply_image_list_filters(
+            images_query,
+            search=search,
+        )
+
+    # Parse and apply the unified gallery filter.
+    parsed = parse_gallery_filter(included, excluded, hidden, missing)
+    images_query, filter_constrained_ids = apply_gallery_filter(
+        images_query, parsed, db, query_service,
+    )
+
+    # Combine with the parsed filter's constrained IDs.
+    constrained_ids = filter_constrained_ids
+
+    # --- variant_group_id filter ------------------------------------------
+    if variant_group_id:
+        try:
+            vg_image_ids = [
+                row[0]
+                for row in db.query(ImageVariantGroupMembership.image_id)
+                .filter(ImageVariantGroupMembership.group_id.in_(variant_group_id))
+                .all()
+            ]
+            if vg_image_ids:
+                vg_set = set(vg_image_ids)
+                constrained_ids = (
+                    vg_set
+                    if constrained_ids is None
+                    else constrained_ids.intersection(vg_set)
+                )
+            else:
+                constrained_ids = set()  # no matches → empty result
+        except Exception:
+            pass
+
+    # Apply constrained IDs to the query.
+    if constrained_ids is not None:
+        if constrained_ids:
+            images_query = images_query.filter(ImageModel.id.in_(list(constrained_ids)))
+        else:
+            images_query = images_query.filter(text("1 = 0"))
+
+    if sort_by == "last_added":
+        images_query = images_query.order_by(ImageModel.id.desc())
+    else:
+        images_query = images_query.order_by(ImageModel.id.asc())
+
+    # --- Cursor-based / over-fetch pagination ----------------------------
+    use_overfetch = group_variants and limit is not None
+    use_cursor = use_overfetch
+    if use_overfetch:
+        if cursor is not None:
+            if sort_by == "last_added":
+                images_query = images_query.filter(ImageModel.id < cursor)
+            else:
+                images_query = images_query.filter(ImageModel.id > cursor)
+        db_row_limit = limit * _OVERFETCH_FACTOR
+        images_query = images_query.limit(db_row_limit)
+    else:
+        if skip > 0:
+            images_query = images_query.offset(skip)
+        if limit is not None:
+            images_query = images_query.limit(limit)
+
+    images = images_query.all()
+
+    _t1 = _time.perf_counter()
+    print(f"[PERF] unified query: {_t1-_t0:.3f}s  rows={len(images)}")
+
+    # --- Build display items (same pipeline as legacy) -------------------
+    image_to_variant_group: dict[int, int] = {}
+    if group_variants:
+        image_ids = [img.id for img in images]
+        try:
+            membership_rows = (
+                db.query(
+                    ImageVariantGroupMembership.image_id,
+                    ImageVariantGroupMembership.group_id,
+                )
+                .filter(ImageVariantGroupMembership.image_id.in_(image_ids))
+                .all()
+            )
+            for img_id, grp_id in membership_rows:
+                if img_id not in image_to_variant_group:
+                    image_to_variant_group[img_id] = grp_id
+        except Exception:
+            pass
+
+    display_items: list[dict[str, Any]] = []
+    for image in images:
+        db_dict = ImageData.from_db_record(image).to_dict()
+        db_dict["exif_data"] = None
+        db_dict["civitai_data"] = None
+        db_dict["json_metadata"] = None
+        merged = db_dict
+
+        if (image.mimetype or "").lower().startswith("video/"):
+            image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+            poster_path = get_video_poster_path(image_path, IMAGE_RESOURCES_PATH)
+            thumbnail_path = get_video_thumbnail_path(image_path, IMAGE_RESOURCES_PATH)
+            if poster_path.exists() and poster_path.is_file():
+                merged["video_poster_url"] = f"/api/images/{image.file_hash}/video_poster"
+            if thumbnail_path.exists() and thumbnail_path.is_file():
+                merged["video_thumbnail_url"] = (
+                    f"/api/images/{image.file_hash}/video_thumbnail"
+                )
+        merged["collection_names"] = [c.name for c in image.collections]
+        merged["collection_ids"] = [c.id for c in image.collections]
+        merged["artist_name"] = image.artist.name if image.artist is not None else None
+        merged["artist_deleted"] = image.artist.civitai_user_deleted if image.artist is not None else None
+        merged["artist_original_name"] = image.artist.civitai_user_original_name if image.artist is not None else None
+        nsfw_ratings = _read_nsfw_ratings_for_image(image)
+        merged["nsfw_ratings"] = nsfw_ratings
+        merged["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
+        merged["user_nsfw_rating"] = image.user_nsfw_rating
+        merged["user_nsfw_safety_class"] = image.user_nsfw_safety_class
+        db_user_tags = getattr(image, "user_tags", None)
+        if isinstance(db_user_tags, list) and db_user_tags:
+            merged["user_tags"] = db_user_tags
+        db_user_neg_tags = getattr(image, "user_negative_tags", None)
+        if isinstance(db_user_neg_tags, list) and db_user_neg_tags:
+            merged["user_negative_tags"] = db_user_neg_tags
+        display_items.extend(
+            _build_display_items_for_image(
+                image, merged, group_variants=group_variants,
+                variant_group_id=image_to_variant_group.get(image.id),
+            )
+        )
+
+    if group_variants:
+        display_items = _merge_duplicate_grouped_items(display_items)
+
+    # --- Cursor pagination trim -------------------------------------------
+    next_cursor: Optional[int] = None
+    if use_cursor and limit is not None:
+        if len(display_items) > limit:
+            display_items = display_items[:limit]
+        if display_items and images:
+            next_cursor = images[-1].id
+            if len(display_items) < limit:
+                next_cursor = None
+
+    # --- Total count ------------------------------------------------------
+    if use_cursor:
+        if constrained_ids is not None:
+            total_count = len(constrained_ids)
+        else:
+            base_count_query = (
+                db.query(func.count(ImageModel.id))
+                .filter(_active_image_filter())
+            )
+            if search:
+                base_count_query = _apply_image_list_filters(
+                    base_count_query, search=search,
+                )
+            total_count = base_count_query.scalar() or 0
+    else:
+        if constrained_ids is not None:
+            total_count = len(constrained_ids)
+        else:
+            base_count_query = (
+                db.query(func.count(ImageModel.id))
+                .filter(_active_image_filter())
+            )
+            if search:
+                base_count_query = _apply_image_list_filters(
+                    base_count_query, search=search,
+                )
+            total_count = base_count_query.scalar() or 0
+
+    _t2 = _time.perf_counter()
+    print(f"[PERF] unified display loop: {_t2-_t1:.3f}s  items={len(display_items)}")
+    print(f"[PERF] unified TOTAL: {_t2-_t0:.3f}s")
+
+    return display_items, total_count, next_cursor
 
 
 def _load_display_image_items(
@@ -11889,6 +12597,13 @@ def _load_display_image_items(
 
         # DB-only display: no sidecar reads.  All gallery-critical fields
         # come from DB columns or json_metadata (a JSON column).
+        # Strip detail-only blob fields from the gallery list payload; they
+        # are fetched on demand via GET /api/images/{id} when an image is
+        # selected.  This keeps the gallery response lean — civitai_data and
+        # json_metadata can be 5–20 KB per image.
+        db_dict["exif_data"] = None
+        db_dict["civitai_data"] = None
+        db_dict["json_metadata"] = None
         merged = db_dict
 
         if (image.mimetype or "").lower().startswith("video/"):
@@ -11896,10 +12611,10 @@ def _load_display_image_items(
             poster_path = get_video_poster_path(image_path, IMAGE_RESOURCES_PATH)
             thumbnail_path = get_video_thumbnail_path(image_path, IMAGE_RESOURCES_PATH)
             if poster_path.exists() and poster_path.is_file():
-                merged["video_poster_url"] = f"/images/{image.file_hash}/video_poster"
+                merged["video_poster_url"] = f"/api/images/{image.file_hash}/video_poster"
             if thumbnail_path.exists() and thumbnail_path.is_file():
                 merged["video_thumbnail_url"] = (
-                    f"/images/{image.file_hash}/video_thumbnail"
+                    f"/api/images/{image.file_hash}/video_thumbnail"
                 )
         merged["collection_names"] = [c.name for c in image.collections]
         merged["collection_ids"] = [c.id for c in image.collections]
@@ -11978,8 +12693,28 @@ def _load_display_image_items(
             )
             total_count = base_count_query.scalar() or 0
     else:
-        # Legacy offset path: compute from the full query without offset/limit.
-        total_count = len(display_items)
+        # Legacy offset path: use the constrained ID count when filters are
+        # active so X-Filtered-Count reflects the full matching set, not just
+        # the current page.  This lets the frontend correctly determine
+        # hasMore = offset < filteredMatchCount when serverFilterMode is on.
+        if constrained_ids is not None:
+            total_count = len(constrained_ids)
+        else:
+            base_count_query = (
+                db.query(func.count(ImageModel.id))
+                .filter(_active_image_filter())
+            )
+            base_count_query = _apply_image_list_filters(
+                base_count_query,
+                search=search,
+                source_sites=source_site,
+                mimetypes=mimetype,
+                artist_names=artist_name,
+                collection_names=collection_name,
+                exclude_artist_names=exclude_artist_name,
+                exclude_collection_names=exclude_collection_name,
+            )
+            total_count = base_count_query.scalar() or 0
 
     _t7 = _time.perf_counter()
     print(f"[PERF] display loop: {_t7-_t6:.3f}s  items={len(display_items)}")
@@ -13657,6 +14392,33 @@ async def lifespan(app: FastAPI):
                         except Exception as migrate_exc:
                             print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
 
+                    if (
+                        str(version_result or "") == "1.5"
+                        and str(CURRENT_SCHEMA_VERSION) == "1.6"
+                    ):
+                        print(
+                            "   Attempting in-place schema upgrade 1.5 -> 1.6 "
+                            "(CivitaiUser, CivitaiBaseModel, ModelObservation tables + FK columns)..."
+                        )
+                        try:
+                            Base.metadata.create_all(bind=engine, checkfirst=True)
+                            _ensure_civitai_user_columns()
+                            _ensure_civitai_creator_id_column()
+                            _ensure_base_model_id_column()
+                            _seed_civitai_base_models()
+                            _backfill_civitai_base_model_ids()
+                            _backfill_civitai_users()
+                            with SessionLocal() as db:
+                                db.query(SchemaVersion).delete()
+                                db.add(
+                                    SchemaVersion(version_num=CURRENT_SCHEMA_VERSION)
+                                )
+                                db.commit()
+                            migrated = True
+                            print("✅ In-place schema upgrade complete.")
+                        except Exception as migrate_exc:
+                            print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
+
                     if migrated:
                         version_result = CURRENT_SCHEMA_VERSION
 
@@ -13740,6 +14502,11 @@ async def lifespan(app: FastAPI):
     _ensure_blurhash_column()
     _ensure_civitai_image_id_column()
     _ensure_civitai_user_columns()
+    _ensure_civitai_creator_id_column()
+    _ensure_base_model_id_column()
+    _seed_civitai_base_models()
+    _backfill_civitai_base_model_ids()
+    _backfill_civitai_users()
     _ensure_observation_unique_constraint()
     _ensure_file_hash_nonunique()
 
@@ -13752,7 +14519,14 @@ async def lifespan(app: FastAPI):
 
 
 # Pass the lifespan manager to the FastAPI app
-app = FastAPI(title="AtelierAI API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="AtelierAI API",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
 
 # Compress larger JSON responses (e.g., taxonomy tree state payloads).
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
@@ -13782,8 +14556,29 @@ app.mount(
 app.mount("/frontend/images", StaticFiles(directory="images"), name="frontend_images")
 
 
+# ---------------------------------------------------------------------------
+# Routers — registered before the legacy @app.* routes so that extracted
+# routes take priority.  Legacy @app.* duplicates remain as dead-code fallbacks
+# until Phase 4.5 removes them.
+# ---------------------------------------------------------------------------
+from routers import health as _health_router_mod  # noqa: E402, PLC0415
+from routers import taxonomy as _taxonomy_router_mod  # noqa: E402, PLC0415
+from routers import images as _images_router_mod  # noqa: E402, PLC0415
+from routers import collections as _collections_router_mod  # noqa: E402, PLC0415
+from routers import generation as _generation_router_mod  # noqa: E402, PLC0415
+from routers.civitai import router as _civitai_router  # noqa: E402, PLC0415
+from routers import models_tree as _models_tree_router_mod  # noqa: E402, PLC0415
+
+app.include_router(_health_router_mod.router)
+app.include_router(_taxonomy_router_mod.router, prefix="/api")
+app.include_router(_images_router_mod.router, prefix="/api")
+app.include_router(_collections_router_mod.router, prefix="/api")
+app.include_router(_generation_router_mod.router, prefix="/api")
+app.include_router(_civitai_router, prefix="/api")
+app.include_router(_models_tree_router_mod.router, prefix="/api")
+
+
 # Define a root endpoint to serve the main index.html file
-@app.get("/")
 async def read_index():
     return FileResponse("frontend/index.html")
 
@@ -13791,7 +14586,6 @@ async def read_index():
 # ---------------------------------------------------------------------------
 # Frontend configuration endpoint — exposes safe, read-only settings to the UI.
 # ---------------------------------------------------------------------------
-@app.get("/api/config")
 async def get_frontend_config():
     """Return CivitAI domain configuration for frontend URL construction."""
     return {
@@ -13812,17 +14606,14 @@ async def get_frontend_config():
     }
 
 
-@app.get("/tree")
 async def read_tree_prototype():
     return FileResponse("frontend/tree.html")
 
 
-@app.get("/generation-lab")
 async def read_generation_lab():
     return FileResponse("frontend/generation-lab.html")
 
 
-@app.get("/healthz", response_model=dict)
 def read_healthz(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
@@ -13839,27 +14630,22 @@ def read_healthz(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/model-lab")
 async def read_model_lab():
     return FileResponse("frontend/model-lab.html")
 
 
-@app.get("/folder-lab")
 async def read_folder_lab():
     return FileResponse("frontend/folder-lab.html")
 
 
-@app.get("/perceptual-lab")
 async def read_perceptual_lab():
     return FileResponse("frontend/perceptual-lab.html")
 
 
-@app.get("/expression-lab")
 async def read_expression_lab():
     return FileResponse("frontend/expression-lab.html")
 
 
-@app.get("/comfyui-lab")
 async def read_comfyui_lab():
     return FileResponse("frontend/comfyui-lab.html")
 
@@ -13882,7 +14668,6 @@ def _comfyui_target(target: str) -> str:
     return target.rstrip("/")
 
 
-@app.post("/comfyui-proxy/upload/image")
 async def comfyui_proxy_upload_image(
     request: Request,
     target: str = Query(..., description="ComfyUI base URL, e.g. http://127.0.0.1:8188"),
@@ -13914,7 +14699,6 @@ async def comfyui_proxy_upload_image(
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
-@app.post("/comfyui-proxy/prompt")
 async def comfyui_proxy_prompt(
     target: str = Query(..., description="ComfyUI base URL"),
     prompt: str = Body(..., media_type="application/json"),
@@ -13939,7 +14723,6 @@ async def comfyui_proxy_prompt(
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
-@app.get("/api/expression-sets")
 async def list_expression_sets():
     """Return the list of expression image files in /images/expressions."""
     from pathlib import Path
@@ -13955,13 +14738,11 @@ async def list_expression_sets():
     return {"files": files}
 
 
-@app.get("/tasks/", response_model=list[dict])
 def list_background_tasks(limit: int = 20):
     capped_limit = max(1, min(int(limit), 50))
     return task_manager.list_tasks(limit=capped_limit)
 
 
-@app.get("/tasks/{task_id}", response_model=dict)
 def get_background_task(task_id: str):
     try:
         return task_manager.get_task(task_id)
@@ -13969,7 +14750,6 @@ def get_background_task(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
 
 
-@app.post("/tasks/{task_id}/cancel", response_model=dict)
 def cancel_background_task(task_id: str):
     try:
         return task_manager.cancel_task(task_id)
@@ -13979,12 +14759,10 @@ def cancel_background_task(task_id: str):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.get("/generation-prototype/civitai/{image_id}", response_model=dict)
 def get_civitai_generation_prototype(image_id: int):
     return _build_generation_prototype_civitai_payload(image_id)
 
 
-@app.get("/images/{file_hash}/generation-prototype", response_model=dict)
 def get_local_generation_prototype(file_hash: str, db: Session = Depends(get_db)):
     image = (
         db.query(ImageModel)
@@ -13997,9 +14775,6 @@ def get_local_generation_prototype(file_hash: str, db: Session = Depends(get_db)
     return _build_generation_prototype_local_payload(image)
 
 
-@app.get(
-    "/generation-prototype/civitai/{image_id}/comfy-workspace", response_model=dict
-)
 def get_civitai_generation_comfy_workspace(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -14112,9 +14887,6 @@ def _inject_fresh_local_exif_metadata_for_comfy(
     return generation_payload, warnings
 
 
-@app.get(
-    "/generation-prototype/civitai/{image_id}/comfy-workflow-raw", response_model=dict
-)
 def get_civitai_generation_comfy_workflow_raw(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -14136,9 +14908,6 @@ def get_civitai_generation_comfy_workflow_raw(
     return _extract_required_comfy_raw_payload(export_payload, payload_kind="workflow")
 
 
-@app.get(
-    "/generation-prototype/civitai/{image_id}/comfy-prompt-raw", response_model=dict
-)
 def get_civitai_generation_comfy_prompt_raw(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -14160,9 +14929,6 @@ def get_civitai_generation_comfy_prompt_raw(
     return _extract_required_comfy_raw_payload(export_payload, payload_kind="prompt")
 
 
-@app.get(
-    "/images/{file_hash}/generation-prototype/comfy-workspace", response_model=dict
-)
 def get_local_generation_comfy_workspace(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -14210,9 +14976,6 @@ def get_local_generation_comfy_workspace(
     return export_payload
 
 
-@app.get(
-    "/images/{file_hash}/generation-prototype/comfy-workflow-raw", response_model=dict
-)
 def get_local_generation_comfy_workflow_raw(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -14247,9 +15010,6 @@ def get_local_generation_comfy_workflow_raw(
     return _extract_required_comfy_raw_payload(export_payload, payload_kind="workflow")
 
 
-@app.get(
-    "/images/{file_hash}/generation-prototype/comfy-prompt-raw", response_model=dict
-)
 def get_local_generation_comfy_prompt_raw(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -15499,7 +16259,6 @@ def _build_a1111_bridge_dataset_quality_report() -> dict[str, Any]:
     }
 
 
-@app.post("/generation-prototype/a1111-bridge/analyze", response_model=dict)
 def analyze_a1111_bridge(
     request: A1111BridgeAnalyzeRequest,
     db: Session = Depends(get_db),
@@ -15604,8 +16363,6 @@ def analyze_a1111_bridge(
     return response_payload
 
 
-@app.post("/generation-prototype/parity-workbench/candidate-audit", response_model=dict)
-@app.post("/generation-audit/analyze", response_model=dict)
 def analyze_parity_candidate(
     request: ParityCandidateAuditRequest,
     db: Session = Depends(get_db),
@@ -15670,7 +16427,6 @@ def analyze_parity_candidate(
     return audit
 
 
-@app.post("/generation-prototype/a1111-bridge/save-analysis", response_model=dict)
 def save_a1111_bridge_analysis(payload: A1111BridgeSaveRequest):
     analysis_payload = _dict_payload(payload.analysis_payload)
     if not analysis_payload:
@@ -15721,7 +16477,6 @@ def save_a1111_bridge_analysis(payload: A1111BridgeSaveRequest):
     }
 
 
-@app.get("/generation-prototype/a1111-bridge/dataset-quality", response_model=dict)
 def get_a1111_bridge_dataset_quality_report():
     return _build_a1111_bridge_dataset_quality_report()
 
@@ -15817,7 +16572,6 @@ def _apply_comfy_filename_prefix_cache_bust(
     return cloned, mutated
 
 
-@app.post("/generation-prototype/comfy/generate-and-compare", response_model=dict)
 def generate_and_compare_comfy_workspace(
     payload: ComfyGenerateCompareRequest,
     db: Session = Depends(get_db),
@@ -16300,7 +17054,6 @@ def generate_and_compare_comfy_workspace(
     }
 
 
-@app.get("/generation-prototype/comfy/attempts", response_model=dict)
 def list_comfy_generation_match_attempts(
     reference_file_hash: Optional[str] = Query(default=None),
     only_fundamental_issues: bool = Query(default=False),
@@ -16366,7 +17119,6 @@ def list_comfy_generation_match_attempts(
     }
 
 
-@app.post("/generation-templates/import-workspace", response_model=dict)
 def import_generation_template_workspace(
     payload: GenerationTemplateImportRequest, db: Session = Depends(get_db)
 ):
@@ -16432,7 +17184,6 @@ def import_generation_template_workspace(
     }
 
 
-@app.get("/generation-templates", response_model=dict)
 def list_generation_templates(
     include_workflow: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=200),
@@ -16487,7 +17238,6 @@ def _resolve_template_local_catalog(
     return local_catalog
 
 
-@app.get("/generation-templates/token-preview", response_model=dict)
 def preview_generation_template_tokens(
     source_mode: Literal["local", "civitai"] = Query(...),
     file_hash: Optional[str] = Query(default=None),
@@ -16539,7 +17289,6 @@ def preview_generation_template_tokens(
     }
 
 
-@app.get("/generation-templates/{template_id}", response_model=dict)
 def get_generation_template(
     template_id: int,
     include_workflow: bool = Query(default=True),
@@ -16560,7 +17309,6 @@ def get_generation_template(
     }
 
 
-@app.put("/generation-templates/{template_id}", response_model=dict)
 def update_generation_template(
     template_id: int,
     payload: GenerationTemplateUpdateRequest,
@@ -16643,7 +17391,6 @@ def update_generation_template(
     }
 
 
-@app.delete("/generation-templates/{template_id}", response_model=dict)
 def delete_generation_template(template_id: int, db: Session = Depends(get_db)):
     template = (
         db.query(GenerationTemplate)
@@ -16690,7 +17437,6 @@ def _resolve_generation_payload_for_template_request(
     raise HTTPException(status_code=422, detail="Unsupported source_mode.")
 
 
-@app.post("/generation-templates/{template_id}/resolve", response_model=dict)
 def resolve_generation_template(
     template_id: int,
     request: GenerationTemplateResolveRequest,
@@ -16737,7 +17483,6 @@ def resolve_generation_template(
     }
 
 
-@app.get("/images/{file_hash}/perceptual-lab/analyze", response_model=dict)
 def analyze_local_image_perceptual_hashes(
     file_hash: str,
     hash_size: int = Query(default=8, ge=4, le=32),
@@ -16813,7 +17558,6 @@ def analyze_local_image_perceptual_hashes(
     }
 
 
-@app.get("/images/{file_hash}/perceptual-lab/similarity", response_model=dict)
 def search_perceptual_similarity(
     file_hash: str,
     algorithm: str = Query(default="phash"),
@@ -16998,7 +17742,6 @@ def search_perceptual_similarity(
     }
 
 
-@app.get("/model-prototype/civitai/{image_id}", response_model=dict)
 def get_civitai_model_prototype(
     image_id: int,
     catalog_url: Optional[str] = Query(default=None),
@@ -17019,7 +17762,6 @@ def get_civitai_model_prototype(
     )
 
 
-@app.get("/images/{file_hash}/model-prototype", response_model=dict)
 def get_local_model_prototype(
     file_hash: str,
     catalog_url: Optional[str] = Query(default=None),
@@ -17049,7 +17791,6 @@ def get_local_model_prototype(
     )
 
 
-@app.get("/model-prototype/catalog", response_model=dict)
 def get_model_catalog_prototype(
     image_limit: int = Query(default=250, ge=1, le=2000),
     catalog_url: Optional[str] = Query(default=None),
@@ -17071,7 +17812,6 @@ def get_model_catalog_prototype(
     )
 
 
-@app.get("/model-prototype/local-match-preview", response_model=dict)
 def get_model_prototype_local_match_preview(
     display_name: str = Query(..., min_length=1),
     resource_type: Optional[str] = Query(default=None),
@@ -17112,7 +17852,6 @@ def get_model_prototype_local_match_preview(
     return payload
 
 
-@app.post("/model-prototype/local-model-download", response_model=dict)
 def trigger_model_prototype_local_model_download(payload: dict = Body(...)):
     request_payload = payload if isinstance(payload, dict) else {}
     result = model_reference_service.download_local_model(
@@ -17134,11 +17873,6 @@ def trigger_model_prototype_local_model_download(payload: dict = Body(...)):
     return result
 
 
-@app.post(
-    "/tasks/{task_id}/retry_failed",
-    response_model=dict,
-    status_code=status.HTTP_202_ACCEPTED,
-)
 def retry_failed_items_from_task(task_id: str):
     try:
         source_task = task_manager.get_task(task_id)
@@ -17182,11 +17916,6 @@ def retry_failed_items_from_task(task_id: str):
     }
 
 
-@app.post(
-    "/tasks/{task_id}/retry-missing",
-    response_model=dict,
-    status_code=status.HTTP_202_ACCEPTED,
-)
 def retry_missing_failures_from_task(task_id: str):
     """Retry items that failed due to missing/unavailable (404/deleted) conditions."""
     try:
@@ -17233,11 +17962,6 @@ def retry_missing_failures_from_task(task_id: str):
     }
 
 
-@app.post(
-    "/tasks/{task_id}/retry-temporary",
-    response_model=dict,
-    status_code=status.HTTP_202_ACCEPTED,
-)
 def retry_temporary_failures_from_task(task_id: str):
     """Retry items that failed due to temporary errors (timeout, rate-limit, etc.)."""
     try:
@@ -17284,7 +18008,6 @@ def retry_temporary_failures_from_task(task_id: str):
     }
 
 
-@app.get("/images/", response_model=list[dict])
 def read_images(
     request: Request,
     response: Response,
@@ -17293,6 +18016,12 @@ def read_images(
     group_variants: bool = Query(default=True),
     sort_by: Literal["first_added", "last_added"] = "first_added",
     search: Optional[str] = None,
+    # --- Unified filter params (preferred) ---
+    included: Optional[list[str]] = Query(default=None),
+    excluded: Optional[list[str]] = Query(default=None),
+    hidden: Optional[list[str]] = Query(default=None),
+    missing: Optional[list[str]] = Query(default=None),
+    # --- Legacy filter params (deprecated, kept for backward compat) ---
     generation_software: Optional[list[str]] = Query(default=None),
     source_site: Optional[list[str]] = Query(default=None),
     mimetype: Optional[list[str]] = Query(default=None),
@@ -17321,35 +18050,64 @@ def read_images(
     pagination (*cursor*).  When *cursor* is supplied, it takes precedence:
     the server over-fetches DB rows to guarantee a full page after variant
     grouping, and returns ``X-Next-Cursor`` for the next page boundary.
+
+    **Filter modes**:
+    - *Unified* (preferred): pass ``included``, ``excluded``, ``hidden``,
+      ``missing`` as typed CGI terms (e.g. ``included=tag:portrait``).
+    - *Legacy*: pass individual filter params (``include_tag``,
+      ``nsfw_rating``, etc.).  Deprecated; will be removed in a future
+      release.
     """
-    cache_key = _build_search_cache_key(
-        "images",
-        payload={
-            "skip": int(skip),
-            "limit": int(limit),
-            "group_variants": bool(group_variants),
-            "sort_by": str(sort_by),
-            "search": str(search or "").strip().lower(),
-            "generation_software": _normalize_cache_list(generation_software),
-            "source_site": _normalize_cache_list(source_site),
-            "mimetype": _normalize_cache_list(mimetype),
-            "nsfw_rating": _normalize_cache_list(nsfw_rating),
-            "nsfw_safety": _normalize_cache_list(nsfw_safety),
-            "artist_name": _normalize_cache_list(artist_name),
-            "collection_name": _normalize_cache_list(collection_name),
-            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
-            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
-            "a1111_hires": _normalize_cache_list(a1111_hires),
-            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
-            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
-            "include_tag": _normalize_cache_list(include_tag),
-            "exclude_tag": _normalize_cache_list(exclude_tag),
-            "variant_group_id": _normalize_cache_list(variant_group_id),
-            "cursor": cursor,
-            "missing_data": _normalize_cache_list(missing_data),
-            "missing_source": _normalize_cache_list(missing_source),
-        },
-    )
+    # Detect which filter mode is active.
+    _has_unified = bool(included or excluded or hidden or missing)
+
+    # Build cache key from whichever params are active.
+    if _has_unified:
+        cache_key = _build_search_cache_key(
+            "images",
+            payload={
+                "skip": int(skip),
+                "limit": int(limit),
+                "group_variants": bool(group_variants),
+                "sort_by": str(sort_by),
+                "search": str(search or "").strip().lower(),
+                "included": _normalize_cache_list(included),
+                "excluded": _normalize_cache_list(excluded),
+                "hidden": _normalize_cache_list(hidden),
+                "missing": _normalize_cache_list(missing),
+                "variant_group_id": _normalize_cache_list(variant_group_id),
+                "cursor": cursor,
+            },
+        )
+    else:
+        cache_key = _build_search_cache_key(
+            "images",
+            payload={
+                "skip": int(skip),
+                "limit": int(limit),
+                "group_variants": bool(group_variants),
+                "sort_by": str(sort_by),
+                "search": str(search or "").strip().lower(),
+                "generation_software": _normalize_cache_list(generation_software),
+                "source_site": _normalize_cache_list(source_site),
+                "mimetype": _normalize_cache_list(mimetype),
+                "nsfw_rating": _normalize_cache_list(nsfw_rating),
+                "nsfw_safety": _normalize_cache_list(nsfw_safety),
+                "artist_name": _normalize_cache_list(artist_name),
+                "collection_name": _normalize_cache_list(collection_name),
+                "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
+                "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
+                "a1111_hires": _normalize_cache_list(a1111_hires),
+                "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
+                "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
+                "include_tag": _normalize_cache_list(include_tag),
+                "exclude_tag": _normalize_cache_list(exclude_tag),
+                "variant_group_id": _normalize_cache_list(variant_group_id),
+                "cursor": cursor,
+                "missing_data": _normalize_cache_list(missing_data),
+                "missing_source": _normalize_cache_list(missing_source),
+            },
+        )
     cache_headers = _build_json_cache_headers(cache_key, gallery=True)
     for header_name, header_value in cache_headers.items():
         response.headers[header_name] = header_value
@@ -17368,32 +18126,49 @@ def read_images(
         if isinstance(items, list):
             return items
 
-    display_items, filtered_count, next_cursor = _load_display_image_items(
-        db,
-        sort_by=sort_by,
-        search=search,
-        generation_software=generation_software,
-        source_site=source_site,
-        mimetype=mimetype,
-        nsfw_rating=nsfw_rating,
-        nsfw_safety=nsfw_safety,
-        artist_name=artist_name,
-        collection_name=collection_name,
-        exclude_artist_name=exclude_artist_name,
-        exclude_collection_name=exclude_collection_name,
-        a1111_hires=a1111_hires,
-        a1111_regional_prompter=a1111_regional_prompter,
-        a1111_adetailer=a1111_adetailer,
-        include_tag=include_tag,
-        exclude_tag=exclude_tag,
-        variant_group_id=variant_group_id,
-        group_variants=group_variants,
-        skip=skip,
-        limit=limit,
-        cursor=cursor,
-        missing_data=missing_data,
-        missing_source=missing_source,
-    )
+    if _has_unified:
+        display_items, filtered_count, next_cursor = _load_display_image_items_unified(
+            db,
+            query_service=image_query_service,
+            included=included or [],
+            excluded=excluded or [],
+            hidden=hidden or [],
+            missing=missing or [],
+            sort_by=sort_by,
+            search=search,
+            variant_group_id=variant_group_id,
+            group_variants=group_variants,
+            skip=skip,
+            limit=limit,
+            cursor=cursor,
+        )
+    else:
+        display_items, filtered_count, next_cursor = _load_display_image_items(
+            db,
+            sort_by=sort_by,
+            search=search,
+            generation_software=generation_software,
+            source_site=source_site,
+            mimetype=mimetype,
+            nsfw_rating=nsfw_rating,
+            nsfw_safety=nsfw_safety,
+            artist_name=artist_name,
+            collection_name=collection_name,
+            exclude_artist_name=exclude_artist_name,
+            exclude_collection_name=exclude_collection_name,
+            a1111_hires=a1111_hires,
+            a1111_regional_prompter=a1111_regional_prompter,
+            a1111_adetailer=a1111_adetailer,
+            include_tag=include_tag,
+            exclude_tag=exclude_tag,
+            variant_group_id=variant_group_id,
+            group_variants=group_variants,
+            skip=skip,
+            limit=limit,
+            cursor=cursor,
+            missing_data=missing_data,
+            missing_source=missing_source,
+        )
     response.headers["X-Filtered-Count"] = str(filtered_count)
     if next_cursor is not None:
         response.headers["X-Next-Cursor"] = str(int(next_cursor))
@@ -17410,16 +18185,46 @@ def read_images(
     return display_items
 
 
-@app.get("/images/state", response_model=dict)
 def read_images_state(
+    # Unified filter params (preferred).
+    included: Optional[list[str]] = Query(default=None),
+    excluded: Optional[list[str]] = Query(default=None),
+    hidden: Optional[list[str]] = Query(default=None),
+    missing: Optional[list[str]] = Query(default=None),
+    # Legacy param (deprecated).
     nsfw_rating: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Return lightweight image-library state for polling-based UI refresh logic."""
+    """Return lightweight image-library state for polling-based UI refresh logic.
+
+    Supports both unified (``included``/``excluded``/``hidden``/``missing``)
+    and legacy ``nsfw_rating`` params.
+    """
+    _has_unified = bool(included or excluded or hidden or missing)
     base_query = db.query(ImageModel).filter(_active_image_filter())
 
-    # Apply NSFW visibility preference to constrain the catalog count.
-    if nsfw_rating:
+    if _has_unified:
+        parsed = parse_gallery_filter(included or [], excluded or [], hidden or [], missing or [])
+        filtered_query, constrained_ids = apply_gallery_filter(
+            base_query, parsed, db, image_query_service,
+        )
+        if constrained_ids is not None:
+            visible_ids = constrained_ids
+            total_count = len(visible_ids)
+            latest_row = (
+                db.query(ImageModel.id)
+                .filter(_active_image_filter(), ImageModel.id.in_(visible_ids))
+                .order_by(ImageModel.id.desc())
+                .first()
+            )
+        else:
+            total_count = filtered_query.count()
+            latest_row = (
+                filtered_query.with_entities(ImageModel.id)
+                .order_by(ImageModel.id.desc())
+                .first()
+            )
+    elif nsfw_rating:
         nsfw_filtered = _filter_image_ids_by_nsfw_ratings(base_query, nsfw_rating)
         if nsfw_filtered is not None:
             visible_ids = set(nsfw_filtered)
@@ -17456,12 +18261,17 @@ def read_images_state(
     }
 
 
-@app.get("/images/keys", response_model=list[str])
 def read_image_keys(
     request: Request,
     response: Response,
     group_variants: bool = Query(default=True),
     search: Optional[str] = None,
+    # Unified filter params (preferred).
+    included: Optional[list[str]] = Query(default=None),
+    excluded: Optional[list[str]] = Query(default=None),
+    hidden: Optional[list[str]] = Query(default=None),
+    missing: Optional[list[str]] = Query(default=None),
+    # Legacy filter params (deprecated).
     generation_software: Optional[list[str]] = Query(default=None),
     source_site: Optional[list[str]] = Query(default=None),
     mimetype: Optional[list[str]] = Query(default=None),
@@ -17476,29 +18286,52 @@ def read_image_keys(
     a1111_adetailer: Optional[list[str]] = Query(default=None),
     include_tag: Optional[list[str]] = Query(default=None),
     exclude_tag: Optional[list[str]] = Query(default=None),
+    variant_group_id: Optional[list[int]] = Query(default=None),
+    missing_data: Optional[list[str]] = Query(default=None),
+    missing_source: Optional[list[str]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    cache_key = _build_search_cache_key(
-        "image_keys",
-        payload={
-            "group_variants": bool(group_variants),
-            "search": str(search or "").strip().lower(),
-            "generation_software": _normalize_cache_list(generation_software),
-            "source_site": _normalize_cache_list(source_site),
-            "mimetype": _normalize_cache_list(mimetype),
-            "nsfw_rating": _normalize_cache_list(nsfw_rating),
-            "nsfw_safety": _normalize_cache_list(nsfw_safety),
-            "artist_name": _normalize_cache_list(artist_name),
-            "collection_name": _normalize_cache_list(collection_name),
-            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
-            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
-            "a1111_hires": _normalize_cache_list(a1111_hires),
-            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
-            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
-            "include_tag": _normalize_cache_list(include_tag),
-            "exclude_tag": _normalize_cache_list(exclude_tag),
-        },
-    )
+    """Return filtered image keys (file hashes or group keys).
+
+    Supports both unified (``included``/``excluded``/``hidden``/``missing``)
+    and legacy filter params.
+    """
+    _has_unified = bool(included or excluded or hidden or missing)
+
+    if _has_unified:
+        cache_key = _build_search_cache_key(
+            "image_keys",
+            payload={
+                "group_variants": bool(group_variants),
+                "search": str(search or "").strip().lower(),
+                "included": _normalize_cache_list(included),
+                "excluded": _normalize_cache_list(excluded),
+                "hidden": _normalize_cache_list(hidden),
+                "missing": _normalize_cache_list(missing),
+            },
+        )
+    else:
+        cache_key = _build_search_cache_key(
+            "image_keys",
+            payload={
+                "group_variants": bool(group_variants),
+                "search": str(search or "").strip().lower(),
+                "generation_software": _normalize_cache_list(generation_software),
+                "source_site": _normalize_cache_list(source_site),
+                "mimetype": _normalize_cache_list(mimetype),
+                "nsfw_rating": _normalize_cache_list(nsfw_rating),
+                "nsfw_safety": _normalize_cache_list(nsfw_safety),
+                "artist_name": _normalize_cache_list(artist_name),
+                "collection_name": _normalize_cache_list(collection_name),
+                "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
+                "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
+                "a1111_hires": _normalize_cache_list(a1111_hires),
+                "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
+                "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
+                "include_tag": _normalize_cache_list(include_tag),
+                "exclude_tag": _normalize_cache_list(exclude_tag),
+            },
+        )
     cache_headers = _build_json_cache_headers(cache_key, gallery=True)
     for header_name, header_value in cache_headers.items():
         response.headers[header_name] = header_value
@@ -17509,30 +18342,82 @@ def read_image_keys(
     if isinstance(cached_keys, list):
         return [str(file_hash) for file_hash in cached_keys if file_hash]
 
-    keys = _load_filtered_image_keys(
-        db,
-        search=search,
-        generation_software=generation_software,
-        source_site=source_site,
-        mimetype=mimetype,
-        nsfw_rating=nsfw_rating,
-        nsfw_safety=nsfw_safety,
-        artist_name=artist_name,
-        collection_name=collection_name,
-        exclude_artist_name=exclude_artist_name,
-        exclude_collection_name=exclude_collection_name,
-        a1111_hires=a1111_hires,
-        a1111_regional_prompter=a1111_regional_prompter,
-        a1111_adetailer=a1111_adetailer,
-        include_tag=include_tag,
-        exclude_tag=exclude_tag,
-        group_variants=group_variants,
-    )
+    if _has_unified:
+        keys = _load_filtered_image_keys_unified(
+            db,
+            query_service=image_query_service,
+            included=included or [],
+            excluded=excluded or [],
+            hidden=hidden or [],
+            missing=missing or [],
+            search=search,
+            group_variants=group_variants,
+        )
+    else:
+        keys = _load_filtered_image_keys(
+            db,
+            search=search,
+            generation_software=generation_software,
+            source_site=source_site,
+            mimetype=mimetype,
+            nsfw_rating=nsfw_rating,
+            nsfw_safety=nsfw_safety,
+            artist_name=artist_name,
+            collection_name=collection_name,
+            exclude_artist_name=exclude_artist_name,
+            exclude_collection_name=exclude_collection_name,
+            a1111_hires=a1111_hires,
+            a1111_regional_prompter=a1111_regional_prompter,
+            a1111_adetailer=a1111_adetailer,
+            include_tag=include_tag,
+            exclude_tag=exclude_tag,
+            group_variants=group_variants,
+        )
     _search_cache_put(cache_key, keys)
     return keys
 
 
-@app.patch("/images/{file_hash}", response_model=dict)
+def get_image_detail(image_id: int, db: Session = Depends(get_db)):
+    """Return full image detail for a single image including blob fields.
+
+    The gallery list endpoint (/api/images/) strips exif_data, civitai_data,
+    and json_metadata to keep the payload lean.  This endpoint restores them
+    for the selected-image detail panel.  Identified by integer primary key
+    (base_image_id in gallery responses).
+    """
+    image = (
+        db.query(ImageModel)
+        .filter(ImageModel.id == image_id, _active_image_filter())
+        .first()
+    )
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    detail = ImageData.from_db_record(image).to_dict()
+    detail["id"] = image.id
+    detail["collection_names"] = [c.name for c in image.collections]
+    detail["collection_ids"] = [c.id for c in image.collections]
+    detail["artist_name"] = image.artist.name if image.artist is not None else None
+    detail["artist_deleted"] = (
+        image.artist.civitai_user_deleted if image.artist is not None else None
+    )
+    detail["artist_original_name"] = (
+        image.artist.civitai_user_original_name if image.artist is not None else None
+    )
+    nsfw_ratings = _read_nsfw_ratings_for_image(image)
+    detail["nsfw_ratings"] = nsfw_ratings
+    detail["nsfw_rating"] = nsfw_ratings[0] if nsfw_ratings else None
+    detail["user_nsfw_rating"] = image.user_nsfw_rating
+    detail["user_nsfw_safety_class"] = image.user_nsfw_safety_class
+    db_user_tags = getattr(image, "user_tags", None)
+    if isinstance(db_user_tags, list) and db_user_tags:
+        detail["user_tags"] = db_user_tags
+    db_user_neg_tags = getattr(image, "user_negative_tags", None)
+    if isinstance(db_user_neg_tags, list) and db_user_neg_tags:
+        detail["user_negative_tags"] = db_user_neg_tags
+    return detail
+
+
 def update_image(
     file_hash: str, payload: ImageUpdateRequest, db: Session = Depends(get_db)
 ):
@@ -17720,7 +18605,6 @@ def update_image(
     }
 
 
-@app.get("/images/{file_hash}/video_poster")
 def get_image_video_poster(
     file_hash: str, request: Request, db: Session = Depends(get_db)
 ):
@@ -17753,7 +18637,6 @@ def get_image_video_poster(
     )
 
 
-@app.get("/images/{file_hash}/video_thumbnail")
 def get_image_video_thumbnail(
     file_hash: str, request: Request, db: Session = Depends(get_db)
 ):
@@ -17788,8 +18671,6 @@ def get_image_video_thumbnail(
     )
 
 
-@app.post("/images/{file_hash}/repair", response_model=dict)
-@app.post("/images/{file_hash}/repair_png", response_model=dict)
 def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
     """Repair a media record by normalizing metadata/resources and replacing bad media when needed."""
     image = (
@@ -18351,7 +19232,6 @@ def repair_image_file(file_hash: str, db: Session = Depends(get_db)):
     )
 
 
-@app.post("/images/{file_hash}/rescan", response_model=dict)
 def rescan_image_metadata(file_hash: str, db: Session = Depends(get_db)):
     """Rescan one media file and rerun metadata hydration/backfill steps."""
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
@@ -18374,7 +19254,6 @@ def rescan_image_metadata(file_hash: str, db: Session = Depends(get_db)):
         )
 
 
-@app.delete("/images/{file_hash}/file", response_model=dict)
 def delete_image_file(file_hash: str, db: Session = Depends(get_db)):
     """Soft-delete image record while preserving file and sidecar on disk."""
     max_attempts = 4
@@ -18414,7 +19293,6 @@ def delete_image_file(file_hash: str, db: Session = Depends(get_db)):
     }
 
 
-@app.get("/utilities/image_status_counts", response_model=dict)
 def get_image_status_counts(db: Session = Depends(get_db)):
     active = db.query(ImageModel).filter(_active_image_filter()).count()
     deleted = db.query(ImageModel).filter(ImageModel.image_status == "deleted").count()
@@ -18432,7 +19310,6 @@ def get_image_status_counts(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/utilities/inactive_images", response_model=List[dict])
 def get_inactive_images(
     status: Literal["all", "deleted", "tombstoned", "placeholder"] = "all",
     limit: int = 200,
@@ -18473,7 +19350,6 @@ def get_inactive_images(
     ]
 
 
-@app.get("/utilities/placeholders", response_model=List[dict])
 def get_placeholder_images(
     limit: int = 200,
     classification: Optional[str] = None,
@@ -18547,7 +19423,6 @@ def get_placeholder_images(
     return items
 
 
-@app.get("/utilities/placeholders/summary", response_model=dict)
 def get_placeholder_summary(
     collection_id: Optional[int] = None,
     db: Session = Depends(get_db),
@@ -18611,7 +19486,6 @@ def get_placeholder_summary(
     }
 
 
-@app.post("/utilities/images/{file_hash}/restore", response_model=dict)
 def restore_image_record(file_hash: str, db: Session = Depends(get_db)):
     image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
     if image is None:
@@ -18637,7 +19511,6 @@ def restore_image_record(file_hash: str, db: Session = Depends(get_db)):
     }
 
 
-@app.post("/utilities/purge_deleted_files", response_model=dict)
 def purge_deleted_files(db: Session = Depends(get_db)):
     """Permanently remove deleted records and their on-disk files/sidecars."""
     deleted_images = (
@@ -18684,7 +19557,6 @@ def purge_deleted_files(db: Session = Depends(get_db)):
 
 
 # Also, update the /artists/ endpoint to return the new artist objects
-@app.get("/artists/", response_model=List[dict])
 def get_artists(
     request: Request,
     response: Response,
@@ -18712,351 +19584,6 @@ def get_artists(
     ]
 
 
-@app.get("/search/suggest", response_model=dict)
-def search_suggest(
-    q: str = Query(default="", min_length=1, max_length=200),
-    limit: int = Query(default=15, ge=1, le=50),
-    nsfw_rating: Optional[list[str]] = Query(default=None),
-    # Filter context params — same as read_images for narrowing suggestions
-    search: Optional[str] = None,
-    generation_software: Optional[list[str]] = Query(default=None),
-    source_site: Optional[list[str]] = Query(default=None),
-    mimetype: Optional[list[str]] = Query(default=None),
-    nsfw_safety: Optional[list[str]] = Query(default=None),
-    artist_name: Optional[list[str]] = Query(default=None),
-    collection_name: Optional[list[str]] = Query(default=None),
-    exclude_artist_name: Optional[list[str]] = Query(default=None),
-    exclude_collection_name: Optional[list[str]] = Query(default=None),
-    a1111_hires: Optional[list[str]] = Query(default=None),
-    a1111_regional_prompter: Optional[list[str]] = Query(default=None),
-    a1111_adetailer: Optional[list[str]] = Query(default=None),
-    include_tag: Optional[list[str]] = Query(default=None),
-    exclude_tag: Optional[list[str]] = Query(default=None),
-    missing_data: Optional[list[str]] = Query(default=None),
-    missing_source: Optional[list[str]] = Query(default=None),
-    db: Session = Depends(get_db),
-):
-    """Return matching collections, artists, and tags for autocomplete suggestions.
-
-    All results are gallery-scoped: only items linked to at least one active image
-    are returned.  When filter context params are provided, results are further
-    narrowed to only items present in the filtered image subset.
-
-    Each result is a ``{name, count}`` object where *count* is the number of
-    distinct matching images.  Results are sorted by count (descending) then
-    alphabetically.
-    """
-    needle = q.strip().lower()
-    if not needle:
-        return {"collections": [], "artists": [], "tags": []}
-
-    # Short-lived cache per unique (query + all filter params) combination.
-    # Debounced autocomplete still fires many requests at the same prefix;
-    # 15 s TTL keeps suggestions fresh without re-running 7 SQL queries on
-    # every keystroke.
-    suggest_cache_key = _build_search_cache_key(
-        "suggest",
-        payload={
-            "q": needle,
-            "limit": limit,
-            "nsfw_rating": _normalize_cache_list(nsfw_rating),
-            "nsfw_safety": _normalize_cache_list(nsfw_safety),
-            "search": (search or "").strip().lower(),
-            "generation_software": _normalize_cache_list(generation_software),
-            "source_site": _normalize_cache_list(source_site),
-            "mimetype": _normalize_cache_list(mimetype),
-            "artist_name": _normalize_cache_list(artist_name),
-            "collection_name": _normalize_cache_list(collection_name),
-            "exclude_artist_name": _normalize_cache_list(exclude_artist_name),
-            "exclude_collection_name": _normalize_cache_list(exclude_collection_name),
-            "a1111_hires": _normalize_cache_list(a1111_hires),
-            "a1111_regional_prompter": _normalize_cache_list(a1111_regional_prompter),
-            "a1111_adetailer": _normalize_cache_list(a1111_adetailer),
-            "include_tag": _normalize_cache_list(include_tag),
-            "exclude_tag": _normalize_cache_list(exclude_tag),
-            "missing_data": _normalize_cache_list(missing_data),
-            "missing_source": _normalize_cache_list(missing_source),
-        },
-    )
-    cached_suggest = _search_cache_get(suggest_cache_key)
-    if isinstance(cached_suggest, dict):
-        return cached_suggest
-
-    like_pattern = f"%{needle}%"
-
-    # --- Build the constrained image ID set from filter context ---
-    base_query = db.query(ImageModel).filter(_active_image_filter())
-
-    # Apply text / relational filters first
-    filtered_query = _apply_image_list_filters(
-        base_query,
-        search=search,
-        source_sites=source_site,
-        mimetypes=mimetype,
-        artist_names=artist_name,
-        collection_names=collection_name,
-        exclude_artist_names=exclude_artist_name,
-        exclude_collection_names=exclude_collection_name,
-    )
-
-    # Determine whether _apply_image_list_filters narrowed the query.
-    # If any of these params are provided, we must extract IDs from
-    # filtered_query and use them as the base scope.
-    has_list_filters = any(
-        p
-        for p in (
-            search,
-            source_site,
-            mimetype,
-            artist_name,
-            collection_name,
-            exclude_artist_name,
-            exclude_collection_name,
-        )
-    )
-
-    constrained_ids: Optional[set[int]] = None
-
-    # If list filters are active, extract the scoped image IDs first
-    if has_list_filters:
-        constrained_ids = set(
-            row[0]
-            for row in filtered_query.with_entities(ImageModel.id).all()
-        )
-
-    # Intersect with specialised filters (each returns None when inactive)
-    nsfw_filtered = _filter_image_ids_by_nsfw_ratings(filtered_query, nsfw_rating)
-    nsfw_safety_filtered = _filter_image_ids_by_nsfw_safety_classes(
-        filtered_query, nsfw_safety
-    )
-    gen_filtered = _filter_image_ids_by_generation_software(
-        filtered_query, generation_software
-    )
-    a1111_filtered = _filter_image_ids_by_a1111_features(
-        filtered_query,
-        a1111_hires=a1111_hires,
-        a1111_regional_prompter=a1111_regional_prompter,
-        a1111_adetailer=a1111_adetailer,
-    )
-    tag_filtered = _filter_image_ids_by_tag_names(
-        filtered_query, include_tags=include_tag, exclude_tags=exclude_tag,
-    )
-    missing_data_filtered = _filter_image_ids_by_missing_data(
-        filtered_query, missing_data
-    )
-    missing_source_filtered = _filter_image_ids_by_missing_source(
-        filtered_query, missing_source
-    )
-
-    for fids in (
-        nsfw_filtered,
-        nsfw_safety_filtered,
-        gen_filtered,
-        a1111_filtered,
-        tag_filtered,
-        missing_data_filtered,
-        missing_source_filtered,
-    ):
-        if fids is not None:
-            # Convert to set so & intersection works regardless of whether the
-            # previous value was a list or a set (all filter helpers return list[int]).
-            fids_set: set[int] = set(fids)
-            constrained_ids = (
-                fids_set if constrained_ids is None else constrained_ids & fids_set
-            )
-
-    # Build the final image-ID constraint as a SQL subquery.
-    # When no filters are active (constrained_ids is None), avoid materialising
-    # all image IDs into Python and passing them back as a literal IN(…) list.
-    # That pattern generates enormous SQL for large galleries and defeats SQLite
-    # index lookups on image_concept_observations.
-    if constrained_ids is not None:
-        if not constrained_ids:
-            return {"collections": [], "artists": [], "tags": []}
-        allowed_ids_sub = (
-            db.query(ImageModel.id)
-            .filter(ImageModel.id.in_(constrained_ids))
-            .subquery()
-        )
-    else:
-        # No active filters — use _active_image_filter() as a real SQL subquery.
-        allowed_ids_sub = (
-            db.query(ImageModel.id).filter(_active_image_filter()).subquery()
-        )
-
-    # --- Collections with counts ---
-    collection_rows = (
-        db.query(
-            CollectionModel.name,
-            func.count(func.distinct(ImageModel.id)),
-        )
-        .join(
-            ImageCollectionMembership,
-            ImageCollectionMembership.collection_id == CollectionModel.id,
-        )
-        .join(ImageModel, ImageModel.id == ImageCollectionMembership.image_id)
-        .filter(
-            ImageModel.id.in_(allowed_ids_sub),
-            func.lower(CollectionModel.name).like(like_pattern),
-        )
-        .group_by(CollectionModel.name)
-        .order_by(func.count(func.distinct(ImageModel.id)).desc(), CollectionModel.name)
-        .limit(limit)
-        .all()
-    )
-
-    # --- Artists with counts ---
-    artist_rows = (
-        db.query(
-            Artist.name,
-            func.count(func.distinct(ImageModel.id)),
-        )
-        .join(ImageModel, ImageModel.artist_id == Artist.id)
-        .filter(
-            ImageModel.id.in_(allowed_ids_sub),
-            func.lower(Artist.name).like(like_pattern),
-        )
-        .group_by(Artist.name)
-        .order_by(func.count(func.distinct(ImageModel.id)).desc(), Artist.name)
-        .limit(limit)
-        .all()
-    )
-
-    # --- Tags with counts from 5 sources ---
-    # Merge across sources keeping max count per canonical (lowered) name.
-    tag_counts: dict[str, dict[str, Any]] = {}  # lowered → {name, count}
-
-    # 1. Tag → image_tags → ImageModel
-    tag_rows = (
-        db.query(
-            Tag.name,
-            func.count(func.distinct(ImageTag.image_id)),
-        )
-        .join(ImageTag, ImageTag.tag_id == Tag.id)
-        .filter(
-            ImageTag.image_id.in_(allowed_ids_sub),
-            func.lower(Tag.name).like(like_pattern),
-        )
-        .group_by(Tag.name)
-        .all()
-    )
-    for name, cnt in tag_rows:
-        key = name.lower()
-        if key not in tag_counts or cnt > tag_counts[key]["count"]:
-            tag_counts[key] = {"name": name, "count": int(cnt)}
-
-    # 2. Concept → image_concept_observations → ImageModel
-    concept_rows = (
-        db.query(
-            Concept.canonical_name,
-            func.count(func.distinct(ImageConceptObservation.image_id)),
-        )
-        .join(
-            ImageConceptObservation,
-            ImageConceptObservation.concept_id == Concept.id,
-        )
-        .filter(
-            ImageConceptObservation.image_id.in_(allowed_ids_sub),
-            func.lower(Concept.canonical_name).like(like_pattern),
-        )
-        .group_by(Concept.canonical_name)
-        .all()
-    )
-    for name, cnt in concept_rows:
-        key = name.lower()
-        if key not in tag_counts or cnt > tag_counts[key]["count"]:
-            tag_counts[key] = {"name": name, "count": int(cnt)}
-
-    # 3. ConceptAlias → Concept → image_concept_observations → ImageModel
-    alias_rows = (
-        db.query(
-            ConceptAlias.normalized_alias,
-            func.count(func.distinct(ImageConceptObservation.image_id)),
-        )
-        .join(Concept, Concept.id == ConceptAlias.concept_id)
-        .join(
-            ImageConceptObservation,
-            ImageConceptObservation.concept_id == Concept.id,
-        )
-        .filter(
-            ImageConceptObservation.image_id.in_(allowed_ids_sub),
-            func.lower(ConceptAlias.normalized_alias).like(like_pattern),
-        )
-        .group_by(ConceptAlias.normalized_alias)
-        .all()
-    )
-    for name, cnt in alias_rows:
-        key = name.lower()
-        if key not in tag_counts or cnt > tag_counts[key]["count"]:
-            tag_counts[key] = {"name": name, "count": int(cnt)}
-
-    # 4. AuthorityTerm → image_concept_observations → ImageModel
-    auth_rows = (
-        db.query(
-            AuthorityTerm.external_name,
-            func.count(func.distinct(ImageConceptObservation.image_id)),
-        )
-        .join(
-            ImageConceptObservation,
-            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
-        )
-        .filter(
-            ImageConceptObservation.image_id.in_(allowed_ids_sub),
-            func.lower(AuthorityTerm.external_name).like(like_pattern),
-        )
-        .group_by(AuthorityTerm.external_name)
-        .all()
-    )
-    for name, cnt in auth_rows:
-        key = name.lower()
-        if key not in tag_counts or cnt > tag_counts[key]["count"]:
-            tag_counts[key] = {"name": name, "count": int(cnt)}
-
-    # 5. User tags from ImageModel.user_tags (JSON array) — Python-side expansion
-    try:
-        ut_results = (
-            db.query(ImageModel.user_tags)
-            .filter(ImageModel.id.in_(allowed_ids_sub))
-            .all()
-        )
-        user_tag_counts: dict[str, int] = {}
-        for (ut_json,) in ut_results:
-            if ut_json and isinstance(ut_json, list):
-                seen_in_image: set[str] = set()
-                for tag in ut_json:
-                    if isinstance(tag, str):
-                        lowered = tag.lower()
-                        if needle in lowered:
-                            if lowered not in seen_in_image:
-                                seen_in_image.add(lowered)
-                                user_tag_counts[lowered] = (
-                                    user_tag_counts.get(lowered, 0) + 1
-                                )
-        for tag_lower, cnt in user_tag_counts.items():
-            if tag_lower not in tag_counts or cnt > tag_counts[tag_lower]["count"]:
-                tag_counts[tag_lower] = {"name": tag_lower, "count": cnt}
-    except Exception:
-        # Fail open if user_tags query encounters issues
-        pass
-
-    # Sort by count desc, then name asc; apply limit
-    sorted_tags = sorted(
-        tag_counts.values(),
-        key=lambda t: (-t["count"], t["name"].lower()),
-    )[:limit]
-
-    result = {
-        "collections": [
-            {"name": name, "count": int(cnt)} for name, cnt in collection_rows
-        ],
-        "artists": [{"name": name, "count": int(cnt)} for name, cnt in artist_rows],
-        "tags": sorted_tags,
-    }
-    _search_cache_put(suggest_cache_key, result, ttl_seconds=15.0)
-    return result
-
-
-@app.get("/filters/options", response_model=dict)
 def get_filter_options(
     request: Request,
     response: Response,
@@ -19283,7 +19810,6 @@ def _serialize_variant_group(group: VariantGroup) -> dict:
     }
 
 
-@app.get("/variant-groups/", response_model=List[dict])
 def list_variant_groups(
     group_type: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -19307,7 +19833,6 @@ def list_variant_groups(
     return result
 
 
-@app.get("/variant-groups/{group_id}", response_model=dict)
 def get_variant_group(group_id: int, db: Session = Depends(get_db)):
     """Get a variant group with its member list."""
     group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
@@ -19334,7 +19859,6 @@ def get_variant_group(group_id: int, db: Session = Depends(get_db)):
     return result
 
 
-@app.post("/variant-groups/", response_model=dict, status_code=201)
 def create_variant_group(payload: VariantGroupCreateRequest, db: Session = Depends(get_db)):
     """Create a new variant group, optionally with initial member images."""
     group_key = f"manual:{uuid4().hex[:12]}"
@@ -19369,7 +19893,6 @@ def create_variant_group(payload: VariantGroupCreateRequest, db: Session = Depen
     return result
 
 
-@app.patch("/variant-groups/{group_id}", response_model=dict)
 def update_variant_group(
     group_id: int, payload: VariantGroupUpdateRequest, db: Session = Depends(get_db)
 ):
@@ -19404,7 +19927,6 @@ def update_variant_group(
     return _serialize_variant_group(group)
 
 
-@app.delete("/variant-groups/{group_id}", response_model=dict)
 def delete_variant_group(group_id: int, db: Session = Depends(get_db)):
     """Delete a variant group and all its memberships. Images are not deleted."""
     group = db.query(VariantGroup).filter(VariantGroup.id == group_id).first()
@@ -19419,7 +19941,6 @@ def delete_variant_group(group_id: int, db: Session = Depends(get_db)):
     return {"message": "Variant group deleted.", "group_id": group_id}
 
 
-@app.post("/variant-groups/{group_id}/members", response_model=dict)
 def add_members_to_variant_group(
     group_id: int,
     payload: VariantGroupAddMembersRequest,
@@ -19473,7 +19994,6 @@ def add_members_to_variant_group(
     }
 
 
-@app.delete("/variant-groups/{group_id}/members/{image_id}", response_model=dict)
 def remove_member_from_variant_group(
     group_id: int, image_id: int, db: Session = Depends(get_db)
 ):
@@ -19515,7 +20035,6 @@ def remove_member_from_variant_group(
     }
 
 
-@app.get("/collections/", response_model=List[dict])
 def get_collections(
     request: Request,
     response: Response,
@@ -19532,7 +20051,6 @@ def get_collections(
     return [_serialize_collection(c) for c in collections]
 
 
-@app.post("/collections/", response_model=dict)
 def create_collection(payload: CollectionCreateRequest, db: Session = Depends(get_db)):
     normalized_name = _normalize_collection_name(payload.name)
     existing = (
@@ -19552,7 +20070,6 @@ def create_collection(payload: CollectionCreateRequest, db: Session = Depends(ge
     return _serialize_collection(created)
 
 
-@app.patch("/collections/{collection_id}", response_model=dict)
 def rename_collection(
     collection_id: int, payload: CollectionRenameRequest, db: Session = Depends(get_db)
 ):
@@ -19581,7 +20098,6 @@ def rename_collection(
     return _serialize_collection(collection)
 
 
-@app.delete("/collections/{collection_id}", response_model=dict)
 def delete_collection(collection_id: int, db: Session = Depends(get_db)):
     collection = (
         db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
@@ -19597,7 +20113,6 @@ def delete_collection(collection_id: int, db: Session = Depends(get_db)):
     return {"message": "Collection deleted.", "collection_id": collection_id}
 
 
-@app.get("/images/{file_hash}/collections", response_model=List[dict])
 def get_image_collections(file_hash: str, db: Session = Depends(get_db)):
     image = (
         db.query(ImageModel)
@@ -19610,7 +20125,6 @@ def get_image_collections(file_hash: str, db: Session = Depends(get_db)):
     return [_serialize_collection(c) for c in image.collections]
 
 
-@app.post("/images/{file_hash}/collections/{collection_id}", response_model=dict)
 def add_image_to_collection(
     file_hash: str, collection_id: int, db: Session = Depends(get_db)
 ):
@@ -19633,7 +20147,6 @@ def add_image_to_collection(
     }
 
 
-@app.post("/collections/{collection_id}/images", response_model=dict)
 def add_images_to_collection(
     collection_id: int,
     payload: CollectionBulkMembershipRequest,
@@ -19700,7 +20213,6 @@ def add_images_to_collection(
     }
 
 
-@app.delete("/images/{file_hash}/collections/{collection_id}", response_model=dict)
 def remove_image_from_collection(
     file_hash: str, collection_id: int, db: Session = Depends(get_db)
 ):
@@ -19728,9 +20240,6 @@ def remove_image_from_collection(
     }
 
 
-@app.api_route(
-    "/collections/{collection_id}/images", methods=["DELETE"], response_model=dict
-)
 def remove_images_from_collection(
     collection_id: int,
     payload: CollectionBulkMembershipRequest,
@@ -19797,7 +20306,6 @@ def remove_images_from_collection(
     }
 
 
-@app.get("/licenses/", response_model=List[dict])
 def get_licenses(
     request: Request,
     response: Response,
@@ -19818,7 +20326,6 @@ def get_licenses(
     ]
 
 
-@app.post("/scan_library/")
 def scan_library(db: Session = Depends(get_db)):
     """
     Scans the library, imports new files, and removes duplicates/orphaned records.
@@ -19835,7 +20342,6 @@ def scan_library(db: Session = Depends(get_db)):
         )
 
 
-@app.post("/upload_images/")
 async def upload_images(
     # This will be a list of uploaded files
     files: List[UploadFile] = File(...),
@@ -19899,7 +20405,6 @@ async def upload_images(
     }
 
 
-@app.post("/import_civitai/", status_code=status.HTTP_202_ACCEPTED)
 def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(get_db)):
     """Import CivitAI images by image URL/ID or collection URL/ID.
 
@@ -19980,7 +20485,6 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
 # ---------------------------------------------------------------------------
 
 
-@app.get("/civitai/auth/status", response_model=dict)
 def civitai_auth_status():
     """Check whether the current CivitAI session cookie is valid.
 
@@ -20001,7 +20505,6 @@ def civitai_auth_status():
     return {"authenticated": is_valid, "message": message}
 
 
-@app.post("/civitai/auth/cookie", response_model=dict)
 def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
     """Accept a manually-pasted CivitAI session cookie.
 
@@ -20053,7 +20556,6 @@ def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
     return {"success": True, "message": status_msg, "validated": is_valid}
 
 
-@app.post("/civitai/auth/refresh", response_model=dict)
 def civitai_auth_refresh():
     """Trigger a Playwright-based re-authentication with CivitAI.
 
@@ -20104,11 +20606,6 @@ def _get_civitai_session_cache_path() -> str:
     return env_val or ".civitai_session"
 
 
-@app.post(
-    "/collections/sync/civitai",
-    response_model=dict,
-    status_code=status.HTTP_202_ACCEPTED,
-)
 def sync_civitai_collections(
     payload: CivitaiCollectionSyncRequest, db: Session = Depends(get_db)
 ):
@@ -20132,11 +20629,6 @@ def sync_civitai_collections(
     }
 
 
-@app.post(
-    "/civitai/backfill/nsfw-levels",
-    response_model=dict,
-    status_code=status.HTTP_202_ACCEPTED,
-)
 def backfill_civitai_nsfw_levels(
     payload: CivitaiNsfwBackfillRequest,
     db: Session = Depends(get_db),
@@ -20230,7 +20722,6 @@ def _normalize_meili_hit(hit: dict) -> dict:
     return out
 
 
-@app.post("/civitai-search", response_model=dict)
 def civitai_search_proxy(payload: CivitaiSearchRequest):
     """Proxy a search request to the CivitAI Meilisearch host.
 
@@ -20306,7 +20797,6 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
     return response
 
 
-@app.get("/civitai-search/auth-status", response_model=dict)
 def civitai_search_auth_status():
     """Check whether the Meilisearch key is available for search."""
     from atelierai.civitai.civitai_search import CivitaiSearchClient
@@ -20325,7 +20815,6 @@ def civitai_search_auth_status():
     }
 
 
-@app.get("/taxonomy/review/summary", response_model=dict)
 def taxonomy_review_summary(db: Session = Depends(get_db)):
     concepts_total = db.query(Concept).count()
     concepts_active = db.query(Concept).filter(Concept.status == "active").count()
@@ -20348,7 +20837,6 @@ def taxonomy_review_summary(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/taxonomy/review/unresolved_terms", response_model=list[dict])
 def taxonomy_unresolved_terms(
     authority: Optional[str] = None,
     limit: int = 200,
@@ -20381,7 +20869,6 @@ def taxonomy_unresolved_terms(
     ]
 
 
-@app.get("/taxonomy/review/potential_duplicates", response_model=list[dict])
 def taxonomy_potential_duplicates(limit: int = 200, db: Session = Depends(get_db)):
     capped_limit = max(1, min(int(limit), 2000))
     concepts = (
@@ -20422,7 +20909,6 @@ def taxonomy_potential_duplicates(limit: int = 200, db: Session = Depends(get_db
     return duplicates[:capped_limit]
 
 
-@app.get("/taxonomy/concepts", response_model=list[dict])
 def taxonomy_list_concepts(
     query: Optional[str] = None,
     status: str = "active",
@@ -20484,7 +20970,6 @@ def taxonomy_list_concepts(
     return response
 
 
-@app.patch("/taxonomy/concepts/{concept_id}", response_model=dict)
 def taxonomy_update_concept(
     concept_id: int,
     payload: TaxonomyConceptUpdateRequest,
@@ -20531,7 +21016,6 @@ def taxonomy_update_concept(
     }
 
 
-@app.post("/taxonomy/concepts/{concept_id}/aliases", response_model=dict)
 def taxonomy_add_alias(
     concept_id: int,
     payload: TaxonomyAliasCreateRequest,
@@ -20604,7 +21088,6 @@ def taxonomy_add_alias(
     }
 
 
-@app.post("/taxonomy/review/merge_concepts", response_model=dict)
 def taxonomy_merge_concepts(
     payload: TaxonomyMergeRequest, db: Session = Depends(get_db)
 ):
@@ -20749,7 +21232,6 @@ def taxonomy_merge_concepts(
     }
 
 
-@app.post("/taxonomy/bootstrap/import", response_model=dict)
 def taxonomy_bootstrap_import(
     payload: TaxonomyBootstrapImportRequest, db: Session = Depends(get_db)
 ):
@@ -20759,16 +21241,13 @@ def taxonomy_bootstrap_import(
         db,
         authority_name=payload.authority_name,
         rows=rows,
-        create_missing_concepts=payload.create_missing_concepts,
         dry_run=payload.dry_run,
     )
 
 
-@app.post("/taxonomy/bootstrap/import_file", response_model=dict)
 async def taxonomy_bootstrap_import_file(
     authority_name: str = Form("user"),
     format: str = Form("json"),
-    create_missing_concepts: bool = Form(True),
     dry_run: bool = Form(True),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -20787,14 +21266,12 @@ async def taxonomy_bootstrap_import_file(
         db,
         authority_name=authority_name,
         rows=rows,
-        create_missing_concepts=create_missing_concepts,
         dry_run=dry_run,
     )
     result["source_file"] = file.filename
     return result
 
 
-@app.post("/taxonomy/concepts", response_model=dict)
 def taxonomy_create_concept(
     payload: TaxonomyConceptCreateRequest, db: Session = Depends(get_db)
 ):
@@ -20854,7 +21331,6 @@ def taxonomy_create_concept(
     }
 
 
-@app.post("/taxonomy/concepts/{concept_id}/parent", response_model=dict)
 def taxonomy_update_parent(
     concept_id: int,
     payload: TaxonomyParentUpdateRequest,
@@ -20899,7 +21375,6 @@ def taxonomy_update_parent(
     }
 
 
-@app.delete("/taxonomy/concepts/{concept_id}", response_model=dict)
 def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db)):
     concept = db.query(Concept).filter(Concept.id == concept_id).first()
     if concept is None:
@@ -20939,7 +21414,6 @@ def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db
     }
 
 
-@app.post("/taxonomy/utils/purge_root_concepts", response_model=dict)
 def taxonomy_purge_root_concepts(
     payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)
 ):
@@ -21035,7 +21509,6 @@ def taxonomy_purge_root_concepts(
     return response
 
 
-@app.get("/taxonomy/tree", response_model=list[dict])
 def taxonomy_tree(status: str = "active", db: Session = Depends(get_db)):
     query = db.query(Concept)
     if status != "all":
@@ -21070,7 +21543,6 @@ def taxonomy_tree(status: str = "active", db: Session = Depends(get_db)):
     return [build_node(root) for root in roots]
 
 
-@app.get("/taxonomy/tree/state", response_model=dict)
 def taxonomy_tree_state(
     request: Request,
     response: Response,
@@ -21328,7 +21800,6 @@ _TAG_SOURCE_COLS = [
 ]
 
 
-@app.get("/taxonomy/tree/tags/{source}", response_model=dict)
 def taxonomy_tree_tags_for_source(
     request: Request,
     response: Response,
@@ -21519,7 +21990,6 @@ def taxonomy_tree_tags_for_source(
     return payload
 
 
-@app.post("/taxonomy/tree/associate", response_model=dict)
 def taxonomy_tree_associate_tag(
     payload: TaxonomyTagAssociationRequest, db: Session = Depends(get_db)
 ):
@@ -21587,7 +22057,6 @@ def taxonomy_tree_associate_tag(
     }
 
 
-@app.delete("/taxonomy/tree/associate/{authority_term_id}", response_model=dict)
 def taxonomy_tree_disassociate_tag(
     authority_term_id: int, db: Session = Depends(get_db)
 ):
@@ -21605,7 +22074,6 @@ def taxonomy_tree_disassociate_tag(
     }
 
 
-@app.delete("/taxonomy/tree/tag/{authority_term_id}", response_model=dict)
 def taxonomy_tree_delete_tag(authority_term_id: int, db: Session = Depends(get_db)):
     term = db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
     if term is None:
@@ -21725,7 +22193,6 @@ def _get_term_concept(db: Session, term: AuthorityTerm) -> Concept | None:
     return db.query(Concept).filter(Concept.id == term.concept_id).first()
 
 
-@app.get("/taxonomy/tree/tag/{authority_term_id}/details", response_model=dict)
 def taxonomy_tree_tag_details(authority_term_id: int, db: Session = Depends(get_db)):
     term = db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
     if term is None:
@@ -21779,7 +22246,6 @@ def taxonomy_tree_tag_details(authority_term_id: int, db: Session = Depends(get_
     }
 
 
-@app.patch("/taxonomy/tree/tag/{authority_term_id}/details", response_model=dict)
 def taxonomy_tree_update_tag_details(
     authority_term_id: int,
     payload: TaxonomyTagDetailsUpdateRequest,
@@ -21880,7 +22346,6 @@ def taxonomy_tree_update_tag_details(
 _VALID_TAG_MAINT_SOURCES = {"civitai", "danbooru", "prompt", "user"}
 
 
-@app.get("/taxonomy/tag-maint/{source}/export")
 def taxonomy_tag_maint_export(source: str, db: Session = Depends(get_db)):
     """Export all authority_terms for a source as a JSON bootstrap archive."""
     source_lower = (source or "").strip().lower()
@@ -21929,7 +22394,6 @@ def taxonomy_tag_maint_export(source: str, db: Session = Depends(get_db)):
     }
 
 
-@app.post("/taxonomy/tag-maint/{source}/purge", response_model=dict)
 def taxonomy_tag_maint_purge(
     source: str, payload: TaxonomyTagMaintPurgeRequest, db: Session = Depends(get_db)
 ):
@@ -21975,7 +22439,6 @@ def taxonomy_tag_maint_purge(
     }
 
 
-@app.get("/taxonomy/tag-maint/{source}/list", response_model=dict)
 def taxonomy_tag_maint_list(
     source: str,
     page: int = 1,
@@ -22107,7 +22570,6 @@ def taxonomy_tag_maint_list(
     }
 
 
-@app.patch("/taxonomy/tag-maint/{source}/update", response_model=dict)
 def taxonomy_tag_maint_update(
     source: str, payload: TaxonomyTagMaintUpdateRequest, db: Session = Depends(get_db)
 ):
@@ -22172,7 +22634,6 @@ def taxonomy_tag_maint_update(
     }
 
 
-@app.post("/taxonomy/tag-maint/{source}/bulk-delete", response_model=dict)
 def taxonomy_tag_maint_bulk_delete(
     source: str,
     payload: TaxonomyTagMaintBulkDeleteRequest,
@@ -22223,7 +22684,6 @@ def taxonomy_tag_maint_bulk_delete(
     }
 
 
-@app.get("/taxonomy/tag-maint/civitai/rescan-observations")
 def taxonomy_tag_maint_rescan_civitai_observations(
     dry_run: bool = Query(False, description="Preview changes without committing"),
 ):
@@ -22510,7 +22970,6 @@ def _rescan_civitai_observations_inner(
     })
 
 
-@app.post("/taxonomy/tag-maint/civitai/backfill-tag-ids")
 def taxonomy_tag_maint_backfill_civitai_tag_ids(
     dry_run: bool = Query(True, description="Preview changes without committing"),
     limit: int = Query(0, description="Max sidecars to scan (0 = all)"),
@@ -22626,7 +23085,6 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
 _sync_lab_prepared: dict[int, _PreparedCivitaiImport] = {}
 
 
-@app.get("/sync-lab/collections", response_model=dict)
 def sync_lab_list_collections():
     """Step 1: Fetch the authenticated user's CivitAI image collections."""
     t0 = time.monotonic()
@@ -22647,7 +23105,6 @@ def sync_lab_list_collections():
     }
 
 
-@app.get("/sync-lab/collection-items/{collection_id}")
 def sync_lab_fetch_collection_items(
     collection_id: int, limit: int = Query(default=None, ge=1)
 ):
@@ -22767,7 +23224,6 @@ def sync_lab_fetch_collection_items(
     )
 
 
-@app.post("/sync-lab/analyze-local", response_model=dict)
 def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
     """Step 4: Check which CivitAI image IDs exist in the local DB."""
     t0 = time.monotonic()
@@ -22911,7 +23367,6 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
     }
 
 
-@app.get("/sync-lab/fetch-metadata")
 def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separated CivitAI image IDs")):
     """Step 5: Fetch CivitAI API metadata (basic info + generation data) for specified image IDs (SSE streaming)."""
     import queue
@@ -23026,7 +23481,6 @@ def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separ
     )
 
 
-@app.get("/sync-lab/download")
 def sync_lab_download(image_ids: str = Query(..., description="Comma-separated CivitAI image IDs")):
     """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
     import queue
@@ -23171,7 +23625,6 @@ def sync_lab_download(image_ids: str = Query(..., description="Comma-separated C
     )
 
 
-@app.get("/sync-lab/ingest")
 def sync_lab_ingest(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
     collection_id: Optional[int] = Query(None, description="CivitAI collection ID to attach"),
@@ -23325,7 +23778,6 @@ def sync_lab_ingest(
     )
 
 
-@app.get("/sync-lab/collection-status/{collection_id}", response_model=dict)
 def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)):
     """Get the current local DB state for a CivitAI collection."""
     collection = (
@@ -23377,7 +23829,6 @@ def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)
     }
 
 
-@app.get("/sync-lab")
 def sync_lab_page():
     """Serve the Sync Lab page."""
     return FileResponse("frontend/sync-lab.html")

@@ -336,6 +336,35 @@ def execute_gallery_query(
 
 
 # ---------------------------------------------------------------------------
+# Search suggestions (autocomplete)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/search/suggest")
+def search_suggest(
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Return autocomplete suggestions for the search bar.
+
+    Accepts a ``SuggestRequest`` JSON body with ``q`` (partial text),
+    optional ``search`` (text filter), and ``filter`` (GalleryFilter).
+    Returns matching collections, artists, and tags scoped to the
+    filtered image set.
+
+    Constrained IDs are looked up from a cache populated by
+    ``POST /api/query``.  On cache miss the filter is resolved fresh.
+    """
+    from services.query_model import SuggestRequest  # noqa: PLC0415
+
+    body = SuggestRequest.model_validate(payload)
+
+    from main import search_suggest_impl as _impl  # noqa: PLC0415
+
+    return _impl(body=body, db=db)
+
+
+# ---------------------------------------------------------------------------
 # Video poster / thumbnail
 # ---------------------------------------------------------------------------
 
@@ -753,63 +782,6 @@ def get_artists(
 # ---------------------------------------------------------------------------
 # Search + filter options (delegate — large complex implementations)
 # ---------------------------------------------------------------------------
-
-
-@router.get("/search/suggest", response_model=dict)
-def search_suggest(
-    q: str = Query(default="", min_length=1, max_length=200),
-    limit: int = Query(default=15, ge=1, le=50),
-    # Unified filter params (preferred).
-    included: Optional[list[str]] = Query(default=None),
-    excluded: Optional[list[str]] = Query(default=None),
-    hidden: Optional[list[str]] = Query(default=None),
-    missing: Optional[list[str]] = Query(default=None),
-    # Legacy filter params (deprecated).
-    nsfw_rating: Optional[list[str]] = Query(default=None),
-    generation_software: Optional[list[str]] = Query(default=None),
-    source_site: Optional[list[str]] = Query(default=None),
-    mimetype: Optional[list[str]] = Query(default=None),
-    nsfw_safety: Optional[list[str]] = Query(default=None),
-    artist_name: Optional[list[str]] = Query(default=None),
-    collection_name: Optional[list[str]] = Query(default=None),
-    exclude_artist_name: Optional[list[str]] = Query(default=None),
-    exclude_collection_name: Optional[list[str]] = Query(default=None),
-    a1111_hires: Optional[list[str]] = Query(default=None),
-    a1111_regional_prompter: Optional[list[str]] = Query(default=None),
-    a1111_adetailer: Optional[list[str]] = Query(default=None),
-    include_tag: Optional[list[str]] = Query(default=None),
-    exclude_tag: Optional[list[str]] = Query(default=None),
-    missing_data: Optional[list[str]] = Query(default=None),
-    missing_source: Optional[list[str]] = Query(default=None),
-    db: Session = Depends(get_db),
-):
-    from main import search_suggest as _impl  # noqa: PLC0415
-
-    return _impl(
-        q=q,
-        limit=limit,
-        included=included,
-        excluded=excluded,
-        hidden=hidden,
-        missing=missing,
-        nsfw_rating=nsfw_rating,
-        generation_software=generation_software,
-        source_site=source_site,
-        mimetype=mimetype,
-        nsfw_safety=nsfw_safety,
-        artist_name=artist_name,
-        collection_name=collection_name,
-        exclude_artist_name=exclude_artist_name,
-        exclude_collection_name=exclude_collection_name,
-        a1111_hires=a1111_hires,
-        a1111_regional_prompter=a1111_regional_prompter,
-        a1111_adetailer=a1111_adetailer,
-        include_tag=include_tag,
-        exclude_tag=exclude_tag,
-        missing_data=missing_data,
-        missing_source=missing_source,
-        db=db,
-    )
 
 
 @router.get("/filters/options", response_model=dict)

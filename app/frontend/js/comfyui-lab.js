@@ -149,7 +149,7 @@
         group_variants: 'false',
         limit: '1',
       });
-      const resp = await fetch(`/images/?${params.toString()}`);
+      const resp = await fetch(`/api/images/?${params.toString()}`);
       if (!resp.ok) {
         clearPreview();
         logDrop(`Image query failed: ${resp.status}`, 'err');

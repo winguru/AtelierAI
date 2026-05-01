@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/image-api.md
+# ──────────────────────────────────────────────────────────────────────────────
 """
 ImageData class for encapsulating image metadata.
 

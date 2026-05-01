@@ -44,6 +44,11 @@ async def read_model_lab():
     return FileResponse("frontend/model-lab.html")
 
 
+@router.get("/model-maint")
+async def read_model_maint():
+    return FileResponse("frontend/model-maint.html")
+
+
 @router.get("/folder-lab")
 async def read_folder_lab():
     return FileResponse("frontend/folder-lab.html")
@@ -62,6 +67,11 @@ async def read_expression_lab():
 @router.get("/comfyui-lab")
 async def read_comfyui_lab():
     return FileResponse("frontend/comfyui-lab.html")
+
+
+@router.get("/models")
+async def read_models_tree():
+    return FileResponse("frontend/models.html")
 
 
 # ---------------------------------------------------------------------------

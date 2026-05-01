@@ -1,3 +1,7 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/parity-workbench.md
+# 📄 docs: app/docs/memories/image-api.md
+# ──────────────────────────────────────────────────────────────────────────────
 """Utilities for extracting promoted metadata columns from image payloads.
 
 Used by both the ingestion pipeline and the backfill script to keep

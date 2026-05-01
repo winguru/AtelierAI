@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/parity-workbench.md
+# ──────────────────────────────────────────────────────────────────────────────
 """Consolidated A1111 parameter text parsing and detection.
 
 This module is the single source of truth for:

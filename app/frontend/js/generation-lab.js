@@ -498,7 +498,7 @@
     params.set('group_variants', 'false');
     params.set('limit', String(Math.max(1, Math.min(100, Number(limit) || 20))));
     params.set('search', query);
-    const response = await fetch(`/images/?${params.toString()}`);
+    const response = await fetch(`/api/images/?${params.toString()}`);
     const payload = await response.json().catch(() => []);
     if (!response.ok) {
       throw new Error(`Gallery query failed with HTTP ${response.status}.`);
@@ -973,7 +973,7 @@
       'Analyzing',
       'Extracting fields and running audit...'
     );
-    const response = await fetch('/generation-audit/analyze', {
+    const response = await fetch('/api/generation-audit/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestPayload),
@@ -1149,7 +1149,7 @@
       limit: '30',
       offset: '0',
     });
-    const response = await fetch(`/generation-prototype/comfy/attempts?${params.toString()}`);
+    const response = await fetch(`/api/generation-prototype/comfy/attempts?${params.toString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(String(payload?.detail || `Attempt history request failed with HTTP ${response.status}.`));
@@ -1210,7 +1210,7 @@
   async function runGenerateImageFlow() {
     const requestPayload = buildGenerateImageRequestPayload();
     setGenerateStatus('is-loading', 'Submitting', 'Submitting prompt to ComfyUI and waiting for completion...');
-    const response = await fetch('/generation-prototype/comfy/generate-and-compare', {
+    const response = await fetch('/api/generation-prototype/comfy/generate-and-compare', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestPayload),
@@ -1311,7 +1311,7 @@
       bridgeDatasetRefreshButton.disabled = true;
     }
     try {
-      const response = await fetch('/generation-prototype/a1111-bridge/dataset-quality');
+      const response = await fetch('/api/generation-prototype/a1111-bridge/dataset-quality');
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(String(payload?.detail || `Bridge dataset quality failed with HTTP ${response.status}.`));
@@ -3215,7 +3215,7 @@
 
   async function importTemplateFromForm() {
     const payload = buildTemplateDraftPayload({ requireName: true });
-    const response = await fetch('/generation-templates/import-workspace', {
+    const response = await fetch('/api/generation-templates/import-workspace', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -3234,7 +3234,7 @@
       throw new Error('Select a saved template first.');
     }
     const payload = buildTemplateDraftPayload({ requireName: true });
-    const response = await fetch(`/generation-templates/${encodeURIComponent(state.selectedTemplateId)}`, {
+    const response = await fetch(`/api/generation-templates/${encodeURIComponent(state.selectedTemplateId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -3251,7 +3251,7 @@
     if (!state.selectedTemplateId) {
       throw new Error('Select a saved template first.');
     }
-    const response = await fetch(`/generation-templates/${encodeURIComponent(state.selectedTemplateId)}`, {
+    const response = await fetch(`/api/generation-templates/${encodeURIComponent(state.selectedTemplateId)}`, {
       method: 'DELETE',
     });
     const data = await response.json().catch(() => ({}));
@@ -3340,7 +3340,7 @@
       params.set('include_full_catalog_raw', 'true');
     }
 
-    const response = await fetch(`/generation-templates/${encodeURIComponent(state.selectedTemplateId)}/resolve${params.toString() ? `?${params.toString()}` : ''}`, {
+    const response = await fetch(`/api/generation-templates/${encodeURIComponent(state.selectedTemplateId)}/resolve${params.toString() ? `?${params.toString()}` : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -3657,7 +3657,7 @@
       throw new Error('Run A1111 Bridge analysis before saving.');
     }
 
-    const response = await fetch('/generation-prototype/a1111-bridge/save-analysis', {
+    const response = await fetch('/api/generation-prototype/a1111-bridge/save-analysis', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3707,7 +3707,7 @@
 
   async function runA1111BridgeAnalysis() {
     const requestPayload = buildA1111BridgeRequestPayload();
-    const response = await fetch('/generation-prototype/a1111-bridge/analyze', {
+    const response = await fetch('/api/generation-prototype/a1111-bridge/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestPayload),
@@ -4015,7 +4015,7 @@
     if (parityLoadTemplateButton instanceof HTMLButtonElement) {
       parityLoadTemplateButton.addEventListener('click', async () => {
         try {
-          const resp = await fetch('/generation-templates/list');
+          const resp = await fetch('/api/generation-templates/list');
           if (!resp.ok) {
             setParityStatus('is-error', 'Templates unavailable', `Failed to load templates (HTTP ${resp.status}).`);
             return;
@@ -4042,7 +4042,7 @@
         const templateId = parityTemplateSelect.value.trim();
         if (!templateId || !(parityWorkflowJsonInput instanceof HTMLTextAreaElement)) return;
         try {
-          const resp = await fetch(`/generation-templates/get/${encodeURIComponent(templateId)}`);
+          const resp = await fetch(`/api/generation-templates/get/${encodeURIComponent(templateId)}`);
           if (!resp.ok) {
             setParityStatus('is-error', 'Template fetch failed', `HTTP ${resp.status}`);
             return;

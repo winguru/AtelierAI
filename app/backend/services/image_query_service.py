@@ -1,9 +1,9 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/image-api.md
+# ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-import json
 import re
-from pathlib import Path
-from threading import RLock
 from typing import Any, Optional
 
 from sqlalchemy import false as sa_false, func, or_, select, text
@@ -34,13 +34,14 @@ class ImageQueryService:
     _A1111_RP_DIRECTIVE_RE: re.Pattern = _a1111_svc.A1111_RP_DIRECTIVE_RE
     _A1111_HIRES_KEYWORDS: tuple[str, ...] = _a1111_svc.A1111_HIRES_KEYWORDS
 
-    """Encapsulates image list filtering and generation software lookup logic."""
+    """Encapsulates image list filtering and generation software lookup logic.
+
+    All query-time data is read from DB columns — no sidecar JSON file I/O.
+    """
 
     def __init__(self, *, image_library_path: str):
-        self._image_library_path = Path(image_library_path)
-        self._generation_software_cache: dict[str, tuple[Optional[float], Optional[str]]] = {}
-        self._nsfw_ratings_cache: dict[str, tuple[Optional[float], list[str]]] = {}
-        self._cache_lock = RLock()
+        # image_library_path kept for API compatibility; no longer used for file I/O
+        pass
 
     @staticmethod
     def _dedupe_labels(values: list[str]) -> list[str]:
@@ -198,39 +199,28 @@ class ImageQueryService:
         return normalized
 
     def read_generation_software_for_image(self, image: Any) -> Optional[str]:
+        """Return generation software from DB columns only (no sidecar file I/O)."""
+        # Primary: dedicated generation_software column
+        db_column = getattr(image, "generation_software", None)
+        if db_column and str(db_column).strip():
+            return str(db_column).strip().lower()
+
+        # Fallback: generation_software inside json_metadata
         db_json = image.json_metadata if isinstance(image.json_metadata, dict) else {}
         db_value = str(db_json.get("generation_software") or "").strip()
         if db_value:
             return db_value.lower()
 
-        sidecar_path = (self._image_library_path / str(image.file_path)).with_suffix(".json")
-        cache_key = str(sidecar_path)
-        try:
-            sidecar_mtime = sidecar_path.stat().st_mtime if sidecar_path.exists() else None
-        except OSError:
-            sidecar_mtime = None
-
-        with self._cache_lock:
-            cached_entry = self._generation_software_cache.get(cache_key)
-            if cached_entry and cached_entry[0] == sidecar_mtime:
-                return cached_entry[1]
-
-        normalized_value: Optional[str] = None
-        if sidecar_mtime is not None:
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as handle:
-                    payload = json.load(handle)
-                if isinstance(payload, dict):
-                    raw_value = str(payload.get("generation_software") or "").strip()
-                    normalized_value = raw_value.lower() if raw_value else None
-            except (OSError, json.JSONDecodeError):
-                normalized_value = None
-
-        with self._cache_lock:
-            self._generation_software_cache[cache_key] = (sidecar_mtime, normalized_value)
-        return normalized_value
+        return None
 
     def read_nsfw_ratings_for_image(self, image: Any) -> list[str]:
+        """Return NSFW rating labels from DB columns only (no sidecar file I/O).
+
+        Priority chain:
+          1. user_nsfw_rating / user_nsfw_safety_class (user override)
+          2. civitai_nsfw_level (promoted CivitAI column)
+          3. json_metadata → civitai.nsfwLevel / nsfw_rating fields
+        """
         # User-defined overrides take priority over all source-derived labels.
         user_rating = getattr(image, "user_nsfw_rating", None)
         user_safety = getattr(image, "user_nsfw_safety_class", None)
@@ -242,66 +232,31 @@ class ImageQueryService:
                 labels.extend(self._normalize_nsfw_labels(str(user_safety)))
             return self._dedupe_labels(labels)
 
+        # Civitai nsfwLevel promoted column
+        civitai_level = getattr(image, "civitai_nsfw_level", None)
+        if civitai_level is not None:
+            normalized_level = self._normalize_nsfw_level_value(civitai_level)
+            if normalized_level is not None:
+                return self._labels_from_nsfw_level(normalized_level)
+
+        # json_metadata fallback (DB column, not file I/O)
         db_json = image.json_metadata if isinstance(getattr(image, "json_metadata", None), dict) else {}
-        db_labels = self._extract_nsfw_labels_from_payload({
-            "json_metadata": db_json,
-            "civitai": db_json.get("civitai"),
-            "nsfw_rating": db_json.get("nsfw_rating"),
-            "nsfw_ratings": db_json.get("nsfw_ratings"),
-            "rating": db_json.get("rating"),
-        })
+        if db_json:
+            return self._extract_nsfw_labels_from_payload({
+                "civitai": db_json.get("civitai"),
+                "nsfw_rating": db_json.get("nsfw_rating"),
+                "nsfw_ratings": db_json.get("nsfw_ratings"),
+                "nsfw_level": db_json.get("nsfw_level"),
+                "rating": db_json.get("rating"),
+            })
 
-        sidecar_path = (self._image_library_path / str(image.file_path)).with_suffix(".json")
-        cache_key = str(sidecar_path)
-        try:
-            sidecar_mtime = sidecar_path.stat().st_mtime if sidecar_path.exists() else None
-        except OSError:
-            sidecar_mtime = None
-
-        sidecar_labels: list[str] = []
-        with self._cache_lock:
-            cached_entry = self._nsfw_ratings_cache.get(cache_key)
-            if cached_entry and cached_entry[0] == sidecar_mtime:
-                sidecar_labels = list(cached_entry[1])
-
-        if not sidecar_labels and sidecar_mtime is not None:
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as handle:
-                    payload = json.load(handle)
-                if isinstance(payload, dict):
-                    sidecar_labels = self._extract_nsfw_labels_from_payload(payload)
-            except (OSError, json.JSONDecodeError):
-                sidecar_labels = []
-
-            with self._cache_lock:
-                self._nsfw_ratings_cache[cache_key] = (sidecar_mtime, list(sidecar_labels))
-
-        return self._dedupe_labels(sidecar_labels + db_labels)
+        return []
 
     def _read_exif_for_image(self, image: Any) -> dict[str, Any]:
-        """Read EXIF data from DB json_metadata or sidecar JSON."""
+        """Read EXIF data from DB json_metadata only (no sidecar file I/O)."""
         db_json = image.json_metadata if isinstance(getattr(image, "json_metadata", None), dict) else {}
         raw_exif = db_json.get("exif_data") if isinstance(db_json, dict) else None
-        exif_from_db: dict[str, Any] = raw_exif if isinstance(raw_exif, dict) else {}
-
-        sidecar_path = (self._image_library_path / str(image.file_path)).with_suffix(".json")
-        try:
-            sidecar_mtime = sidecar_path.stat().st_mtime if sidecar_path.exists() else None
-        except OSError:
-            sidecar_mtime = None
-
-        sidecar_exif: dict[str, Any] = {}
-        if sidecar_mtime is not None:
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as handle:
-                    payload = json.load(handle)
-                if isinstance(payload, dict):
-                    raw_sidecar_exif = payload.get("exif_data")
-                    sidecar_exif = raw_sidecar_exif if isinstance(raw_sidecar_exif, dict) else {}
-            except (OSError, json.JSONDecodeError):
-                sidecar_exif = {}
-
-        return {**exif_from_db, **sidecar_exif}
+        return raw_exif if isinstance(raw_exif, dict) else {}
 
     def _looks_like_a1111_user_comment_payload(self, exif: dict[str, Any]) -> bool:
         """Detect whether EXIF contains A1111-style generation metadata."""

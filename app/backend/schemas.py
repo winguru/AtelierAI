@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/taxonomy-import.md
+# ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
@@ -95,9 +98,52 @@ class TaxonomyConceptUpdateRequest(BaseModel):
 
 class TaxonomyBootstrapImportRequest(BaseModel):
     authority_name: str = "user"
+
+
+# ---------------------------------------------------------------------------
+# Unified Gallery Filter
+# ---------------------------------------------------------------------------
+
+# Valid term type prefixes for the 4-concept gallery filter.
+# Format: "type:value" e.g. "tag:portrait", "artist:Rembrandt"
+INCLUDED_TERM_TYPES = frozenset({
+    "tag", "artist", "collection", "model", "source", "software", "mimetype", "feature",
+})
+EXCLUDED_TERM_TYPES = INCLUDED_TERM_TYPES  # Same types allowed for both directions
+HIDDEN_TERM_TYPES = frozenset({"nsfw", "nsfw_safety"})
+MISSING_TERMS = frozenset({
+    "artist", "prompt", "tags", "model", "checkpoint", "lora",
+    "nsfw", "generation", "exif", "source", "civitai_meta",
+})
+
+
+class FilterTerm(BaseModel):
+    """A single typed filter term parsed from 'type:value' format."""
+    type: str
+    value: str
+    qualifier: Optional[str] = None  # e.g. "checkpoint" for missing:feature:checkpoint
+
+    class Config:
+        frozen = True
+
+
+class ParsedGalleryFilter(BaseModel):
+    """Parsed representation of the 4-concept gallery filter.
+
+    All lists are grouped by type for efficient dispatch to filter functions.
+    """
+    # Included terms grouped by type: {"tag": ["portrait", "landscape"], "artist": ["Rembrandt"]}
+    included_by_type: dict[str, list[str]] = {}
+    # Excluded terms grouped by type (same structure)
+    excluded_by_type: dict[str, list[str]] = {}
+    # Hidden terms grouped by type: {"nsfw": ["xxx"], "nsfw_safety": ["explicit"]}
+    hidden_by_type: dict[str, list[str]] = {}
+    # Missing keys as a flat set: {"artist", "model", "checkpoint"}
+    missing_keys: set[str] = set()
+    # Feature-specific missing: {"a1111_hires", "a1111_regional_prompter"}
+    missing_features: set[str] = set()
     format: str = "json"
     raw_text: str
-    create_missing_concepts: bool = True
     dry_run: bool = True
 
 

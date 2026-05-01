@@ -431,11 +431,11 @@ FodyWeavers.xsd
 venv*/
 
 # Application specific files
-data/
-data/*
 .civitai_session
 image_db.sqlite*
-image_library/
-image_library/*
-image_resources/
-image_resources/*
+app/data/
+app/data/*
+app/image_library/
+app/image_library/*
+app/image_resources/
+app/image_resources/*

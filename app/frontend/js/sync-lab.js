@@ -137,7 +137,7 @@
     el('step1-results').innerHTML = '';
 
     try {
-      const resp = await fetch('/sync-lab/collections');
+      const resp = await fetch('/api/sync-lab/collections');
       const data = await resp.json();
 
       if (!resp.ok || data.status === 'error') {
@@ -253,7 +253,7 @@
     el('step3-results').innerHTML = '';
 
     try {
-      const url = `/sync-lab/collection-items/${state.selectedCollectionId}`;
+      const url = `/api/sync-lab/collection-items/${state.selectedCollectionId}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
         let lastProgress = null;
@@ -388,7 +388,7 @@
     const imageIds = state.collectionItems.map(it => it.id || it.imageId).filter(Boolean);
 
     try {
-      const resp = await fetch('/sync-lab/analyze-local', {
+      const resp = await fetch('/api/sync-lab/analyze-local', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_ids: imageIds }),
@@ -497,7 +497,7 @@
     }
 
     try {
-      const url = `/sync-lab/fetch-metadata?image_ids=${imageIds.join(',')}`;
+      const url = `/api/sync-lab/fetch-metadata?image_ids=${imageIds.join(',')}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -765,7 +765,7 @@
     }
 
     try {
-      const url = `/sync-lab/download?image_ids=${imageIds.join(',')}`;
+      const url = `/api/sync-lab/download?image_ids=${imageIds.join(',')}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -869,7 +869,7 @@
     el('step7-results').innerHTML = '';
 
     try {
-      const url = `/sync-lab/ingest?image_ids=${okIds.join(',')}&collection_id=${state.selectedCollectionId || ''}`;
+      const url = `/api/sync-lab/ingest?image_ids=${okIds.join(',')}&collection_id=${state.selectedCollectionId || ''}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 

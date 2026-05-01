@@ -740,6 +740,60 @@ class CivitaiAPI:
 
         return result
 
+    # ===== Model API Methods =====
+
+    def fetch_model_list(
+        self,
+        username: str,
+        cursor: Optional[str] = None,
+        limit: int = 50,
+    ) -> Optional[Dict]:
+        """Fetch a page of models for a user using model.getAll endpoint.
+
+        Args:
+            username: CivitAI username
+            cursor: Pagination cursor (None for first page)
+            limit: Number of items per page
+
+        Returns:
+            Dictionary with items and nextCursor, or None if request fails
+        """
+        payload_data = {
+            "username": username,
+            "sort": "Newest",
+            "period": "AllTime",
+            "cursor": cursor,
+            "limit": limit,
+            "authed": True,
+        }
+
+        return self._make_request(
+            endpoint="model.getAll",
+            payload_data=payload_data,
+        )
+
+    def fetch_model_detail(
+        self,
+        model_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch full model detail using model.getById endpoint.
+
+        Args:
+            model_id: CivitAI model ID
+
+        Returns:
+            Model detail dictionary, or None if not found
+        """
+        payload_data = {
+            "id": int(model_id),
+            "authed": True,
+        }
+
+        return self._make_request(
+            endpoint="model.getById",
+            payload_data=payload_data,
+        )
+
     # ===== Collection API Methods =====
 
     def fetch_collection_items(self, collection_id: int) -> List[Dict]:

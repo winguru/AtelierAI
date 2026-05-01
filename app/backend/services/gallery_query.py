@@ -45,6 +45,7 @@ from services.query_model import (
     TagDetailItem,
     TagDetailSpec,
     TopTag,
+    filter_cache_key,
 )
 
 # Over-fetch multiplier when group_variants collapses rows.
@@ -197,7 +198,30 @@ class GalleryQuery:
         gallery_filter: GalleryFilter,
         search: Optional[str],
     ) -> Optional[set[int]]:
-        """Apply all filter clauses and return constrained IDs (or None)."""
+        """Apply all filter clauses and return constrained IDs (or None).
+
+        Results are cached in the shared ``_search_cache`` keyed by a
+        deterministic hash of the filter + search.  A cache hit avoids
+        re-executing the filter query, which is the expensive part.
+        """
+        from utils.cache import _build_search_cache_key, _search_cache_get, _search_cache_put  # noqa: PLC0415
+
+        # ── Check cache ─────────────────────────────────────────────────
+        _UNFILTERED_SENTINEL = object()
+        fkey = filter_cache_key(gallery_filter, search)
+        cache_key = _build_search_cache_key(
+            "constrained_ids", payload={"filter_key": fkey},
+        )
+        cached = _search_cache_get(cache_key)
+        if cached is not None:
+            # Cache stores frozenset for filtered, or "unfiltered" string for None.
+            if isinstance(cached, frozenset):
+                return set(cached)
+            if cached == "unfiltered":
+                return None
+            return cached
+
+        # ── Compute ─────────────────────────────────────────────────────
         from services.gallery_filter_service import (
             apply_gallery_filter,
             parse_gallery_filter,
@@ -230,6 +254,13 @@ class GalleryQuery:
         _, constrained_ids = apply_gallery_filter(
             images_query, parsed, self._db, self._qs,
         )
+
+        # ── Store in cache ──────────────────────────────────────────────
+        # frozenset for filtered IDs, "unfiltered" string for None (avoids
+        # ambiguity with _search_cache_get returning None on miss).
+        cache_value: object = frozenset(constrained_ids) if constrained_ids is not None else "unfiltered"
+        _search_cache_put(cache_key, cache_value, ttl_seconds=30.0)
+
         return constrained_ids
 
     @staticmethod

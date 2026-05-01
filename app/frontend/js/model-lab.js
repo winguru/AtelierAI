@@ -548,7 +548,7 @@
     if (formState.lorasUrl) {
       params.set('loras_url', formState.lorasUrl);
     }
-    return `/model-prototype/local-match-preview?${params.toString()}`;
+    return `/api/model-prototype/local-match-preview?${params.toString()}`;
   }
 
   function buildFallbackLocalMatchPreviewPayload(match) {
@@ -599,7 +599,7 @@
       payload.loras_url = formState.lorasUrl;
     }
 
-    const response = await fetch('/model-prototype/local-model-download', {
+    const response = await fetch('/api/model-prototype/local-model-download', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

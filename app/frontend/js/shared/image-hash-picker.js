@@ -53,7 +53,7 @@
     params.set('group_variants', 'false');
     params.set('limit', String(Math.max(1, Math.min(100, Number(limit) || 30))));
     params.set('search', query);
-    const response = await fetch(`/images/?${params.toString()}`);
+    const response = await fetch(`/api/images/?${params.toString()}`);
     const payload = await response.json().catch(() => []);
     if (!response.ok) {
       throw new Error(`Gallery query failed with HTTP ${response.status}.`);

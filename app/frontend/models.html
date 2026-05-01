@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Models Browser</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/tree.css">
+  <link rel="stylesheet" href="/frontend/css/models.css">
+</head>
+<body>
+  <main class="concept-page models-page">
+    <header class="concept-header">
+      <div class="concept-header-row">
+        <div>
+          <h1>Models Browser</h1>
+          <p>Browse checkpoints and LoRAs by base model, model, version, and precision.</p>
+        </div>
+        <div class="global-pref-row" aria-label="Page preferences">
+          <label class="toggle-wrap" for="theme-toggle">
+            <input id="theme-toggle" type="checkbox">
+            <span>Dark mode</span>
+          </label>
+        </div>
+      </div>
+    </header>
+
+    <section class="scope-controls-wrap" aria-label="Model scope controls">
+      <div class="tag-filter-title">Scope</div>
+      <div id="scope-controls" class="tag-filter-row"></div>
+    </section>
+
+    <section id="type-board" class="tag-board" aria-label="Model type panes">
+      <!-- Two type panes: checkpoints and loras, each with 4-level hierarchy -->
+    </section>
+  </main>
+
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/shared/ui-kit.js" defer></script>
+  <script src="/frontend/js/models.js" defer></script>
+</body>
+</html>

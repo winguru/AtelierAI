@@ -233,3 +233,44 @@ class GalleryQueryResponse(BaseModel):
     page: Optional[PageInfo] = None
     images: Optional[list[ImageItem]] = None
     tags: Optional[list[TagDetailItem]] = None
+
+
+# ---------------------------------------------------------------------------
+# Search-suggest request
+# ---------------------------------------------------------------------------
+
+class SuggestRequest(BaseModel):
+    """Autocomplete suggestion request — ``POST /api/search/suggest``.
+
+    ``q`` is the partial text the user has typed (LIKE pattern).
+    ``search`` is the optional full-text search term from the gallery
+    filter bar (narrows the image pool).
+    ``filter`` mirrors the same ``GalleryFilter`` used by ``/api/query``,
+    allowing the suggest endpoint to reuse cached constrained IDs.
+    """
+
+    q: str = Field(min_length=1, max_length=200)
+    limit: int = Field(default=15, ge=1, le=50)
+    search: Optional[str] = None
+    filter: GalleryFilter = Field(default_factory=GalleryFilter)
+
+
+def filter_cache_key(
+    gallery_filter: GalleryFilter,
+    search: Optional[str],
+) -> str:
+    """Return a deterministic cache key for a (filter, search) pair.
+
+    The key is a canonical JSON string so it can be used directly with
+    ``_build_search_cache_key("constrained_ids", payload=...)``.
+    """
+    import json  # noqa: PLC0415 – avoid top-level import for stdlib
+
+    payload: dict[str, object] = {
+        "filter": gallery_filter.model_dump(),
+    }
+    if search:
+        payload["search"] = search.strip().lower()
+    # Deterministic serialisation — sort keys, compact separators.
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True)

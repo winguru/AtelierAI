@@ -1,3 +1,7 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/taxonomy-import.md
+# 📄 docs: app/docs/memories/image-api.md
+# ──────────────────────────────────────────────────────────────────────────────
 import enum
 
 from sqlalchemy import (
@@ -851,3 +855,302 @@ class ImageVariantGroupMembership(Base):
     role_in_group = Column(String, nullable=False, default="member")  # "primary" | "base" | "result" | "seed_variant" | "member"
     sort_index = Column(Integer, nullable=False, default=0)
     source = Column(String, nullable=False, default="manual")  # "auto_hash" | "auto_seed" | "auto_img2img" | "auto_civitai" | "manual"
+
+
+# ---------------------------------------------------------------------------
+# CivitAI User Table
+# ---------------------------------------------------------------------------
+
+
+class CivitaiUser(Base):
+    """CivitAI user/creator accounts.
+
+    Normalized from the denormalized civitai_user_id/username/deleted columns on
+    CivitaiModel.  Populated during model sync (upsert_model_list_item / upsert_model_detail).
+    """
+    __tablename__ = "civitai_users"
+
+    civitai_user_id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    deleted_at = Column(DateTime, nullable=True)  # When the CivitAI account was deleted
+    original_name = Column(String, nullable=True)  # Name at time of deletion
+    created_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    scraped_at = Column(DateTime, nullable=True)  # When we last saw this user
+
+    # Relationships
+    models = relationship(
+        "CivitaiModel",
+        back_populates="creator",
+        foreign_keys="[CivitaiModel.creator_id]",
+    )
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Model Catalog Tables
+# ---------------------------------------------------------------------------
+
+class CivitaiModel(Base):
+    """Master table for CivitAI models (Checkpoints, LoRAs, etc.)."""
+    __tablename__ = "civitai_models"
+
+    civitai_model_id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    type = Column(String, nullable=False, index=True)  # "Checkpoint", "LORA", etc.
+    description = Column(Text, nullable=True)  # Phase 2: model-level fallback; version.description is authoritative
+    checkpoint_type = Column(String, nullable=True)  # "Merge", "Trained", null for non-checkpoints
+    nsfw = Column(Boolean, nullable=False, default=False)
+    nsfw_level = Column(Integer, nullable=False, default=1)  # Phase 2: model-level fallback; version.nsfw_level is authoritative
+    sfw_only = Column(Boolean, nullable=False, default=False)
+    poi = Column(Boolean, nullable=False, default=False)
+    minor = Column(Boolean, nullable=False, default=False)
+    status = Column(String, nullable=False, default="Published")  # Phase 2: model-level fallback; version.status is authoritative
+    availability = Column(String, nullable=False, default="Public")
+    upload_type = Column(String, nullable=True)  # Phase 2: model-level fallback; version.upload_type is authoritative
+    locked = Column(Boolean, nullable=False, default=False)
+    allow_no_credit = Column(Boolean, nullable=True)
+    allow_commercial_use = Column(JSON, nullable=True)  # Array of allowed commercial types
+    allow_derivatives = Column(Boolean, nullable=True)
+    allow_different_license = Column(Boolean, nullable=True)
+    civitai_user_id = Column(Integer, nullable=False, index=True)  # Legacy: kept for backward compat; prefer creator FK
+    civitai_username = Column(String, nullable=False)  # Legacy: kept for backward compat; prefer creator FK
+    civitai_user_deleted = Column(Boolean, nullable=False, default=False)  # Legacy: kept for backward compat; prefer creator FK
+    creator_id = Column(Integer, ForeignKey("civitai_users.civitai_user_id"), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    last_version_at = Column(DateTime, nullable=True)
+    early_access_deadline = Column(DateTime, nullable=True)
+    latest_version_id = Column(Integer, ForeignKey("civitai_model_versions.civitai_version_id"), nullable=True)
+    scraped_at = Column(DateTime, nullable=True)  # When we last did getById
+    list_scraped_at = Column(DateTime, nullable=True)  # When we last saw this in getAll
+
+    # Relationships
+    versions = relationship(
+        "CivitaiModelVersion",
+        back_populates="model",
+        cascade="all, delete-orphan",
+        foreign_keys="[CivitaiModelVersion.civitai_model_id]",
+    )
+    tags = relationship("CivitaiModelTag", back_populates="model", cascade="all, delete-orphan")
+    rank = relationship("CivitaiModelRank", uselist=False, back_populates="model", cascade="all, delete-orphan")
+    creator = relationship("CivitaiUser", back_populates="models", foreign_keys=[creator_id])
+
+
+class CivitaiModelVersion(Base):
+    """Versions of a CivitAI model.
+
+    Version-level fields (description, nsfw_level, status, upload_type) are
+    authoritative.  When null, fall back to the parent CivitaiModel's value.
+    """
+    __tablename__ = "civitai_model_versions"
+
+    civitai_version_id = Column(Integer, primary_key=True, index=True)
+    civitai_model_id = Column(Integer, ForeignKey("civitai_models.civitai_model_id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)  # Authoritative; fallback to model.description
+    base_model = Column(String, nullable=False, index=True)
+    base_model_type = Column(String, nullable=True)
+    base_model_id = Column(Integer, ForeignKey("civitai_base_models.id"), nullable=True, index=True)
+    nsfw_level = Column(Integer, nullable=False, default=1)  # Authoritative; fallback to model.nsfw_level
+    status = Column(String, nullable=False, default="Published")  # Authoritative; fallback to model.status
+    availability = Column(String, nullable=False, default="Public")
+    upload_type = Column(String, nullable=True)  # Authoritative; fallback to model.upload_type
+    clip_skip = Column(Integer, nullable=True)
+    steps = Column(Integer, nullable=True)  # Training steps
+    epochs = Column(Integer, nullable=True)  # Training epochs
+    trained_words = Column(JSON, nullable=True)  # Trigger phrases as array
+    training_status = Column(String, nullable=True)
+    require_auth = Column(Boolean, nullable=False, default=False)
+    usage_control = Column(String, nullable=True)
+    early_access_config = Column(JSON, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    scraped_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    model = relationship("CivitaiModel", back_populates="versions", foreign_keys=[civitai_model_id])
+    files = relationship("CivitaiModelVersionFile", back_populates="version", cascade="all, delete-orphan")
+    rank = relationship("CivitaiModelRank", uselist=False, back_populates="version", cascade="all, delete-orphan")
+    base_model_ref = relationship("CivitaiBaseModel", foreign_keys=[base_model_id])
+
+
+class CivitaiModelVersionFile(Base):
+    """Files associated with a model version."""
+    __tablename__ = "civitai_model_version_files"
+
+    civitai_file_id = Column(Integer, primary_key=True, index=True)
+    civitai_version_id = Column(Integer, ForeignKey("civitai_model_versions.civitai_version_id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)  # "Model", "VAE", etc.
+    size_kb = Column(Float, nullable=False)
+    download_url = Column(Text, nullable=True)
+    visibility = Column(String, nullable=True)
+    format = Column(String, nullable=True)  # "SafeTensor", etc.
+    fp = Column(String, nullable=True)  # "fp16", "fp32", etc.
+    size_label = Column(String, nullable=True)  # "pruned", "full", etc.
+    pickle_scan_result = Column(String, nullable=True)
+    virus_scan_result = Column(String, nullable=True)
+    scanned_at = Column(DateTime, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+
+    # Relationships
+    version = relationship("CivitaiModelVersion", back_populates="files", foreign_keys=[civitai_version_id])
+    hashes = relationship("CivitaiModelFileHash", back_populates="file", cascade="all, delete-orphan")
+
+
+class CivitaiModelFileHash(Base):
+    """Hashes for model files (SHA256, AutoV2, CRC32, BLAKE3, etc.)."""
+    __tablename__ = "civitai_model_file_hashes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("civitai_model_version_files.civitai_file_id"), nullable=False, index=True)
+    hash_type = Column(String, nullable=False)  # "SHA256", "AutoV2", "CRC32", "BLAKE3", "AutoV1", "AutoV3"
+    hash_value = Column(String, nullable=False, index=True)
+
+    # Relationships
+    file = relationship("CivitaiModelVersionFile", back_populates="hashes", foreign_keys=[file_id])
+
+    __table_args__ = (
+        UniqueConstraint("file_id", "hash_type", name="uq_file_hash_type"),
+        Index("ix_hash_type_value", "hash_type", "hash_value"),
+    )
+
+
+class CivitaiModelRank(Base):
+    """Ranking and statistics for models and versions."""
+    __tablename__ = "civitai_model_ranks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(Integer, ForeignKey("civitai_models.civitai_model_id"), nullable=True, index=True)
+    version_id = Column(Integer, ForeignKey("civitai_model_versions.civitai_version_id"), nullable=True, index=True)
+    scope = Column(String, nullable=False, default="allTime")  # "allTime" or "currentPeriod"
+    download_count = Column(Integer, nullable=False, default=0)
+    thumbs_up_count = Column(Integer, nullable=False, default=0)
+    thumbs_down_count = Column(Integer, nullable=False, default=0)
+    comment_count = Column(Integer, nullable=True)  # Model-level only
+    collected_count = Column(Integer, nullable=True)  # Model-level only
+    tipped_amount_count = Column(Integer, nullable=True)  # Model-level only
+    generation_count = Column(Integer, nullable=True)  # Version-level only
+    earned_amount = Column(Integer, nullable=True)  # Version-level only
+    scraped_at = Column(DateTime, nullable=False)
+
+    # Relationships
+    model = relationship("CivitaiModel", back_populates="rank", foreign_keys=[model_id])
+    version = relationship("CivitaiModelVersion", back_populates="rank", foreign_keys=[version_id])
+
+
+class CivitaiModelTag(Base):
+    """Tags applied to CivitAI models."""
+    __tablename__ = "civitai_model_tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    civitai_model_id = Column(Integer, ForeignKey("civitai_models.civitai_model_id"), nullable=False, index=True)
+    civitai_tag_id = Column(Integer, nullable=False)
+    tag_name = Column(String, nullable=False)
+    is_category = Column(Boolean, nullable=False, default=False)
+    authority_term_id = Column(Integer, ForeignKey("authority_terms.id"), nullable=True)  # Future: link to taxonomy
+
+    # Relationships
+    model = relationship("CivitaiModel", back_populates="tags", foreign_keys=[civitai_model_id])
+    authority_term = relationship("AuthorityTerm", foreign_keys=[authority_term_id])
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Base Model Normalization Table
+# ---------------------------------------------------------------------------
+
+
+class CivitaiBaseModel(Base):
+    """Canonical base model definitions (SD 1.5, SDXL, Flux, etc.).
+
+    Normalized from the raw base_model strings on CivitaiModelVersion.
+    Populated by backfill script and kept in sync during model upsert.
+    """
+    __tablename__ = "civitai_base_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    canonical_key = Column(String, unique=True, nullable=False, index=True)  # "sdxl", "sd15", "flux", etc.
+    label = Column(String, nullable=False)  # Display label: "SDXL", "SD 1.5", "Flux"
+    base_model_type = Column(String, nullable=True)  # "sd", "sdxl", etc. from CivitAI API
+    family = Column(String, nullable=True)  # Grouping: "stable-diffusion", "flux", "pony"
+    sort_order = Column(Integer, nullable=False, default=0)  # Display ordering
+    created_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    versions = relationship(
+        "CivitaiModelVersion",
+        back_populates="base_model_ref",
+        foreign_keys="[CivitaiModelVersion.base_model_id]",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model Observation Table (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class ModelObservation(Base):
+    """Tracks which CivitAI models/versions appear in which images.
+
+    Normalized from the denormalized json_metadata.civitai.models/loras arrays.
+    Provides structured querying of model usage across the image library.
+    """
+    __tablename__ = "model_observations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    image_id = Column(
+        Integer, ForeignKey("images.id"), nullable=False, index=True
+    )
+    civitai_model_id = Column(
+        Integer, ForeignKey("civitai_models.civitai_model_id"),
+        nullable=True, index=True,
+    )
+    civitai_version_id = Column(
+        Integer, ForeignKey("civitai_model_versions.civitai_version_id"),
+        nullable=True, index=True,
+    )
+    # "checkpoint", "lora", "vae", etc.
+    resource_type = Column(
+        String, nullable=False, default="unknown", index=True
+    )
+    generation_stage = Column(String, nullable=True)  # Stage label when known
+    # Primary checkpoint vs secondary
+    is_primary = Column(
+        Boolean, nullable=False, default=False, index=True
+    )
+    # "metadata", "user", "analysis"
+    source_type = Column(
+        String, nullable=False, default="metadata", index=True
+    )
+    confidence = Column(Float, nullable=True)  # Future: weight/strength
+    strength = Column(Float, nullable=True)  # LoRA weight / CFG scale
+    created_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    image = relationship("ImageModel", foreign_keys=[image_id])
+    civitai_model = relationship(
+        "CivitaiModel", foreign_keys=[civitai_model_id]
+    )
+    civitai_version = relationship(
+        "CivitaiModelVersion", foreign_keys=[civitai_version_id]
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "image_id", "civitai_version_id", "generation_stage",
+            name="uq_model_obs_image_version_stage",
+        ),
+        # Covering: model → image (which images use this model)
+        Index("ix_model_obs_model_image", "civitai_model_id", "image_id"),
+        # Covering: version → image (which images use this specific version)
+        Index("ix_model_obs_version_image", "civitai_version_id", "image_id"),
+        # Covering: type+primary → image (find primary checkpoints)
+        Index(
+            "ix_model_obs_type_primary_image",
+            "resource_type", "is_primary", "image_id",
+        ),
+    )

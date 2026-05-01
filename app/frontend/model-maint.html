@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Model Maintenance</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/model-maint.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <h1 id="page-title">Model Maintenance</h1>
+        <p class="subtitle" id="page-subtitle">Type scoped model maintenance for checkpoint/lora</p>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">Gallery</a>
+        <a class="btn ghost" href="/model-lab">Model Lab</a>
+        <a class="btn ghost" href="/frontend/tag-maint.html?source=civitai">Tag Maintenance</a>
+      </div>
+    </header>
+
+    <main class="maint-layout">
+      <section class="step-card" aria-label="Rescan gallery models">
+        <div class="step-header">
+          <div class="step-number">1</div>
+          <div class="step-title-area">
+            <h2>Rescan Gallery</h2>
+            <p class="step-desc">Find referenced CivitAI model IDs in gallery generation resources and backfill catalog rows.</p>
+          </div>
+          <div class="step-actions">
+            <label class="checkbox-row" for="rescan-fetch-details" title="When checked, each discovered model is fetched from the CivitAI API with full metadata (versions, files, hashes, tags, rank). Uncheck for a lightweight scan that only resolves version IDs to parent model IDs.">
+              <input id="rescan-fetch-details" type="checkbox" checked>
+              <span>Fetch full details</span>
+            </label>
+            <label class="checkbox-row" for="rescan-missing-only">
+              <input id="rescan-missing-only" type="checkbox" checked>
+              <span>Missing only</span>
+            </label>
+            <input id="rescan-limit" type="number" min="1" placeholder="Model limit (optional)">
+            <button class="btn primary" id="rescan-btn" type="button">Rescan</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="step-status" id="rescan-status"></div>
+          <pre class="step-results" id="rescan-results" hidden></pre>
+        </div>
+      </section>
+
+      <section class="step-card" id="obs-rescan-card" aria-label="Populate model observations">
+        <div class="step-header">
+          <div class="step-number">2</div>
+          <div class="step-title-area">
+            <h2>Populate Observations</h2>
+            <p class="step-desc">Scan sidecar JSON files to populate model_observations table from gallery metadata.</p>
+          </div>
+          <div class="step-actions">
+            <label class="checkbox-row" for="obs-dry-run">
+              <input id="obs-dry-run" type="checkbox" checked>
+              <span>Dry run</span>
+            </label>
+            <button class="btn primary" id="obs-rescan-btn" type="button">Start Scan</button>
+          </div>
+        </div>
+        <div class="step-body" id="obs-rescan-body">
+          <div class="step-status" id="obs-rescan-status"></div>
+
+          <!-- Progress bar -->
+          <div class="rescan-progress-wrap" id="obs-progress-wrap" hidden>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" id="obs-progress-bar"></div>
+            </div>
+            <div class="progress-label" id="obs-progress-label">0 / 0 images</div>
+          </div>
+
+          <!-- Metrics grid -->
+          <div class="rescan-metrics" id="obs-metrics" hidden>
+            <div class="metric-card">
+              <span class="metric-value" id="metric-models-processed">0</span>
+              <span class="metric-label">Models Processed</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="metric-unique-models">0</span>
+              <span class="metric-label">Unique Models</span>
+            </div>
+            <div class="metric-card metric-existing">
+              <span class="metric-value" id="metric-pre-existing">0</span>
+              <span class="metric-label">Pre-existing</span>
+            </div>
+            <div class="metric-card metric-new">
+              <span class="metric-value" id="metric-new-models">0</span>
+              <span class="metric-label">New Models</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="metric-obs-created">0</span>
+              <span class="metric-label">Observations Created</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="metric-obs-skipped">0</span>
+              <span class="metric-label">Observations Skipped</span>
+            </div>
+          </div>
+
+          <pre class="step-results" id="obs-rescan-results" hidden></pre>
+        </div>
+      </section>
+
+      <section class="step-card" aria-label="Bootstrap model catalog">
+        <div class="step-header">
+          <div class="step-number">3</div>
+          <div class="step-title-area">
+            <h2>Bootstrap</h2>
+            <p class="step-desc">Import, export, and purge model catalog rows by type.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="bootstrap-row">
+            <div class="bootstrap-card">
+              <h3>Import JSON</h3>
+              <input type="file" id="import-file" accept=".json,text/plain,application/json">
+              <label class="checkbox-row" for="import-dry-run">
+                <input id="import-dry-run" type="checkbox" checked>
+                <span>Dry run</span>
+              </label>
+              <button class="btn primary" id="import-btn" type="button">Import</button>
+              <pre class="bootstrap-output" id="import-output" hidden></pre>
+            </div>
+            <div class="bootstrap-card">
+              <h3>Export</h3>
+              <button class="btn primary" id="export-btn" type="button">Export JSON Archive</button>
+              <pre class="bootstrap-output" id="export-output" hidden></pre>
+            </div>
+            <div class="bootstrap-card">
+              <h3>Purge All</h3>
+              <label class="checkbox-row" for="purge-dry-run">
+                <input id="purge-dry-run" type="checkbox" checked>
+                <span>Dry run</span>
+              </label>
+              <button class="btn btn-danger" id="purge-btn" type="button">Purge</button>
+              <pre class="bootstrap-output" id="purge-output" hidden></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="step-card" aria-label="Local catalog">
+        <div class="step-header">
+          <div class="step-number">4</div>
+          <div class="step-title-area">
+            <h2>Local Catalog</h2>
+            <p class="step-desc">Check which CivitAI models are installed locally via ComfyUI LoRA Manager. Matching versions are shown in the table below.</p>
+          </div>
+          <div class="step-actions">
+            <button class="btn primary" id="local-catalog-btn" type="button">Refresh Local Catalog</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="step-status" id="local-catalog-status"></div>
+          <pre class="step-results" id="local-catalog-results" hidden></pre>
+        </div>
+      </section>
+
+      <section class="step-card" aria-label="Model table">
+        <div class="step-header">
+          <div class="step-number">5</div>
+          <div class="step-title-area">
+            <h2>Models</h2>
+            <p class="step-desc">Type-scoped table for quick inspection.</p>
+          </div>
+          <div class="step-actions">
+            <label class="checkbox-label"><input id="show-versions-check" type="checkbox">Show versions</label>
+            <input id="search-input" type="text" placeholder="Search model names...">
+            <button class="btn ghost" id="refresh-table-btn" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="table-scroll">
+            <table id="model-table">
+              <thead>
+                <tr id="model-table-header">
+                  <th>Model ID</th>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Status</th>
+                  <th>Author</th>
+                  <th>Downloads</th>
+                  <th>Versions</th>
+                </tr>
+              </thead>
+              <tbody id="model-tbody"></tbody>
+            </table>
+          </div>
+          <div class="table-footer">
+            <span id="table-info">Loading...</span>
+            <div class="pager">
+              <button class="btn ghost" id="prev-page-btn" type="button" disabled>Prev</button>
+              <span id="page-indicator">Page 1</span>
+              <button class="btn ghost" id="next-page-btn" type="button">Next</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast-container" class="toast-container"></div>
+  </div>
+
+  <script src="/frontend/js/shared/preferences.js" defer></script>
+  <script src="/frontend/js/model-maint.js" defer></script>
+</body>
+</html>

@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/backend-startup.md
+# ──────────────────────────────────────────────────────────────────────────────
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -79,7 +82,7 @@ except OSError as e:
 
 
 # --- Schema Versioning ---
-CURRENT_SCHEMA_VERSION = "1.5"  # Increment this when you make schema changes
+CURRENT_SCHEMA_VERSION = "1.6"  # Increment this when you make schema changes
 ALLOW_SCHEMA_RESET = _env_bool("ALLOW_SCHEMA_RESET", default=False)
 
 # --- CivitAI Domain Configuration ---

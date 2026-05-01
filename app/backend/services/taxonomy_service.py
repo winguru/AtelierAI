@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/taxonomy-import.md
+# ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
 import csv

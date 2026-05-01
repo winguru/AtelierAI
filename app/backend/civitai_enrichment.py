@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
 import re
 from importlib import import_module
 from typing import Any, Optional

@@ -1,19 +1,2513 @@
-"""Concept taxonomy and tag management routes.
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/taxonomy-import.md
+# 📄 docs: app/docs/memories/image-api.md
+# ──────────────────────────────────────────────────────────────────────────────
+"""Taxonomy routes: concepts, aliases, tags, bootstrap, tree, and tag-maint.
 
-TODO: Extract from main.py (lines ~20328–22226).
+All routes previously defined in main.py between lines 20328-22626 are
+extracted here verbatim.  Helper functions used exclusively by these routes
+are co-located in this module.
 
-Route prefixes:
-  GET  /taxonomy/tree/state
-  GET  /taxonomy/tree/tags/{source}
-  POST /taxonomy/concepts/
-  PUT  /taxonomy/concepts/{concept_id}
-  ...
+TODO: Move non-route helpers into dedicated services:
+  - _gallery_tag_*_from_observations  -> services/gallery_tag_service.py
+  - _concept_source_map, _is_descendant, _execute_taxonomy_bootstrap_import
+      -> services/taxonomy_service.py
+  - _upsert_civitai_authority_terms   -> services/civitai_service.py
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Generator, Optional
+from urllib.parse import quote
 
-router = APIRouter(tags=["taxonomy"])
+import atelierai.config as app_config
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session
 
-# TODO: routes to be extracted from main.py
+from database import SessionLocal, get_db
+from models import (
+    AuthorityTerm,
+    Concept,
+    ConceptAlias,
+    ImageConceptObservation,
+    ImageModel,
+    ObservationCertainty,
+    ObservationSource,
+    TagAuthority,
+)
+from schemas import (
+    TaxonomyAliasCreateRequest,
+    TaxonomyBootstrapImportRequest,
+    TaxonomyConceptCreateRequest,
+    TaxonomyConceptUpdateRequest,
+    TaxonomyMergeRequest,
+    TaxonomyParentUpdateRequest,
+    TaxonomyPurgeRootsRequest,
+    TaxonomyTagAssociationRequest,
+    TaxonomyTagDetailsUpdateRequest,
+    TaxonomyTagMaintBulkDeleteRequest,
+    TaxonomyTagMaintPurgeRequest,
+    TaxonomyTagMaintUpdateRequest,
+)
+from services.gallery_tag_service import GalleryTagService
+from services.image_service import _active_image_filter
+from services.taxonomy_service import TaxonomyService
+from utils.cache import (
+    _FILTER_OPTIONS_CACHE_TTL_SECONDS,
+    _build_json_cache_headers,
+    _build_search_cache_key,
+    _search_cache_get,
+    _search_cache_put,
+    _should_return_json_not_modified,
+)
+
+# -- Module-level service instances ------------------------------------------
+
+_taxonomy_service = TaxonomyService()
+_gallery_tag_service = GalleryTagService()
+
+# -- Router ------------------------------------------------------------------
+
+router = APIRouter(prefix="/taxonomy", tags=["taxonomy"])
+
+# -- Constants ---------------------------------------------------------------
+
+_TAG_SOURCE_COLS = [
+    "id",
+    "name",
+    "ext_id",
+    "scope",
+    "post_count",
+    "concept_id",
+    "mdtag_id",
+    "mdtag_name",
+]
+
+_VALID_TAG_MAINT_SOURCES = {"civitai", "danbooru", "prompt", "user"}
+
+# -- Delegation helpers ------------------------------------------------------
+
+
+def _normalize_taxonomy_text(value: str) -> str:
+    return _taxonomy_service.normalize_text(value)
+
+
+def _normalize_gallery_tag_text(value: str) -> str:
+    return _gallery_tag_service.normalize_text(value)
+
+
+def _duplicate_key(value: str) -> str:
+    return _taxonomy_service.duplicate_key(value)
+
+
+def _slugify_concept_name(value: str) -> str:
+    return _taxonomy_service.slugify_concept_name(value)
+
+
+def _ensure_unique_concept_slug(db: Session, base_slug: str) -> str:
+    return _taxonomy_service.ensure_unique_concept_slug(db, base_slug)
+
+
+def _get_or_create_authority(db: Session, authority_name: str) -> TagAuthority:
+    return _taxonomy_service.get_or_create_authority(db, authority_name)
+
+
+def _get_or_create_concept(db: Session, canonical_name: str) -> Concept:
+    return _taxonomy_service.get_or_create_concept(db, canonical_name)
+
+
+def _ensure_alias_for_concept(
+    db: Session,
+    concept_id: int,
+    alias_text: str,
+    alias_type: str = "synonym",
+    authority_id: Optional[int] = None,
+    external_tag_id: Optional[int] = None,
+) -> bool:
+    return _taxonomy_service.ensure_alias_for_concept(
+        db,
+        concept_id,
+        alias_text,
+        alias_type,
+        authority_id,
+        external_tag_id,
+    )
+
+
+def _parse_bootstrap_terms(format_name: str, raw_text: str) -> list[dict]:
+    return _taxonomy_service.parse_bootstrap_terms(format_name, raw_text)
+
+
+# -- Gallery tag observation helpers -----------------------------------------
+
+
+def _gallery_tag_names_by_source_from_observations(db: Session) -> dict[str, list[str]]:
+    by_source: dict[str, set[str]] = {
+        "civitai": set(),
+        "danbooru": set(),
+        "prompt": set(),
+        "user": set(),
+    }
+    obs_rows = (
+        db.query(TagAuthority.name, AuthorityTerm.external_name)
+        .join(AuthorityTerm, AuthorityTerm.authority_id == TagAuthority.id)
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+        )
+        .join(ImageModel, ImageModel.id == ImageConceptObservation.image_id)
+        .filter(_active_image_filter())
+        .distinct()
+        .all()
+    )
+    for authority_name, external_name in obs_rows:
+        source_key = (authority_name or "").strip().lower()
+        if source_key in by_source and external_name:
+            by_source[source_key].add(_normalize_gallery_tag_text(external_name))
+    return {
+        source: sorted(name for name in names if name)
+        for source, names in by_source.items()
+    }
+
+
+def _gallery_tag_usage_counts_by_source_from_observations(
+    db: Session,
+) -> dict[str, dict[str, int]]:
+    by_source: dict[str, dict[str, int]] = {
+        "civitai": {},
+        "danbooru": {},
+        "prompt": {},
+        "user": {},
+    }
+    count_rows = (
+        db.query(
+            TagAuthority.name,
+            AuthorityTerm.external_name,
+            func.count(func.distinct(ImageConceptObservation.image_id)),
+        )
+        .join(AuthorityTerm, AuthorityTerm.authority_id == TagAuthority.id)
+        .join(
+            ImageConceptObservation,
+            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+        )
+        .join(ImageModel, ImageModel.id == ImageConceptObservation.image_id)
+        .filter(_active_image_filter())
+        .group_by(TagAuthority.name, AuthorityTerm.external_name)
+        .all()
+    )
+    for authority_name, external_name, image_count in count_rows:
+        source_key = (authority_name or "").strip().lower()
+        if source_key in by_source and external_name:
+            normalized = _normalize_gallery_tag_text(external_name)
+            if normalized:
+                by_source[source_key][normalized] = int(image_count)
+    return {
+        source: {name: counts[name] for name in sorted(counts)}
+        for source, counts in by_source.items()
+    }
+
+
+# -- Taxonomy concept helpers ------------------------------------------------
+
+
+def _is_descendant(db: Session, ancestor_id: int, candidate_descendant_id: int) -> bool:
+    current = db.query(Concept).filter(Concept.id == candidate_descendant_id).first()
+    seen: set[int] = set()
+    while current is not None and current.parent_concept_id is not None:
+        current_id = int(current.id)
+        if current_id in seen:
+            break
+        seen.add(current_id)
+        if int(current.parent_concept_id) == ancestor_id:
+            return True
+        current = (
+            db.query(Concept).filter(Concept.id == current.parent_concept_id).first()
+        )
+    return False
+
+
+def _authority_display_name(authority_name: str) -> str:
+    normalized = (authority_name or "").strip().lower()
+    mapping = {
+        "civitai": "CivitAI",
+        "danbooru": "Danbooru",
+        "prompt": "Prompt",
+        "user": "User",
+        "ai_agent": "AI",
+    }
+    return mapping.get(
+        normalized, authority_name.title() if authority_name else "Unknown"
+    )
+
+
+def _concept_source_map(db: Session, concept_ids: list[int]) -> dict[int, list[str]]:
+    if not concept_ids:
+        return {}
+    rows = (
+        db.query(AuthorityTerm.concept_id, TagAuthority.name)
+        .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+        .filter(AuthorityTerm.concept_id.in_(concept_ids))
+        .all()
+    )
+    source_map: dict[int, set[str]] = {}
+    for concept_id, authority_name in rows:
+        if concept_id is None:
+            continue
+        source_map.setdefault(int(concept_id), set()).add(str(authority_name))
+    return {
+        cid: sorted(_authority_display_name(name) for name in names)
+        for cid, names in source_map.items()
+    }
+
+
+def _concept_display_prefix(source_labels: list[str]) -> str:
+    if not source_labels:
+        return "Concept"
+    if len(source_labels) == 1:
+        return source_labels[0]
+    return "Concept"
+
+
+# -- Bootstrap import helper -------------------------------------------------
+
+
+def _execute_taxonomy_bootstrap_import(
+    db: Session,
+    *,
+    authority_name: str,
+    rows: list[dict],
+    dry_run: bool,
+) -> dict:
+    authority = _get_or_create_authority(db, authority_name)
+    stats: dict = {
+        "rows_received": len(rows),
+        "rows_processed": 0,
+        "concepts_linked": 0,
+        "aliases_created": 0,
+        "authority_terms_created": 0,
+        "authority_terms_updated": 0,
+        "errors": [],
+    }
+    for idx, row in enumerate(rows, start=1):
+        try:
+            with db.begin_nested():
+                raw_name = str(
+                    (row or {}).get("name") or (row or {}).get("external_name") or ""
+                ).strip()
+                if not raw_name:
+                    continue
+                normalized_name = _normalize_taxonomy_text(raw_name)
+                raw_tag_id = (row or {}).get("external_tag_id")
+                try:
+                    external_tag_id = (
+                        int(raw_tag_id) if raw_tag_id not in (None, "") else None
+                    )
+                except (TypeError, ValueError):
+                    external_tag_id = None
+                mapped_concept_name = str(
+                    (row or {}).get("concept_name") or ""
+                ).strip()
+                concept_name = mapped_concept_name or normalized_name
+                concept = (
+                    db.query(Concept)
+                    .filter(
+                        Concept.canonical_name
+                        == _normalize_taxonomy_text(concept_name)
+                    )
+                    .first()
+                )
+                if concept is not None:
+                    stats["concepts_linked"] += 1
+
+                    if _ensure_alias_for_concept(
+                        db,
+                        concept_id=concept.id,
+                        alias_text=raw_name,
+                        alias_type="imported",
+                        authority_id=authority.id,
+                        external_tag_id=external_tag_id,
+                    ):
+                        stats["aliases_created"] += 1
+
+                concept_id = concept.id if concept is not None else None
+
+                term = (
+                    db.query(AuthorityTerm)
+                    .filter(
+                        AuthorityTerm.authority_id == authority.id,
+                        or_(
+                            AuthorityTerm.external_tag_id == external_tag_id,
+                            AuthorityTerm.normalized_external_name == normalized_name,
+                        ),
+                    )
+                    .first()
+                )
+                if term is None:
+                    term = AuthorityTerm(
+                        authority_id=authority.id,
+                        external_tag_id=external_tag_id,
+                        external_name=raw_name,
+                        normalized_external_name=normalized_name,
+                        concept_id=concept_id,
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow(),
+                        last_seen_at=datetime.utcnow(),
+                    )
+                    db.add(term)
+                    db.flush()
+                    stats["authority_terms_created"] += 1
+                else:
+                    changed = False
+                    if getattr(term, "external_tag_id", None) != external_tag_id:
+                        term.external_tag_id = external_tag_id
+                        changed = True
+                    if str(term.external_name or "") != raw_name:
+                        term.external_name = raw_name
+                        changed = True
+                    if str(term.normalized_external_name or "") != normalized_name:
+                        term.normalized_external_name = normalized_name
+                        changed = True
+                    if (term.concept_id or 0) != (concept_id or 0):
+                        term.concept_id = concept_id
+                        changed = True
+                    term.last_seen_at = datetime.utcnow()
+                    if changed:
+                        term.updated_at = datetime.utcnow()
+                        stats["authority_terms_updated"] += 1
+                stats["rows_processed"] += 1
+        except Exception as exc:
+            stats["errors"].append(f"row {idx}: {exc}")
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
+    return {
+        "message": "Taxonomy bootstrap import complete.",
+        "dry_run": dry_run,
+        "authority": authority.name,
+        "stats": stats,
+    }
+
+
+# -- CivitAI authority-term upsert -------------------------------------------
+# TODO: Move to services/civitai_service.py once that module is populated.
+
+
+def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
+    """Sync CivitAI tag records into the taxonomy authority_terms table."""
+    tag_records = civitai_data.get("tags")
+    if not isinstance(tag_records, list) or not tag_records:
+        return {"terms_upserted": 0, "terms_created": 0, "terms_updated": 0}
+    authority = _get_or_create_authority(db, "civitai")
+    stats = {"terms_upserted": 0, "terms_created": 0, "terms_updated": 0}
+    for tag in tag_records:
+        if not isinstance(tag, dict):
+            continue
+        raw_name = str(tag.get("name") or "").strip()
+        if not raw_name:
+            continue
+        normalized_name = _normalize_taxonomy_text(raw_name)
+        raw_tag_id = tag.get("id")
+        try:
+            external_tag_id = (
+                int(raw_tag_id) if raw_tag_id not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            external_tag_id = None
+        tag_meta: dict = {}
+        for meta_key in ("type", "nsfwLevel", "automated", "concrete", "score"):
+            val = tag.get(meta_key)
+            if val is not None:
+                tag_meta[meta_key] = val
+        term = None
+        if external_tag_id is not None:
+            term = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority.id,
+                    AuthorityTerm.external_tag_id == external_tag_id,
+                )
+                .first()
+            )
+        if term is None:
+            term = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority.id,
+                    AuthorityTerm.normalized_external_name == normalized_name,
+                )
+                .first()
+            )
+        now = datetime.utcnow()
+        if term is None:
+            term = AuthorityTerm(
+                authority_id=authority.id,
+                external_tag_id=external_tag_id,
+                external_name=raw_name,
+                normalized_external_name=normalized_name,
+                concept_id=None,
+                metadata_json=tag_meta if tag_meta else None,
+                created_at=now,
+                updated_at=now,
+                last_seen_at=now,
+            )
+            db.add(term)
+            stats["terms_created"] += 1
+        else:
+            changed = False
+            if getattr(term, "external_tag_id", None) != external_tag_id:
+                term.external_tag_id = external_tag_id
+                changed = True
+            if str(term.external_name or "") != raw_name:
+                term.external_name = raw_name
+                changed = True
+            if str(term.normalized_external_name or "") != normalized_name:
+                term.normalized_external_name = normalized_name
+                changed = True
+            if tag_meta:
+                existing_meta = (
+                    term.metadata_json if isinstance(term.metadata_json, dict) else {}
+                )
+                merged_meta = {**existing_meta, **tag_meta}
+                if merged_meta != existing_meta:
+                    term.metadata_json = merged_meta
+                    changed = True
+            term.last_seen_at = now
+            if changed:
+                term.updated_at = now
+                stats["terms_updated"] += 1
+        stats["terms_upserted"] += 1
+    if stats["terms_upserted"]:
+        db.flush()
+    return stats
+
+
+# -- Tag-detail normalization helpers ----------------------------------------
+
+
+def _normalize_str_list(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _normalize_taxonomy_text(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _normalize_danbooru_example_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"/wiki\s+pages/", "/wiki_pages/", text, flags=re.IGNORECASE)
+    return text
+
+
+def _normalize_example_list(values: list[str], authority_name: str) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    source = str(authority_name or "").strip().lower()
+    for value in values:
+        text = str(value or "").strip()
+        if source == "danbooru":
+            text = _normalize_danbooru_example_url(text)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _build_default_example_url(
+    authority_name: str, external_name: str, metadata: dict[str, Any]
+) -> str:
+    normalized_authority = str(authority_name or "").strip().lower()
+    name = str(external_name or "").strip()
+    if not name:
+        return ""
+    if normalized_authority == "civitai":
+        encoded = quote(name, safe="")
+        web_base = getattr(app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red")
+        return f"{web_base}/search/images?tags={encoded}&sortBy=images_v6"
+    if normalized_authority == "danbooru":
+        wiki_url = (
+            str(metadata.get("wiki_url") or "").strip()
+            if isinstance(metadata, dict)
+            else ""
+        )
+        if wiki_url:
+            return _normalize_danbooru_example_url(wiki_url)
+        encoded = quote(name, safe="")
+        return f"https://danbooru.donmai.us/wiki_pages/{encoded}"
+    if normalized_authority == "prompt":
+        encoded = quote(name, safe="")
+        return f"/?search={encoded}"
+    return ""
+
+
+def _with_source_default_example_first(
+    authority_name: str,
+    external_name: str,
+    metadata: dict[str, Any],
+    values: list[str],
+) -> list[str]:
+    normalized = _normalize_example_list(values, authority_name)
+    default_url = str(
+        _build_default_example_url(authority_name, external_name, metadata) or ""
+    ).strip()
+    if str(authority_name or "").strip().lower() == "danbooru":
+        default_url = _normalize_danbooru_example_url(default_url)
+    if not default_url:
+        return normalized
+    reordered = [item for item in normalized if item != default_url]
+    return [default_url, *reordered]
+
+
+def _get_term_concept(db: Session, term: AuthorityTerm) -> Concept | None:
+    if term.concept_id is None:
+        return None
+    return db.query(Concept).filter(Concept.id == term.concept_id).first()
+
+
+# -- CivitAI rescan SSE generator --------------------------------------------
+
+
+def _rescan_civitai_observations_inner(
+    db: Session,
+    dry_run: bool,
+    emit: Callable[[str, dict], str],
+) -> Generator[str, None, None]:
+    from atelierai.config import IMAGE_LIBRARY_PATH
+
+    library_path = Path(IMAGE_LIBRARY_PATH)
+    if not library_path.is_dir():
+        yield emit("error_event", {"error": "Image library path not found.", "current_image": 0})
+        yield emit("complete", {
+            "total_images": 0, "tags_processed": 0, "unique_tags": 0,
+            "pre_existing_tags": 0, "new_tags": 0,
+            "observations_created": 0, "observations_skipped": 0,
+            "errors": 1, "dry_run": dry_run,
+        })
+        return
+
+    sidecar_files = sorted(library_path.glob("*.json"))
+    total_images = len(sidecar_files)
+    tags_processed = 0
+    unique_tag_names: set[str] = set()
+    pre_existing_tags = 0
+    new_tags = 0
+    observations_created = 0
+    observations_skipped = 0
+    error_count = 0
+
+    authority = _get_or_create_authority(db, "civitai")
+    known_term_names: set[str] = set()
+    if authority:
+        rows = (
+            db.query(AuthorityTerm.normalized_external_name)
+            .filter(AuthorityTerm.authority_id == authority.id)
+            .all()
+        )
+        known_term_names = {r[0] for r in rows if r[0]}
+
+    now = datetime.utcnow()
+
+    for idx, json_file in enumerate(sidecar_files, start=1):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            error_count += 1
+            yield emit("error_event", {"current_image": idx, "file": json_file.name, "error": str(exc)})
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        if not isinstance(data, dict):
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        civitai = data.get("civitai")
+        if not isinstance(civitai, dict):
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        tags = civitai.get("tags")
+        if not isinstance(tags, list) or not tags:
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+                "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        try:
+            stats = _upsert_civitai_authority_terms(db, civitai)
+            tags_processed += stats.get("terms_upserted", 0)
+            for tag in tags:
+                if not isinstance(tag, dict):
+                    continue
+                raw_name = str(tag.get("name") or "").strip()
+                if not raw_name:
+                    continue
+                norm = _normalize_taxonomy_text(raw_name)
+                if norm in unique_tag_names:
+                    continue
+                unique_tag_names.add(norm)
+                if norm in known_term_names:
+                    pre_existing_tags += 1
+                else:
+                    new_tags += 1
+                    known_term_names.add(norm)
+        except Exception as exc:
+            db.rollback()
+            error_count += 1
+            yield emit("error_event", {
+                "current_image": idx, "file": json_file.name, "error": f"upsert_terms: {exc}",
+            })
+
+        if not dry_run:
+            try:
+                image_stem = json_file.stem
+                image_row = (
+                    db.query(ImageModel.id)
+                    .filter(ImageModel.file_path.like(image_stem + ".%"))
+                    .first()
+                )
+                if image_row is not None:
+                    image_id = image_row[0]
+                    tag_norms = set()
+                    for tag in tags:
+                        if not isinstance(tag, dict):
+                            continue
+                        raw_name = str(tag.get("name") or "").strip()
+                        if raw_name:
+                            tag_norms.add(_normalize_taxonomy_text(raw_name))
+                    if tag_norms and authority:
+                        matched_terms = (
+                            db.query(AuthorityTerm)
+                            .filter(
+                                AuthorityTerm.authority_id == authority.id,
+                                AuthorityTerm.normalized_external_name.in_(tag_norms),
+                            )
+                            .all()
+                        )
+                        seen_concept_ids: set[int] = set()
+                        for term in matched_terms:
+                            existing = (
+                                db.query(ImageConceptObservation.id)
+                                .filter(
+                                    ImageConceptObservation.image_id == image_id,
+                                    ImageConceptObservation.authority_term_id == term.id,
+                                )
+                                .first()
+                            )
+                            if existing is not None:
+                                observations_skipped += 1
+                                continue
+                            if term.concept_id is not None:
+                                if term.concept_id in seen_concept_ids:
+                                    observations_skipped += 1
+                                    continue
+                                dup_concept = (
+                                    db.query(ImageConceptObservation.id)
+                                    .filter(
+                                        ImageConceptObservation.image_id == image_id,
+                                        ImageConceptObservation.concept_id == term.concept_id,
+                                        ImageConceptObservation.authority_id == authority.id,
+                                    )
+                                    .first()
+                                )
+                                if dup_concept is not None:
+                                    observations_skipped += 1
+                                    continue
+                                seen_concept_ids.add(term.concept_id)
+                            db.add(ImageConceptObservation(
+                                image_id=image_id,
+                                concept_id=term.concept_id,
+                                authority_id=authority.id,
+                                authority_term_id=term.id,
+                                source_type=ObservationSource.IMPORT,
+                                certainty_label=ObservationCertainty.LIKELY,
+                                is_present=True,
+                                is_curated=False,
+                                created_at=now,
+                                updated_at=now,
+                            ))
+                            observations_created += 1
+                        if observations_created:
+                            db.flush()
+            except Exception as exc:
+                db.rollback()
+                error_count += 1
+                yield emit("error_event", {
+                    "current_image": idx, "file": json_file.name, "error": f"observations: {exc}",
+                })
+
+        yield emit("progress", {
+            "current_image": idx, "total_images": total_images,
+            "tags_processed": tags_processed, "unique_tags": len(unique_tag_names),
+            "pre_existing_tags": pre_existing_tags, "new_tags": new_tags,
+            "observations_created": observations_created,
+            "observations_skipped": observations_skipped,
+        })
+
+    if not dry_run and (observations_created > 0 or tags_processed > 0):
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            yield emit("error_event", {
+                "current_image": total_images, "error": f"commit failed: {exc}",
+            })
+
+    yield emit("complete", {
+        "total_images": total_images,
+        "tags_processed": tags_processed,
+        "unique_tags": len(unique_tag_names),
+        "pre_existing_tags": pre_existing_tags,
+        "new_tags": new_tags,
+        "observations_created": observations_created,
+        "observations_skipped": observations_skipped,
+        "errors": error_count,
+        "dry_run": dry_run,
+    })
+
+
+# ============================================================
+# Routes
+# ============================================================
+
+
+@router.get("/review/summary", response_model=dict)
+def taxonomy_review_summary(db: Session = Depends(get_db)):
+    concepts_total = db.query(Concept).count()
+    concepts_active = db.query(Concept).filter(Concept.status == "active").count()
+    concepts_merged = db.query(Concept).filter(Concept.status == "merged").count()
+    aliases_total = db.query(ConceptAlias).count()
+    terms_total = db.query(AuthorityTerm).count()
+    unresolved_terms = (
+        db.query(AuthorityTerm).filter(AuthorityTerm.concept_id.is_(None)).count()
+    )
+    observations_total = db.query(ImageConceptObservation).count()
+    return {
+        "concepts_total": concepts_total,
+        "concepts_active": concepts_active,
+        "concepts_merged": concepts_merged,
+        "aliases_total": aliases_total,
+        "authority_terms_total": terms_total,
+        "unresolved_terms_total": unresolved_terms,
+        "observations_total": observations_total,
+    }
+
+
+@router.get("/review/unresolved_terms", response_model=list[dict])
+def taxonomy_unresolved_terms(
+    authority: Optional[str] = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    capped_limit = max(1, min(int(limit), 1000))
+    query = (
+        db.query(AuthorityTerm, TagAuthority)
+        .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+        .filter(AuthorityTerm.concept_id.is_(None))
+        .order_by(AuthorityTerm.id.asc())
+    )
+    if authority:
+        query = query.filter(
+            func.lower(TagAuthority.name) == authority.strip().lower()
+        )
+    rows = query.limit(capped_limit).all()
+    return [
+        {
+            "authority_term_id": term.id,
+            "authority": auth.name,
+            "external_tag_id": term.external_tag_id,
+            "external_name": term.external_name,
+            "normalized_external_name": term.normalized_external_name,
+            "last_seen_at": (
+                term.last_seen_at.isoformat() if term.last_seen_at else None
+            ),
+        }
+        for term, auth in rows
+    ]
+
+
+@router.get("/review/potential_duplicates", response_model=list[dict])
+def taxonomy_potential_duplicates(limit: int = 200, db: Session = Depends(get_db)):
+    capped_limit = max(1, min(int(limit), 2000))
+    concepts = (
+        db.query(Concept)
+        .filter(Concept.status == "active")
+        .order_by(Concept.id.asc())
+        .limit(10000)
+        .all()
+    )
+    groups: dict[str, list[Concept]] = {}
+    for concept in concepts:
+        key = _duplicate_key(concept.canonical_name)
+        if not key:
+            continue
+        groups.setdefault(key, []).append(concept)
+    duplicates: list[dict] = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        duplicates.append({
+            "duplicate_key": key,
+            "count": len(members),
+            "concepts": [
+                {"id": c.id, "canonical_name": c.canonical_name, "status": c.status}
+                for c in members
+            ],
+        })
+    duplicates.sort(key=lambda row: (-row["count"], row["duplicate_key"]))
+    return duplicates[:capped_limit]
+
+
+@router.get("/concepts", response_model=list[dict])
+def taxonomy_list_concepts(
+    query: Optional[str] = None,
+    status: str = "active",
+    limit: int = 200,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    capped_limit = max(1, min(int(limit), 1000))
+    safe_offset = max(0, int(offset))
+    q = db.query(Concept)
+    if status != "all":
+        q = q.filter(Concept.status == status)
+    if query:
+        needle = f"%{query.strip().lower()}%"
+        q = q.filter(func.lower(Concept.canonical_name).like(needle))
+    rows = (
+        q.order_by(Concept.canonical_name.asc())
+        .offset(safe_offset)
+        .limit(capped_limit)
+        .all()
+    )
+    source_map = _concept_source_map(db, [int(c.id) for c in rows])
+    response: list[dict] = []
+    for concept in rows:
+        alias_count = (
+            db.query(ConceptAlias).filter(ConceptAlias.concept_id == concept.id).count()
+        )
+        term_count = (
+            db.query(AuthorityTerm).filter(AuthorityTerm.concept_id == concept.id).count()
+        )
+        observation_count = (
+            db.query(ImageConceptObservation)
+            .filter(ImageConceptObservation.concept_id == concept.id)
+            .count()
+        )
+        source_labels = source_map.get(int(concept.id), [])
+        response.append({
+            "id": concept.id,
+            "canonical_name": concept.canonical_name,
+            "description": concept.description,
+            "slug": concept.slug,
+            "status": concept.status,
+            "parent_concept_id": concept.parent_concept_id,
+            "alias_count": alias_count,
+            "authority_term_count": term_count,
+            "observation_count": observation_count,
+            "source_labels": source_labels,
+            "display_prefix": _concept_display_prefix(source_labels),
+        })
+    return response
+
+
+@router.patch("/concepts/{concept_id}", response_model=dict)
+def taxonomy_update_concept(
+    concept_id: int,
+    payload: TaxonomyConceptUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    if payload.canonical_name is not None:
+        normalized_name = _normalize_taxonomy_text(payload.canonical_name)
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="canonical_name cannot be empty")
+        duplicate = (
+            db.query(Concept)
+            .filter(Concept.canonical_name == normalized_name, Concept.id != concept_id)
+            .first()
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Another concept already uses that canonical_name",
+            )
+        concept.canonical_name = normalized_name
+    if payload.description is not None:
+        concept.description = payload.description.strip() or None
+    concept.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(concept)
+    return {
+        "message": "Concept updated.",
+        "concept": {
+            "id": concept.id,
+            "canonical_name": concept.canonical_name,
+            "description": concept.description,
+            "status": concept.status,
+            "parent_concept_id": concept.parent_concept_id,
+        },
+    }
+
+
+@router.post("/concepts/{concept_id}/aliases", response_model=dict)
+def taxonomy_add_alias(
+    concept_id: int,
+    payload: TaxonomyAliasCreateRequest,
+    db: Session = Depends(get_db),
+):
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    alias_raw = (payload.alias or "").strip()
+    if not alias_raw:
+        raise HTTPException(status_code=400, detail="Alias cannot be empty")
+    normalized_alias = _normalize_taxonomy_text(alias_raw)
+    existing = (
+        db.query(ConceptAlias)
+        .filter(
+            ConceptAlias.concept_id == concept_id,
+            ConceptAlias.normalized_alias == normalized_alias,
+        )
+        .first()
+    )
+    if existing is not None:
+        return {
+            "message": "Alias already exists for this concept.",
+            "concept_id": concept_id,
+            "alias_id": existing.id,
+            "normalized_alias": existing.normalized_alias,
+        }
+    authority_id = None
+    if payload.authority_name:
+        authority = (
+            db.query(TagAuthority)
+            .filter(
+                func.lower(TagAuthority.name) == payload.authority_name.strip().lower()
+            )
+            .first()
+        )
+        if authority is None:
+            raise HTTPException(status_code=404, detail="Authority not found")
+        authority_id = authority.id
+    alias = ConceptAlias(
+        concept_id=concept_id,
+        alias=alias_raw,
+        normalized_alias=normalized_alias,
+        alias_type=payload.alias_type,
+        is_preferred=payload.is_preferred,
+        authority_id=authority_id,
+        external_tag_id=payload.external_tag_id,
+    )
+    db.add(alias)
+    concept.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(alias)
+    return {
+        "message": "Alias created.",
+        "concept_id": concept_id,
+        "alias": {
+            "id": alias.id,
+            "alias": alias.alias,
+            "normalized_alias": alias.normalized_alias,
+            "alias_type": alias.alias_type,
+            "is_preferred": alias.is_preferred,
+            "authority_id": alias.authority_id,
+            "external_tag_id": alias.external_tag_id,
+        },
+    }
+
+
+@router.post("/review/merge_concepts", response_model=dict)
+def taxonomy_merge_concepts(
+    payload: TaxonomyMergeRequest, db: Session = Depends(get_db)
+):
+    if payload.source_concept_id == payload.target_concept_id:
+        raise HTTPException(
+            status_code=400,
+            detail="source_concept_id and target_concept_id must differ",
+        )
+    source = db.query(Concept).filter(Concept.id == payload.source_concept_id).first()
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source concept not found")
+    target = db.query(Concept).filter(Concept.id == payload.target_concept_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target concept not found")
+    moved_terms = 0
+    moved_observations = 0
+    moved_aliases = 0
+    terms = db.query(AuthorityTerm).filter(AuthorityTerm.concept_id == source.id).all()
+    observations = (
+        db.query(ImageConceptObservation)
+        .filter(ImageConceptObservation.concept_id == source.id)
+        .all()
+    )
+    source_aliases = (
+        db.query(ConceptAlias).filter(ConceptAlias.concept_id == source.id).all()
+    )
+    if payload.dry_run:
+        target_aliases = (
+            db.query(ConceptAlias).filter(ConceptAlias.concept_id == target.id).all()
+        )
+        target_alias_set = {
+            _normalize_taxonomy_text(a.normalized_alias or a.alias or "")
+            for a in target_aliases
+        }
+        mergeable_aliases = 0
+        duplicate_aliases = 0
+        for alias in source_aliases:
+            normalized_alias = _normalize_taxonomy_text(
+                alias.normalized_alias or alias.alias or ""
+            )
+            if normalized_alias in target_alias_set:
+                duplicate_aliases += 1
+            else:
+                mergeable_aliases += 1
+        source_name_alias_conflict = (
+            _normalize_taxonomy_text(source.canonical_name) in target_alias_set
+        )
+        projected_moved_aliases = mergeable_aliases
+        if payload.create_source_alias and not source_name_alias_conflict:
+            projected_moved_aliases += 1
+        return {
+            "message": "Dry-run merge preview.",
+            "dry_run": True,
+            "source_concept_id": source.id,
+            "target_concept_id": target.id,
+            "source_concept_name": source.canonical_name,
+            "target_concept_name": target.canonical_name,
+            "would_move_authority_terms": len(terms),
+            "would_move_observations": len(observations),
+            "would_move_aliases": projected_moved_aliases,
+            "would_drop_duplicate_aliases": duplicate_aliases,
+            "would_deactivate_source": payload.deactivate_source,
+            "source_status_after": (
+                "merged" if payload.deactivate_source else source.status
+            ),
+        }
+    for term in terms:
+        term.concept_id = target.id
+        term.updated_at = datetime.utcnow()
+        moved_terms += 1
+    for obs in observations:
+        obs.concept_id = target.id
+        obs.updated_at = datetime.utcnow()
+        moved_observations += 1
+    for alias in source_aliases:
+        normalized_alias = alias.normalized_alias or _normalize_taxonomy_text(
+            alias.alias
+        )
+        existing_target_alias = (
+            db.query(ConceptAlias)
+            .filter(
+                ConceptAlias.concept_id == target.id,
+                ConceptAlias.normalized_alias == normalized_alias,
+            )
+            .first()
+        )
+        if existing_target_alias is not None:
+            db.delete(alias)
+            continue
+        alias.concept_id = target.id
+        moved_aliases += 1
+    if payload.create_source_alias:
+        normalized_source_name = _normalize_taxonomy_text(source.canonical_name)
+        existing_source_alias = (
+            db.query(ConceptAlias)
+            .filter(
+                ConceptAlias.concept_id == target.id,
+                ConceptAlias.normalized_alias == normalized_source_name,
+            )
+            .first()
+        )
+        if existing_source_alias is None:
+            db.add(ConceptAlias(
+                concept_id=target.id,
+                alias=source.canonical_name,
+                normalized_alias=normalized_source_name,
+                alias_type="merged_from",
+                is_preferred=False,
+            ))
+            moved_aliases += 1
+    if payload.deactivate_source:
+        source.status = "merged"
+        source.parent_concept_id = target.id
+    source.updated_at = datetime.utcnow()
+    target.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "message": "Concept merge complete.",
+        "dry_run": False,
+        "source_concept_id": source.id,
+        "target_concept_id": target.id,
+        "moved_authority_terms": moved_terms,
+        "moved_observations": moved_observations,
+        "moved_aliases": moved_aliases,
+        "source_status": source.status,
+    }
+
+
+@router.post("/bootstrap/import", response_model=dict)
+def taxonomy_bootstrap_import(
+    payload: TaxonomyBootstrapImportRequest, db: Session = Depends(get_db)
+):
+    rows = _parse_bootstrap_terms(payload.format, payload.raw_text)
+    return _execute_taxonomy_bootstrap_import(
+        db,
+        authority_name=payload.authority_name,
+        rows=rows,
+        dry_run=payload.dry_run,
+    )
+
+
+@router.post("/bootstrap/import_file", response_model=dict)
+async def taxonomy_bootstrap_import_file(
+    authority_name: str = Form("user"),
+    format: str = Form("json"),
+    dry_run: bool = Form(True),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded text")
+    rows = _parse_bootstrap_terms(format, raw_text)
+    result = _execute_taxonomy_bootstrap_import(
+        db,
+        authority_name=authority_name,
+        rows=rows,
+        dry_run=dry_run,
+    )
+    result["source_file"] = file.filename
+    return result
+
+
+@router.post("/concepts", response_model=dict)
+def taxonomy_create_concept(
+    payload: TaxonomyConceptCreateRequest, db: Session = Depends(get_db)
+):
+    canonical_name = _normalize_taxonomy_text(payload.canonical_name)
+    if not canonical_name:
+        raise HTTPException(status_code=400, detail="canonical_name is required")
+    existing = (
+        db.query(Concept).filter(Concept.canonical_name == canonical_name).first()
+    )
+    if existing is not None:
+        return {
+            "message": "Concept already exists.",
+            "concept": {
+                "id": existing.id,
+                "canonical_name": existing.canonical_name,
+                "slug": existing.slug,
+                "status": existing.status,
+                "parent_concept_id": existing.parent_concept_id,
+            },
+        }
+    if payload.parent_concept_id is not None:
+        parent = (
+            db.query(Concept).filter(Concept.id == payload.parent_concept_id).first()
+        )
+        if parent is None:
+            raise HTTPException(status_code=404, detail="Parent concept not found")
+    slug = _ensure_unique_concept_slug(db, _slugify_concept_name(canonical_name))
+    concept = Concept(
+        canonical_name=canonical_name,
+        slug=slug,
+        description=payload.description,
+        status="active",
+        parent_concept_id=payload.parent_concept_id,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(concept)
+    db.flush()
+    _ensure_alias_for_concept(
+        db, concept_id=concept.id, alias_text=canonical_name, alias_type="canonical"
+    )
+    db.commit()
+    db.refresh(concept)
+    return {
+        "message": "Concept created.",
+        "concept": {
+            "id": concept.id,
+            "canonical_name": concept.canonical_name,
+            "slug": concept.slug,
+            "status": concept.status,
+            "parent_concept_id": concept.parent_concept_id,
+        },
+    }
+
+
+@router.post("/concepts/{concept_id}/parent", response_model=dict)
+def taxonomy_update_parent(
+    concept_id: int,
+    payload: TaxonomyParentUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    new_parent_id = payload.parent_concept_id
+    if new_parent_id == concept_id:
+        raise HTTPException(status_code=400, detail="Concept cannot be its own parent")
+    if new_parent_id is not None:
+        parent = db.query(Concept).filter(Concept.id == new_parent_id).first()
+        if parent is None:
+            raise HTTPException(status_code=404, detail="Parent concept not found")
+        if _is_descendant(db, ancestor_id=concept.id, candidate_descendant_id=new_parent_id):
+            raise HTTPException(
+                status_code=400, detail="Parent assignment would create a cycle"
+            )
+    if payload.dry_run:
+        return {
+            "message": "Dry-run parent assignment preview.",
+            "dry_run": True,
+            "concept_id": concept.id,
+            "current_parent_concept_id": concept.parent_concept_id,
+            "new_parent_concept_id": new_parent_id,
+        }
+    concept.parent_concept_id = new_parent_id
+    concept.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "message": "Concept parent updated.",
+        "dry_run": False,
+        "concept_id": concept.id,
+        "parent_concept_id": concept.parent_concept_id,
+    }
+
+
+@router.delete("/concepts/{concept_id}", response_model=dict)
+def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db)):
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    to_visit = [int(concept_id)]
+    branch_ids: set[int] = set()
+    while to_visit:
+        current = to_visit.pop()
+        if current in branch_ids:
+            continue
+        branch_ids.add(current)
+        children = (
+            db.query(Concept.id).filter(Concept.parent_concept_id == current).all()
+        )
+        to_visit.extend(int(row.id) for row in children)
+    db.query(AuthorityTerm).filter(AuthorityTerm.concept_id.in_(branch_ids)).update(
+        {AuthorityTerm.concept_id: None, AuthorityTerm.updated_at: datetime.utcnow()},
+        synchronize_session=False,
+    )
+    db.query(ImageConceptObservation).filter(
+        ImageConceptObservation.concept_id.in_(branch_ids)
+    ).delete(synchronize_session=False)
+    db.query(ConceptAlias).filter(ConceptAlias.concept_id.in_(branch_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(Concept).filter(Concept.id.in_(branch_ids)).delete(synchronize_session=False)
+    db.commit()
+    return {
+        "message": "Concept branch deleted.",
+        "deleted_concept_ids": sorted(branch_ids),
+    }
+
+
+@router.post("/utils/purge_root_concepts", response_model=dict)
+def taxonomy_purge_root_concepts(
+    payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)
+):
+    roots = (
+        db.query(Concept.id, Concept.canonical_name)
+        .filter(Concept.parent_concept_id.is_(None))
+        .order_by(Concept.id.asc())
+        .all()
+    )
+    root_ids = [int(row.id) for row in roots]
+    if not root_ids:
+        return {
+            "message": "No root concepts found.",
+            "dry_run": payload.dry_run,
+            "root_concept_count": 0,
+            "affected_concept_count": 0,
+            "affected_authority_term_count": 0,
+            "affected_alias_count": 0,
+            "affected_observation_count": 0,
+            "deleted_concept_ids": [],
+        }
+    to_visit = list(root_ids)
+    branch_ids: set[int] = set()
+    while to_visit:
+        current = to_visit.pop()
+        if current in branch_ids:
+            continue
+        branch_ids.add(current)
+        children = (
+            db.query(Concept.id).filter(Concept.parent_concept_id == current).all()
+        )
+        to_visit.extend(int(row.id) for row in children)
+    branch_id_list = sorted(branch_ids)
+    authority_term_count = (
+        db.query(func.count(AuthorityTerm.id))
+        .filter(AuthorityTerm.concept_id.in_(branch_id_list))
+        .scalar()
+        or 0
+    )
+    alias_count = (
+        db.query(func.count(ConceptAlias.id))
+        .filter(ConceptAlias.concept_id.in_(branch_id_list))
+        .scalar()
+        or 0
+    )
+    observation_count = (
+        db.query(func.count(ImageConceptObservation.id))
+        .filter(ImageConceptObservation.concept_id.in_(branch_id_list))
+        .scalar()
+        or 0
+    )
+    response_data = {
+        "message": (
+            "Dry-run purge preview." if payload.dry_run else "Root concept branches purged."
+        ),
+        "dry_run": payload.dry_run,
+        "root_concept_count": len(root_ids),
+        "affected_concept_count": len(branch_id_list),
+        "affected_authority_term_count": int(authority_term_count),
+        "affected_alias_count": int(alias_count),
+        "affected_observation_count": int(observation_count),
+        "root_concepts": [
+            {"id": int(row.id), "canonical_name": row.canonical_name}
+            for row in roots[:200]
+        ],
+        "deleted_concept_ids": branch_id_list,
+    }
+    if payload.dry_run:
+        return response_data
+    db.query(AuthorityTerm).filter(AuthorityTerm.concept_id.in_(branch_id_list)).update(
+        {AuthorityTerm.concept_id: None, AuthorityTerm.updated_at: datetime.utcnow()},
+        synchronize_session=False,
+    )
+    db.query(ImageConceptObservation).filter(
+        ImageConceptObservation.concept_id.in_(branch_id_list)
+    ).delete(synchronize_session=False)
+    db.query(ConceptAlias).filter(ConceptAlias.concept_id.in_(branch_id_list)).delete(
+        synchronize_session=False
+    )
+    db.query(Concept).filter(Concept.id.in_(branch_id_list)).delete(
+        synchronize_session=False
+    )
+    db.commit()
+    return response_data
+
+
+@router.get("/tree", response_model=list[dict])
+def taxonomy_tree(status: str = "active", db: Session = Depends(get_db)):
+    query = db.query(Concept)
+    if status != "all":
+        query = query.filter(Concept.status == status)
+    concepts = query.order_by(Concept.canonical_name.asc()).all()
+    source_map = _concept_source_map(db, [int(c.id) for c in concepts])
+    by_parent: dict[Optional[int], list[dict]] = {}
+    for concept in concepts:
+        by_parent.setdefault(concept.parent_concept_id, []).append({
+            "id": concept.id,
+            "canonical_name": concept.canonical_name,
+            "description": concept.description,
+            "status": concept.status,
+            "parent_concept_id": concept.parent_concept_id,
+            "source_labels": source_map.get(int(concept.id), []),
+            "display_prefix": _concept_display_prefix(
+                source_map.get(int(concept.id), [])
+            ),
+        })
+
+    def build_node(node: dict) -> dict:
+        children = by_parent.get(node["id"], [])
+        return {**node, "children": [build_node(child) for child in children]}
+
+    roots = by_parent.get(None, [])
+    return [build_node(root) for root in roots]
+
+
+@router.get("/tree/state", response_model=dict)
+def taxonomy_tree_state(
+    request: Request,
+    response: Response,
+    include_tag_details: bool = True,
+    include_tags: bool = True,
+    db: Session = Depends(get_db),
+):
+    cache_key = _build_search_cache_key(
+        "taxonomy_tree_state",
+        payload={
+            "include_tag_details": bool(include_tag_details),
+            "include_tags": bool(include_tags),
+        },
+    )
+    cache_headers = _build_json_cache_headers(cache_key, max_age_seconds=30)
+    for header_name, header_value in cache_headers.items():
+        response.headers[header_name] = header_value
+    if _should_return_json_not_modified(request, cache_headers):
+        return Response(status_code=304, headers=cache_headers)
+    cached_state = _search_cache_get(cache_key)
+    if isinstance(cached_state, dict):
+        return cached_state
+
+    gallery_tag_names_by_source = _gallery_tag_names_by_source_from_observations(db)
+    gallery_tag_usage_counts_by_source = (
+        _gallery_tag_usage_counts_by_source_from_observations(db)
+    )
+    gallery_tag_name_sets_by_source = {
+        source: set(names) for source, names in gallery_tag_names_by_source.items()
+    }
+    concepts = (
+        db.query(Concept)
+        .filter(Concept.status == "active")
+        .order_by(Concept.id.asc())
+        .all()
+    )
+    concept_ids = [int(c.id) for c in concepts]
+    alias_data_by_concept: dict[int, dict[str, list[str]]] = {
+        cid: {"aliases": [], "implies": []} for cid in concept_ids
+    }
+    if include_tag_details and concept_ids:
+        aliases = (
+            db.query(ConceptAlias)
+            .filter(ConceptAlias.concept_id.in_(concept_ids))
+            .order_by(ConceptAlias.id.asc())
+            .all()
+        )
+        for alias in aliases:
+            alias_text = str(alias.alias or "").strip()
+            if not alias_text:
+                continue
+            concept_id = int(alias.concept_id)
+            bucket = alias_data_by_concept.setdefault(
+                concept_id, {"aliases": [], "implies": []}
+            )
+            alias_kind = str(alias.alias_type or "synonym").strip().lower()
+            if alias_kind == "canonical":
+                continue
+            if alias_kind == "implies":
+                bucket["implies"].append(alias_text)
+            else:
+                bucket["aliases"].append(alias_text)
+    if not include_tags:
+        term_rows = []
+    else:
+        term_rows = (
+            db.query(AuthorityTerm, TagAuthority, Concept)
+            .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+            .outerjoin(Concept, Concept.id == AuthorityTerm.concept_id)
+            .order_by(TagAuthority.name.asc(), AuthorityTerm.external_name.asc())
+            .all()
+        )
+    danbooru_name_by_external_tag_id: dict[int, str] = {}
+    for term, authority, _ in term_rows:
+        authority_name = str(authority.name or "").strip().lower()
+        if authority_name != "danbooru":
+            continue
+        ext_id = term.external_tag_id
+        external_name = str(term.external_name or "").strip()
+        if ext_id is not None and external_name:
+            danbooru_name_by_external_tag_id[ext_id] = external_name
+    tags: list[dict] = []
+    normalized_term_names: set[str] = set()
+    referenced_concept_ids: set[int] = set()
+    for term, authority, concept in term_rows:
+        taxonomy_normalized_term_name = _normalize_taxonomy_text(
+            term.external_name or ""
+        )
+        if taxonomy_normalized_term_name:
+            normalized_term_names.add(taxonomy_normalized_term_name)
+        gallery_normalized_term_name = _normalize_gallery_tag_text(
+            term.external_name or ""
+        )
+        source_name = str(authority.name or "user").strip().lower()
+        if source_name not in {"civitai", "danbooru", "prompt", "user"}:
+            source_name = "user"
+        gallery_scope_names = gallery_tag_name_sets_by_source.get(source_name, set())
+        if concept is not None:
+            referenced_concept_ids.add(int(concept.id))
+        concept_alias_data = (
+            alias_data_by_concept.get(int(concept.id), {"aliases": [], "implies": []})
+            if include_tag_details and concept
+            else {"aliases": [], "implies": []}
+        )
+        metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+        examples = []
+        if include_tag_details:
+            raw_examples = (
+                metadata.get("examples") if isinstance(metadata, dict) else []
+            )
+            if isinstance(raw_examples, list):
+                examples = [str(item) for item in raw_examples if str(item).strip()]
+        post_count = None
+        if source_name in {"danbooru", "civitai"}:
+            raw_post_count = (
+                metadata.get("post_count") if isinstance(metadata, dict) else None
+            )
+            try:
+                parsed_post_count = (
+                    int(raw_post_count) if raw_post_count is not None else None
+                )
+            except (TypeError, ValueError):
+                parsed_post_count = None
+            if parsed_post_count is not None and parsed_post_count > 0:
+                post_count = parsed_post_count
+        mapped_danbooru_tag_id = None
+        mapped_danbooru_name = None
+        external_tag_id = term.external_tag_id
+        if source_name == "prompt":
+            raw_mapped_danbooru_tag_id = (
+                metadata.get("mapped_danbooru_tag_id")
+                if isinstance(metadata, dict)
+                else None
+            )
+            if raw_mapped_danbooru_tag_id not in (None, ""):
+                try:
+                    mapped_danbooru_tag_id = int(raw_mapped_danbooru_tag_id)
+                except (TypeError, ValueError):
+                    mapped_danbooru_tag_id = None
+            elif external_tag_id is not None:
+                mapped_danbooru_tag_id = external_tag_id
+            if mapped_danbooru_tag_id:
+                mapped_danbooru_name = danbooru_name_by_external_tag_id.get(
+                    mapped_danbooru_tag_id
+                )
+        tag_payload = {
+            "id": f"term:{term.id}",
+            "authority_term_id": int(term.id),
+            "name": term.external_name,
+            "external_tag_id": external_tag_id,
+            "source": source_name,
+            "scope": (
+                "gallery"
+                if gallery_normalized_term_name
+                and gallery_normalized_term_name in gallery_scope_names
+                else "image"
+            ),
+            "post_count": post_count,
+            "concept_id": int(concept.id) if concept else None,
+            "mapped_danbooru_tag_id": mapped_danbooru_tag_id,
+            "mapped_danbooru_name": mapped_danbooru_name,
+        }
+        if include_tag_details:
+            tag_payload["description"] = concept.description if concept else ""
+            tag_payload["aliases"] = concept_alias_data.get("aliases", [])
+            tag_payload["implies"] = concept_alias_data.get("implies", [])
+            tag_payload["examples"] = _with_source_default_example_first(
+                source_name,
+                str(term.external_name or ""),
+                metadata,
+                examples,
+            )
+        tags.append(tag_payload)
+    child_parent_ids: set[int] = {
+        int(c.parent_concept_id) for c in concepts if c.parent_concept_id is not None
+    }
+    filtered_concepts: list[Concept] = []
+    for concept in concepts:
+        concept_id = int(concept.id)
+        alias_data = alias_data_by_concept.get(concept_id, {"aliases": [], "implies": []})
+        has_metadata = (
+            bool((concept.description or "").strip())
+            or bool(alias_data.get("aliases"))
+            or bool(alias_data.get("implies"))
+        )
+        canonical_normalized = _normalize_taxonomy_text(concept.canonical_name or "")
+        is_empty_tag_stub = (
+            concept.parent_concept_id is None
+            and concept_id not in child_parent_ids
+            and concept_id not in referenced_concept_ids
+            and not has_metadata
+            and canonical_normalized in normalized_term_names
+        )
+        if not is_empty_tag_stub:
+            filtered_concepts.append(concept)
+    payload_data = {
+        "concepts": [
+            {
+                "id": int(c.id),
+                "canonical_name": c.canonical_name,
+                "parent_concept_id": (
+                    int(c.parent_concept_id) if c.parent_concept_id is not None else None
+                ),
+            }
+            for c in filtered_concepts
+        ],
+        "tags": tags,
+        "gallery_tag_names_by_source": gallery_tag_names_by_source,
+        "tag_usage_by_scope": {
+            "gallery": gallery_tag_usage_counts_by_source,
+            "selected": {source: {} for source in gallery_tag_usage_counts_by_source},
+            "all": {
+                source: dict(counts)
+                for source, counts in gallery_tag_usage_counts_by_source.items()
+            },
+        },
+    }
+    _search_cache_put(cache_key, payload_data, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+    return payload_data
+
+
+@router.get("/tree/tags/{source}", response_model=dict)
+def taxonomy_tree_tags_for_source(
+    request: Request,
+    response: Response,
+    source: str,
+    db: Session = Depends(get_db),
+):
+    valid_sources = {"civitai", "danbooru", "prompt", "user"}
+    source_lower = (source or "").strip().lower()
+    if source_lower not in valid_sources:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+    cache_key = _build_search_cache_key(
+        "taxonomy_tags_for_source", payload={"source": source_lower}
+    )
+    cache_headers = _build_json_cache_headers(cache_key, max_age_seconds=30)
+    for header_name, header_value in cache_headers.items():
+        response.headers[header_name] = header_value
+    if _should_return_json_not_modified(request, cache_headers):
+        return Response(status_code=304, headers=cache_headers)
+    cached = _search_cache_get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
+    gallery_names_all = _search_cache_get(gallery_names_cache_key)
+    if not isinstance(gallery_names_all, dict):
+        gallery_names_all = _gallery_tag_names_by_source_from_observations(db)
+        _search_cache_put(
+            gallery_names_cache_key,
+            gallery_names_all,
+            ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+        )
+    gallery_scope_names: set[str] = {
+        _normalize_gallery_tag_text(n)
+        for n in gallery_names_all.get(source_lower, [])
+        if n
+    }
+    danbooru_name_by_ext_id: dict[int, str] = {}
+    if source_lower == "prompt":
+        danbooru_names_cache_key = "_shared_danbooru_name_by_ext_id"
+        cached_danbooru_names = _search_cache_get(danbooru_names_cache_key)
+        if isinstance(cached_danbooru_names, dict):
+            danbooru_name_by_ext_id = cached_danbooru_names
+        else:
+            danbooru_term_rows = (
+                db.query(AuthorityTerm.external_tag_id, AuthorityTerm.external_name)
+                .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+                .filter(TagAuthority.name.ilike("danbooru"))
+                .all()
+            )
+            for ext_id, ext_name in danbooru_term_rows:
+                if ext_id is not None and ext_name:
+                    danbooru_name_by_ext_id[ext_id] = str(ext_name).strip()
+            _search_cache_put(
+                danbooru_names_cache_key,
+                danbooru_name_by_ext_id,
+                ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+            )
+    term_rows = (
+        db.query(AuthorityTerm, Concept)
+        .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+        .outerjoin(Concept, Concept.id == AuthorityTerm.concept_id)
+        .filter(TagAuthority.name.ilike(source_lower))
+        .order_by(AuthorityTerm.external_name.asc())
+        .all()
+    )
+    rows: list[list] = []
+    for term, concept in term_rows:
+        gallery_norm = _normalize_gallery_tag_text(term.external_name or "")
+        scope = (
+            "gallery" if (gallery_norm and gallery_norm in gallery_scope_names) else "image"
+        )
+        metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+        post_count = None
+        if source_lower in {"danbooru", "civitai"}:
+            raw_pc = (
+                metadata.get("post_count") if isinstance(metadata, dict) else None
+            )
+            try:
+                pc = int(raw_pc) if raw_pc is not None else None
+            except (TypeError, ValueError):
+                pc = None
+            if pc is not None and pc > 0:
+                post_count = pc
+        external_tag_id = term.external_tag_id
+        mdtag_id = None
+        mdtag_name = None
+        if source_lower == "prompt":
+            raw_mapped = (
+                metadata.get("mapped_danbooru_tag_id")
+                if isinstance(metadata, dict)
+                else None
+            )
+            if raw_mapped not in (None, ""):
+                try:
+                    mdtag_id = int(raw_mapped)
+                except (TypeError, ValueError):
+                    mdtag_id = None
+            elif external_tag_id is not None:
+                mdtag_id = external_tag_id
+            if mdtag_id:
+                mdtag_name = danbooru_name_by_ext_id.get(mdtag_id)
+        rows.append([
+            int(term.id),
+            term.external_name,
+            external_tag_id,
+            scope,
+            post_count,
+            int(concept.id) if concept else None,
+            mdtag_id,
+            mdtag_name,
+        ])
+    if source_lower == "user":
+        existing_user_term_names: set[str] = {
+            _normalize_gallery_tag_text(r[1]) for r in rows if r[1]
+        }
+        user_tag_name_counts: dict[str, int] = {}
+        user_tag_rows = (
+            db.query(ImageModel.user_tags)
+            .filter(_active_image_filter())
+            .filter(ImageModel.user_tags.isnot(None))
+            .all()
+        )
+        for (user_tags_col,) in user_tag_rows:
+            if not isinstance(user_tags_col, list):
+                continue
+            for tag_name in user_tags_col:
+                normalized = _normalize_gallery_tag_text(str(tag_name))
+                if normalized:
+                    user_tag_name_counts[normalized] = (
+                        user_tag_name_counts.get(normalized, 0) + 1
+                    )
+        usage_counts_cache_key = "_shared_gallery_tag_usage_counts_by_source"
+        usage_counts_all = _search_cache_get(usage_counts_cache_key)
+        if not isinstance(usage_counts_all, dict):
+            usage_counts_all = _gallery_tag_usage_counts_by_source_from_observations(db)
+            _search_cache_put(
+                usage_counts_cache_key,
+                usage_counts_all,
+                ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+            )
+        user_usage_counts = usage_counts_all.get("user", {})
+        _synthetic_user_id = -1
+        for tag_name in sorted(user_tag_name_counts):
+            if tag_name in existing_user_term_names:
+                continue
+            gallery_count = user_usage_counts.get(
+                tag_name, user_tag_name_counts.get(tag_name, 0)
+            )
+            synthetic_scope = "gallery" if tag_name in gallery_scope_names else "image"
+            rows.append([
+                _synthetic_user_id, tag_name, None, synthetic_scope,
+                gallery_count if gallery_count > 0 else None, None, None, None,
+            ])
+            _synthetic_user_id -= 1
+    payload_data = {"source": source_lower, "cols": _TAG_SOURCE_COLS, "rows": rows}
+    _search_cache_put(cache_key, payload_data, ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS)
+    return payload_data
+
+
+@router.post("/tree/associate", response_model=dict)
+def taxonomy_tree_associate_tag(
+    payload: TaxonomyTagAssociationRequest, db: Session = Depends(get_db)
+):
+    concept = db.query(Concept).filter(Concept.id == payload.concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    term_id = payload.authority_term_id
+    created_term = False
+    if term_id < 0:
+        raw_name = (payload.tag_name or "").strip()
+        source_name = (payload.tag_source or "user").strip().lower()
+        if not raw_name:
+            raise HTTPException(
+                status_code=400, detail="tag_name is required for synthetic tag IDs"
+            )
+        normalized_name = _normalize_taxonomy_text(raw_name)
+        if not normalized_name:
+            raise HTTPException(
+                status_code=400, detail="tag_name is empty after normalization"
+            )
+        authority = _get_or_create_authority(db, source_name)
+        term = (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority.id,
+                AuthorityTerm.normalized_external_name == normalized_name,
+            )
+            .first()
+        )
+        if term is None:
+            now = datetime.utcnow()
+            term = AuthorityTerm(
+                authority_id=authority.id,
+                external_tag_id=None,
+                external_name=raw_name,
+                normalized_external_name=normalized_name,
+                concept_id=None,
+                metadata_json={"origin": "tree_associate", "source": source_name},
+                created_at=now,
+                updated_at=now,
+                last_seen_at=now,
+            )
+            db.add(term)
+            db.flush()
+            created_term = True
+        term_id = term.id
+    else:
+        term = db.query(AuthorityTerm).filter(AuthorityTerm.id == term_id).first()
+        if term is None:
+            raise HTTPException(status_code=404, detail="Authority term not found")
+    term.concept_id = int(concept.id)
+    term.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "message": "Tag associated to concept."
+        + (" Authority term created." if created_term else ""),
+        "authority_term_id": int(term.id),
+        "concept_id": int(concept.id),
+    }
+
+
+@router.delete("/tree/associate/{authority_term_id}", response_model=dict)
+def taxonomy_tree_disassociate_tag(
+    authority_term_id: int, db: Session = Depends(get_db)
+):
+    term = (
+        db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
+    )
+    if term is None:
+        raise HTTPException(status_code=404, detail="Authority term not found")
+    term.concept_id = None
+    term.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "message": "Tag disassociated from concept.",
+        "authority_term_id": int(term.id),
+    }
+
+
+@router.delete("/tree/tag/{authority_term_id}", response_model=dict)
+def taxonomy_tree_delete_tag(authority_term_id: int, db: Session = Depends(get_db)):
+    term = (
+        db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
+    )
+    if term is None:
+        raise HTTPException(status_code=404, detail="Authority term not found")
+    authority_name = (
+        str(term.authority.name or "").strip().lower()
+        if term.authority is not None
+        else ""
+    )
+    if authority_name != "prompt":
+        raise HTTPException(
+            status_code=409,
+            detail="Only prompt tags can be deleted from tree edit mode",
+        )
+    deleted_name = str(term.external_name or "").strip()
+    db.delete(term)
+    db.commit()
+    return {
+        "message": "Prompt tag deleted.",
+        "authority_term_id": int(authority_term_id),
+        "name": deleted_name,
+    }
+
+
+@router.get("/tree/tag/{authority_term_id}/details", response_model=dict)
+def taxonomy_tree_tag_details(authority_term_id: int, db: Session = Depends(get_db)):
+    term = (
+        db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
+    )
+    if term is None:
+        raise HTTPException(status_code=404, detail="Authority term not found")
+    authority_name = (
+        str(term.authority.name or "").strip().lower()
+        if term.authority is not None
+        else ""
+    )
+    aliases: list[str] = []
+    implies: list[str] = []
+    description = ""
+    if term.concept_id is not None:
+        concept = db.query(Concept).filter(Concept.id == term.concept_id).first()
+        if concept is not None:
+            description = concept.description or ""
+            rows = (
+                db.query(ConceptAlias)
+                .filter(ConceptAlias.concept_id == concept.id)
+                .order_by(ConceptAlias.id.asc())
+                .all()
+            )
+            for row in rows:
+                kind = str(row.alias_type or "synonym").strip().lower()
+                if kind == "canonical":
+                    continue
+                if kind == "implies":
+                    implies.append(row.alias)
+                else:
+                    aliases.append(row.alias)
+    metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+    raw_examples = metadata.get("examples") if isinstance(metadata, dict) else []
+    examples = (
+        [str(item) for item in raw_examples] if isinstance(raw_examples, list) else []
+    )
+    return {
+        "authority_term_id": int(term.id),
+        "description": description,
+        "aliases": _normalize_str_list(aliases),
+        "implies": _normalize_str_list(implies),
+        "examples": _with_source_default_example_first(
+            authority_name,
+            str(term.external_name or ""),
+            metadata,
+            examples,
+        ),
+    }
+
+
+@router.patch("/tree/tag/{authority_term_id}/details", response_model=dict)
+def taxonomy_tree_update_tag_details(
+    authority_term_id: int,
+    payload: TaxonomyTagDetailsUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    term = (
+        db.query(AuthorityTerm).filter(AuthorityTerm.id == authority_term_id).first()
+    )
+    if term is None:
+        raise HTTPException(status_code=404, detail="Authority term not found")
+    authority_name = (
+        str(term.authority.name or "").strip().lower()
+        if term.authority is not None
+        else ""
+    )
+    need_concept = (
+        payload.description is not None
+        or payload.aliases is not None
+        or payload.implies is not None
+    )
+    concept = _get_term_concept(db, term) if need_concept else None
+    if need_concept and concept is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Tag is not associated with a concept. Associate it first before "
+                "editing description, aliases, or implies."
+            ),
+        )
+    if concept is not None and payload.description is not None:
+        concept.description = (payload.description or "").strip() or None
+        concept.updated_at = datetime.utcnow()
+    if concept is not None and payload.aliases is not None:
+        db.query(ConceptAlias).filter(
+            ConceptAlias.concept_id == concept.id,
+            ConceptAlias.alias_type == "synonym",
+        ).delete(synchronize_session=False)
+        canonical = _normalize_taxonomy_text(concept.canonical_name)
+        for alias in _normalize_str_list(payload.aliases):
+            if alias == canonical:
+                continue
+            db.add(ConceptAlias(
+                concept_id=concept.id,
+                alias=alias,
+                normalized_alias=alias,
+                alias_type="synonym",
+                is_preferred=False,
+            ))
+    if concept is not None and payload.implies is not None:
+        db.query(ConceptAlias).filter(
+            ConceptAlias.concept_id == concept.id,
+            ConceptAlias.alias_type == "implies",
+        ).delete(synchronize_session=False)
+        canonical = _normalize_taxonomy_text(concept.canonical_name)
+        for implied in _normalize_str_list(payload.implies):
+            if implied == canonical:
+                continue
+            db.add(ConceptAlias(
+                concept_id=concept.id,
+                alias=implied,
+                normalized_alias=implied,
+                alias_type="implies",
+                is_preferred=False,
+            ))
+    if payload.examples is not None:
+        metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+        metadata = dict(metadata)
+        metadata["examples"] = _with_source_default_example_first(
+            authority_name,
+            str(term.external_name or ""),
+            metadata,
+            payload.examples,
+        )
+        term.metadata_json = metadata
+        term.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "message": "Tag details updated.",
+        "authority_term_id": int(term.id),
+        "concept_id": int(term.concept_id) if term.concept_id is not None else None,
+    }
+
+
+@router.get("/tag-maint/{source}/export")
+def taxonomy_tag_maint_export(source: str, db: Session = Depends(get_db)):
+    """Export all authority_terms for a source as a JSON bootstrap archive."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
+    if authority is None:
+        return {"authority": source_lower, "terms": [], "total": 0}
+    term_rows = (
+        db.query(AuthorityTerm)
+        .filter(AuthorityTerm.authority_id == authority.id)
+        .order_by(AuthorityTerm.external_name.asc())
+        .all()
+    )
+    terms: list[dict] = []
+    for t in term_rows:
+        concept_name = None
+        if t.concept_id is not None:
+            concept = db.query(Concept).filter(Concept.id == t.concept_id).first()
+            if concept is not None:
+                concept_name = concept.canonical_name
+        metadata = t.metadata_json if isinstance(t.metadata_json, dict) else {}
+        terms.append({
+            "id": int(t.id),
+            "name": t.external_name,
+            "external_tag_id": t.external_tag_id,
+            "concept_name": concept_name,
+            "metadata": metadata,
+        })
+    return {
+        "authority": source_lower,
+        "exported_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "total": len(terms),
+        "terms": terms,
+    }
+
+
+@router.post("/tag-maint/{source}/purge", response_model=dict)
+def taxonomy_tag_maint_purge(
+    source: str,
+    payload: TaxonomyTagMaintPurgeRequest,
+    db: Session = Depends(get_db),
+):
+    """Purge all authority_terms for a source."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
+    if authority is None:
+        return {
+            "message": "No authority found for source.",
+            "source": source_lower,
+            "deleted": 0,
+            "dry_run": payload.dry_run,
+        }
+    term_count = (
+        db.query(AuthorityTerm)
+        .filter(AuthorityTerm.authority_id == authority.id)
+        .count()
+    )
+    if not payload.dry_run:
+        db.query(AuthorityTerm).filter(
+            AuthorityTerm.authority_id == authority.id
+        ).delete(synchronize_session=False)
+        db.commit()
+    return {
+        "message": (
+            "Dry-run purge preview." if payload.dry_run else "All authority terms purged."
+        ),
+        "source": source_lower,
+        "deleted": term_count,
+        "dry_run": payload.dry_run,
+    }
+
+
+@router.get("/tag-maint/{source}/list", response_model=dict)
+def taxonomy_tag_maint_list(
+    source: str,
+    page: int = 1,
+    page_size: int = 100,
+    sort_col: str = "name",
+    sort_dir: str = "asc",
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Paginated, sortable, searchable tag list for table display."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+    page = max(1, page)
+    page_size = max(1, min(500, page_size))
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
+    if authority is None:
+        return {
+            "source": source_lower,
+            "cols": _TAG_SOURCE_COLS,
+            "rows": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+        }
+    q = db.query(AuthorityTerm).filter(AuthorityTerm.authority_id == authority.id)
+    if search and search.strip():
+        search_norm = search.strip().lower()
+        q = q.filter(AuthorityTerm.external_name.ilike(f"%{search_norm}%"))
+    total = q.count()
+    col_map = {
+        "id": AuthorityTerm.id,
+        "name": AuthorityTerm.external_name,
+        "ext_id": AuthorityTerm.external_tag_id,
+        "concept_id": AuthorityTerm.concept_id,
+    }
+    sort_direction = (sort_dir or "asc").strip().lower()
+    if sort_direction not in {"asc", "desc"}:
+        sort_direction = "asc"
+    if sort_col == "post_count":
+        post_count_expr = func.json_extract(AuthorityTerm.metadata_json, "$.post_count")
+        sort_expr = (
+            post_count_expr.desc() if sort_direction == "desc" else post_count_expr.asc()
+        )
+    else:
+        sort_expr = col_map.get(sort_col, AuthorityTerm.external_name)
+        sort_expr = sort_expr.desc() if sort_direction == "desc" else sort_expr.asc()
+    term_rows = (
+        q.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size).all()
+    )
+    gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
+    gallery_names_all = _search_cache_get(gallery_names_cache_key)
+    if not isinstance(gallery_names_all, dict):
+        gallery_names_all = _gallery_tag_names_by_source_from_observations(db)
+        _search_cache_put(
+            gallery_names_cache_key,
+            gallery_names_all,
+            ttl_seconds=_FILTER_OPTIONS_CACHE_TTL_SECONDS,
+        )
+    gallery_scope_names: set[str] = {
+        _normalize_gallery_tag_text(n)
+        for n in gallery_names_all.get(source_lower, [])
+        if n
+    }
+    rows: list[list] = []
+    for term in term_rows:
+        gallery_norm = _normalize_gallery_tag_text(term.external_name or "")
+        scope = (
+            "gallery" if (gallery_norm and gallery_norm in gallery_scope_names) else "image"
+        )
+        metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
+        post_count = None
+        if source_lower in {"danbooru", "civitai"}:
+            raw_pc = (
+                metadata.get("post_count") if isinstance(metadata, dict) else None
+            )
+            try:
+                pc = int(raw_pc) if raw_pc is not None else None
+            except (TypeError, ValueError):
+                pc = None
+            if pc is not None and pc > 0:
+                post_count = pc
+        rows.append([
+            int(term.id),
+            term.external_name,
+            term.external_tag_id,
+            scope,
+            post_count,
+            int(term.concept_id) if getattr(term, "concept_id", None) is not None else None,
+            None,
+            None,
+        ])
+    return {
+        "source": source_lower,
+        "cols": _TAG_SOURCE_COLS,
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.patch("/tag-maint/{source}/update", response_model=dict)
+def taxonomy_tag_maint_update(
+    source: str,
+    payload: TaxonomyTagMaintUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Inline cell edit for a single authority_term field."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+    term = (
+        db.query(AuthorityTerm)
+        .filter(AuthorityTerm.id == payload.authority_term_id)
+        .first()
+    )
+    if term is None:
+        raise HTTPException(status_code=404, detail="Authority term not found")
+    authority = (
+        db.query(TagAuthority).filter(TagAuthority.id == term.authority_id).first()
+    )
+    if authority is None or authority.name.strip().lower() != source_lower:
+        raise HTTPException(
+            status_code=409,
+            detail="Authority term does not belong to this source",
+        )
+    if payload.field == "external_name":
+        new_name = str(payload.value or "").strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="external_name cannot be empty")
+        term.external_name = new_name
+        term.normalized_external_name = _normalize_taxonomy_text(new_name)
+    elif payload.field == "external_tag_id":
+        if payload.value is not None and str(payload.value).strip() != "":
+            try:
+                term.external_tag_id = int(payload.value)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400, detail="external_tag_id must be an integer"
+                )
+        else:
+            term.external_tag_id = None
+    elif payload.field == "concept_id":
+        if payload.value is not None:
+            concept_id = int(payload.value)
+            concept = db.query(Concept).filter(Concept.id == concept_id).first()
+            if concept is None:
+                raise HTTPException(status_code=404, detail="Concept not found")
+            term.concept_id = concept_id
+        else:
+            term.concept_id = None
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown field: {payload.field}")
+    term.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {
+        "message": "Tag updated.",
+        "authority_term_id": int(term.id),
+        "field": payload.field,
+        "value": payload.value,
+    }
+
+
+@router.post("/tag-maint/{source}/bulk-delete", response_model=dict)
+def taxonomy_tag_maint_bulk_delete(
+    source: str,
+    payload: TaxonomyTagMaintBulkDeleteRequest,
+    db: Session = Depends(get_db),
+):
+    """Delete multiple authority_terms by ID."""
+    source_lower = (source or "").strip().lower()
+    if source_lower not in _VALID_TAG_MAINT_SOURCES:
+        raise HTTPException(status_code=404, detail=f"Unknown tag source: {source}")
+    if not payload.authority_term_ids:
+        return {"message": "No IDs provided.", "deleted": 0, "dry_run": payload.dry_run}
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == source_lower)
+        .first()
+    )
+    if authority is None:
+        return {
+            "message": "Authority not found.", "deleted": 0, "dry_run": payload.dry_run
+        }
+    terms = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.id.in_(payload.authority_term_ids),
+        )
+        .all()
+    )
+    deleted_count = len(terms)
+    if not payload.dry_run:
+        for term in terms:
+            db.delete(term)
+        db.commit()
+    return {
+        "message": (
+            "Dry-run bulk delete preview." if payload.dry_run else "Tags deleted."
+        ),
+        "source": source_lower,
+        "deleted": deleted_count,
+        "dry_run": payload.dry_run,
+    }
+
+
+@router.get("/tag-maint/civitai/rescan-observations")
+def taxonomy_tag_maint_rescan_civitai_observations(
+    dry_run: bool = Query(False, description="Preview changes without committing"),
+):
+    """SSE endpoint: rescan gallery sidecar JSON files to populate CivitAI
+    authority_terms and image_concept_observations."""
+
+    def _sse_event(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    def event_stream():
+        db = SessionLocal()
+        try:
+            yield from _rescan_civitai_observations_inner(db, dry_run, _sse_event)
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/tag-maint/civitai/backfill-tag-ids")
+def taxonomy_tag_maint_backfill_civitai_tag_ids(
+    dry_run: bool = Query(True, description="Preview changes without committing"),
+    limit: int = Query(0, description="Max sidecars to scan (0 = all)"),
+    db: Session = Depends(get_db),
+):
+    """Backfill missing external_tag_id on CivitAI authority_terms from sidecar JSON."""
+    from atelierai.config import IMAGE_LIBRARY_PATH
+
+    library_path = Path(IMAGE_LIBRARY_PATH)
+    if not library_path.is_dir():
+        raise HTTPException(status_code=500, detail="Image library path not found.")
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == "civitai")
+        .first()
+    )
+    if authority is None:
+        return {"message": "No CivitAI authority exists yet.", "resolved": 0}
+    missing_before = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.external_tag_id.is_(None),
+        )
+        .count()
+    )
+    sidecars_scanned = 0
+    sidecars_with_tags = 0
+    total_tags_processed = 0
+    cumulative_stats = {"terms_upserted": 0, "terms_created": 0, "terms_updated": 0}
+    errors = 0
+    for json_file in library_path.glob("*.json"):
+        if limit > 0 and sidecars_scanned >= limit:
+            break
+        sidecars_scanned += 1
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            errors += 1
+            continue
+        if not isinstance(data, dict):
+            continue
+        civitai = data.get("civitai")
+        if not isinstance(civitai, dict):
+            continue
+        tags = civitai.get("tags")
+        if not isinstance(tags, list) or not tags:
+            continue
+        has_ids = any(isinstance(t, dict) and t.get("id") is not None for t in tags)
+        if not has_ids:
+            continue
+        sidecars_with_tags += 1
+        try:
+            stats = _upsert_civitai_authority_terms(db, civitai)
+            total_tags_processed += stats.get("terms_upserted", 0)
+            for k in ("terms_upserted", "terms_created", "terms_updated"):
+                cumulative_stats[k] += stats.get(k, 0)
+        except Exception as exc:
+            errors += 1
+            print(f"   [backfill-tag-ids] Error processing {json_file.name}: {exc}")
+    if not dry_run and cumulative_stats["terms_upserted"] > 0:
+        db.commit()
+    missing_after = (
+        (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority.id,
+                AuthorityTerm.external_tag_id.is_(None),
+            )
+            .count()
+        )
+        if not dry_run
+        else missing_before
+    )
+    return {
+        "dry_run": dry_run,
+        "sidecars_scanned": sidecars_scanned,
+        "sidecars_with_tag_ids": sidecars_with_tags,
+        "tags_processed": total_tags_processed,
+        "terms_created": cumulative_stats["terms_created"],
+        "terms_updated": cumulative_stats["terms_updated"],
+        "missing_ids_before": missing_before,
+        "missing_ids_after": missing_after,
+        "resolved": missing_before - missing_after,
+        "errors": errors,
+    }

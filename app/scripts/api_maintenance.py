@@ -114,7 +114,7 @@ def _wait_for_task(
         payload = _request_json(
             session,
             method="GET",
-            url=_build_url(base_url, f"/tasks/{task_id}"),
+            url=_build_url(base_url, f"/api/tasks/{task_id}"),
             timeout_seconds=max(30.0, poll_seconds + 5.0),
         )
         status = str((payload or {}).get("status") or "unknown")
@@ -164,7 +164,7 @@ def cmd_scan_library(args: argparse.Namespace, session: requests.Session) -> int
     payload = _request_json(
         session,
         method="POST",
-        url=_build_url(args.base_url, "/scan_library/"),
+        url=_build_url(args.base_url, "/api/scan_library/"),
         timeout_seconds=args.timeout,
     )
     _print_payload(payload, pretty=args.pretty)
@@ -175,7 +175,7 @@ def cmd_rescan_image(args: argparse.Namespace, session: requests.Session) -> int
     payload = _request_json(
         session,
         method="POST",
-        url=_build_url(args.base_url, f"/images/{args.file_hash}/rescan"),
+        url=_build_url(args.base_url, f"/api/images/{args.file_hash}/rescan"),
         timeout_seconds=args.timeout,
     )
     _print_payload(payload, pretty=args.pretty)
@@ -186,7 +186,7 @@ def cmd_list_tasks(args: argparse.Namespace, session: requests.Session) -> int:
     payload = _request_json(
         session,
         method="GET",
-        url=_build_url(args.base_url, f"/tasks/?limit={args.limit}"),
+        url=_build_url(args.base_url, f"/api/tasks/?limit={args.limit}"),
         timeout_seconds=args.timeout,
     )
     _print_payload(payload, pretty=args.pretty)
@@ -197,7 +197,7 @@ def cmd_get_task(args: argparse.Namespace, session: requests.Session) -> int:
     payload = _request_json(
         session,
         method="GET",
-        url=_build_url(args.base_url, f"/tasks/{args.task_id}"),
+        url=_build_url(args.base_url, f"/api/tasks/{args.task_id}"),
         timeout_seconds=args.timeout,
     )
     _print_payload(payload, pretty=args.pretty)
@@ -208,7 +208,7 @@ def cmd_cancel_task(args: argparse.Namespace, session: requests.Session) -> int:
     payload = _request_json(
         session,
         method="POST",
-        url=_build_url(args.base_url, f"/tasks/{args.task_id}/cancel"),
+        url=_build_url(args.base_url, f"/api/tasks/{args.task_id}/cancel"),
         timeout_seconds=args.timeout,
     )
     _print_payload(payload, pretty=args.pretty)
@@ -219,7 +219,7 @@ def cmd_retry_failed(args: argparse.Namespace, session: requests.Session) -> int
     payload = _request_json(
         session,
         method="POST",
-        url=_build_url(args.base_url, f"/tasks/{args.task_id}/retry_failed"),
+        url=_build_url(args.base_url, f"/api/tasks/{args.task_id}/retry_failed"),
         timeout_seconds=args.timeout,
     )
     return _maybe_wait_for_task(payload, args=args, session=session)
@@ -229,7 +229,7 @@ def cmd_import_civitai(args: argparse.Namespace, session: requests.Session) -> i
     payload = _request_json(
         session,
         method="POST",
-        url=_build_url(args.base_url, "/import_civitai/"),
+        url=_build_url(args.base_url, "/api/import_civitai/"),
         timeout_seconds=args.timeout,
         json_payload={
             "import_type": args.import_type,
@@ -244,7 +244,7 @@ def cmd_sync_civitai_collections(args: argparse.Namespace, session: requests.Ses
     payload = _request_json(
         session,
         method="POST",
-        url=_build_url(args.base_url, "/collections/sync/civitai"),
+        url=_build_url(args.base_url, "/api/collections/sync/civitai"),
         timeout_seconds=args.timeout,
         json_payload={
             "limit": args.limit,
@@ -275,13 +275,13 @@ def cmd_doctor(args: argparse.Namespace, session: requests.Session) -> int:
         {
             "name": "tasks",
             "method": "GET",
-            "path": "/tasks/?limit=1",
+            "path": "/api/tasks/?limit=1",
             "expect_json": True,
         },
         {
             "name": "collections",
             "method": "GET",
-            "path": "/collections/",
+            "path": "/api/collections/",
             "expect_json": True,
         },
     ]

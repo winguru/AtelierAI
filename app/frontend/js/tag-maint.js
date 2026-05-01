@@ -1,3 +1,6 @@
+// ── Memory ───────────────────────────────────────────────────────────────────
+// 📄 docs: app/docs/memories/taxonomy-import.md
+// ──────────────────────────────────────────────────────────────────────────────
 (() => {
   'use strict';
 
@@ -57,7 +60,7 @@
 
   // ── Helpers ──
   function apiUrl(path) {
-    return `/taxonomy/tag-maint/${source}${path}`;
+    return `/api/taxonomy/tag-maint/${source}${path}`;
   }
 
   function toast(message, type = 'info') {
@@ -350,14 +353,14 @@
       const ext = file.name.split('.').pop().toLowerCase();
       const format = ext === 'csv' ? 'csv' : 'json';
 
-      const resp = await fetch('/taxonomy/bootstrap/import', {
+      const resp = await fetch('/api/taxonomy/bootstrap/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           authority_name: source,
           format,
           raw_text: text,
-          create_missing_concepts: true,
+
           dry_run: dryRun,
         }),
       });
@@ -476,7 +479,7 @@
       rescanProgressWrap.hidden = false;
       rescanMetrics.hidden = false;
 
-      const url = `/taxonomy/tag-maint/civitai/rescan-observations?dry_run=${dryRun ? '1' : '0'}`;
+      const url = `/api/taxonomy/tag-maint/civitai/rescan-observations?dry_run=${dryRun ? '1' : '0'}`;
 
       rescanEventSource = new EventSource(url);
 

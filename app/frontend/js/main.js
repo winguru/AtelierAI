@@ -1,3 +1,6 @@
+// ── Memory ───────────────────────────────────────────────────────────────────
+// 📄 docs: app/docs/memories/image-api.md
+// ──────────────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     const STORAGE_KEYS = {
         infinite: 'atelier.gallery.infiniteScroll',
@@ -431,6 +434,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const taxonomyTree = document.getElementById('taxonomy-tree');
     const taxonomyOutput = document.getElementById('taxonomy-output');
     const treeEmbedFrame = document.getElementById('tree-embed-frame');
+    const modelsEmbedFrame = document.getElementById('models-embed-frame');
     let taxonomyDragSourceConceptId = null;
     const taxonomyExpandedNodeIds = new Set();
     let taxonomyTreeData = [];
@@ -1192,7 +1196,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function cancelTask(taskId) {
-        const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
             method: 'POST',
         });
         const result = await response.json();
@@ -1203,7 +1207,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function retryFailedItems(taskId) {
-        const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/retry_failed`, {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/retry_failed`, {
             method: 'POST',
         });
         const result = await response.json();
@@ -1214,7 +1218,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function retryMissingItems(taskId) {
-        const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/retry-missing`, {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/retry-missing`, {
             method: 'POST',
         });
         const result = await response.json();
@@ -1225,7 +1229,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function retryTemporaryItems(taskId) {
-        const response = await fetch(`/tasks/${encodeURIComponent(taskId)}/retry-temporary`, {
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/retry-temporary`, {
             method: 'POST',
         });
         const result = await response.json();
@@ -1244,7 +1248,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.taskRefreshInFlight = true;
         let shouldReloadGallery = false;
         try {
-            const response = await fetch('/tasks/?limit=40');
+            const response = await fetch('/api/tasks/?limit=40');
             const result = await response.json();
             if (!response.ok) {
                 throw new Error(result.detail || `HTTP ${response.status}`);
@@ -1603,7 +1607,166 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        return `/images/?${params.toString()}`;
+        return `/api/images/?${params.toString()}`;
+    }
+
+    /**
+     * Build a POST /api/query request body equivalent to buildImagesRequestUrl().
+     *
+     * Maps the same GET query params into the structured GalleryQueryRequest
+     * schema accepted by the unified query endpoint.
+     *
+     * @param {number} skip   - Offset for legacy pagination (used when no cursor).
+     * @param {number} limit  - Page size.
+     * @param {string|null} cursor - Opaque cursor from previous response, or null.
+     * @returns {{ url: string, body: object }} Ready for fetch(url, { method: 'POST', body: JSON.stringify(body) }).
+     */
+    /**
+     * Build the GalleryFilter + search portion of a request body.
+     * Shared by buildQueryRequestPost() and fetchSuggestions() so both
+     * endpoints send identical filter context.
+     * @returns {{ filter?: object, search?: string }}
+     */
+    function _buildFilterBody() {
+        const body = {};
+
+        // ── NSFW visibility → filter.hidden ────────────────────────────
+        const visibilityMode = state.nsfwVisibility || 'explicit';
+        if (visibilityMode !== 'explicit') {
+            const ratings = getNsfwVisibilityServerRatings(visibilityMode);
+            if (ratings.length) {
+                body.filter = body.filter || {};
+                body.filter.hidden = body.filter.hidden || {};
+                body.filter.hidden.nsfw = ratings;
+            }
+        }
+
+        // ── Structured filters from active config ──────────────────────
+        const config = state.serverFilterMode ? state.activeServerFilterConfig : null;
+        if (config) {
+            // Search
+            if (config.search) {
+                body.search = config.search;
+            }
+
+            // Ensure filter object exists
+            body.filter = body.filter || {};
+            body.filter.included = body.filter.included || {};
+            body.filter.excluded = body.filter.excluded || {};
+            const inc = body.filter.included;
+            const exc = body.filter.excluded;
+
+            // Software
+            if (config.generationSoftwares && config.generationSoftwares.length) {
+                inc.software = config.generationSoftwares;
+            }
+            // Source sites
+            if (config.sourceSites && config.sourceSites.length) {
+                inc.source = config.sourceSites;
+            }
+            // Mimetypes
+            if (config.mimetypes && config.mimetypes.length) {
+                inc.mimetype = config.mimetypes;
+            }
+            // NSFW ratings (additional to visibility)
+            if (config.nsfwRatings && config.nsfwRatings.length) {
+                body.filter.hidden = body.filter.hidden || {};
+                body.filter.hidden.nsfw = [
+                    ...(body.filter.hidden.nsfw || []),
+                    ...config.nsfwRatings,
+                ];
+            }
+            // NSFW safety
+            if (config.nsfwSafety && config.nsfwSafety.length) {
+                body.filter.hidden = body.filter.hidden || {};
+                body.filter.hidden.nsfw_safety = config.nsfwSafety;
+            }
+            // Artists
+            if (config.artistNames && config.artistNames.length) {
+                inc.artist = config.artistNames;
+            }
+            if (config.excludeArtists && config.excludeArtists.length) {
+                exc.artist = config.excludeArtists;
+            }
+            // Collections
+            if (config.collectionNames && config.collectionNames.length) {
+                inc.collection = config.collectionNames;
+            }
+            if (config.excludeCollections && config.excludeCollections.length) {
+                exc.collection = config.excludeCollections;
+            }
+            // Tags
+            if (config.includeTags && config.includeTags.length) {
+                inc.tag = config.includeTags;
+            }
+            if (config.excludeTags && config.excludeTags.length) {
+                exc.tag = config.excludeTags;
+            }
+            // A1111 features
+            if (config.a1111Hires && config.a1111Hires.length) {
+                inc.feature = [...(inc.feature || []), ...config.a1111Hires.map((v) => `a1111_hires:${v}`)];
+            }
+            if (config.a1111RegionalPrompter && config.a1111RegionalPrompter.length) {
+                inc.feature = [...(inc.feature || []), ...config.a1111RegionalPrompter.map((v) => `a1111_regional_prompter:${v}`)];
+            }
+            if (config.a1111Adetailer && config.a1111Adetailer.length) {
+                inc.feature = [...(inc.feature || []), ...config.a1111Adetailer.map((v) => `a1111_adetailer:${v}`)];
+            }
+            // Missing data
+            if (config.missingData && config.missingData.length) {
+                body.filter.missing = config.missingData;
+            }
+            // Missing sources — mapped to filter.missing
+            if (config.missingSources && config.missingSources.length) {
+                body.filter.missing = [
+                    ...(body.filter.missing || []),
+                    ...config.missingSources.map((s) => `source:${s}`),
+                ];
+            }
+        }
+
+        // Clean up empty sections to keep the request lean
+        if (body.filter) {
+            if (body.filter.included && Object.keys(body.filter.included).length === 0) {
+                delete body.filter.included;
+            }
+            if (body.filter.excluded && Object.keys(body.filter.excluded).length === 0) {
+                delete body.filter.excluded;
+            }
+            if (body.filter.hidden && Object.keys(body.filter.hidden).length === 0) {
+                delete body.filter.hidden;
+            }
+            if (body.filter.missing && body.filter.missing.length === 0) {
+                delete body.filter.missing;
+            }
+            if (Object.keys(body.filter).length === 0) {
+                delete body.filter;
+            }
+        }
+
+        return body;
+    }
+
+    function buildQueryRequestPost(skip, limit, cursor = null) {
+        const body = _buildFilterBody();
+
+        // ── Image page spec ────────────────────────────────────────────
+        const images = {
+            limit,
+            group_variants: state.groupVariantsEnabled,
+        };
+        if (cursor != null) {
+            images.cursor = String(cursor);
+        } else {
+            images.offset = skip;
+        }
+        // Map legacy sort_by values to ImagePageSpec sort/order.
+        // first_added → date_added asc (oldest first), last_added → date_added desc (newest first)
+        images.sort = 'date_added';
+        images.order = state.sortOrder === 'last_added' ? 'desc' : 'asc';
+        body.images = images;
+
+        return { url: '/api/query', body };
     }
 
     function buildImageKeysRequestUrl(config = null) {
@@ -1655,7 +1818,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const queryString = params.toString();
-        return queryString ? `/images/keys?${queryString}` : '/images/keys';
+        return queryString ? `/api/images/keys?${queryString}` : '/api/images/keys';
     }
 
     function getImageCountDisplayState() {
@@ -2259,6 +2422,7 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast(`Added user tag "${normalised}" to ${successCount}/${targets.length} image(s).`, 'success');
         renderUserTagsPanel();
         postSelectedImageTagsToTree(getSelectedImage());
+        postSelectedImageModelsToModelsFrame(getSelectedImage());
     }
 
     async function removeUserTagFromGroup(tagName) {
@@ -2288,6 +2452,7 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast(`Removed user tag "${normalised}" from ${successCount}/${targets.length} image(s).`, 'success');
         renderUserTagsPanel();
         postSelectedImageTagsToTree(getSelectedImage());
+        postSelectedImageModelsToModelsFrame(getSelectedImage());
     }
 
     function renderUserTagsPanel() {
@@ -2545,6 +2710,129 @@ document.addEventListener('DOMContentLoaded', () => {
             },
             window.location.origin,
         );
+    }
+
+    /**
+     * Send selected image model data to the models browser iframe.
+     * Extracts checkpoint/lora resources from the image's generation data.
+     */
+    function postSelectedImageModelsToModelsFrame(image) {
+        if (!modelsEmbedFrame || !modelsEmbedFrame.contentWindow) {
+            return;
+        }
+
+        const payload = buildSelectedImageModelsPayload(image);
+
+        modelsEmbedFrame.contentWindow.postMessage(
+            {
+                type: 'atelier:selected-image-models',
+                payload,
+            },
+            window.location.origin,
+        );
+    }
+
+    /**
+     * Send current gallery image keys to the models browser iframe so
+     * Gallery scope can mirror the main page's current filtered set.
+     */
+    function postGalleryKeysToModelsFrame() {
+        if (!modelsEmbedFrame || !modelsEmbedFrame.contentWindow) {
+            return;
+        }
+
+        const keys = Array.isArray(state.filteredImages)
+            ? state.filteredImages
+                .map((img) => img?.__key)
+                .filter((key) => typeof key === 'string' && key.length > 0)
+            : [];
+
+        modelsEmbedFrame.contentWindow.postMessage(
+            {
+                type: 'atelier:gallery-keys',
+                payload: { keys },
+            },
+            window.location.origin,
+        );
+    }
+
+    /**
+     * Build model payload from selected image for the models browser iframe.
+     * Extracts checkpoint and lora resources from generation data.
+     */
+    function buildSelectedImageModelsPayload(image) {
+        if (!image) {
+            return { imageKey: null, checkpoint: [], lora: [] };
+        }
+
+        const checkpoint = [];
+        const lora = [];
+
+        // Extract resources from generation data
+        const processes = Array.isArray(image.__processes) ? image.__processes : [];
+        const genData = image.generation || image.generationData || {};
+        const genProcesses = Array.isArray(genData?.processes) ? genData.processes : processes;
+
+        for (const proc of genProcesses) {
+            const stages = getGenerationStagesForProcess(proc);
+            for (const stage of stages) {
+                const resources = Array.isArray(stage?.resources) && stage.resources.length
+                    ? stage.resources
+                    : (Array.isArray(proc?.resources) ? proc.resources : []);
+                for (const res of resources) {
+                    if (!res || typeof res !== 'object') continue;
+                    const rawType = String(res.resource_type || res.modelType || res.type || '').trim().toLowerCase();
+                    const parentType = _parentResourceType(rawType);
+                    if (parentType !== 'checkpoint' && parentType !== 'lora') continue;
+
+                    const entry = {
+                        type: parentType,
+                        name: String(res.display_name || res.modelName || res.name || '').trim(),
+                        modelId: res.civitai_model_id || res.modelId || null,
+                        versionId: res.civitai_model_version_id || res.versionId || null,
+                        versionName: String(res.version_name || res.versionName || '').trim(),
+                        baseModel: String(res.base_model_name || res.baseModel || '').trim(),
+                    };
+
+                    if (parentType === 'checkpoint') {
+                        checkpoint.push(entry);
+                    } else {
+                        lora.push(entry);
+                    }
+                }
+            }
+        }
+
+        return {
+            imageKey: image.__key || null,
+            checkpoint,
+            lora,
+        };
+    }
+
+    /**
+     * Map resource type to parent type (checkpoint/lora).
+     * Mirrors backend _RESOURCE_TYPE_PARENTS logic.
+     */
+    function _parentResourceType(rawType) {
+        const TYPE_ALIASES = {
+            'model': 'checkpoint',
+            'diffusion_model': 'diffusion_model',
+            'lora': 'lora',
+            'dora': 'dora',
+            'embedding': 'embedding',
+            'vae': 'vae',
+            'controlnet': 'controlnet',
+            'clip': 'clip',
+            'unet': 'unet',
+            'te': 'te',
+        };
+        const TYPE_PARENTS = {
+            'diffusion_model': 'checkpoint',
+            'dora': 'lora',
+        };
+        const normalised = TYPE_ALIASES[rawType] || rawType;
+        return TYPE_PARENTS[normalised] || normalised;
     }
 
     /**
@@ -3606,7 +3894,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const request = (async () => {
-            const response = await fetch(`/images/${encodeURIComponent(fileHash)}/generation-prototype`);
+            const response = await fetch(`/api/images/${encodeURIComponent(fileHash)}/generation-prototype`);
             let payload = null;
             try {
                 payload = await response.json();
@@ -4862,43 +5150,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchSuggestions(query) {
-        const params = new URLSearchParams({ q: query, limit: '15' });
-        _appendNsfwVisibilityParams(params);
+        // Build filter context using the shared helper so suggestions are
+        // scoped to the same filtered gallery subset as /api/query.
+        // Do NOT send config.search — it duplicates `q` and would narrow
+        // the image pool, causing incorrect counts and missing tag suggestions.
+        const filterBody = _buildFilterBody();
+        const body = {
+            q: query,
+            limit: 15,
+            // search intentionally omitted — see comment above
+            filter: filterBody.filter || undefined,
+        };
 
-        // Send active filter context so suggestions are scoped to the filtered gallery subset.
-        // Do NOT send config.search — it duplicates the `q` param and would narrow the image
-        // pool to only images matching the text search, causing incorrect counts and missing
-        // tag suggestions.
-        const config = state.activeServerFilterConfig;
-        if (config) {
-            config.generationSoftwares.forEach((v) => params.append('generation_software', v));
-            config.sourceSites.forEach((v) => params.append('source_site', v));
-            config.mimetypes.forEach((v) => params.append('mimetype', v));
-            config.nsfwRatings.forEach((v) => params.append('nsfw_rating', v));
-            config.nsfwSafety.forEach((v) => params.append('nsfw_safety', v));
-            config.artistNames.forEach((v) => params.append('artist_name', v));
-            config.collectionNames.forEach((v) => params.append('collection_name', v));
-            if (config.excludeArtists && config.excludeArtists.length)
-                config.excludeArtists.forEach((v) => params.append('exclude_artist_name', v));
-            if (config.excludeCollections && config.excludeCollections.length)
-                config.excludeCollections.forEach((v) => params.append('exclude_collection_name', v));
-            if (config.a1111Hires && config.a1111Hires.length)
-                config.a1111Hires.forEach((v) => params.append('a1111_hires', v));
-            if (config.a1111RegionalPrompter && config.a1111RegionalPrompter.length)
-                config.a1111RegionalPrompter.forEach((v) => params.append('a1111_regional_prompter', v));
-            if (config.a1111Adetailer && config.a1111Adetailer.length)
-                config.a1111Adetailer.forEach((v) => params.append('a1111_adetailer', v));
-            if (config.includeTags && config.includeTags.length)
-                config.includeTags.forEach((v) => params.append('include_tag', v));
-            if (config.excludeTags && config.excludeTags.length)
-                config.excludeTags.forEach((v) => params.append('exclude_tag', v));
-            if (config.missingData && config.missingData.length)
-                config.missingData.forEach((v) => params.append('missing_data', v));
-            if (config.missingSources && config.missingSources.length)
-                config.missingSources.forEach((v) => params.append('missing_source', v));
-        }
-
-        const response = await fetch(`/search/suggest?${params.toString()}`);
+        const response = await fetch('/api/search/suggest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
         if (!response.ok) return { collections: [], artists: [], tags: [] };
         return response.json();
     }
@@ -5251,7 +5519,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchFilterOptions() {
-        const response = await fetch('/filters/options');
+        const response = await fetch('/api/filters/options');
         const result = await response.json();
         if (!response.ok) {
             throw new Error(result.detail || `HTTP ${response.status}`);
@@ -5776,7 +6044,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const versionToken = image?.date_modified || image?.id || image?.file_size || fileHash;
         const version = versionToken ? `?v=${encodeURIComponent(String(versionToken))}` : '';
-        return `/images/${encodeURIComponent(fileHash)}/video_poster${version}`;
+        return `/api/images/${encodeURIComponent(fileHash)}/video_poster${version}`;
     }
 
     function getVideoThumbnailUrl(image) {
@@ -5803,7 +6071,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         const versionToken = image?.date_modified || image?.id || image?.file_size || fileHash;
         const version = versionToken ? `?v=${encodeURIComponent(String(versionToken))}` : '';
-        return `/images/${encodeURIComponent(fileHash)}/video_thumbnail${version}`;
+        return `/api/images/${encodeURIComponent(fileHash)}/video_thumbnail${version}`;
     }
 
     function applyTileVideoPoster(tile, posterImage, video, posterUrl) {
@@ -6948,7 +7216,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function saveImageMetadata(fileHash, patchData) {
-        const response = await fetch(`/images/${encodeURIComponent(fileHash)}`, {
+        const response = await fetch(`/api/images/${encodeURIComponent(fileHash)}`, {
             method: 'PATCH',
             headers: {
                 'Content-Type': 'application/json',
@@ -6964,7 +7232,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchCollections() {
-        const response = await fetch('/collections/');
+        const response = await fetch('/api/collections/');
         const result = await response.json();
         if (!response.ok) {
             throw new Error(result.detail || `HTTP ${response.status}`);
@@ -6976,7 +7244,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const params = new URLSearchParams();
         _appendNsfwVisibilityParams(params);
         const queryString = params.toString();
-        const url = queryString ? `/images/state?${queryString}` : '/images/state';
+        const url = queryString ? `/api/images/state?${queryString}` : '/api/images/state';
         const response = await fetch(url);
         const result = await response.json();
         if (!response.ok) {
@@ -6994,7 +7262,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchImageStatusCounts() {
-        const response = await fetch('/utilities/image_status_counts');
+        const response = await fetch('/api/utilities/image_status_counts');
         const result = await response.json();
         if (!response.ok) {
             throw new Error(result.detail || `HTTP ${response.status}`);
@@ -7009,7 +7277,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchInactiveImages(status = 'all') {
-        const response = await fetch(`/utilities/inactive_images?status=${encodeURIComponent(status)}&limit=300`);
+        const response = await fetch(`/api/utilities/inactive_images?status=${encodeURIComponent(status)}&limit=300`);
         const result = await response.json();
         if (!response.ok) {
             throw new Error(result.detail || `HTTP ${response.status}`);
@@ -7722,7 +7990,7 @@ document.addEventListener('DOMContentLoaded', () => {
             throw new Error('No selected items are available for collection add.');
         }
 
-        const response = await fetch(`/collections/${collectionId}/images`, {
+        const response = await fetch(`/api/collections/${collectionId}/images`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -7744,7 +8012,7 @@ document.addEventListener('DOMContentLoaded', () => {
             throw new Error('No selected items are available for collection removal.');
         }
 
-        const response = await fetch(`/collections/${collectionId}/images`, {
+        const response = await fetch(`/api/collections/${collectionId}/images`, {
             method: 'DELETE',
             headers: {
                 'Content-Type': 'application/json',
@@ -7812,7 +8080,7 @@ document.addEventListener('DOMContentLoaded', () => {
             restoreBtn.addEventListener('click', async () => {
                 restoreBtn.disabled = true;
                 try {
-                    const response = await fetch(`/utilities/images/${encodeURIComponent(row.file_hash)}/restore`, {
+                    const response = await fetch(`/api/utilities/images/${encodeURIComponent(row.file_hash)}/restore`, {
                         method: 'POST',
                     });
                     const result = await response.json();
@@ -8292,7 +8560,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
                 try {
-                    const response = await fetch(`/images/${encodeURIComponent(editableHash)}/collections/${collectionId}`, {
+                    const response = await fetch(`/api/images/${encodeURIComponent(editableHash)}/collections/${collectionId}`, {
                         method: 'DELETE',
                     });
                     const result = await response.json();
@@ -8532,6 +8800,34 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showDetails(image) {
+        // Lazy-load detail-only blob fields (exif_data, civitai_data,
+        // json_metadata) the first time an image is selected.  The gallery
+        // list endpoint strips these fields to keep the payload lean; they
+        // are fetched on demand from GET /api/images/{base_image_id}.
+        if (image && !image._detail_loaded && !image._detail_loading) {
+            image._detail_loading = true;
+            const imageId = image.base_image_id ?? image.id;
+            fetch(`/api/images/${imageId}`)
+                .then((res) => res.ok ? res.json() : null)
+                .then((detail) => {
+                    if (detail) {
+                        image.exif_data = detail.exif_data ?? null;
+                        image.civitai_data = detail.civitai_data ?? null;
+                        image.json_metadata = detail.json_metadata ?? null;
+                    }
+                    image._detail_loaded = true;
+                    image._detail_loading = false;
+                    // Re-render detail panel only if this image is still selected.
+                    if (getSelectedImage()?.__key === image.__key) {
+                        showDetails(image);
+                    }
+                })
+                .catch(() => {
+                    image._detail_loaded = true;
+                    image._detail_loading = false;
+                });
+        }
+
         if (!image) {
             closeFullscreenPreview();
             detailImage.classList.add('hidden');
@@ -8571,6 +8867,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 detailGeneration.innerHTML = '';
             }
             postSelectedImageTagsToTree(null);
+            postSelectedImageModelsToModelsFrame(null);
             return;
         }
 
@@ -8806,6 +9103,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         postSelectedImageTagsToTree(image);
+        postSelectedImageModelsToModelsFrame(image);
         renderUserTagsPanel();
 
         scheduleGalleryGridHeightSync();
@@ -8814,6 +9112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderGallery(options = {}) {
         const appendOnly = options.appendOnly === true;
         renderImageCountControl();
+        postGalleryKeysToModelsFrame();
 
         updateSelectionUi();
         const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
@@ -9565,19 +9864,17 @@ document.addEventListener('DOMContentLoaded', () => {
         // Capture the offset at prefetch time so toClientImage indices are correct.
         const prefetchOffset = state.offset;
 
-        fetch(buildImagesRequestUrl(prefetchOffset, state.pageSize, nextCursor), {
+        const { url: queryUrl, body: queryBody } = buildQueryRequestPost(prefetchOffset, state.pageSize, nextCursor);
+        fetch(queryUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(queryBody),
             cache: 'no-store',
             signal: controller.signal,
         })
             .then((response) => {
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const filteredCountHeader = response.headers.get('X-Filtered-Count');
-                const nextCursorHeader = response.headers.get('X-Next-Cursor');
-                return response.json().then((page) => ({
-                    page,
-                    filteredCount: filteredCountHeader,
-                    nextCursor: nextCursorHeader,
-                }));
+                return response.json();
             })
             .then((result) => {
                 // Only cache if the filter hasn't changed and the cursor still matches.
@@ -9587,13 +9884,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 ) {
                     return; // stale — discard
                 }
-                const normalizedPage = Array.isArray(result.page)
-                    ? result.page.map((img, idx) => toClientImage(img, prefetchOffset + idx))
+                const pageImages = Array.isArray(result.images)
+                    ? result.images.map((img, idx) => toClientImage(img, prefetchOffset + idx))
                     : [];
+                const pageInfo = result.page || {};
                 state._prefetchResult = {
-                    page: normalizedPage,
-                    filteredCount: result.filteredCount,
-                    nextCursor: result.nextCursor,
+                    page: pageImages,
+                    filteredCount: pageInfo.total != null ? String(pageInfo.total) : null,
+                    nextCursor: pageInfo.next_cursor != null ? String(pageInfo.next_cursor) : null,
                 };
             })
             .catch((err) => {
@@ -9643,7 +9941,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Discard stale prefetch.
                 _clearPrefetch();
 
-                const response = await fetch(buildImagesRequestUrl(state.offset, state.pageSize, state.cursor), {
+                const { url: queryUrl, body: queryBody } = buildQueryRequestPost(state.offset, state.pageSize, state.cursor);
+                const response = await fetch(queryUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(queryBody),
                     cache: 'no-store',
                 });
 
@@ -9656,12 +9958,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(`HTTP ${response.status}`);
                 }
 
-                const page = await response.json();
-                filteredCountHeader = response.headers.get('X-Filtered-Count');
-                nextCursorHeader = response.headers.get('X-Next-Cursor');
-                normalizedPage = Array.isArray(page)
-                    ? page.map((img, idx) => toClientImage(img, state.offset + idx))
+                const result = await response.json();
+                const pageImages = Array.isArray(result.images)
+                    ? result.images.map((img, idx) => toClientImage(img, state.offset + idx))
                     : [];
+                const pageInfo = result.page || {};
+                filteredCountHeader = pageInfo.total != null ? String(pageInfo.total) : null;
+                nextCursorHeader = pageInfo.next_cursor != null ? String(pageInfo.next_cursor) : null;
+                normalizedPage = pageImages;
             }
 
             if (state.serverFilterMode) {
@@ -9678,10 +9982,14 @@ document.addEventListener('DOMContentLoaded', () => {
             state.allImages = state.allImages.concat(dedupedPage);
             state.offset += dedupedPage.length;
 
-            // Cursor-based pagination: use X-Next-Cursor header to determine hasMore.
-            if (state.cursor != null || nextCursorHeader != null) {
-                state.cursor = nextCursorHeader ? Number(nextCursorHeader) : null;
-                state.hasMore = state.cursor != null;
+            // Cursor-based pagination: use page metadata to determine hasMore.
+            if (nextCursorHeader != null) {
+                state.cursor = Number(nextCursorHeader);
+                state.hasMore = true;
+            } else if (state.cursor != null) {
+                // No next cursor returned — this was the last page.
+                state.cursor = null;
+                state.hasMore = false;
             } else if (state.serverFilterMode) {
                 state.hasMore = state.offset < state.filteredMatchCount;
             } else if (normalizedPage.length < state.pageSize) {
@@ -9712,8 +10020,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function loadReferenceData() {
         const [artistsRes, licensesRes, collections] = await Promise.all([
-            fetch('/artists/'),
-            fetch('/licenses/'),
+            fetch('/api/artists/'),
+            fetch('/api/licenses/'),
             fetchCollections(),
         ]);
 
@@ -10421,7 +10729,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             for (const image of images) {
                 try {
-                    const response = await fetch(`/images/${encodeURIComponent(getEditableFileHash(image))}/repair`, {
+                    const response = await fetch(`/api/images/${encodeURIComponent(getEditableFileHash(image))}/repair`, {
                         method: 'POST',
                     });
                     const result = await response.json();
@@ -10492,7 +10800,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 for (const image of images) {
                     try {
-                        const response = await fetch(`/images/${encodeURIComponent(getEditableFileHash(image))}/rescan`, {
+                        const response = await fetch(`/api/images/${encodeURIComponent(getEditableFileHash(image))}/rescan`, {
                             method: 'POST',
                         });
                         const result = await response.json();
@@ -10601,7 +10909,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             for (const image of images) {
                 try {
-                    const response = await fetch(`/images/${encodeURIComponent(getEditableFileHash(image))}/file`, {
+                    const response = await fetch(`/api/images/${encodeURIComponent(getEditableFileHash(image))}/file`, {
                         method: 'DELETE',
                     });
                     const result = await response.json();
@@ -10645,7 +10953,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch('/collections/', {
+            const response = await fetch('/api/collections/', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -10690,7 +10998,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch(`/collections/${collectionId}`, {
+            const response = await fetch(`/api/collections/${collectionId}`, {
                 method: 'PATCH',
                 headers: {
                     'Content-Type': 'application/json',
@@ -10737,7 +11045,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch(`/collections/${collectionId}`, {
+            const response = await fetch(`/api/collections/${collectionId}`, {
                 method: 'DELETE',
             });
             const result = await response.json();
@@ -10770,7 +11078,7 @@ document.addEventListener('DOMContentLoaded', () => {
         scanBtn.disabled = true;
         scanOutput.textContent = 'Scanning library...';
         try {
-            const response = await fetch('/scan_library/', { method: 'POST' });
+            const response = await fetch('/api/scan_library/', { method: 'POST' });
             const result = await response.json();
             if (!response.ok) {
                 throw new Error(result.detail || `HTTP ${response.status}`);
@@ -10798,7 +11106,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         purgeDeletedBtn.disabled = true;
         try {
-            const response = await fetch('/utilities/purge_deleted_files', {
+            const response = await fetch('/api/utilities/purge_deleted_files', {
                 method: 'POST',
             });
             const result = await response.json();
@@ -11190,7 +11498,7 @@ document.addEventListener('DOMContentLoaded', () => {
         submitButton.disabled = true;
 
         try {
-            const response = await fetch('/upload_images/', {
+            const response = await fetch('/api/upload_images/', {
                 method: 'POST',
                 body: formData,
             });
@@ -11273,7 +11581,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const response = await fetch('/import_civitai/', {
+            const response = await fetch('/api/import_civitai/', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -11327,7 +11635,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             try {
-                const response = await fetch('/collections/sync/civitai', {
+                const response = await fetch('/api/collections/sync/civitai', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -11447,7 +11755,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function checkCivitaiAuthStatus() {
         setCivitaiAuthStatus('loading', 'Checking connection…');
         try {
-            const resp = await fetch('/civitai/auth/status');
+            const resp = await fetch('/api/civitai/auth/status');
             const data = await resp.json();
             if (data.authenticated) {
                 setCivitaiAuthStatus('ok', data.message || 'Authenticated');
@@ -11481,7 +11789,7 @@ document.addEventListener('DOMContentLoaded', () => {
             civitaiCookieSaveBtn.disabled = true;
             setCivitaiAuthStatus('loading', 'Saving cookie…');
             try {
-                const resp = await fetch('/civitai/auth/cookie', {
+                const resp = await fetch('/api/civitai/auth/cookie', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ cookie }),
@@ -11507,7 +11815,7 @@ document.addEventListener('DOMContentLoaded', () => {
             civitaiAuthRefreshBtn.disabled = true;
             setCivitaiAuthStatus('loading', 'Launching browser re-authentication (this may take a while)…');
             try {
-                const resp = await fetch('/civitai/auth/refresh', { method: 'POST' });
+                const resp = await fetch('/api/civitai/auth/refresh', { method: 'POST' });
                 const data = await resp.json();
                 if (!resp.ok) {
                     throw new Error(data.detail || `HTTP ${resp.status}`);
@@ -11572,6 +11880,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (treeEmbedFrame) {
         treeEmbedFrame.addEventListener('load', () => {
             postSelectedImageTagsToTree(getSelectedImage());
+            postSelectedImageModelsToModelsFrame(getSelectedImage());
+        });
+    }
+
+    if (modelsEmbedFrame) {
+        modelsEmbedFrame.addEventListener('load', () => {
+            postSelectedImageModelsToModelsFrame(getSelectedImage());
+            postGalleryKeysToModelsFrame();
         });
     }
 

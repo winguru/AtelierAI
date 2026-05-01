@@ -1,0 +1,146 @@
+@import url('/frontend/css/tag-maint.css');
+
+.maint-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  color: var(--text-muted, #6b7280);
+  font-size: 0.95rem;
+}
+
+.step-actions input[type='number'] {
+  width: 160px;
+}
+
+.bootstrap-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.bootstrap-card {
+  border: 1px solid var(--border-soft, #e5e7eb);
+  border-radius: 10px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.bootstrap-output {
+  background: var(--surface-muted, #f8fafc);
+  border: 1px solid var(--border-soft, #e5e7eb);
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.table-scroll {
+  overflow: auto;
+}
+
+#model-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#model-table th,
+#model-table td {
+  border-bottom: 1px solid var(--border-soft, #e5e7eb);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+#model-table th {
+  background: var(--surface-muted, #f8fafc);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.checkbox-label input[type='checkbox'] {
+  margin: 0;
+}
+
+td.muted {
+  color: var(--text-muted, #6b7280);
+  font-style: italic;
+}
+
+/* Local catalog column */
+.badge-local {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 0.8em;
+  font-weight: 600;
+  background: var(--surface-info, #dbeafe);
+  color: var(--text-primary, #1e3a5f);
+}
+
+.local-check {
+  color: var(--color-success, #16a34a);
+  font-weight: 700;
+  font-size: 1.1em;
+  cursor: help;
+}
+
+/* Gallery usage column */
+.badge-gallery {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 0.8em;
+  font-weight: 600;
+  background: var(--surface-info, #dbeafe);
+  color: var(--text-primary, #1e3a5f);
+}
+
+/* Sortable column headers */
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.sortable:hover {
+  background: var(--surface-hover, #e5e7eb);
+}
+
+th.sort-active.sort-asc::after {
+  content: ' \25B2';
+  font-size: 0.7em;
+  opacity: 0.8;
+}
+
+th.sort-active.sort-desc::after {
+  content: ' \25BC';
+  font-size: 0.7em;
+  opacity: 0.8;
+}

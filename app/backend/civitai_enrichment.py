@@ -1,7 +1,9 @@
 # ── Memory ───────────────────────────────────────────────────────────────────
 # 📄 docs: app/docs/memories/civitai-integration.md
+# 📄 docs: app/docs/memories/civitai-cache.md
 # ──────────────────────────────────────────────────────────────────────────────
 import re
+from datetime import timedelta
 from importlib import import_module
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -131,8 +133,19 @@ def extract_civitai_hash(payload: Optional[dict[str, Any]]) -> Optional[str]:
     return None
 
 
-def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, Any]]:
+def fetch_civitai_image_data(
+    source_url: Optional[str],
+    *,
+    max_age: Optional[timedelta] = None,
+) -> Optional[dict[str, Any]]:
     """Fetch and normalize CivitAI data for a source URL.
+
+    Args:
+        source_url: CivitAI image page URL.
+        max_age: When provided, serve from cache if a row exists within this
+            age and only call the live API when the cache is stale or absent.
+            ``None`` (default) always fetches live, preserving prior behaviour
+            for all existing call sites.
 
     Returns None when URL is not a CivitAI image URL or when enrichment fails.
     """
@@ -155,8 +168,12 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
         CivitaiImage = getattr(civitai_image_mod, "CivitaiImage")
 
         api = CivitaiAPI.get_instance()
-        basic_info = api.fetch_basic_info(image_id)
-        generation_data = api.fetch_generation_data(image_id)
+        if max_age is not None:
+            basic_info = api.fetch_basic_info_cached(image_id, max_age=max_age)
+            generation_data = api.fetch_generation_data_cached(image_id, max_age=max_age)
+        else:
+            basic_info = api.fetch_basic_info(image_id)
+            generation_data = api.fetch_generation_data(image_id)
 
         if not basic_info and not generation_data:
             return None
@@ -171,7 +188,10 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
 
         # Store CivitAI tags as ID-first records for stable uniqueness.
         # Keep a tag_names list as a compatibility fallback for older consumers.
-        tag_records = api.fetch_image_tag_records(image_id)
+        if max_age is not None:
+            tag_records = api.fetch_image_tag_records_cached(image_id, max_age=max_age)
+        else:
+            tag_records = api.fetch_image_tag_records(image_id)
         if tag_records:
             data["tags"] = tag_records
             data["tag_names"] = [
@@ -230,6 +250,17 @@ def fetch_civitai_image_data(source_url: Optional[str]) -> Optional[dict[str, An
             civitai_hash = extract_civitai_hash(basic_info)
             if civitai_hash:
                 data["civitai_hash"] = civitai_hash
+
+            # Persist declared file size from CivitAI metadata for size-mismatch detection
+            metadata = basic_info.get("metadata")
+            if isinstance(metadata, dict):
+                raw_size = metadata.get("size")
+                try:
+                    declared_file_size = int(raw_size) if raw_size is not None else None
+                except (TypeError, ValueError):
+                    declared_file_size = None
+                if declared_file_size is not None:
+                    data["declared_file_size"] = declared_file_size
 
         return data
     except Exception as e:

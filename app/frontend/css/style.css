@@ -1483,6 +1483,131 @@ h1 {
     color: var(--ink-soft);
 }
 
+/* Authority tag tabs */
+.authority-tags-cloud {
+    align-content: start;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    min-height: 2rem;
+    padding: 0.15rem 0;
+}
+
+.authority-tag-chip {
+    align-items: center;
+    background: #fff3e4;
+    border: 1px solid #d7b48a;
+    border-radius: 0.72rem;
+    color: var(--ink);
+    display: inline-flex;
+    gap: 0.35rem;
+    max-width: min(24rem, 100%);
+    padding: 0.1rem 0.45rem;
+    position: relative;
+    transition: border-radius 0.14s ease;
+    z-index: 0;
+}
+
+.authority-tag-chip.source-civitai {
+    border-color: color-mix(in oklab, #2f7fd5 44%, var(--stroke) 56%);
+}
+
+.authority-tag-chip.source-danbooru {
+    border-color: color-mix(in oklab, #3d9b55 44%, var(--stroke) 56%);
+}
+
+.authority-tag-chip.source-prompt {
+    border-color: color-mix(in oklab, #e09522 44%, var(--stroke) 56%);
+}
+
+.authority-tag-chip.source-user {
+    border-color: color-mix(in oklab, #7f5ad6 44%, var(--stroke) 56%);
+}
+
+.authority-tag-chip.filter-active {
+    background: color-mix(in oklab, var(--accent) 14%, #fff 86%);
+    border-color: color-mix(in oklab, var(--accent) 48%, #fff 52%);
+}
+
+.authority-tag-remove {
+    align-items: center;
+    background: color-mix(in oklab, var(--accent) 24%, #fff 76%);
+    border: 0;
+    border-radius: 50%;
+    color: var(--accent-ink);
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 0.72rem;
+    font-weight: 800;
+    height: 1.15rem;
+    justify-content: center;
+    line-height: 1;
+    left: -0.58rem;
+    opacity: 0;
+    padding: 0 0 0 1px;
+    pointer-events: none;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    transition: opacity 0.12s ease;
+    width: 1.15rem;
+    z-index: 1;
+}
+
+.authority-tag-chip:hover .authority-tag-remove,
+.authority-tag-chip:focus-within .authority-tag-remove {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.authority-tag-chip:hover,
+.authority-tag-chip:focus-within {
+    border-radius: 0.9rem;
+    z-index: 2;
+}
+
+.authority-tag-label {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    color: var(--ink);
+    cursor: pointer;
+    display: inline-flex;
+    flex-wrap: wrap;
+    font-size: 0.82rem;
+    justify-content: center;
+    line-height: 1.15;
+    margin: 0;
+    max-width: 100%;
+    min-height: 1.4rem;
+    padding: 0.08rem 0.12rem;
+    text-align: center;
+    text-wrap: balance;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.authority-tag-chip.override-active .authority-tag-label {
+    text-decoration: line-through;
+}
+
+.authority-tag-count {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.08);
+    border-radius: 999px;
+    color: var(--ink-soft);
+    display: inline-flex;
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    font-weight: 700;
+    justify-content: center;
+    line-height: 1;
+    margin-top: auto;
+    margin-bottom: auto;
+    min-width: 1.2rem;
+    padding: 0.12rem 0.38rem;
+}
+
 /* User Tags pane */
 .user-tags-cloud {
     align-content: start;
@@ -1667,6 +1792,76 @@ h1 {
     height: 100%;
     object-fit: contain;
     cursor: zoom-in;
+}
+
+.detail-video-error {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #fff8f0 0%, #fff3e0 100%);
+    border-radius: 12px;
+    opacity: 0;
+    transform: scale(0.95);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.detail-video-error.hidden {
+    opacity: 0;
+    transform: scale(0.95);
+    pointer-events: none;
+}
+
+.detail-video-error:not(.hidden) {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.video-error-icon {
+    font-size: 3rem;
+    line-height: 1;
+    margin-bottom: 0.75rem;
+    opacity: 0.6;
+}
+
+.video-error-content {
+    text-align: center;
+}
+
+.video-error-title {
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #8b4a30;
+}
+
+.video-error-message {
+    margin: 0 0 1.25rem;
+    font-size: 0.85rem;
+    color: #a67c5c;
+    line-height: 1.4;
+}
+
+.video-error-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+}
+
+.video-error-actions .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    padding: 0.4rem 0.75rem;
+}
+
+.video-error-actions .btn-icon {
+    font-size: 0.85rem;
+    line-height: 1;
 }
 
 @media (max-width: 1080px) {

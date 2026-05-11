@@ -745,9 +745,16 @@ class ImageQueryService:
             images_query = images_query.filter(ImageModel.id.notin_(excluded_artist_ids_sq))
 
         if normalized_collection_names:
-            images_query = images_query.filter(
-                ImageModel.collections.any(func.lower(CollectionModel.name).in_(normalized_collection_names))
+            # Use subquery instead of .any() to avoid conflict with
+            # joinedload(ImageModel.collections) on the base query.
+            coll_ids_sq = (
+                select(ImageCollectionMembership.image_id)
+                .join(CollectionModel, CollectionModel.id == ImageCollectionMembership.collection_id)
+                .where(func.lower(CollectionModel.name).in_(normalized_collection_names))
+                .correlate(None)
+                .scalar_subquery()
             )
+            images_query = images_query.filter(ImageModel.id.in_(coll_ids_sq))
 
         if normalized_exclude_collection_names:
             # Use NOT IN subquery for same Bloom-filter optimisation.

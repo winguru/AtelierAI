@@ -9,6 +9,7 @@ Routes:
   GET  /civitai/auth/status
   POST /civitai/auth/cookie
   POST /civitai/auth/refresh
+  GET  /civitai/auth/rate-limit-status
 """
 
 from __future__ import annotations
@@ -160,3 +161,22 @@ def civitai_auth_refresh():
         }
 
     return {"success": True, "message": "CivitAI session refreshed successfully."}
+
+
+@router.get("/rate-limit-status", response_model=dict)
+def civitai_rate_limit_status():
+    """Return current CivitAI API request metrics and rate-limit state.
+
+    Shows sliding-window RPM, 429 counts, global backoff status, FIFO queue
+    depth, and per-type / per-FQDN / per-endpoint request breakdowns.
+    """
+    try:
+        from atelierai.civitai.http_client import CivitaiHttpClient
+    except ImportError:
+        return {"available": False, "message": "CivitAI HTTP client module not available."}
+
+    metrics = CivitaiHttpClient.get_request_metrics()
+    return {
+        "available": True,
+        **metrics,
+    }

@@ -8,12 +8,12 @@ from dotenv import load_dotenv
 # Load environment variables from known .env locations so launch cwd does not matter.
 _CONFIG_DIR = Path(__file__).resolve().parent
 _DOTENV_CANDIDATES = [
-    _CONFIG_DIR.parent / ".env",        # app/.env
-    _CONFIG_DIR.parent.parent / ".env", # repo-root/.env
-    _CONFIG_DIR.parent / ".vscode" / ".env",        # app/.vscode/.env
-    _CONFIG_DIR.parent.parent / ".vscode" / ".env", # repo-root/.vscode/.env
-    Path.cwd() / ".env",                # current working directory
-    Path.cwd() / ".vscode" / ".env",   # cwd/.vscode/.env
+    _CONFIG_DIR.parent / ".env",  # app/.env
+    _CONFIG_DIR.parent.parent / ".env",  # repo-root/.env
+    _CONFIG_DIR.parent / ".vscode" / ".env",  # app/.vscode/.env
+    _CONFIG_DIR.parent.parent / ".vscode" / ".env",  # repo-root/.vscode/.env
+    Path.cwd() / ".env",  # current working directory
+    Path.cwd() / ".vscode" / ".env",  # cwd/.vscode/.env
 ]
 
 _seen_dotenv_paths: set[Path] = set()
@@ -27,8 +27,25 @@ for _dotenv_path in _DOTENV_CANDIDATES:
 
 # --- Database Configuration ---
 # Get the database URL from an environment variable or use a default
-# This makes it easy to switch to a different database like PostgreSQL later
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///image_db.sqlite")
+# This makes it easy to switch to a different database like PostgreSQL later.
+# For the default SQLite path we resolve to an absolute URI anchored to app/
+# (the canonical cwd when the server starts) so the same DB file is used
+# regardless of the current working directory.
+_raw_db_url = os.getenv("DATABASE_URL", "").strip()
+if not _raw_db_url:
+    # Default: <repo>/app/image_db.sqlite — matches start.sh cwd of app/
+    _db_dir = Path(__file__).resolve().parent.parent  # app/backend/ → app/
+    _db_file = _db_dir / "image_db.sqlite"
+    DATABASE_URL = f"sqlite:///{_db_file}"
+elif _raw_db_url.startswith("sqlite:///") and not os.path.isabs(
+    _raw_db_url.removeprefix("sqlite:///")
+):
+    # Relative SQLite path — resolve against app/ (the canonical base).
+    _rel = _raw_db_url.removeprefix("sqlite:///")
+    _abs = (Path(__file__).resolve().parent.parent / _rel).resolve()
+    DATABASE_URL = f"sqlite:///{_abs}"
+else:
+    DATABASE_URL = _raw_db_url
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -49,6 +66,7 @@ def _env_float(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
+
 # --- File System Configuration ---
 # This is the path inside the Docker container where images are stored.
 # Resolve and create it at import time so downstream code can rely on it.
@@ -67,7 +85,9 @@ IMAGE_RESOURCES_PATH = str(Path(_raw_resources_path).expanduser())
 try:
     Path(IMAGE_LIBRARY_PATH).mkdir(parents=True, exist_ok=True)
 except OSError as e:
-    raise RuntimeError(f"Could not create image library directory '{IMAGE_LIBRARY_PATH}': {e}") from e
+    raise RuntimeError(
+        f"Could not create image library directory '{IMAGE_LIBRARY_PATH}': {e}"
+    ) from e
 
 try:
     resources_root = Path(IMAGE_RESOURCES_PATH)
@@ -77,8 +97,9 @@ try:
     (resources_root / "thumbnails").mkdir(parents=True, exist_ok=True)
     (resources_root / "extracted_metadata").mkdir(parents=True, exist_ok=True)
 except OSError as e:
-    raise RuntimeError(f"Could not create image resources directory '{IMAGE_RESOURCES_PATH}': {e}") from e
-
+    raise RuntimeError(
+        f"Could not create image resources directory '{IMAGE_RESOURCES_PATH}': {e}"
+    ) from e
 
 
 # --- Schema Versioning ---
@@ -126,6 +147,7 @@ CIVITAI_PASSWORD = os.getenv("CIVITAI_PASSWORD", "")
 # Session cache file for automatic authentication
 CIVITAI_SESSION_CACHE = os.getenv("CIVITAI_SESSION_CACHE", ".civitai_session")
 
+
 def _read_civitai_session_cookie_from_cache(cache_path: str) -> str:
     """Read current CivitAI session cookie from the cache file.
 
@@ -149,8 +171,12 @@ CIVITAI_SESSION_COOKIE = _read_civitai_session_cookie_from_cache(CIVITAI_SESSION
 # Optional Chrome profile overrides for OAuth fallback behavior.
 # Leave unset to use the project-local .civitai_chrome_profile directory.
 CIVITAI_CHROME_USER_DATA_DIR = os.getenv("CIVITAI_CHROME_USER_DATA_DIR", "").strip()
-CIVITAI_CHROME_PROFILE_DIRECTORY = os.getenv("CIVITAI_CHROME_PROFILE_DIRECTORY", "").strip()
+CIVITAI_CHROME_PROFILE_DIRECTORY = os.getenv(
+    "CIVITAI_CHROME_PROFILE_DIRECTORY", ""
+).strip()
 
 # --- ComfyUI Configuration ---
 ATELIER_COMFYUI_BASE_URL = os.getenv("ATELIER_COMFYUI_BASE_URL", "").strip()
-ATELIER_COMFY_MATCH_THRESHOLD = max(0.0, min(1.0, _env_float("ATELIER_COMFY_MATCH_THRESHOLD", 0.95)))
+ATELIER_COMFY_MATCH_THRESHOLD = max(
+    0.0, min(1.0, _env_float("ATELIER_COMFY_MATCH_THRESHOLD", 0.95))
+)

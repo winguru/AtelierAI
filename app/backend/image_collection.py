@@ -26,6 +26,7 @@ from atelierai.utils.prompt_phrases import (
 )
 from image_data import ImageData
 from civitai_enrichment import is_civitai_image_url, fetch_civitai_image_data
+from utils.url_helpers import normalize_civitai_url
 from services.gallery_tag_service import GalleryTagService
 from services.metadata_extraction import extract_civitai_nsfw_level
 from services.taxonomy_service import TaxonomyService
@@ -646,33 +647,30 @@ class ImageCollection:
                 if not normalized_names:
                     continue
 
-                # Batch-load matching authority_terms that have concept_id set
+                # Batch-load matching authority_terms (concept_id may be None — concepts
+                # are optional organizational structure, not required for a valid tag)
                 terms = (
                     self.db.query(AuthorityTerm)
                     .filter(
                         AuthorityTerm.authority_id == authority_id,
                         AuthorityTerm.normalized_external_name.in_(normalized_names),
-                        AuthorityTerm.concept_id.isnot(None),
                     )
                     .all()
                 )
 
                 for term in terms:
-                    concept_id = term.concept_id
-                    if concept_id is None:
-                        continue
+                    concept_id = term.concept_id  # may be None
 
-                    obs_key = (db_record.id, concept_id, authority_id)
+                    obs_key = (db_record.id, term.id)
                     if obs_key in _seen:
                         continue
 
-                    # Check for existing observation (idempotent)
+                    # Check for existing observation keyed by authority_term_id
                     existing = (
                         self.db.query(ImageConceptObservation.id)
                         .filter(
                             ImageConceptObservation.image_id == db_record.id,
-                            ImageConceptObservation.concept_id == concept_id,
-                            ImageConceptObservation.authority_id == authority_id,
+                            ImageConceptObservation.authority_term_id == term.id,
                         )
                         .first()
                     )
@@ -1450,24 +1448,24 @@ class ImageCollection:
             # Fail open — never block image import
             print(f"Warning: could not auto-create variant group: {exc}")
 
-    def _ensure_variant_group_for_civitai_hash(
-        self, db_record: ImageModel, civitai_hash: str
+    def _ensure_variant_group_for_civitai_image_id(
+        self, db_record: ImageModel, civitai_image_id: int
     ) -> None:
-        """Auto-create a civitai_multi_resource variant group when civitai_hash matches an existing image.
+        """Auto-create a civitai_multi_resource variant group when civitai_image_id matches an existing image.
 
-        If another active image shares the same civitai_hash, ensures both images belong
+        If another active image shares the same civitai_image_id, ensures both images belong
         to the same variant group (creating the group if needed). Idempotent — safe to
         call multiple times.
         """
-        if not civitai_hash or not db_record.id:
+        if not civitai_image_id or not db_record.id:
             return
 
         try:
-            # Find other active images with the same civitai_hash
+            # Find other active images with the same civitai_image_id
             sibling = (
                 self.db.query(ImageModel)
                 .filter(
-                    ImageModel.civitai_hash == civitai_hash,
+                    ImageModel.civitai_image_id == civitai_image_id,
                     ImageModel.id != db_record.id,
                     ImageModel.image_status != "tombstoned",
                 )
@@ -1476,9 +1474,9 @@ class ImageCollection:
             if sibling is None:
                 return  # No duplicate, nothing to group
 
-            group_key = f"civitai:{civitai_hash}"
+            group_key = f"civitai:{civitai_image_id}"
 
-            # Check if a variant group already exists for this hash
+            # Check if a variant group already exists for this image id
             existing_group = (
                 self.db.query(VariantGroup)
                 .filter(VariantGroup.group_key == group_key)
@@ -1651,7 +1649,7 @@ class ImageCollection:
                 existing_image.status_reason = None
                 existing_image.replaced_by_image_id = None
                 if source_url:
-                    existing_image.source_url = source_url
+                    existing_image.source_url = normalize_civitai_url(source_url)
                 if license_id is not None:
                     existing_image.license_id = license_id
                 if artist_name:
@@ -1962,6 +1960,10 @@ class ImageCollection:
 
         When ``force_refresh`` is True, always fetch fresh CivitAI metadata.
         """
+        # Skip images known to be deleted from CivitAI (404 on image.get).
+        if getattr(db_record, "civitai_deleted_at", None) is not None:
+            return
+
         source_url_value = getattr(db_record, "source_url", None)
         if not isinstance(source_url_value, str) or not source_url_value:
             return
@@ -2016,23 +2018,36 @@ class ImageCollection:
         # Extract civitai_nsfw_level from the enrichment data
         nsfw_level = extract_civitai_nsfw_level({"civitai": civitai_data})
 
+        # Extract declared file size for size-mismatch detection
+        update_dict = {
+            ImageModel.json_metadata: merged_json_metadata,
+            ImageModel.source_site: "civitai",
+            ImageModel.civitai_uuid: civitai_uuid,
+            ImageModel.civitai_hash: civitai_hash,
+            ImageModel.civitai_nsfw_level: nsfw_level,
+        }
+        declared_file_size = (
+            civitai_data.get("declared_file_size") if isinstance(civitai_data, dict) else None
+        )
+        if declared_file_size is not None:
+            try:
+                declared_file_size = int(declared_file_size)
+            except (TypeError, ValueError):
+                declared_file_size = None
+        if declared_file_size is not None:
+            update_dict[ImageModel.expected_file_size] = declared_file_size
+
         self.db.query(ImageModel).filter(ImageModel.id == db_record.id).update(
-            {
-                ImageModel.json_metadata: merged_json_metadata,
-                ImageModel.source_site: "civitai",
-                ImageModel.civitai_uuid: civitai_uuid,
-                ImageModel.civitai_hash: civitai_hash,
-                ImageModel.civitai_nsfw_level: nsfw_level,
-            },
+            update_dict,
             synchronize_session=False,
         )
         self.db.flush()
         self.db.refresh(db_record)
 
         # Auto-create civitai_multi_resource variant group if another image
-        # shares the same civitai_hash.
-        if civitai_hash:
-            self._ensure_variant_group_for_civitai_hash(db_record, civitai_hash)
+        # shares the same civitai_image_id.
+        if db_record.civitai_image_id:
+            self._ensure_variant_group_for_civitai_image_id(db_record, db_record.civitai_image_id)
 
         processor.save_json_metadata(
             image_path,
@@ -2230,7 +2245,7 @@ class ImageCollection:
             date_created=date_created,
             date_modified=date_modified,
             artist_id=image_data.artist_id,
-            source_url=image_data.source_url,
+            source_url=normalize_civitai_url(image_data.source_url),
             source_site=(
                 image_data.source_site
                 or ("civitai" if image_data.civitai_data else None)

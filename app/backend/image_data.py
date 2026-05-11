@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import json
 
+from backend.config import CIVITAI_WEB_BASE_URL
+from utils.url_helpers import build_civitai_url
+
 # from datetime import datetime
 
 
@@ -79,6 +82,15 @@ class ImageData:
     variant_group_key: Optional[str] = None
     variant_role: Optional[str] = None
 
+    # Health / integrity
+    is_corrupt: Optional[bool] = None
+    expected_file_size: Optional[int] = None
+
+    # CivitAI post metadata
+    civitai_post_id: Optional[int] = None
+    civitai_post_title: Optional[str] = None
+    civitai_post_index: Optional[int] = None
+
     def __post_init__(self):
         """Initialize fields after dataclass creation."""
         if self.exif_data is None:
@@ -130,6 +142,11 @@ class ImageData:
             blurhash=data.get("blurhash"),
             variant_group_key=data.get("variant_group_key"),
             variant_role=data.get("variant_role"),
+            is_corrupt=data.get("is_corrupt"),
+            expected_file_size=data.get("expected_file_size"),
+            civitai_post_id=data.get("civitai_post_id"),
+            civitai_post_title=data.get("civitai_post_title"),
+            civitai_post_index=data.get("civitai_post_index"),
         )
 
     @classmethod
@@ -206,6 +223,11 @@ class ImageData:
             blurhash=getattr(db_record, "blurhash", None),
             variant_group_key=getattr(db_record, "variant_group_key", None),
             variant_role=getattr(db_record, "variant_role", None),
+            is_corrupt=getattr(db_record, "is_corrupt", None),
+            expected_file_size=getattr(db_record, "expected_file_size", None),
+            civitai_post_id=getattr(db_record, "civitai_post_id", None),
+            civitai_post_title=getattr(db_record, "civitai_post_title", None),
+            civitai_post_index=getattr(db_record, "civitai_post_index", None),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -227,7 +249,7 @@ class ImageData:
             "date_created": self.date_created,
             "date_modified": self.date_modified,
             "artist_id": self.artist_id,
-            "source_url": self.source_url,
+            "source_url": build_civitai_url(self.source_url, CIVITAI_WEB_BASE_URL),
             "source_site": self.source_site,
             "license_id": self.license_id,
             "exif_data": self.exif_data,
@@ -238,6 +260,11 @@ class ImageData:
             "blurhash": self.blurhash,
             "variant_group_key": self.variant_group_key,
             "variant_role": self.variant_role,
+            "is_corrupt": self.is_corrupt,
+            "expected_file_size": self.expected_file_size,
+            "civitai_post_id": self.civitai_post_id,
+            "civitai_post_title": self.civitai_post_title,
+            "civitai_post_index": self.civitai_post_index,
         }
 
     def to_json(self, indent: int = 2) -> str:

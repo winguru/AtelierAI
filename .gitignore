@@ -433,9 +433,9 @@ venv*/
 # Application specific files
 .civitai_session
 image_db.sqlite*
-app/data/
-app/data/*
-app/image_library/
-app/image_library/*
-app/image_resources/
-app/image_resources/*
+data/
+data/*
+image_library/
+image_library/*
+image_resources/
+image_resources/*

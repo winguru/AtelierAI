@@ -107,24 +107,6 @@ def _iter_civitai_tag_ids_from_metadata(metadata: Any) -> list[int]:
     return out
 
 
-def _extract_trpc_result(raw_response: Any) -> Any:
-    """Extract the tRPC result payload from a raw envelope dict.
-
-    Replicates the success-path extraction in CivitaiAPI._make_request so
-    probe helpers can obtain a parsed result from the raw response without
-    issuing a second HTTP request.
-    """
-    if not isinstance(raw_response, dict):
-        return None
-    result_wrapper = raw_response.get("result")
-    if not isinstance(result_wrapper, dict):
-        return None
-    result_data = result_wrapper.get("data")
-    if isinstance(result_data, dict) and "json" in result_data:
-        return result_data["json"]
-    return result_data
-
-
 # ---------------------------------------------------------------------------
 # Taxonomy DB helpers (shared pattern with compare_getinfinite_tags_against_main_db.py)
 # ---------------------------------------------------------------------------
@@ -505,11 +487,10 @@ def _enrich_unknown_tags(
             if civitai_image_id is not None:
                 coverage["with_first_civitai_image"] += 1
 
-            # tag.getById — one HTTP call; extract parsed result from tRPC envelope.
-            raw_by_id = api._make_raw_request(
-                endpoint="tag.getById", payload_data={"id": int(tag_id), "authed": True}
+            # tag.getById — cache-first fetch; falls back to live on cache miss.
+            get_by_id = api.get_cached_or_fetch(
+                "tag.getById", {"id": int(tag_id), "authed": True}
             )
-            get_by_id = _extract_trpc_result(raw_by_id)
             if isinstance(get_by_id, dict):
                 coverage["getById_success"] += 1
 
@@ -518,10 +499,9 @@ def _enrich_unknown_tags(
             votable_match: dict[str, Any] | None = None
             if civitai_image_id is not None:
                 votable_payload = {"id": int(civitai_image_id), "type": "image", "authed": True}
-                raw_votable = api._make_raw_request(
-                    endpoint="tag.getVotableTags", payload_data=votable_payload
+                votable_response = api.get_cached_or_fetch(
+                    "tag.getVotableTags", votable_payload
                 )
-                votable_response = _extract_trpc_result(raw_votable)
                 if isinstance(votable_response, list):
                     for item in votable_response:
                         if not isinstance(item, dict):

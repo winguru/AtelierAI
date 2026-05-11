@@ -251,9 +251,19 @@ class GalleryQuery:
         missing_strs = gallery_filter.missing  # already flat list
 
         parsed = parse_gallery_filter(included_strs, excluded_strs, hidden_strs, missing_strs)
-        _, constrained_ids = apply_gallery_filter(
+        filtered_query, constrained_ids = apply_gallery_filter(
             images_query, parsed, self._db, self._qs,
         )
+
+        # When relational filters (collection, source, artist, etc.) were
+        # applied to the query but no ID-based filters (tag, feature, nsfw,
+        # status, missing) exist, constrained_ids will be None.  Materialize
+        # IDs from the filtered query so callers get the right set.
+        if constrained_ids is None and parsed.has_relational_filters():
+            constrained_ids = set(
+                row[0] for row in
+                filtered_query.with_entities(ImageModel.id).all()
+            )
 
         # ── Store in cache ──────────────────────────────────────────────
         # frozenset for filtered IDs, "unfiltered" string for None (avoids
@@ -476,6 +486,12 @@ class GalleryQuery:
                 ImageModel.file_size.desc() if order == "desc"
                 else ImageModel.file_size.asc()
             )
+        elif sort == "civitai_image_id":
+            col = ImageModel.civitai_image_id
+            if order == "desc":
+                images_query = images_query.order_by(col.desc().nulls_last())
+            else:
+                images_query = images_query.order_by(col.asc().nulls_last())
         else:
             # Default: id-based sort
             if order == "desc":
@@ -509,11 +525,15 @@ class GalleryQuery:
             images_query = images_query.limit(limit)
 
         images = images_query.all()
+        # Remember the original page boundary before variant-group expansion
+        # so the cursor reflects the actual pagination position.
+        _page_images = list(images)
 
         # Build display items
         image_to_variant_group: dict[int, int] = {}
         if spec.group_variants:
             image_ids = [img.id for img in images]
+            fetched_id_set = set(image_ids)
             try:
                 membership_rows = (
                     db.query(
@@ -527,7 +547,50 @@ class GalleryQuery:
                     if img_id not in image_to_variant_group:
                         image_to_variant_group[img_id] = grp_id
             except Exception:
-                pass
+                membership_rows = []
+
+            # ── Expand variant groups: fetch sibling members not in page ──
+            # When variant group members are spread across a wide ID range,
+            # cursor-based pagination may exclude some siblings. We backfill
+            # them so every displayed group is complete.
+            if membership_rows:
+                group_ids = {grp_id for _, grp_id in membership_rows}
+                sibling_rows = (
+                    db.query(
+                        ImageVariantGroupMembership.image_id,
+                        ImageVariantGroupMembership.group_id,
+                    )
+                    .filter(ImageVariantGroupMembership.group_id.in_(group_ids))
+                    .all()
+                )
+                missing_ids = {
+                    sib_id for sib_id, _ in sibling_rows
+                    if sib_id not in fetched_id_set
+                }
+                if missing_ids:
+                    missing_query = (
+                        db.query(ImageModel)
+                        .options(
+                            joinedload(ImageModel.artist),
+                            joinedload(ImageModel.license),
+                            joinedload(ImageModel.collections),
+                        )
+                        .filter(ImageModel.id.in_(list(missing_ids)))
+                        .filter(self._active_image_filter())
+                    )
+                    if constrained_ids is not None:
+                        if constrained_ids:
+                            missing_query = missing_query.filter(
+                                ImageModel.id.in_(list(constrained_ids))
+                            )
+                        else:
+                            missing_query = missing_query.filter(text("1 = 0"))
+                    missing_images = missing_query.all()
+                    if missing_images:
+                        images.extend(missing_images)
+                        for img_id, grp_id in sibling_rows:
+                            if img_id not in image_to_variant_group:
+                                image_to_variant_group[img_id] = grp_id
 
         display_items: list[dict[str, Any]] = []
         for image in images:
@@ -591,14 +654,32 @@ class GalleryQuery:
         next_cursor: Optional[str] = None
         has_more = False
         if use_cursor or use_overfetch:
-            if len(display_items) > limit:
+            raw_count = len(display_items)
+            overfetch_limit = limit * _OVERFETCH_FACTOR
+            _overfetch_hit_ceiling = (
+                use_overfetch and len(_page_images) >= overfetch_limit
+            )
+            if raw_count > limit:
                 display_items = display_items[:limit]
+                # We had to truncate — there is definitely more data.
                 has_more = True
-            if images and len(display_items) >= limit:
-                next_cursor = str(images[-1].id)
+            elif _overfetch_hit_ceiling:
+                # Variant collapsing reduced the overfetch window below
+                # `limit`, but the DB query hit its row ceiling — there are
+                # more rows beyond this page.
+                has_more = True
+
+            # Use the original page (before variant-group expansion) for the
+            # cursor so pagination stays deterministic.
+            if has_more and _page_images:
+                next_cursor = str(_page_images[-1].id)
+            elif _page_images and raw_count >= limit:
+                # Non-overfetch cursor path: page is full, set cursor so
+                # the frontend can request the next page.  The frontend
+                # defaults hasMore=true when a cursor is present.
+                next_cursor = str(_page_images[-1].id)
             else:
                 next_cursor = None
-                has_more = False
 
         # Total count
         if _total_count is not None:

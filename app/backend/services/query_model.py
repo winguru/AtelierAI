@@ -255,6 +255,26 @@ class SuggestRequest(BaseModel):
     filter: GalleryFilter = Field(default_factory=GalleryFilter)
 
 
+# ---------------------------------------------------------------------------
+# Models-tree state request
+# ---------------------------------------------------------------------------
+
+class ModelsTreeStateRequest(BaseModel):
+    """Models tree state request — ``POST /api/models/tree/state``.
+
+    ``search`` is the optional full-text search term from the gallery
+    filter bar (narrows the gallery-scope image pool).
+    ``filter`` mirrors the same ``GalleryFilter`` used by ``/api/query``,
+    allowing the tree-state endpoint to reuse cached constrained IDs.
+    ``selected_keys`` is an optional list of image keys for the "selected"
+    scope (typically a single image).
+    """
+
+    search: Optional[str] = None
+    filter: GalleryFilter = Field(default_factory=GalleryFilter)
+    selected_keys: Optional[list[str]] = None
+
+
 def filter_cache_key(
     gallery_filter: GalleryFilter,
     search: Optional[str],

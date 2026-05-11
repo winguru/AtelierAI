@@ -178,6 +178,14 @@
                                 </div>
                                 <div id="advanced-missing-data-pills" class="advanced-filter-pill-group"></div>
                             </section>
+
+                            <section class="advanced-filter-section" aria-labelledby="advanced-status-title">
+                                <div class="advanced-filter-head">
+                                    <h3 id="advanced-status-title" class="advanced-filter-title">Status</h3>
+                                    <p class="advanced-filter-hint">Filter by image status conditions.</p>
+                                </div>
+                                <div id="advanced-status-pills" class="advanced-filter-pill-group"></div>
+                            </section>
                         </div>
                     </details>
                     <div id="advanced-filters-quick-chips" class="advanced-filters-quick-chips hidden"></div>
@@ -242,6 +250,23 @@
                         <div id="detail-media-preview" class="detail-media-preview">
                             <img id="detail-image" class="detail-image" alt="Selected image preview">
                             <video id="detail-video" class="detail-image hidden" controls playsinline preload="metadata"></video>
+                            <div id="detail-video-error" class="detail-video-error hidden" aria-live="polite">
+                                <div class="video-error-icon">&#128246;</div>
+                                <div class="video-error-content">
+                                    <h3 class="video-error-title">Video could not be loaded</h3>
+                                    <p class="video-error-message">There was an error loading this video file.</p>
+                                    <div class="video-error-actions">
+                                        <a id="detail-video-download" class="btn primary" download target="_blank">
+                                            <span class="btn-icon">&#128190;</span>
+                                            Download Video
+                                        </a>
+                                        <button id="detail-video-retry" class="btn ghost" type="button">
+                                            <span class="btn-icon">&#8635;</span>
+                                            Retry
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <section id="debug-badge" class="debug-badge" aria-live="polite">
@@ -331,24 +356,28 @@
                         <section id="detail-panel-civitai-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-civitai-tags" hidden>
                             <section class="detail-block">
                                 <h3>CivitAI Tags</h3>
-                                <p class="detail-placeholder">Tag panel scaffold. Wiring to authority-tag data can be added next.</p>
+                                <p class="detail-placeholder">Click tag text to toggle gallery include filters. Click the x badge to toggle a persisted negative override.</p>
+                                <div id="civitai-tags-cloud" class="authority-tags-cloud" data-authority="civitai"></div>
                             </section>
                         </section>
                         <section id="detail-panel-danbooru-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-danbooru-tags" hidden>
                             <section class="detail-block">
                                 <h3>Danbooru Tags</h3>
-                                <p class="detail-placeholder">Tag panel scaffold. Wiring to authority-tag data can be added next.</p>
+                                <p class="detail-placeholder">Click tag text to toggle gallery include filters. Click the x badge to toggle a persisted negative override.</p>
+                                <div id="danbooru-tags-cloud" class="authority-tags-cloud" data-authority="danbooru"></div>
                             </section>
                         </section>
                         <section id="detail-panel-prompt-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-prompt-tags" hidden>
                             <section class="detail-block">
                                 <h3>Prompt Tags</h3>
-                                <p class="detail-placeholder">Tag panel scaffold. Wiring to prompt extraction output can be added next.</p>
+                                <p class="detail-placeholder">Click tag text to toggle gallery include filters. Click the x badge to toggle a persisted negative override.</p>
+                                <div id="prompt-tags-cloud" class="authority-tags-cloud" data-authority="prompt"></div>
                             </section>
                         </section>
                         <section id="detail-panel-user-tags" class="detail-folder-panel" role="tabpanel" aria-labelledby="detail-tab-user-tags" hidden>
                             <section class="detail-block">
                                 <h3>User Tags</h3>
+                                <p class="detail-placeholder">Click tag text to toggle gallery include filters. Click the x badge to toggle a persisted negative override.</p>
                                 <div id="user-tags-cloud" class="user-tags-cloud"></div>
                             </section>
                         </section>
@@ -394,6 +423,7 @@
                         <select id="import-type" name="import_type">
                             <option value="collection">Import CivitAI Collection</option>
                             <option value="image">Import CivitAI Image</option>
+                            <option value="post">Import CivitAI Post</option>
                         </select>
                     </label>
                     <label>
@@ -436,6 +466,13 @@
                             <summary>Advanced: Browser Re-Authentication</summary>
                             <p class="civitai-auth-hint">Opens a browser window on the server to re-authenticate with CivitAI via OAuth. This only works when the server is running on your local machine.</p>
                             <button id="civitai-auth-refresh-btn" class="btn ghost btn-sm" type="button">Re-Authenticate via Browser</button>
+                        </details>
+                        <hr class="civitai-auth-divider">
+                        <details id="civitai-rate-limit-details">
+                            <summary>API Rate Limit Status</summary>
+                            <div id="civitai-rate-limit-body">
+                                <p id="civitai-rate-limit-text" class="civitai-auth-status-text">Loading…</p>
+                            </div>
                         </details>
                     </div>
                 </details>

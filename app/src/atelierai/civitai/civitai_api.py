@@ -9,6 +9,7 @@ import json
 import random
 import threading
 import time
+from datetime import timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -411,6 +412,11 @@ class CivitaiAPI:
                     f" (HTTP {exc.status_code})" if exc.status_code is not None else ""
                 )
                 print(f"❌ API request error{status_text}: {exc}")
+                # Record tombstone for terminal failures (e.g. 404 deleted resources).
+                if exc.status_code is not None:
+                    self._record_to_db_cache(
+                        endpoint, payload_data, None, exc.status_code
+                    )
                 return None
 
             result_wrapper = data.get("result")
@@ -428,11 +434,71 @@ class CivitaiAPI:
                 payload_data=payload_data,
                 response_json=result_json,
             )
+            self._record_to_db_cache(endpoint, payload_data, result_json, 200)
             return result_json
 
         if strict and last_error is not None:
             raise last_error
         return None
+
+    def _record_to_db_cache(
+        self,
+        endpoint: str,
+        payload_data: Dict[str, Any],
+        response_json: Any,
+        http_status: int,
+    ) -> None:
+        """Persist an API response to the DB cache in a fire-and-forget manner.
+
+        Uses a short-lived session independent of any caller transaction.
+        Never raises — all errors are caught and logged so callers are unaffected.
+        """
+        try:
+            session_factory = None
+            for mod_name in ("database", "backend.database", "app.backend.database"):
+                try:
+                    mod = import_module(mod_name)
+                    session_factory = getattr(mod, "SessionLocal", None)
+                    if session_factory is not None:
+                        break
+                except ModuleNotFoundError:
+                    continue
+
+            if session_factory is None:
+                return  # No DB available (e.g. standalone script without backend)
+
+            svc = None
+            for svc_mod_name in (
+                "services.civitai_cache_service",
+                "backend.services.civitai_cache_service",
+                "app.backend.services.civitai_cache_service",
+            ):
+                try:
+                    svc = import_module(svc_mod_name)
+                    break
+                except ModuleNotFoundError:
+                    continue
+
+            if svc is None:
+                return
+
+            db = session_factory()
+            try:
+                svc.record_response(
+                    db,
+                    endpoint=endpoint,
+                    payload=payload_data,
+                    response_json=response_json,
+                    http_status=http_status,
+                )
+            finally:
+                db.close()
+        except Exception as exc:
+            # Cache writes must never surface errors to the caller.
+            import logging as _logging
+            _logging.getLogger(__name__).debug(
+                "CivitAI DB cache write skipped: %s", exc
+            )
 
     def _archive_root(self) -> Path:
         image_resources_path = (
@@ -794,6 +860,263 @@ class CivitaiAPI:
             payload_data=payload_data,
         )
 
+    # ===== Cache-first helpers =====
+
+    def _load_cache_service(self) -> Any:
+        """Return the civitai_cache_service module, or None if unavailable."""
+        for mod_name in (
+            "services.civitai_cache_service",
+            "backend.services.civitai_cache_service",
+            "app.backend.services.civitai_cache_service",
+        ):
+            try:
+                return import_module(mod_name)
+            except ModuleNotFoundError:
+                continue
+        return None
+
+    def _load_session_factory(self) -> Any:
+        """Return the SessionLocal factory, or None if unavailable."""
+        for mod_name in ("database", "backend.database", "app.backend.database"):
+            try:
+                mod = import_module(mod_name)
+                factory = getattr(mod, "SessionLocal", None)
+                if factory is not None:
+                    return factory
+            except ModuleNotFoundError:
+                continue
+        return None
+
+    def get_cached_or_fetch(
+        self,
+        endpoint: str,
+        payload_data: Dict[str, Any],
+        *,
+        max_age: Optional[timedelta] = None,
+        cache_only: bool = False,
+    ) -> Any:
+        """Return a cached response if available and fresh, otherwise fetch live.
+
+        Args:
+            endpoint: tRPC endpoint name (e.g. ``"image.get"``).
+            payload_data: Request payload dict.
+            max_age: Maximum acceptable age of a cached row.  ``None`` means any
+                cached row is acceptable.  Ignored when ``cache_only=False`` and
+                no cache row exists.
+            cache_only: When True, return None instead of making a network call.
+
+        Returns:
+            Parsed response dict/list, or None.
+        """
+        from datetime import datetime
+
+        svc = self._load_cache_service()
+        session_factory = self._load_session_factory()
+
+        if svc is not None and session_factory is not None:
+            request_key = svc.build_request_key(endpoint, payload_data)
+            db = session_factory()
+            try:
+                entry = svc.get_latest(db, endpoint=endpoint, request_key=request_key)
+            finally:
+                db.close()
+
+            if entry is not None:
+                if max_age is None:
+                    return entry.response_json
+                age = datetime.utcnow() - entry.fetched_at
+                if age <= max_age:
+                    return entry.response_json
+
+        if cache_only:
+            return None
+
+        return self._make_request(endpoint=endpoint, payload_data=payload_data)
+
+    def fetch_basic_info_cached(
+        self,
+        image_id: int,
+        *,
+        max_age: Optional[timedelta] = None,
+        cache_only: bool = False,
+    ) -> Optional[Dict]:
+        """Cache-first variant of fetch_basic_info (image.get)."""
+        return self.get_cached_or_fetch(
+            "image.get",
+            {"id": int(image_id), "authed": True},
+            max_age=max_age,
+            cache_only=cache_only,
+        )
+
+    def fetch_generation_data_cached(
+        self,
+        image_id: int,
+        *,
+        max_age: Optional[timedelta] = None,
+        cache_only: bool = False,
+    ) -> Optional[Dict]:
+        """Cache-first variant of fetch_generation_data (image.getGenerationData)."""
+        return self.get_cached_or_fetch(
+            "image.getGenerationData",
+            {"id": int(image_id), "authed": True},
+            max_age=max_age,
+            cache_only=cache_only,
+        )
+
+    def fetch_image_tag_records_cached(
+        self,
+        image_id: int,
+        *,
+        max_age: Optional[timedelta] = None,
+        cache_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Cache-first variant of fetch_image_tag_records (tag.getVotableTags).
+
+        Returns the processed tag list (same format as fetch_image_tag_records),
+        not the raw API response.  Falls through to the live fetch path when
+        no valid cache row exists.
+        """
+        raw = self.get_cached_or_fetch(
+            "tag.getVotableTags",
+            {"id": int(image_id), "type": "image", "authed": True},
+            max_age=max_age,
+            cache_only=cache_only,
+        )
+        if raw is None:
+            return []
+        # Re-use the normalization logic from fetch_image_tag_records.
+        # If we got a live response it was already processed through _make_request;
+        # cached responses need the same normalization pass.
+        if not isinstance(raw, list):
+            return []
+        sorted_tags = sorted(raw, key=lambda t: t.get("score", 0) if isinstance(t, dict) else 0, reverse=True)
+        out: List[Dict[str, Any]] = []
+        for tag in sorted_tags:
+            if not isinstance(tag, dict):
+                continue
+            tag_name = tag.get("name")
+            tag_id = tag.get("id")
+            if tag_id is None and not isinstance(tag_name, str):
+                continue
+            normalized: Dict[str, Any] = {}
+            if tag_id is not None:
+                try:
+                    normalized["id"] = int(tag_id)
+                except (TypeError, ValueError):
+                    normalized["id"] = str(tag_id)
+            if isinstance(tag_name, str) and tag_name.strip():
+                normalized["name"] = tag_name.strip()
+            for field in ("score", "type", "nsfwLevel", "automated", "concrete"):
+                if tag.get(field) is not None:
+                    normalized[field] = tag.get(field)
+            out.append(normalized)
+        return out
+
+    def fetch_model_detail_cached(
+        self,
+        model_id: int,
+        *,
+        max_age: Optional[timedelta] = None,
+        cache_only: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Cache-first variant of fetch_model_detail (model.getById)."""
+        return self.get_cached_or_fetch(
+            "model.getById",
+            {"id": int(model_id), "authed": True},
+            max_age=max_age,
+            cache_only=cache_only,
+        )
+
+    # ===== Post API Methods =====
+
+    def fetch_post(self, post_id: int) -> Optional[Dict]:
+        """Fetch a single post by ID via the post.get endpoint.
+
+        Note: post.get returns post metadata (title, user, nsfwLevel, etc.)
+        but does NOT include an images array. Use fetch_post_images() to get
+        the images for a post.
+
+        Args:
+            post_id: CivitAI post ID
+
+        Returns:
+            Post metadata dict, or None if request fails
+        """
+        return self._make_request(
+            endpoint="post.get",
+            payload_data={"id": int(post_id), "authed": True},
+        )
+
+    def fetch_user_posts(
+        self, cursor: Optional[str] = None, limit: int = 20
+    ) -> Optional[Dict]:
+        """Fetch the authenticated user's posts via post.getInfinite.
+
+        Returns a paginated response with posts including nested images arrays.
+
+        Args:
+            cursor: Pagination cursor from a previous response's nextCursor.
+                    Pass None for the first page.
+            limit: Number of posts per page (capped by API).
+
+        Returns:
+            Dict with 'items' (list of posts) and 'nextCursor', or None.
+            Each post in items has an 'images' array with image objects.
+        """
+        payload_data: Dict[str, Any] = {
+            "authed": True,
+            "limit": limit,
+        }
+        if cursor is not None:
+            payload_data["cursor"] = cursor
+        return self._make_request(
+            endpoint="post.getInfinite",
+            payload_data=payload_data,
+        )
+
+    def fetch_post_images(self, post_id: int) -> List[Dict]:
+        """Fetch all images belonging to a post via image.getInfinite with postId filter.
+
+        Uses the same image.getInfinite endpoint that collection sync uses,
+        but filters by postId instead of collectionId.
+
+        Args:
+            post_id: CivitAI post ID
+
+        Returns:
+            List of image dicts (each with id, url, hash, width, height, etc.),
+            or empty list if request fails or no images found.
+        """
+        payload_data: Dict[str, Any] = {
+            **self.default_params,
+            "postId": int(post_id),
+            "cursor": None,
+        }
+        # Remove collectionId from default params — we're filtering by postId
+        payload_data.pop("collectionId", None)
+
+        all_images: List[Dict] = []
+        while True:
+            response = self._make_request(
+                endpoint="image.getInfinite", payload_data=payload_data
+            )
+            if not response:
+                break
+
+            page_images = self._find_deep_image_list(response)
+            if page_images:
+                all_images.extend(page_images)
+
+            # Check for pagination cursor
+            next_cursor = None
+            if isinstance(response, dict):
+                next_cursor = response.get("nextCursor")
+            if not next_cursor:
+                break
+            payload_data["cursor"] = next_cursor
+
+        return all_images
+
     # ===== Collection API Methods =====
 
     def fetch_collection_items(self, collection_id: int) -> List[Dict]:
@@ -819,6 +1142,58 @@ class CivitaiAPI:
         if response:
             result = self._find_deep_image_list(response)
         return result if result is not None else []
+
+    def fetch_collection_posts(
+        self, collection_id: int, limit: Optional[int] = None
+    ) -> List[Dict]:
+        """Fetch all posts from a post-type CivitAI collection.
+
+        Uses post.getInfinite with collectionId filter. Each post dict includes
+        id, title, imageCount, and an images array (though images may be
+        partial — use fetch_post_images() for complete image lists).
+
+        Args:
+            collection_id: CivitAI collection ID (must be a post-type collection).
+            limit: Maximum number of posts to fetch (None = all).
+
+        Returns:
+            List of post dicts with at least id, title, imageCount.
+        """
+        payload_data: Dict[str, Any] = {
+            **self.default_params,
+            "collectionId": int(collection_id),
+            "sort": "Newest",
+        }
+        # Remove cursor from defaults if present
+        payload_data.pop("cursor", None)
+
+        all_posts: List[Dict] = []
+        cursor: Optional[str] = None
+
+        while True:
+            if limit is not None and len(all_posts) >= limit:
+                break
+            if cursor is not None:
+                payload_data["cursor"] = cursor
+
+            response = self._make_request(
+                endpoint="post.getInfinite", payload_data=payload_data
+            )
+            if not response or not isinstance(response, dict):
+                break
+
+            items = response.get("items", [])
+            if not items:
+                break
+
+            all_posts.extend(items)
+            cursor = response.get("nextCursor")
+            if not cursor:
+                break
+
+        if limit is not None:
+            return all_posts[:limit]
+        return all_posts
 
     def fetch_collection_with_details(
         self, collection_id: int, limit: Optional[int] = 50

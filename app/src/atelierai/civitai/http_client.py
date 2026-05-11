@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import os
+import queue as _queue_module
 import random
 import socket
 import struct
 import tempfile
 import threading
 import time
+from concurrent.futures import Future
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlparse
 
 import requests
 import urllib3.util.connection as urllib3_conn
@@ -152,6 +157,53 @@ class _DnsFallbackAdapter(HTTPAdapter):
                 urllib3_conn.create_connection = original
 
 
+# ---------------------------------------------------------------------------
+# Request classification — per-type / per-FQDN / per-endpoint tracking
+# ---------------------------------------------------------------------------
+
+
+class RequestType(str, Enum):
+    """Broad categories of CivitAI HTTP requests."""
+
+    TRPC = "trpc"
+    CDN_DOWNLOAD = "cdn_download"
+    UNKNOWN = "unknown"
+
+
+def _classify_request(url: str) -> tuple[RequestType, str, str]:
+    """Classify *url* into ``(request_type, fqdn, endpoint)``.
+
+    Examples::
+
+        _classify_request("https://civitai.red/api/trpc/image.get?input=...")
+        → (TRPC, "civitai.red", "image.get")
+
+        _classify_request("https://image.civitai.com/xyz123/original=true/123")
+        → (CDN_DOWNLOAD, "image.civitai.com", "/xyz123/original=true/123")
+
+        _classify_request("https://civitai.red/api/v1/images")
+        → (UNKNOWN, "civitai.red", "/api/v1/images")
+    """
+    parsed = urlparse(url)
+    fqdn = parsed.hostname or "unknown"
+    path = parsed.path or "/"
+
+    if "/api/trpc/" in path:
+        # Extract the tRPC procedure name, e.g. "image.get" from
+        # "/api/trpc/image.get,input=..." or "/api/trpc/image.get"
+        trpc_segment = path.split("/api/trpc/", 1)[1]
+        # The procedure name ends at a comma (batch separator) or query
+        # string boundary.
+        endpoint = trpc_segment.split(",")[0].split("?")[0]
+        return RequestType.TRPC, fqdn, endpoint
+
+    if "cdn" in fqdn.lower() or fqdn.startswith("image."):
+        # CDN path like /{uuid}/width=450/12345
+        return RequestType.CDN_DOWNLOAD, fqdn, path
+
+    return RequestType.UNKNOWN, fqdn, path
+
+
 class CivitaiRequestError(RuntimeError):
     def __init__(
         self,
@@ -165,11 +217,70 @@ class CivitaiRequestError(RuntimeError):
         self.retryable = retryable
 
 
+# Singleton reference — the consumer daemon thread needs an instance to call
+# instance methods (session, headers factory).  We store the most recently
+# created instance here.  There should only ever be one CivitaiHttpClient.
+_SINGLETON_REF: list[Optional[CivitaiHttpClient]] = [None]
+
+
 class CivitaiHttpClient:
     _GLOBAL_BACKOFF_LOCK = threading.Lock()
     _GLOBAL_BACKOFF_UNTIL = 0.0
     _GLOBAL_BACKOFF_REASON = ""
 
+    # ── Request counting & proactive rate limiting ──────────────────────────
+    _REQUEST_COUNTER_LOCK = threading.Lock()
+    _REQUEST_TIMESTAMPS: list[float] = []  # monotonic timestamps
+    _REQUEST_TOTAL = 0  # lifetime counter
+    _THROTTLE_COUNT = 0  # how many times we proactively paused
+    _RATE_LIMIT_RPM = 25  # target max requests per minute (conservative)
+    _RATE_LIMIT_WINDOW = 60.0  # sliding window size in seconds
+    _RATE_LIMIT_HEADROOM = 3  # stop this many requests before the ceiling
+    _RATE_LIMITED_429 = 0  # lifetime 429 responses received
+
+    # ── Per-type / per-FQDN / per-endpoint counters ─────────────────────────
+    _TYPE_COUNTS: dict[RequestType, int] = {}  # total by type
+    _TYPE_429_COUNTS: dict[RequestType, int] = {}  # 429s by type
+    _FQDN_COUNTS: dict[str, int] = {}  # total by FQDN
+    _ENDPOINT_COUNTS: dict[str, int] = {}  # total by endpoint name
+
+    # ── 503 / rate-at-failure tracking ──────────────────────────────────────
+    _TYPE_503_COUNTS: dict[RequestType, int] = {}  # 503s by type
+    _RATE_LIMITED_503: int = 0  # lifetime 503 responses received
+    _LAST_RPM_AT_429: Optional[int] = None  # observed RPM when last 429 hit
+    _LAST_RPM_AT_503: Optional[int] = None  # observed RPM when last 503 hit
+    _LAST_429_TIME: Optional[float] = None  # wall-clock of last 429
+    _LAST_503_TIME: Optional[float] = None  # wall-clock of last 503
+
+    # ── 403 Cloudflare tracking ─────────────────────────────────────────────
+    # CivitAI rate-limits via Cloudflare challenges (HTTP 403 with
+    # "Just a moment..." body).  These are the real rate-limit signal.
+    _TYPE_403_CLOUDFLARE_COUNTS: dict[RequestType, int] = {}
+    _RATE_LIMITED_403_CLOUDFLARE: int = 0
+    _LAST_RPM_AT_403_CF: Optional[int] = None
+    _LAST_403_CF_TIME: Optional[float] = None
+
+    # ── FIFO request queue ──────────────────────────────────────────────────
+    _REQUEST_QUEUE: _queue_module.Queue = _queue_module.Queue()
+    _CONSUMER_THREAD: Optional[threading.Thread] = None
+    _CONSUMER_LOCK = threading.Lock()
+    _MIN_REQUEST_INTERVAL: float = float(
+        os.environ.get("CIVITAI_MIN_REQUEST_INTERVAL", "0.25")
+    )
+    _QUEUE_STARTED = False
+
+    # ── CDN download pacing ─────────────────────────────────────────────────
+    # CDN (image.civitai.com) triggers 503s at high concurrency.
+    # A per-download minimum interval keeps the CDN rate manageable.
+    _CDN_DOWNLOAD_MIN_INTERVAL: float = float(
+        os.environ.get("CIVITAI_CDN_MIN_INTERVAL", "1.0")
+    )
+    _LAST_CDN_DOWNLOAD_TIME: float = 0.0  # monotonic timestamp
+    # ── Last-request debug info ──────────────────────────────────────────────
+    # Updated by the consumer thread after each completed request.
+    # Single-threaded callers (scripts) can read this immediately after a
+    # blocking API call returns — the consumer has already written it by then.
+    _LAST_REQUEST_INFO: Optional[dict] = None
     def __init__(
         self,
         headers_factory: Callable[[], dict[str, str]],
@@ -178,6 +289,7 @@ class CivitaiHttpClient:
         download_timeout: tuple[float, float] = (10.0, 120.0),
         max_attempts: int = 4,
         backoff_base_seconds: float = 0.75,
+        rate_limit_rpm: int = 25,
     ):
         self._headers_factory = headers_factory
         self._default_timeout = default_timeout
@@ -185,6 +297,438 @@ class CivitaiHttpClient:
         self._max_attempts = max(1, int(max_attempts))
         self._backoff_base_seconds = max(0.1, float(backoff_base_seconds))
         self._thread_local = threading.local()
+        # Allow per-instance override of the class-level RPM target
+        if rate_limit_rpm != self._RATE_LIMIT_RPM:
+            self._RATE_LIMIT_RPM = max(1, int(rate_limit_rpm))
+        # Register as the singleton so the consumer daemon can call
+        # instance methods.
+        _SINGLETON_REF[0] = self
+
+    # ── FIFO request queue internals ───────────────────────────────────────
+
+    class _RequestEnvelope:
+        """Internal envelope for requests placed on the FIFO queue."""
+
+        __slots__ = (
+            "method",
+            "url",
+            "kwargs",
+            "future",
+            "request_type",
+            "fqdn",
+            "endpoint",
+            "enqueued_at",
+        )
+
+        def __init__(
+            self,
+            method: str,
+            url: str,
+            kwargs: dict[str, Any],
+            future: Future,
+            request_type: RequestType,
+            fqdn: str,
+            endpoint: str,
+        ):
+            self.method = method
+            self.url = url
+            self.kwargs = kwargs
+            self.future = future
+            self.request_type = request_type
+            self.fqdn = fqdn
+            self.endpoint = endpoint
+            self.enqueued_at = time.monotonic()
+
+    @classmethod
+    def _ensure_consumer_started(cls) -> None:
+        """Start the FIFO consumer daemon thread exactly once."""
+        if cls._QUEUE_STARTED:
+            return
+        with cls._CONSUMER_LOCK:
+            if cls._QUEUE_STARTED:
+                return
+            thread = threading.Thread(
+                target=cls._request_consumer_loop,
+                name="civitai-request-consumer",
+                daemon=True,
+            )
+            cls._CONSUMER_THREAD = thread
+            cls._QUEUE_STARTED = True
+            thread.start()
+
+    @classmethod
+    def _increment_type_counter(
+        cls, counter: dict, key: Any
+    ) -> None:
+        with cls._REQUEST_COUNTER_LOCK:
+            counter[key] = counter.get(key, 0) + 1
+
+    @classmethod
+    def _request_consumer_loop(cls) -> None:
+        """Main loop for the FIFO request consumer daemon thread.
+
+        Dequeues one request at a time, records per-type / per-FQDN /
+        per-endpoint counters, and dispatches to the singleton for execution.
+
+        Pacing is **observational only** — requests are sent as fast as the
+        queue provides them, and the observed rate is recorded so we can
+        correlate it with any 429 / 503 responses.
+        """
+        while True:
+            try:
+                envelope: CivitaiHttpClient._RequestEnvelope = (
+                    cls._REQUEST_QUEUE.get()
+                )
+            except Exception:
+                # Should never happen with stdlib Queue, but guard anyway.
+                time.sleep(0.5)
+                continue
+
+            try:
+                # Wait out any active global backoff (reactive — only
+                # triggered after an actual 429 response).
+                instance = cls._get_any_instance()
+                if instance is not None:
+                    instance._wait_for_global_backoff()
+
+                # Per-type / per-FQDN / per-endpoint counters
+                cls._increment_type_counter(cls._TYPE_COUNTS, envelope.request_type)
+                cls._increment_type_counter(cls._FQDN_COUNTS, envelope.fqdn)
+                cls._increment_type_counter(cls._ENDPOINT_COUNTS, envelope.endpoint)
+
+                # ── CDN download pacing ────────────────────────────────────
+                # CDN (image.civitai.com) 503s at high concurrency.
+                # Enforce a minimum interval between CDN requests.
+                if envelope.request_type == RequestType.CDN_DOWNLOAD:
+                    with cls._REQUEST_COUNTER_LOCK:
+                        last_cdn = cls._LAST_CDN_DOWNLOAD_TIME
+                        now_mono = time.monotonic()
+                        wait_needed = cls._CDN_DOWNLOAD_MIN_INTERVAL - (
+                            now_mono - last_cdn
+                        )
+                    if wait_needed > 0:
+                        time.sleep(wait_needed)
+                    with cls._REQUEST_COUNTER_LOCK:
+                        cls._LAST_CDN_DOWNLOAD_TIME = time.monotonic()
+
+                # Record in the sliding window (used for observed-rate metrics)
+                cls._record_request()
+
+                # Execute the actual HTTP request with retries.
+                # _execute_envelope_request is an instance method (needs
+                # session / headers factory), so call via the singleton.
+                instance = cls._get_any_instance()
+                if instance is None:
+                    raise RuntimeError(
+                        "CivitaiHttpClient singleton not available; "
+                        "cannot execute queued request"
+                    )
+                response = instance._execute_envelope_request(envelope)
+                envelope.future.set_result(response)
+            except Exception as exc:
+                if not envelope.future.done():
+                    envelope.future.set_exception(exc)
+            finally:
+                cls._REQUEST_QUEUE.task_done()
+
+    @classmethod
+    def _get_any_instance(cls) -> Optional[CivitaiHttpClient]:
+        """Return the singleton instance if one exists.
+
+        Used by the consumer thread to call instance methods like
+        ``_wait_for_global_backoff()``.
+        """
+        return _SINGLETON_REF[0] if _SINGLETON_REF else None
+
+    def _execute_envelope_request(
+        self, envelope: _RequestEnvelope
+    ) -> requests.Response:
+        """Send the HTTP request described by *envelope*, with full retry logic.
+
+        This is the core of the consumer thread — it handles retries, 429
+        backoff, and server-error retries identically to the old inline
+        ``request()`` method.
+        """
+        merged_headers = {
+            **self._headers_factory(),
+            **(envelope.kwargs.get("headers") or {}),
+        }
+        request_timeout = envelope.kwargs.get("timeout") or self._default_timeout
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, self._max_attempts + 1):
+            session = self._get_session()
+            try:
+                response = session.request(
+                    method=envelope.method,
+                    url=envelope.url,
+                    params=envelope.kwargs.get("params"),
+                    headers=merged_headers,
+                    timeout=request_timeout,
+                    stream=envelope.kwargs.get("stream", False),
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt >= self._max_attempts:
+                    raise CivitaiRequestError(
+                        f"Request failed after {attempt} attempts: {exc}",
+                        retryable=True,
+                    ) from exc
+                time.sleep(self._retry_delay(attempt))
+                continue
+            except requests.RequestException as exc:
+                raise CivitaiRequestError(str(exc), retryable=False) from exc
+
+            if response.status_code == 429:
+                # Snapshot the observed request rate at time of 429
+                rpm_now = self.__class__._current_rpm()
+                self._increment_type_counter(
+                    self.__class__._TYPE_429_COUNTS, envelope.request_type
+                )
+                with self.__class__._REQUEST_COUNTER_LOCK:
+                    self.__class__._RATE_LIMITED_429 += 1
+                    self.__class__._LAST_RPM_AT_429 = rpm_now
+                    self.__class__._LAST_429_TIME = time.time()
+                retry_after_seconds = self._retry_delay(attempt, response=response)
+                enforced_wait = self.activate_global_backoff(
+                    retry_after_seconds, reason="HTTP 429"
+                )
+                print(
+                    f"⏳ CivitAI rate limit reached ({envelope.request_type.value} "
+                    f"{envelope.endpoint}) at {rpm_now} RPM; "
+                    f"enforcing global backoff for {enforced_wait:.1f}s"
+                )
+                last_error = CivitaiRequestError(
+                    "CivitAI rate limit reached (HTTP 429)",
+                    status_code=429,
+                    retryable=True,
+                )
+                if attempt >= self._max_attempts:
+                    raise last_error
+                continue
+
+            if 500 <= response.status_code < 600:
+                last_error = CivitaiRequestError(
+                    f"CivitAI server error (HTTP {response.status_code})",
+                    status_code=response.status_code,
+                    retryable=True,
+                )
+                # Track 503 separately — it usually signals rate-limiting
+                # at the CDN / reverse-proxy layer rather than app-level 429.
+                if response.status_code == 503:
+                    rpm_now = self.__class__._current_rpm()
+                    self._increment_type_counter(
+                        self.__class__._TYPE_503_COUNTS, envelope.request_type
+                    )
+                    with self.__class__._REQUEST_COUNTER_LOCK:
+                        self.__class__._RATE_LIMITED_503 += 1
+                        self.__class__._LAST_RPM_AT_503 = rpm_now
+                        self.__class__._LAST_503_TIME = time.time()
+                    print(
+                        f"🚫 CivitAI 503 ({envelope.request_type.value} "
+                        f"{envelope.endpoint}) at {rpm_now} RPM"
+                    )
+                if attempt >= self._max_attempts:
+                    raise last_error
+                time.sleep(self._retry_delay(attempt, response=response))
+                continue
+
+            if response.status_code >= 400:
+                body_excerpt = ""
+                try:
+                    body_excerpt = response.text[:240].strip()
+                except Exception:
+                    body_excerpt = ""
+
+                # ── Detect Cloudflare challenge (403) ────────────────────────
+                # CivitAI rate-limits via Cloudflare "Just a moment..." pages.
+                # Track these as rate-limit events so they appear in metrics.
+                if response.status_code == 403 and "Just a moment" in body_excerpt:
+                    rpm_now = self.__class__._current_rpm()
+                    self._increment_type_counter(
+                        self.__class__._TYPE_403_CLOUDFLARE_COUNTS,
+                        envelope.request_type,
+                    )
+                    with self.__class__._REQUEST_COUNTER_LOCK:
+                        self.__class__._RATE_LIMITED_403_CLOUDFLARE += 1
+                        self.__class__._LAST_RPM_AT_403_CF = rpm_now
+                        self.__class__._LAST_403_CF_TIME = time.time()
+                    print(
+                        f"🚫 CivitAI 403 Cloudflare "
+                        f"({envelope.request_type.value} {envelope.endpoint}) "
+                        f"at {rpm_now} RPM"
+                    )
+
+                detail = f"CivitAI request failed with HTTP {response.status_code}"
+                if body_excerpt:
+                    detail = f"{detail}: {body_excerpt}"
+                raise CivitaiRequestError(
+                    detail,
+                    status_code=response.status_code,
+                    retryable=False,
+                )
+
+            # Record metadata for debug consumers (e.g. verbose script flags).
+            try:
+                base_url = (response.url or envelope.url).split("?")[0]
+                self.__class__._LAST_REQUEST_INFO = {
+                    "url": base_url,
+                    "status_code": response.status_code,
+                    "content_length": len(response.content),
+                    "elapsed_seconds": (
+                        response.elapsed.total_seconds()
+                        if response.elapsed is not None
+                        else None
+                    ),
+                    "endpoint": envelope.endpoint,
+                }
+            except Exception:
+                pass
+
+            return response
+
+        if isinstance(last_error, CivitaiRequestError):
+            raise last_error
+        raise CivitaiRequestError("CivitAI request failed", retryable=False)
+
+    # ── Request metrics ────────────────────────────────────────────────────
+
+    @classmethod
+    def get_last_request_info(cls) -> Optional[dict]:
+        """Return metadata for the most recently completed HTTP request.
+
+        Keys: url (base, no query string), status_code, content_length (bytes),
+        elapsed_seconds (HTTP round-trip), endpoint (tRPC/REST name).
+        Returns None if no request has completed yet.
+        """
+        return cls._LAST_REQUEST_INFO
+
+    @classmethod
+    def get_request_metrics(cls) -> dict[str, Any]:
+        """Return a snapshot of request-counting metrics.
+
+        Keys:
+            rpm_window: requests in the last 60 s sliding window
+            observed_rps: observed requests-per-second (rpm_window / window)
+            rpm_limit: configured RPM ceiling (informational — not enforced)
+            total_requests: lifetime request count
+            throttle_count: always 0 (pacing removed)
+            rate_limited_429: number of HTTP 429 responses received
+            rate_limited_503: number of HTTP 503 responses received
+            rate_limited_403_cloudflare: number of Cloudflare 403 challenges received
+            last_rpm_at_429: RPM in sliding window when last 429 hit (or None)
+            last_rpm_at_503: RPM in sliding window when last 503 hit (or None)
+            last_rpm_at_403_cf: RPM when last Cloudflare 403 hit (or None)
+            last_429_time: wall-clock time of last 429 (or None)
+            last_503_time: wall-clock time of last 503 (or None)
+            last_403_cf_time: wall-clock time of last Cloudflare 403 (or None)
+            backoff_active: whether a global backoff is currently active
+            backoff_remaining_seconds: seconds remaining in current backoff
+            queue_depth: number of requests waiting in the FIFO queue
+            min_interval: configured minimum interval (seconds — not enforced)
+            consumer_alive: whether the FIFO consumer thread is running
+            type_counts: lifetime requests broken down by RequestType
+            type_429_counts: 429 responses broken down by RequestType
+            type_503_counts: 503 responses broken down by RequestType
+            type_403_cloudflare_counts: Cloudflare 403 challenges by RequestType
+            fqdn_counts: lifetime requests broken down by FQDN
+            endpoint_counts: lifetime requests broken down by endpoint name
+        """
+        now = time.time()
+        with cls._REQUEST_COUNTER_LOCK:
+            window_start = now - cls._RATE_LIMIT_WINDOW
+            rpm_window = sum(
+                1 for ts in cls._REQUEST_TIMESTAMPS if ts >= window_start
+            )
+            total = cls._REQUEST_TOTAL
+            throttles = cls._THROTTLE_COUNT
+            limited = cls._RATE_LIMITED_429
+            rpm_limit = cls._RATE_LIMIT_RPM
+            type_counts = dict(cls._TYPE_COUNTS)
+            type_429_counts = dict(cls._TYPE_429_COUNTS)
+            fqdn_counts = dict(cls._FQDN_COUNTS)
+            endpoint_counts = dict(cls._ENDPOINT_COUNTS)
+
+        consumer_thread = cls._CONSUMER_THREAD
+        consumer_alive = (
+            consumer_thread is not None and consumer_thread.is_alive()
+        )
+
+        with cls._REQUEST_COUNTER_LOCK:
+            rate_limited_503 = cls._RATE_LIMITED_503
+            last_rpm_429 = cls._LAST_RPM_AT_429
+            last_rpm_503 = cls._LAST_RPM_AT_503
+            last_429_time = cls._LAST_429_TIME
+            last_503_time = cls._LAST_503_TIME
+            type_503_counts = dict(cls._TYPE_503_COUNTS)
+            rate_limited_403_cf = cls._RATE_LIMITED_403_CLOUDFLARE
+            last_rpm_403_cf = cls._LAST_RPM_AT_403_CF
+            last_403_cf_time = cls._LAST_403_CF_TIME
+            type_403_cf_counts = dict(cls._TYPE_403_CLOUDFLARE_COUNTS)
+            cdn_min_interval = cls._CDN_DOWNLOAD_MIN_INTERVAL
+
+        # Observed requests-per-second (across the sliding window)
+        observed_rps = round(rpm_window / cls._RATE_LIMIT_WINDOW, 2) if rpm_window else 0.0
+
+        return {
+            "rpm_window": rpm_window,
+            "observed_rps": observed_rps,
+            "rpm_limit": rpm_limit,
+            "total_requests": total,
+            "throttle_count": throttles,
+            "rate_limited_429": limited,
+            "rate_limited_503": rate_limited_503,
+            "rate_limited_403_cloudflare": rate_limited_403_cf,
+            "last_rpm_at_429": last_rpm_429,
+            "last_rpm_at_503": last_rpm_503,
+            "last_rpm_at_403_cf": last_rpm_403_cf,
+            "last_429_time": last_429_time,
+            "last_503_time": last_503_time,
+            "last_403_cf_time": last_403_cf_time,
+            "backoff_active": cls.is_global_backoff_active(),
+            "backoff_remaining_seconds": round(
+                cls.get_global_backoff_remaining_seconds(), 1
+            ),
+            "queue_depth": cls._REQUEST_QUEUE.qsize(),
+            "min_interval": cls._MIN_REQUEST_INTERVAL,
+            "consumer_alive": consumer_alive,
+            "type_counts": {
+                rt.value: type_counts.get(rt, 0) for rt in RequestType
+            },
+            "type_429_counts": {
+                rt.value: type_429_counts.get(rt, 0) for rt in RequestType
+            },
+            "type_503_counts": {
+                rt.value: type_503_counts.get(rt, 0) for rt in RequestType
+            },
+            "type_403_cloudflare_counts": {
+                rt.value: type_403_cf_counts.get(rt, 0) for rt in RequestType
+            },
+            "cdn_min_interval": cdn_min_interval,
+            "fqdn_counts": fqdn_counts,
+            "endpoint_counts": endpoint_counts,
+        }
+
+    @classmethod
+    def _record_request(cls) -> None:
+        """Record an outgoing request in the sliding window."""
+        now = time.time()
+        with cls._REQUEST_COUNTER_LOCK:
+            cls._REQUEST_TIMESTAMPS.append(now)
+            cls._REQUEST_TOTAL += 1
+            # Prune timestamps older than the window to keep the list bounded
+            window_start = now - cls._RATE_LIMIT_WINDOW
+            cls._REQUEST_TIMESTAMPS = [
+                ts for ts in cls._REQUEST_TIMESTAMPS if ts >= window_start
+            ]
+
+    @classmethod
+    def _current_rpm(cls) -> int:
+        """Return the number of requests in the current sliding window."""
+        now = time.time()
+        with cls._REQUEST_COUNTER_LOCK:
+            window_start = now - cls._RATE_LIMIT_WINDOW
+            return sum(1 for ts in cls._REQUEST_TIMESTAMPS if ts >= window_start)
 
     @classmethod
     def activate_global_backoff(
@@ -234,83 +778,42 @@ class CivitaiHttpClient:
         timeout: Optional[tuple[float, float]] = None,
         stream: bool = False,
     ) -> requests.Response:
-        last_error: Optional[Exception] = None
-        merged_headers = {**self._headers_factory(), **(headers or {})}
-        request_timeout = timeout or self._default_timeout
+        """Enqueue an HTTP request through the FIFO queue and block until done.
 
-        for attempt in range(1, self._max_attempts + 1):
-            self._wait_for_global_backoff()
-            session = self._get_session()
-            try:
-                response = session.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    headers=merged_headers,
-                    timeout=request_timeout,
-                    stream=stream,
-                )
-            except (requests.Timeout, requests.ConnectionError) as exc:
-                last_error = exc
-                if attempt >= self._max_attempts:
-                    raise CivitaiRequestError(
-                        f"Request failed after {attempt} attempts: {exc}",
-                        retryable=True,
-                    ) from exc
-                time.sleep(self._retry_delay(attempt))
-                continue
-            except requests.RequestException as exc:
-                raise CivitaiRequestError(str(exc), retryable=False) from exc
+        The actual HTTP send happens on the consumer daemon thread, which
+        enforces minimum interval pacing and sliding-window ceiling checks.
+        Retries are handled entirely within the consumer thread.
+        """
+        # Early exit: if global backoff is very long, fail fast so callers
+        # don't sit in the queue for ages.
+        self._wait_for_global_backoff()
 
-            if response.status_code == 429:
-                retry_after_seconds = self._retry_delay(attempt, response=response)
-                enforced_wait = self.activate_global_backoff(
-                    retry_after_seconds,
-                    reason="HTTP 429",
-                )
-                print(
-                    f"⏳ CivitAI rate limit reached; enforcing global backoff for {enforced_wait:.1f}s"
-                )
-                last_error = CivitaiRequestError(
-                    "CivitAI rate limit reached (HTTP 429)",
-                    status_code=429,
-                    retryable=True,
-                )
-                if attempt >= self._max_attempts:
-                    raise last_error
-                continue
+        # Classify the request for per-type / per-FQDN / per-endpoint tracking
+        request_type, fqdn, endpoint = _classify_request(url)
 
-            if 500 <= response.status_code < 600:
-                last_error = CivitaiRequestError(
-                    f"CivitAI server error (HTTP {response.status_code})",
-                    status_code=response.status_code,
-                    retryable=True,
-                )
-                if attempt >= self._max_attempts:
-                    raise last_error
-                time.sleep(self._retry_delay(attempt, response=response))
-                continue
+        # Build the envelope
+        future: Future[requests.Response] = Future()
+        envelope = self._RequestEnvelope(
+            method=method,
+            url=url,
+            kwargs={
+                "params": params,
+                "headers": headers,
+                "timeout": timeout,
+                "stream": stream,
+            },
+            future=future,
+            request_type=request_type,
+            fqdn=fqdn,
+            endpoint=endpoint,
+        )
 
-            if response.status_code >= 400:
-                body_excerpt = ""
-                try:
-                    body_excerpt = response.text[:240].strip()
-                except Exception:
-                    body_excerpt = ""
-                detail = f"CivitAI request failed with HTTP {response.status_code}"
-                if body_excerpt:
-                    detail = f"{detail}: {body_excerpt}"
-                raise CivitaiRequestError(
-                    detail,
-                    status_code=response.status_code,
-                    retryable=False,
-                )
+        # Ensure the consumer daemon is running, then enqueue
+        self._ensure_consumer_started()
+        self._REQUEST_QUEUE.put(envelope)
 
-            return response
-
-        if isinstance(last_error, CivitaiRequestError):
-            raise last_error
-        raise CivitaiRequestError("CivitAI request failed", retryable=False)
+        # Block until the consumer fills the future (or raises)
+        return future.result()
 
     def request_json(
         self,

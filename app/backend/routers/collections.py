@@ -40,6 +40,8 @@ from schemas import (
     CollectionCreateRequest,
     CollectionRenameRequest,
     SyncLabAnalyzeRequest,
+    SyncSessionCreateRequest,
+    SyncSessionStepUpdateRequest,
 )
 from utils.cache import (
     _build_json_cache_headers,
@@ -538,8 +540,10 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
         _detect_civitai_url_type,
         _parse_civitai_collection_id,
         _parse_civitai_image_id,
+        _parse_civitai_post_id,
         _run_civitai_collection_import_job,
         _run_civitai_image_import_job,
+        _run_civitai_post_import_job,
     )
 
     value = (payload.value or "").strip()
@@ -570,6 +574,8 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
         import_type = payload.import_type
         if import_type == "image":
             import_id = _parse_civitai_image_id(value)
+        elif import_type == "post":
+            import_id = _parse_civitai_post_id(value)
         else:
             import_id = _parse_civitai_collection_id(value)
 
@@ -587,6 +593,22 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
                 "requested_value": value,
             },
             runner=lambda context: _run_civitai_image_import_job(context, import_id),
+        )
+    elif import_type == "post":
+        task = task_manager.create_task(
+            kind="civitai-post-import",
+            title=f"Import CivitAI post {import_id}",
+            metadata={
+                "import_type": "post",
+                "post_id": import_id,
+                "requested_value": value,
+                "limit": payload.limit,
+            },
+            runner=lambda context: _run_civitai_post_import_job(
+                context,
+                post_id=import_id,
+                limit=payload.limit,
+            ),
         )
     else:
         task = task_manager.create_task(
@@ -619,6 +641,54 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
 # imports from `main` will be replaced once civitai_service.py is populated.
 
 
+# ---------------------------------------------------------------------------
+# Sync Session CRUD routes
+# ---------------------------------------------------------------------------
+
+@router.post("/sync-lab/sessions", response_model=dict)
+def create_sync_session(payload: "SyncSessionCreateRequest", db: Session = Depends(get_db)):
+    """Create a new resumable sync session."""
+    from main import sync_session_create as _impl  # noqa: PLC0415
+    return _impl(payload, db)
+
+
+@router.get("/sync-lab/sessions", response_model=dict)
+def list_sync_sessions(
+    include_complete: bool = Query(False, description="Include completed sessions"),
+    db: Session = Depends(get_db),
+):
+    """List sync sessions."""
+    from main import sync_session_list as _impl  # noqa: PLC0415
+    return _impl(db, include_complete=include_complete)
+
+
+@router.get("/sync-lab/sessions/{session_id}", response_model=dict)
+def get_sync_session(session_id: str, db: Session = Depends(get_db)):
+    """Get a single sync session."""
+    from main import sync_session_get as _impl  # noqa: PLC0415
+    return _impl(session_id, db)
+
+
+@router.patch("/sync-lab/sessions/{session_id}/step", response_model=dict)
+def update_sync_session_step(
+    session_id: str, payload: "SyncSessionStepUpdateRequest", db: Session = Depends(get_db)
+):
+    """Update a step's status and data for a sync session."""
+    from main import sync_session_update_step as _impl  # noqa: PLC0415
+    return _impl(session_id, payload, db)
+
+
+@router.delete("/sync-lab/sessions/{session_id}", response_model=dict)
+def delete_sync_session(session_id: str, db: Session = Depends(get_db)):
+    """Delete a sync session."""
+    from main import sync_session_delete as _impl  # noqa: PLC0415
+    return _impl(session_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Sync Lab step routes
+# ---------------------------------------------------------------------------
+
 @router.get("/sync-lab/collections", response_model=dict)
 def sync_lab_list_collections():
     """Step 1: Fetch the authenticated user's CivitAI image collections."""
@@ -649,18 +719,27 @@ def sync_lab_list_collections():
 
 @router.get("/sync-lab/collection-items/{collection_id}")
 def sync_lab_fetch_collection_items(
-    collection_id: int, limit: int = Query(default=None, ge=1)
+    collection_id: int,
+    limit: int = Query(default=None, ge=1),
+    collection_type: str = Query(default="image", pattern="^(image|post)$"),
 ):
-    """Step 3: Fetch all items for a specific CivitAI collection (SSE streaming)."""
+    """Step 3: Fetch all items for a specific CivitAI collection (SSE streaming).
+
+    Supports both image-type collections (via image.getInfinite) and
+    post-type collections (via post.getInfinite → image.getInfinite per post).
+    """
     import queue  # noqa: PLC0415
     import threading  # noqa: PLC0415
 
     from atelierai.civitai.civitai import CivitaiPrivateScraper  # noqa: PLC0415
+    from atelierai.civitai.civitai_api import CivitaiAPI  # noqa: PLC0415
     from atelierai.civitai.http_client import CivitaiRequestError  # noqa: PLC0415
     from main import (  # noqa: PLC0415
         _archive_civitai_collection_items,
         _classify_civitai_upstream_error,
     )
+
+    collection_type = collection_type.strip().lower()
 
     def _sse(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
@@ -674,14 +753,60 @@ def sync_lab_fetch_collection_items(
         def on_progress(page: int, page_items: int, total: int):
             q.put(("progress", page, page_items, total))
 
+        def _fetch_post_collection_items(
+            api: CivitaiAPI,
+            cid: int,
+            max_items: int | None,
+        ) -> list[dict]:
+            """Fetch images from a post-type collection.
+
+            Uses post.getInfinite to get posts, then image.getInfinite
+            with postId to get images from each post.
+            """
+            all_images: list[dict] = []
+            posts = api.fetch_collection_posts(collection_id=cid)
+            total_posts = len(posts)
+
+            for i, post in enumerate(posts, 1):
+                post_id = post.get("id")
+                if not post_id:
+                    continue
+
+                post_images = api.fetch_post_images(int(post_id))
+                for idx, img in enumerate(post_images):
+                    if isinstance(img, dict):
+                        # Attach post metadata for context
+                        img["_post_id"] = int(post_id)
+                        img["_post_title"] = post.get("title", "")
+                        img["_post_index"] = idx
+                        all_images.append(img)
+
+                # Report per-post progress with cumulative image count
+                q.put(("progress", {
+                    "post_number": i,
+                    "total_posts": total_posts,
+                    "post_images": len(post_images),
+                    "total_images": len(all_images),
+                }))
+
+                if max_items is not None and len(all_images) >= max_items:
+                    all_images = all_images[:max_items]
+                    break
+
+            return all_images
+
         def worker():
             try:
-                scraper = CivitaiPrivateScraper(auto_authenticate=True)
-                items = scraper.fetch_collection_items(
-                    collection_id=collection_id,
-                    limit=limit,
-                    progress_callback=on_progress,
-                )
+                if collection_type == "post":
+                    api = CivitaiAPI.get_instance()
+                    items = _fetch_post_collection_items(api, collection_id, limit)
+                else:
+                    scraper = CivitaiPrivateScraper(auto_authenticate=True)
+                    items = scraper.fetch_collection_items(
+                        collection_id=collection_id,
+                        limit=limit,
+                        progress_callback=on_progress,
+                    )
                 q.put(("result", items))
             except CivitaiRequestError as exc:
                 classified = _classify_civitai_upstream_error(exc)
@@ -701,13 +826,30 @@ def sync_lab_fetch_collection_items(
 
             kind = msg[0]
             if kind == "progress":
-                _, page, page_items, total = msg
-                yield _sse({
-                    "type": "progress",
-                    "page": page,
-                    "page_items": page_items,
-                    "total": total,
-                })
+                payload = msg[1]
+                # Image-type collections use 3-tuple (page, page_items, total)
+                # Post-type collections use dict with post/image details
+                if isinstance(payload, dict):
+                    yield _sse({
+                        "type": "progress",
+                        "collection_type": "post",
+                        "page": payload["post_number"],
+                        "page_items": payload["post_images"],
+                        "total": payload["total_posts"],
+                        "post_number": payload["post_number"],
+                        "total_posts": payload["total_posts"],
+                        "post_images": payload["post_images"],
+                        "total_images": payload["total_images"],
+                    })
+                else:
+                    page, page_items, total = msg[1], msg[2], msg[3]
+                    yield _sse({
+                        "type": "progress",
+                        "collection_type": "image",
+                        "page": page,
+                        "page_items": page_items,
+                        "total": total,
+                    })
             elif kind == "error":
                 _, status_code, detail = msg
                 yield _sse({"type": "error", "status_code": status_code, "detail": detail})
@@ -772,43 +914,49 @@ def sync_lab_fetch_collection_items(
 
 
 @router.post("/sync-lab/analyze-local", response_model=dict)
-def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest):
+def sync_lab_analyze_local(
+    payload: SyncLabAnalyzeRequest,
+    session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
+):
     """Step 4: Check which CivitAI image IDs exist in the local DB."""
     # Re-dispatch to main implementation to avoid duplicating complex logic.
     from main import sync_lab_analyze_local as _impl  # noqa: PLC0415
 
-    return _impl(payload)
+    return _impl(payload, session_id=session_id)
 
 
 @router.get("/sync-lab/fetch-metadata")
 def sync_lab_fetch_metadata(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 5: Fetch CivitAI API metadata for specified image IDs (SSE streaming)."""
     from main import sync_lab_fetch_metadata as _impl  # noqa: PLC0415
 
-    return _impl(image_ids=image_ids)
+    return _impl(image_ids=image_ids, session_id=session_id)
 
 
 @router.get("/sync-lab/download")
 def sync_lab_download(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
     from main import sync_lab_download as _impl  # noqa: PLC0415
 
-    return _impl(image_ids=image_ids)
+    return _impl(image_ids=image_ids, session_id=session_id)
 
 
 @router.get("/sync-lab/ingest")
 def sync_lab_ingest(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
     collection_id: Optional[int] = Query(None, description="CivitAI collection ID to attach"),
+    session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 7: Ingest previously downloaded images into the library (SSE streaming)."""
     from main import sync_lab_ingest as _impl  # noqa: PLC0415
 
-    return _impl(image_ids=image_ids, collection_id=collection_id)
+    return _impl(image_ids=image_ids, collection_id=collection_id, session_id=session_id)
 
 
 @router.get("/sync-lab/collection-status/{collection_id}", response_model=dict)

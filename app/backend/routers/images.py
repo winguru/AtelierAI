@@ -17,12 +17,14 @@ video poster/thumbnail) are implemented directly.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any, List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -385,6 +387,133 @@ def get_image_video_thumbnail(
     from main import get_image_video_thumbnail as _impl  # noqa: PLC0415
 
     return _impl(file_hash=file_hash, request=request, db=db)
+
+
+@router.get("/images/{file_hash}/video_mp4")
+async def get_transcoded_video(
+    file_hash: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Get transcoded video file (WebM → MP4) for Electron browsers.
+
+    This endpoint detects Electron-based browsers and provides MP4 transcoded versions
+    of WebM files, since Electron has limited WebM/VP9 codec support. Non-Electron
+    browsers receive a redirect to the original video file.
+
+    The transcoded files are cached in IMAGE_RESOURCES_PATH/transcoded/ for reuse.
+    """
+    from backend.utils.video_transcoding import (  # noqa: PLC0415
+        VideoTranscodingError,
+        get_transcoded_path,
+        is_electron_browser,
+        stream_transcoded_video,
+        transcode_webm_to_mp4,
+    )
+    from backend.config import (  # noqa: PLC0415
+        IMAGE_LIBRARY_PATH,
+        IMAGE_RESOURCES_PATH,
+    )
+
+    logger = logging.getLogger(__name__)
+
+    # Query the database for the image record
+    db_image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
+    if not db_image:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Image with file_hash '{file_hash}' not found"
+        )
+
+    # Check if this is a video file
+    if not (db_image.file_path or '').lower().endswith(('.webm', '.mp4', '.mov', '.mkv')):
+        raise HTTPException(
+            status_code=400,
+            detail="Not a video file"
+        )
+
+    # For non-Electron browsers, just redirect to original video
+    if not is_electron_browser(request):
+        # Redirect to the original video in the static file serving
+        original_path = Path(IMAGE_LIBRARY_PATH) / db_image.file_path
+        if original_path.exists():
+            return RedirectResponse(url=f"/image_library/{db_image.file_path}")
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Original video file not found: {db_image.file_path}"
+            )
+
+    # For Electron browsers, transcode WebM to MP4
+    file_path_str = str(db_image.file_path or "")
+    original_path = Path(IMAGE_LIBRARY_PATH) / file_path_str
+
+    # If it's already MP4, just serve it directly
+    if file_path_str.lower().endswith('.mp4'):
+        if not original_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Video file not found: {file_path_str}"
+            )
+        return FileResponse(
+            path=str(original_path),
+            media_type="video/mp4",
+            filename=file_path_str
+        )
+
+    # Transcode WebM to MP4
+    # Use file_hash for cache filename to match URL structure and frontend expectations
+    output_path = get_transcoded_path(
+        Path(IMAGE_LIBRARY_PATH),
+        Path(IMAGE_RESOURCES_PATH),
+        file_hash,
+        target_format="mp4"
+    )
+
+    # Transcode if needed (with caching)
+    if not output_path.exists():
+        try:
+            await transcode_webm_to_mp4(
+                input_path=original_path,
+                output_path=output_path,
+                overwrite=False,
+                video_codec="libx264",
+                audio_codec="aac",
+                crf=23,
+                preset="medium"
+            )
+        except VideoTranscodingError as e:
+            logger.error(f"Transcoding failed for {file_hash}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Video transcoding failed: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error transcoding {file_hash}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="An error occurred while processing the video"
+            )
+
+    # Stream the transcoded video
+    try:
+        filename_str = Path(file_path_str).stem
+        return StreamingResponse(
+            stream_transcoded_video(output_path),
+            media_type="video/mp4",
+            headers={
+                "Cache-Control": "public, max-age=31536000",  # 1 year cache
+                "Content-Disposition": f'inline; filename="{filename_str}.mp4"'
+            }
+        )
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error streaming transcoded video: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error streaming video"
+        )
 
 
 # ---------------------------------------------------------------------------

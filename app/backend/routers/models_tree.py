@@ -4,7 +4,7 @@
 """Models tree hierarchy API routes.
 
 Provides endpoints for the /frontend/models.html page:
-- GET /api/models/tree/state  — hierarchy + scope-aware usage counts
+- POST /api/models/tree/state  — hierarchy + scope-aware usage counts
 - GET /api/models/tree/data   — detailed model/versions for a given type pane
 
 The tree shows 4 hierarchy levels: base_model → model → version → precision,
@@ -13,11 +13,10 @@ split across two type panes: checkpoints and loras.
 
 from __future__ import annotations
 
-import json as _json
 from collections import defaultdict
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -27,8 +26,10 @@ from models import (
     CivitaiModelVersion,
     CivitaiModelVersionFile,
     ImageModel,
+    ModelObservation,
 )
 from services.model_reference_service import ModelReferenceService
+from services.query_model import GalleryFilter, ModelsTreeStateRequest
 
 router = APIRouter(prefix="/models/tree", tags=["models-tree"])
 
@@ -156,6 +157,48 @@ def _image_id_set_from_keys(
     return ids if ids else None
 
 
+def _resolve_gallery_usage(
+    db: Session,
+    gallery_filter: GalleryFilter,
+    search: Optional[str],
+) -> dict[str, dict[str, int]]:
+    """Resolve gallery-scope usage counts via the shared constrained-IDs cache.
+
+    Reuses the same cache populated by ``POST /api/query`` so that the
+    expensive filter-resolution is only done once per unique filter.
+    """
+    from services.query_model import filter_cache_key  # noqa: PLC0415
+    from utils.cache import (  # noqa: PLC0415
+        _build_search_cache_key,
+        _search_cache_get,
+    )
+
+    # Try the shared constrained-IDs cache first.
+    fkey = filter_cache_key(gallery_filter, search)
+    cids_cache_key = _build_search_cache_key(
+        "constrained_ids",
+        payload={"filter_key": fkey},
+    )
+    cached_cids = _search_cache_get(cids_cache_key)
+
+    constrained_ids: Optional[set[int]] = None
+    if cached_cids is not None:
+        if isinstance(cached_cids, frozenset):
+            constrained_ids = set(cached_cids)
+        elif cached_cids != "unfiltered":
+            constrained_ids = cached_cids
+        # "unfiltered" → constrained_ids stays None (all images)
+    else:
+        # Cache miss — resolve via GalleryQuery (which also caches).
+        # Import here to avoid circular imports at module level.
+        from main import _make_gallery_query  # type: ignore[import-untyped]  # noqa: PLC0415
+
+        gq = _make_gallery_query(db)
+        constrained_ids = gq._resolve_filter(gallery_filter, search)
+
+    return _build_usage_map(db, constrained_ids)
+
+
 def _build_usage_map(
     db: Session,
     image_ids: set[int] | None,
@@ -171,68 +214,30 @@ def _build_usage_map(
       ``"base_key.model_id"``           → unique images using any version of that model
       ``"base_key.model_id.version_id"``→ unique images using that specific version
 
-    Counts are sourced from ``json_metadata.civitai.models`` (checkpoints) and
-    ``json_metadata.civitai.loras`` (LoRAs), keyed by ``modelVersionId``.
+    Counts are sourced from the ``model_observations`` relational table joined
+    with ``civitai_model_versions`` for hierarchy components.
     """
-    # Fetch image id + json_metadata rows, optionally filtered by scope
-    query = db.query(ImageModel.id, ImageModel.json_metadata).filter(
-        ImageModel.json_metadata.isnot(None),
-        ImageModel.image_status == "active",
+    if image_ids is not None and not image_ids:
+        return {"checkpoint": {}, "lora": {}}
+
+    # Single query: model_observations JOIN civitai_model_versions
+    # Returns one row per (resource_type, base_model, civitai_model_id, civitai_version_id, image_id).
+    query = db.query(
+        ModelObservation.resource_type,
+        CivitaiModelVersion.base_model,
+        CivitaiModelVersion.civitai_model_id,
+        CivitaiModelVersion.civitai_version_id,
+        ModelObservation.image_id,
+    ).join(
+        CivitaiModelVersion,
+        CivitaiModelVersion.civitai_version_id == ModelObservation.civitai_version_id,
     )
     if image_ids is not None:
-        if not image_ids:
-            return {"checkpoint": {}, "lora": {}}
-        query = query.filter(ImageModel.id.in_(image_ids))
+        query = query.filter(ModelObservation.image_id.in_(image_ids))
 
     rows = query.all()
 
-    # version_id → set of image_ids that reference it
-    checkpoint_vid_images: dict[int, set[int]] = defaultdict(set)
-    lora_vid_images: dict[int, set[int]] = defaultdict(set)
-
-    for image_id, raw_meta in rows:
-        meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
-        if isinstance(raw_meta, str):
-            try:
-                meta = _json.loads(raw_meta)
-            except Exception:
-                continue
-        civitai = meta.get("civitai", {}) if isinstance(meta, dict) else {}
-        if not isinstance(civitai, dict):
-            continue
-
-        for m in civitai.get("models") or []:
-            if isinstance(m, dict):
-                vid = m.get("modelVersionId")
-                if vid:
-                    checkpoint_vid_images[int(vid)].add(image_id)
-
-        for lora in civitai.get("loras") or []:
-            if isinstance(lora, dict):
-                vid = lora.get("modelVersionId")
-                if vid:
-                    lora_vid_images[int(vid)].add(image_id)
-
-    all_version_ids = set(checkpoint_vid_images.keys()) | set(lora_vid_images.keys())
-    if not all_version_ids:
-        return {"checkpoint": {}, "lora": {}}
-
-    # Batch-resolve version IDs to hierarchy components
-    version_rows = (
-        db.query(
-            CivitaiModelVersion.civitai_version_id,
-            CivitaiModelVersion.civitai_model_id,
-            CivitaiModelVersion.base_model,
-        )
-        .filter(CivitaiModelVersion.civitai_version_id.in_(all_version_ids))
-        .all()
-    )
-    version_map = {
-        r.civitai_version_id: r for r in version_rows
-    }
-
-    # Build per-level image ID sets for deduplication before converting to counts.
-    # model_key → set[image_id], base_key → set[image_id]
+    # Accumulate image ID sets for deduplication at each hierarchy level.
     base_images: dict[str, dict[str, set[int]]] = {
         "checkpoint": defaultdict(set),
         "lora": defaultdict(set),
@@ -241,31 +246,30 @@ def _build_usage_map(
         "checkpoint": defaultdict(set),
         "lora": defaultdict(set),
     }
+    version_images: dict[str, dict[str, set[int]]] = {
+        "checkpoint": defaultdict(set),
+        "lora": defaultdict(set),
+    }
 
+    for resource_type, raw_base, model_id, version_id, img_id in rows:
+        pane = "checkpoint" if resource_type == "checkpoint" else "lora"
+        base_key = _normalize_base_model(raw_base)
+        model_key = f"{base_key}.{model_id}"
+        version_key = f"{model_key}.{version_id}"
+
+        version_images[pane][version_key].add(img_id)
+        model_images[pane][model_key].add(img_id)
+        base_images[pane][base_key].add(img_id)
+
+    # Build final usage map with unique counts at all three levels.
     usage: dict[str, dict[str, int]] = {"checkpoint": {}, "lora": {}}
-
-    for pane, vid_images in (("checkpoint", checkpoint_vid_images), ("lora", lora_vid_images)):
-        for vid, img_ids in vid_images.items():
-            ver = version_map.get(vid)
-            if ver is None:
-                continue
-            base_key = _normalize_base_model(ver.base_model)
-            model_key = f"{base_key}.{ver.civitai_model_id}"
-            version_key = f"{model_key}.{vid}"
-
-            # Version-level: exact unique count for this version
-            usage[pane][version_key] = len(img_ids)
-
-            # Accumulate image ID sets for parent levels
-            model_images[pane][model_key].update(img_ids)
-            base_images[pane][base_key].update(img_ids)
-
-    # Write pre-computed unique counts at model and base levels
     for pane in ("checkpoint", "lora"):
-        for model_key, img_ids in model_images[pane].items():
-            usage[pane][model_key] = len(img_ids)
-        for base_key, img_ids in base_images[pane].items():
-            usage[pane][base_key] = len(img_ids)
+        for key, ids in version_images[pane].items():
+            usage[pane][key] = len(ids)
+        for key, ids in model_images[pane].items():
+            usage[pane][key] = len(ids)
+        for key, ids in base_images[pane].items():
+            usage[pane][key] = len(ids)
 
     return usage
 
@@ -283,23 +287,20 @@ def _precision_label_from_fields(fp: Optional[str], size_label: Optional[str]) -
 
 
 # ---------------------------------------------------------------------------
-# GET /api/models/tree/state
+# POST /api/models/tree/state
 # ---------------------------------------------------------------------------
 
 
-@router.get("/state")
+@router.post("/state")
 def get_models_tree_state(
-    gallery_keys: Optional[str] = Query(
-        None,
-        description="Comma-separated gallery image keys for gallery scope counts",
-    ),
-    selected_keys: Optional[str] = Query(
-        None,
-        description="Comma-separated selected image keys for selected scope counts",
-    ),
+    body: ModelsTreeStateRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """Return the models tree hierarchy with scope-aware usage counts.
+
+    Accepts a JSON body with ``filter`` (GalleryFilter) and ``search`` to
+    define the "gallery" scope via the shared constrained-IDs cache, instead
+    of passing a long list of image keys as a CGI parameter.
 
     Response shape::
 
@@ -346,18 +347,13 @@ def get_models_tree_state(
     # "all" scope: every image
     all_usage = _build_usage_map(db, None)
 
-    # "gallery" scope
-    gallery_usage = {"checkpoint": {}, "lora": {}}
-    if gallery_keys:
-        gk_list = [k.strip() for k in gallery_keys.split(",") if k.strip()]
-        g_ids = _image_id_set_from_keys(db, gk_list)
-        gallery_usage = _build_usage_map(db, g_ids)
+    # "gallery" scope — resolve via shared constrained-IDs cache
+    gallery_usage = _resolve_gallery_usage(db, body.filter, body.search)
 
-    # "selected" scope
-    selected_usage = {"checkpoint": {}, "lora": {}}
-    if selected_keys:
-        sk_list = [k.strip() for k in selected_keys.split(",") if k.strip()]
-        s_ids = _image_id_set_from_keys(db, sk_list)
+    # "selected" scope — resolve from optional image keys
+    selected_usage: dict[str, dict[str, int]] = {"checkpoint": {}, "lora": {}}
+    if body.selected_keys:
+        s_ids = _image_id_set_from_keys(db, body.selected_keys)
         selected_usage = _build_usage_map(db, s_ids)
 
     return {
@@ -437,9 +433,13 @@ def _build_hierarchy(db: Session) -> dict[str, list[dict]]:
             if vfiles:
                 for f in vfiles:
                     prec = _precision_label(f)
-                    tree[pane][base_key][m.civitai_model_id][v.civitai_version_id].append(prec)
+                    tree[pane][base_key][m.civitai_model_id][
+                        v.civitai_version_id
+                    ].append(prec)
             else:
-                tree[pane][base_key][m.civitai_model_id][v.civitai_version_id].append("default")
+                tree[pane][base_key][m.civitai_model_id][v.civitai_version_id].append(
+                    "default"
+                )
 
     # Convert to nested dicts for JSON
     for pane in ("checkpoint", "lora"):
@@ -465,11 +465,13 @@ def _build_hierarchy(db: Session) -> dict[str, list[dict]]:
                     for prec in precisions:
                         if prec not in seen_precisions:
                             seen_precisions.add(prec)
-                            version_node["children"].append({
-                                "key": prec,
-                                "label": prec,
-                                "children": [],
-                            })
+                            version_node["children"].append(
+                                {
+                                    "key": prec,
+                                    "label": prec,
+                                    "children": [],
+                                }
+                            )
                     model_node["children"].append(version_node)
                 base_node["children"].append(model_node)
             result[pane].append(base_node)

@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -30,7 +30,7 @@ class ImageUpdateRequest(BaseModel):
 
 
 class CivitaiImportRequest(BaseModel):
-    import_type: Literal["collection", "image"]
+    import_type: Literal["collection", "image", "post"]
     value: str
     limit: Optional[int] = None
 
@@ -108,6 +108,7 @@ class TaxonomyBootstrapImportRequest(BaseModel):
 # Format: "type:value" e.g. "tag:portrait", "artist:Rembrandt"
 INCLUDED_TERM_TYPES = frozenset({
     "tag", "artist", "collection", "model", "source", "software", "mimetype", "feature",
+    "status",
 })
 EXCLUDED_TERM_TYPES = INCLUDED_TERM_TYPES  # Same types allowed for both directions
 HIDDEN_TERM_TYPES = frozenset({"nsfw", "nsfw_safety"})
@@ -145,6 +146,20 @@ class ParsedGalleryFilter(BaseModel):
     format: str = "json"
     raw_text: str
     dry_run: bool = True
+
+    # Relational filter types — these modify the Query object directly
+    # (source, mimetype, artist, collection, model, software) rather than
+    # returning ID sets.
+    _RELATIONAL_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {"source", "mimetype", "artist", "collection", "model", "software"}
+    )
+
+    def has_relational_filters(self) -> bool:
+        """Return True if any relational filter clauses are present."""
+        for t in self._RELATIONAL_TYPES:
+            if self.included_by_type.get(t) or self.excluded_by_type.get(t):
+                return True
+        return False
 
 
 class TaxonomyTagAssociationRequest(BaseModel):
@@ -287,3 +302,48 @@ class SyncLabIngestRequest(BaseModel):
     """Sync Lab: ingest step payload."""
     image_ids: list[int]
     collection_id: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Sync Session — resumable workflow state
+# ---------------------------------------------------------------------------
+
+class SyncSessionCreateRequest(BaseModel):
+    """Create a new sync session."""
+    collection_id: int
+    collection_type: str = "image"  # "image" | "post"
+    collection_name: Optional[str] = None
+
+
+class SyncSessionStepUpdateRequest(BaseModel):
+    """Update a step's status and optional data for a sync session."""
+    step: int  # 3–7
+    status: str  # "pending" | "in_progress" | "complete" | "failed" | "cancelled"
+    data: Optional[dict] = None
+    error_message: Optional[str] = None
+
+
+class SyncSessionResponse(BaseModel):
+    """API response shape for a sync session."""
+    id: str
+    collection_id: int
+    collection_type: str
+    collection_name: Optional[str] = None
+    step_3_status: str = "pending"
+    step_4_status: str = "pending"
+    step_5_status: str = "pending"
+    step_6_status: str = "pending"
+    step_7_status: str = "pending"
+    step_3_data: Optional[dict] = None
+    step_4_data: Optional[dict] = None
+    step_5_data: Optional[dict] = None
+    step_6_data: Optional[dict] = None
+    step_7_data: Optional[dict] = None
+    active_step: Optional[int] = None
+    error_message: Optional[str] = None
+    is_complete: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True

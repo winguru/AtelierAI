@@ -85,19 +85,6 @@ def _coerce_meta(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _extract_trpc_result(raw: Any) -> Any:
-    """Extract the tRPC result payload from a raw envelope dict."""
-    if not isinstance(raw, dict):
-        return None
-    wrapper = raw.get("result")
-    if not isinstance(wrapper, dict):
-        return None
-    data = wrapper.get("data")
-    if isinstance(data, dict) and "json" in data:
-        return data["json"]
-    return data
-
-
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
@@ -236,11 +223,10 @@ def _resolve_class_b(
             continue
 
         try:
-            raw = api._make_raw_request(
-                endpoint="tag.getVotableTags",
-                payload_data={"id": int(civ_image_id), "type": "image", "authed": True},
+            response = api.get_cached_or_fetch(
+                "tag.getVotableTags",
+                {"id": int(civ_image_id), "type": "image", "authed": True},
             )
-            response = _extract_trpc_result(raw)
             if not isinstance(response, list):
                 term.discovery_source = "unresolved"
                 print(
@@ -337,11 +323,10 @@ def _enrich_resolved_terms(
     for idx, term in enumerate(needs_enrich, start=1):
         assert term.discovered_tag_id is not None
         try:
-            raw = api._make_raw_request(
-                endpoint="tag.getById",
-                payload_data={"id": int(term.discovered_tag_id), "authed": True},
+            result = api.get_cached_or_fetch(
+                "tag.getById",
+                {"id": int(term.discovered_tag_id), "authed": True},
             )
-            result = _extract_trpc_result(raw)
             if isinstance(result, dict):
                 term.api_metadata["type"] = result.get("type") or term.api_metadata.get("type")
                 # tag.getById does not return nsfwLevel/automated/concrete — leave as-is.

@@ -7,11 +7,14 @@
   const state = {
     collections: [],         // raw collection list from API
     selectedCollectionId: null,
+    selectedCollectionType: null, // 'image' or 'post'
+    selectedCollectionName: null,
     collectionItems: [],     // items from fetch-collection-items
     analysis: null,          // local state analysis results
     metadataResults: [],     // metadata fetch results
     downloadResults: [],     // download results
     ingestResults: [],       // ingest results
+    sessionId: null,         // resumable sync session ID
   };
 
   /* ── DOM helpers ── */
@@ -231,13 +234,106 @@
     state.selectedCollectionId = collectionId;
     const col = state.collections.find(c => (c.id || c.collectionId) === collectionId);
     const colName = col ? col.name : `Collection #${collectionId}`;
-    setStatus(2, 'success', `Selected: ${escHtml(colName)} (ID: ${collectionId})`);
+    const colType = col ? (col.type || 'image') : 'image';
+    state.selectedCollectionType = colType;
+    state.selectedCollectionName = colName;
+    const typeLabel = colType === 'post' ? 'post collection' : 'image collection';
+    setStatus(2, 'success', `Selected: ${escHtml(colName)} (ID: ${collectionId}, ${typeLabel})`);
     el('step2-results').innerHTML = '';
 
     setStepState(2, 'complete');
     setFlowState('flow-2-3', true, `${colName} — ready to fetch items`);
     enableStep(3);
     enableBtn('btn-fetch-items');
+  }
+
+  /* ── Session API helpers ── */
+
+  /** Create a new sync session for the selected collection. */
+  async function createSession() {
+    // Clean up any existing session first
+    if (state.sessionId) {
+      await deleteSession(state.sessionId);
+      state.sessionId = null;
+    }
+    try {
+      const resp = await fetch('/api/sync-lab/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          collection_id: state.selectedCollectionId,
+          collection_type: state.selectedCollectionType || 'image',
+          collection_name: state.selectedCollectionName || `Collection #${state.selectedCollectionId}`,
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.data?.id) {
+        state.sessionId = data.data.id;
+        return data.data;
+      }
+      console.warn('Failed to create session:', data);
+      return null;
+    } catch (err) {
+      console.warn('Session creation error:', err);
+      return null;
+    }
+  }
+
+  /** Fetch an existing session by ID. */
+  async function getSession(sessionId) {
+    try {
+      const resp = await fetch(`/api/sync-lab/sessions/${sessionId}`);
+      const data = await resp.json();
+      return resp.ok ? data.data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** List active (incomplete) sessions. */
+  async function listActiveSessions() {
+    try {
+      const resp = await fetch('/api/sync-lab/sessions?include_complete=false');
+      const data = await resp.json();
+      return resp.ok ? (data.data || []) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Delete a session. */
+  async function deleteSession(sessionId) {
+    try {
+      await fetch(`/api/sync-lab/sessions/${sessionId}`, { method: 'DELETE' });
+    } catch { /* best effort */ }
+  }
+
+  /** Determine the last completed step from session state. */
+  function getLastCompletedStep(session) {
+    for (let s = 7; s >= 3; s--) {
+      if (session[`step_${s}_status`] === 'complete') return s;
+    }
+    for (let s = 3; s <= 7; s++) {
+      if (session[`step_${s}_status`] === 'in_progress') return s - 1;
+    }
+    return 0;
+  }
+
+  /** Show the resume banner. */
+  function showResumeBanner(session) {
+    const banner = el('resume-banner');
+    if (!banner) return;
+    banner.style.display = '';
+    const info = banner.querySelector('.resume-info');
+    if (info) {
+      const step = getLastCompletedStep(session);
+      info.textContent = `Resuming "${session.collection_name || 'Collection #' + session.collection_id}" — completed through step ${step}`;
+    }
+  }
+
+  function hideResumeBanner() {
+    const banner = el('resume-banner');
+    if (banner) banner.style.display = 'none';
   }
 
   /* ────────────────────────────────────────
@@ -253,7 +349,11 @@
     el('step3-results').innerHTML = '';
 
     try {
-      const url = `/api/sync-lab/collection-items/${state.selectedCollectionId}`;
+      const params = new URLSearchParams();
+      if (state.selectedCollectionType && state.selectedCollectionType !== 'image') {
+        params.set('collection_type', state.selectedCollectionType);
+      }
+      const url = `/api/sync-lab/collection-items/${state.selectedCollectionId}${params.toString() ? '?' + params.toString() : ''}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
         let lastProgress = null;
@@ -264,8 +364,13 @@
 
           if (data.type === 'progress') {
             lastProgress = data;
-            setStatus(3, 'info',
-              `Fetching… Page ${data.page}: ${data.page_items} items (total: ${data.total})`);
+            if (data.collection_type === 'post') {
+              setStatus(3, 'info',
+                `Post ${data.post_number}/${data.total_posts}: ${data.post_images} images (${data.total_images} total)`);
+            } else {
+              setStatus(3, 'info',
+                `Fetching… Page ${data.page}: ${data.page_items} items (total: ${data.total})`);
+            }
           } else if (data.type === 'complete') {
             es.close();
             resolve(data);
@@ -291,6 +396,9 @@
 
       renderItemsTable();
       setStepState(3, 'complete');
+
+      // Create a resumable session now that we have collection info
+      await createSession();
 
       // Enable step 4
       if (total > 0) {
@@ -335,8 +443,10 @@
         : escHtml(rawUser.length > 25 ? rawUser.slice(0, 25) + '…' : rawUser);
 
       const imageUrl = `${getCivitaiWebBaseUrl()}/images/${id}`;
+      const postId = item.postId || item._post_id || '—';
       return `<tr data-id="${id}">
         <td class="col-id"><a href="${imageUrl}" target="_blank" rel="noopener">${id}</a></td>
+        <td class="col-post-id">${postId !== '—' ? escHtml(String(postId)) : '—'}</td>
         <td class="col-name" title="${escHtml(rawName)}${mimeType ? ' · ' + escHtml(mimeType) : ''}${size ? ' · ' + size : ''}">${escHtml(name)}</td>
         <td class="col-type">${escHtml(type)}</td>
         <td class="col-user" title="${escHtml(rawUser)}">${userDisplay}</td>
@@ -350,6 +460,7 @@
         <table class="collection-table items-table">
           <thead><tr>
             <th class="col-id">ID</th>
+            <th class="col-post-id">POST ID</th>
             <th class="col-name">Filename</th>
             <th class="col-type">Type</th>
             <th class="col-user">User</th>
@@ -388,7 +499,7 @@
     const imageIds = state.collectionItems.map(it => it.id || it.imageId).filter(Boolean);
 
     try {
-      const resp = await fetch('/api/sync-lab/analyze-local', {
+      const resp = await fetch('/api/sync-lab/analyze-local' + (state.sessionId ? `?session_id=${state.sessionId}` : ''), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_ids: imageIds }),
@@ -497,7 +608,7 @@
     }
 
     try {
-      const url = `/api/sync-lab/fetch-metadata?image_ids=${imageIds.join(',')}`;
+      const url = `/api/sync-lab/fetch-metadata?image_ids=${imageIds.join(',')}` + (state.sessionId ? `&session_id=${state.sessionId}` : '');
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -765,7 +876,7 @@
     }
 
     try {
-      const url = `/api/sync-lab/download?image_ids=${imageIds.join(',')}`;
+      const url = `/api/sync-lab/download?image_ids=${imageIds.join(',')}` + (state.sessionId ? `&session_id=${state.sessionId}` : '');
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -869,7 +980,7 @@
     el('step7-results').innerHTML = '';
 
     try {
-      const url = `/api/sync-lab/ingest?image_ids=${okIds.join(',')}&collection_id=${state.selectedCollectionId || ''}`;
+      const url = `/api/sync-lab/ingest?image_ids=${okIds.join(',')}&collection_id=${state.selectedCollectionId || ''}` + (state.sessionId ? `&session_id=${state.sessionId}` : '');
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -917,6 +1028,10 @@
 
       renderIngestDetails();
       setStepState(7, 'complete');
+
+      // Session is now complete — clear from state
+      state.sessionId = null;
+      hideResumeBanner();
     } catch (err) {
       setStepState(7, 'error');
       setStatus(7, 'error', err.detail || `Network error: ${err.message || err}`);
@@ -1229,6 +1344,182 @@
         }
       }
     });
+
+    // ── CivitAI Rate Limit Status ──────────────────────────────────────
+    const rateLimitText = document.getElementById('rate-limit-text');
+    const rateLimitIcon = document.getElementById('rate-limit-icon');
+
+    async function refreshRateLimit() {
+      if (!rateLimitText) return;
+      try {
+        const resp = await fetch('/api/civitai/auth/rate-limit-status');
+        const data = await resp.json();
+        if (!data.available) {
+          rateLimitText.textContent = data.message || 'Rate limit info unavailable';
+          return;
+        }
+        const rpm = data.rpm_window ?? 0;
+        const rps = data.observed_rps ?? 0;
+        const rpmLimit = data.rpm_limit ?? '?';
+        const total = data.total_requests ?? 0;
+        const limited429 = data.rate_limited_429 ?? 0;
+        const limited503 = data.rate_limited_503 ?? 0;
+        const backoff = data.backoff_active ? ` ⏸️ ${Math.ceil(data.backoff_remaining_seconds)}s backoff` : '';
+        const pct = typeof rpmLimit === 'number' ? Math.round((rpm / rpmLimit) * 100) : '?';
+        const filled = Math.min(20, Math.round((typeof pct === 'number' ? pct : 0) / 5));
+        const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, 20 - filled));
+
+        // Color indicator based on usage
+        let icon = '📊';
+        if (data.backoff_active) icon = '⏸️';
+        else if (limited503 > 0) icon = '🚫';
+        else if (limited429 > 0) icon = '🔴';
+        else if (typeof pct === 'number' && pct >= 60) icon = '🟡';
+        else icon = '🟢';
+        if (rateLimitIcon) rateLimitIcon.textContent = icon;
+
+        // Per-type breakdown (with 429 + 503 markers)
+        const tc = data.type_counts ?? {};
+        const t429 = data.type_429_counts ?? {};
+        const t503 = data.type_503_counts ?? {};
+        const typeParts = [];
+        for (const [type, count] of Object.entries(tc)) {
+          const c429 = t429[type] ?? 0;
+          const c503 = t503[type] ?? 0;
+          const label = type === 'trpc' ? 'tRPC'
+            : type === 'cdn_download' ? 'CDN'
+            : type;
+          const markers = [];
+          if (c429 > 0) markers.push(`${c429}✕429`);
+          if (c503 > 0) markers.push(`${c503}✕503`);
+          typeParts.push(markers.length > 0 ? `${label}:${count}(${markers.join(',')})` : `${label}:${count}`);
+        }
+        const typeStr = typeParts.join(' ');
+
+        // Per-FQDN breakdown
+        const fc = data.fqdn_counts ?? {};
+        const fqdnParts = Object.entries(fc)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([fqdn, count]) => `${fqdn}:${count}`);
+        const fqdnStr = fqdnParts.join(' ');
+
+        // Queue info
+        const queueDepth = data.queue_depth ?? 0;
+        const consumerAlive = data.consumer_alive ?? false;
+        const queueStr = `queue:${queueDepth}${consumerAlive ? '' : '⚠️dead'}`;
+
+        // Rate-at-failure: shows what RPM was observed when 429/503 hit
+        const failParts = [];
+        if (data.last_rpm_at_429 != null) {
+          failParts.push(`429@${data.last_rpm_at_429}rpm`);
+        }
+        if (data.last_rpm_at_503 != null) {
+          failParts.push(`503@${data.last_rpm_at_503}rpm`);
+        }
+        const failStr = failParts.length > 0 ? `  •  ${failParts.join(' ')}` : '';
+
+        rateLimitText.textContent =
+          `${bar} ${rpm}/${rpmLimit} req/min (${rps} rps)${backoff}  •  Total: ${total}  •  429s: ${limited429}  •  503s: ${limited503}${failStr}\n` +
+          `  ${typeStr}  •  ${fqdnStr}  •  ${queueStr}`;
+      } catch (_err) {
+        rateLimitText.textContent = 'Could not load rate limit status';
+      }
+    }
+
+    void refreshRateLimit();
+    setInterval(refreshRateLimit, 15000);
+
+    // ── Session Resume ────────────────────────────────────────────
+    async function tryResumeSession() {
+      const sessions = await listActiveSessions();
+      if (!sessions || sessions.length === 0) return;
+
+      // Use the most recent session
+      const session = sessions[0];
+      if (!session || session.is_complete) return;
+
+      // Restore state from session
+      state.sessionId = session.id;
+      state.selectedCollectionId = session.collection_id;
+      state.selectedCollectionType = session.collection_type;
+      state.selectedCollectionName = session.collection_name;
+
+      const lastComplete = getLastCompletedStep(session);
+
+      // Populate the collection dropdown with basic info
+      const dropdown = el('collection-dropdown');
+      if (dropdown) {
+        const opt = document.createElement('option');
+        opt.value = session.collection_id;
+        opt.textContent = session.collection_name || `Collection #${session.collection_id}`;
+        opt.selected = true;
+        dropdown.prepend(opt);
+      }
+
+      // Restore step UI
+      setStepState(1, 'complete');
+      setStepState(2, 'complete');
+      if (lastComplete >= 3) {
+        setStepState(3, 'complete');
+        if (session.step_3_data?.items) {
+          state.collectionItems = session.step_3_data.items;
+          renderItemsTable();
+          const total = state.collectionItems.length;
+          setStatus(3, 'success', `Fetched ${total} item(s) (resumed)`);
+        }
+        setFlowState('flow-3-4', true, `${state.collectionItems.length} items`);
+      }
+      if (lastComplete >= 4) {
+        setStepState(4, 'complete');
+        if (session.step_4_data) {
+          state.analysis = session.step_4_data;
+        }
+        setFlowState('flow-4-5', true);
+      }
+      if (lastComplete >= 5) {
+        setStepState(5, 'complete');
+        if (session.step_5_data?.results) {
+          const raw = session.step_5_data.results;
+          state.metadataResults = typeof raw === 'object' && !Array.isArray(raw)
+            ? Object.values(raw) : raw;
+        }
+        setStatus(5, 'success', `Metadata fetched (resumed — ${state.metadataResults.length} items)`);
+        setFlowState('flow-5-6', true);
+      }
+      if (lastComplete >= 6) {
+        setStepState(6, 'complete');
+        if (session.step_6_data?.results) {
+          const raw = session.step_6_data.results;
+          state.downloadResults = typeof raw === 'object' && !Array.isArray(raw)
+            ? Object.values(raw) : raw;
+        }
+        setStatus(6, 'success', `Downloads complete (resumed — ${state.downloadResults.length} items)`);
+        setFlowState('flow-6-7', true);
+      }
+      if (lastComplete >= 7) {
+        setStepState(7, 'complete');
+      }
+
+      // Enable the next step
+      const nextStep = lastComplete + 1;
+      if (nextStep <= 7) {
+        enableStep(nextStep);
+        const btnMap = { 4: 'btn-analyze-local', 5: 'btn-fetch-metadata', 6: 'btn-download', 7: 'btn-ingest' };
+        if (btnMap[nextStep]) enableBtn(btnMap[nextStep]);
+      }
+
+      // Show resume banner
+      showResumeBanner(session);
+    }
+
+    void tryResumeSession();
+
+    // Resume banner button handlers
+    const resumeBtn = document.getElementById('btn-resume-dismiss');
+    if (resumeBtn) {
+      resumeBtn.addEventListener('click', () => hideResumeBanner());
+    }
   }
 
   /* ── Boot ── */

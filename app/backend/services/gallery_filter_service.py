@@ -17,7 +17,7 @@ Missing feature terms use a double-colon qualifier:
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Query, Session
@@ -195,6 +195,7 @@ def apply_gallery_filter(
     id_filters.extend(_apply_feature_filters(images_query, parsed, query_service))
     id_filters.extend(_apply_nsfw_filters(images_query, parsed, query_service))
     id_filters.extend(_apply_missing_filters(images_query, parsed, db))
+    id_filters.extend(_apply_status_filters(images_query, parsed, db))
 
     # Intersect all ID sets (AND logic)
     if not id_filters:
@@ -292,11 +293,16 @@ def _apply_relational_filters(
     exclude_collections = exc.get("collection", [])
     if collection_names:
         normalized = query_service.normalize_query_values(collection_names)
-        images_query = images_query.filter(
-            ImageModel.collections.any(
-                func.lower(CollectionModel.name).in_(normalized)
-            )
+        # Use subquery instead of .any() to avoid conflict with
+        # joinedload(ImageModel.collections) on the base query.
+        coll_ids_sq = (
+            select(ImageCollectionMembership.image_id)
+            .join(CollectionModel, CollectionModel.id == ImageCollectionMembership.collection_id)
+            .where(func.lower(CollectionModel.name).in_(normalized))
+            .correlate(None)
+            .scalar_subquery()
         )
+        images_query = images_query.filter(ImageModel.id.in_(coll_ids_sq))
     if exclude_collections:
         normalized = query_service.normalize_query_values(exclude_collections)
         excluded_sq = (
@@ -698,6 +704,94 @@ def _filter_image_ids_by_missing_nsfw(images_query: Query) -> Optional[set[int]]
     if not result:
         return set()
     return {row[0] for row in result}
+
+
+# ---------------------------------------------------------------------------
+# Status filters (return ID sets for intersection)
+# ---------------------------------------------------------------------------
+
+# Simple column-check filters (negligible cost)
+_STATUS_FILTERS: dict[str, Callable] = {
+    "civitai_deleted": lambda Im: Im.civitai_deleted_at.is_not(None),
+    "no_civitai_link": lambda Im: Im.civitai_image_id.is_(None),
+    "corrupt": lambda Im: Im.is_corrupt == True,  # noqa: E712
+    "size_mismatch": lambda Im: and_(
+        Im.expected_file_size.is_not(None), Im.file_size != Im.expected_file_size
+    ),
+}
+
+
+def _build_status_conditions(
+    values: list[str],
+) -> list:
+    """Return a list of SQLAlchemy boolean expressions for *values*.
+
+    Included statuses are OR'd (match any); excluded statuses are
+    individually negated (exclude all requested).
+    """
+    conds: list = []
+    for s in values:
+        if s in _STATUS_FILTERS:
+            conds.append(_STATUS_FILTERS[s](ImageModel))
+        elif s == "duplicate_hash":
+            # file_hash shared by >1 image (indexed — fast)
+            dup_hashes = (
+                select(ImageModel.file_hash)
+                .group_by(ImageModel.file_hash)
+                .having(func.count() > 1)
+            )
+            conds.append(ImageModel.file_hash.in_(dup_hashes))
+        elif s == "multi_resource":
+            # Images that share a civitai_image_id with multiple distinct files
+            # (e.g. CivitAI serves both a still and a video resource for the
+            # same image entry, or the same image was downloaded from different
+            # CivitAI mirrors).
+            multi_ids = (
+                select(ImageModel.civitai_image_id)
+                .where(ImageModel.civitai_image_id.is_not(None))
+                .group_by(ImageModel.civitai_image_id)
+                .having(func.count(func.distinct(ImageModel.id)) > 1)
+            )
+            conds.append(ImageModel.civitai_image_id.in_(multi_ids))
+    return conds
+
+
+def _apply_status_filters(
+    images_query: Query,
+    parsed: ParsedGalleryFilter,
+    db: Session,
+) -> list[set[int]]:
+    """Apply include/exclude status filters, return ID sets to intersect."""
+    results: list[set[int]] = []
+    inc_status = parsed.included_by_type.get("status", [])
+    exc_status = parsed.excluded_by_type.get("status", [])
+
+    if not inc_status and not exc_status:
+        return results
+
+    if inc_status:
+        inc_conds = _build_status_conditions(inc_status)
+        if inc_conds:
+            rows = (
+                images_query.options()
+                .with_entities(ImageModel.id)
+                .filter(or_(*inc_conds))
+                .all()
+            )
+            results.append({row[0] for row in rows})
+
+    if exc_status:
+        exc_conds = _build_status_conditions(exc_status)
+        for cond in exc_conds:
+            rows = (
+                images_query.options()
+                .with_entities(ImageModel.id)
+                .filter(~cond)
+                .all()
+            )
+            results.append({row[0] for row in rows})
+
+    return results
 
 
 # ---------------------------------------------------------------------------

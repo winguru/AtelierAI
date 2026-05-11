@@ -48,6 +48,25 @@ document.addEventListener('DOMContentLoaded', () => {
         'EXIF Data',
         'CivitAI Meta',
     ];
+    const STATUS_PILL_ORDER = [
+        'CivitAI Deleted',
+        'No CivitAI Link',
+        'Duplicate Hash',
+        'Multi Resource',
+        'Corrupt Image',
+        'Size Mismatch',
+    ];
+    const STATUS_PILL_TO_SERVER = {
+        'CivitAI Deleted': 'civitai_deleted',
+        'No Civitai Link': 'no_civitai_link',
+        'Duplicate Hash': 'duplicate_hash',
+        'Multi Resource': 'multi_resource',
+        'Corrupt Image': 'corrupt',
+        'Size Mismatch': 'size_mismatch',
+    };
+    const STATUS_SERVER_TO_PILL = Object.fromEntries(
+        Object.entries(STATUS_PILL_TO_SERVER).map(([k, v]) => [v, k])
+    );
     const DETAIL_TAB_IDS = [
         'image-attributes',
         'generation-data',
@@ -83,6 +102,7 @@ document.addEventListener('DOMContentLoaded', () => {
             tags: [],
             collections: [],
             missingData: [],
+            status: [],
         };
     }
 
@@ -347,6 +367,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const advancedNsfwRatingPills = document.getElementById('advanced-nsfw-rating-pills');
     const advancedNsfwSafetyPills = document.getElementById('advanced-nsfw-safety-pills');
     const advancedMissingDataPills = document.getElementById('advanced-missing-data-pills');
+    const advancedStatusPills = document.getElementById('advanced-status-pills');
     const advancedAuthorSelected = document.getElementById('advanced-author-selected');
     const advancedAuthorInput = document.getElementById('advanced-author-input');
     const advancedAuthorOptions = document.getElementById('advanced-author-options');
@@ -1299,6 +1320,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const detailMediaFrame = document.getElementById('detail-media-frame');
     const detailImage = document.getElementById('detail-image');
     const detailVideo = document.getElementById('detail-video');
+    const detailVideoError = document.getElementById('detail-video-error');
+    const detailVideoDownload = document.getElementById('detail-video-download');
+    const detailVideoRetry = document.getElementById('detail-video-retry');
     const fullscreenPreview = document.getElementById('fullscreen-preview');
     const fullscreenLoopBtn = document.getElementById('fullscreen-loop-btn');
     const fullscreenCloseBtn = document.getElementById('fullscreen-close-btn');
@@ -1313,6 +1337,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const fullscreenEffectiveTagsCloud = document.getElementById('fullscreen-effective-tags-cloud');
     const fullscreenNegativeTagsWrap = document.getElementById('fullscreen-negative-tags-wrap');
     const fullscreenNegativeTagsCloud = document.getElementById('fullscreen-negative-tags-cloud');
+    const civitaiTagsCloud = document.getElementById('civitai-tags-cloud');
+    const danbooruTagsCloud = document.getElementById('danbooru-tags-cloud');
+    const promptTagsCloud = document.getElementById('prompt-tags-cloud');
     const userTagsCloud = document.getElementById('user-tags-cloud');
     const detailTitle = document.getElementById('detail-title');
     const detailSubtitle = document.getElementById('detail-subtitle');
@@ -1485,12 +1512,26 @@ document.addEventListener('DOMContentLoaded', () => {
             if (active) missingSources.push(source);
         }
 
+        // Collect status filters — map display labels to server keys.
+        const includeStatus = [];
+        const excludeStatus = [];
+        for (const entry of getAdvancedFilterValues('status')) {
+            const { mode, name } = _parseModePrefixEntry(entry);
+            const serverKey = STATUS_PILL_TO_SERVER[name] || name;
+            if (mode === 'exclude') {
+                excludeStatus.push(serverKey);
+            } else {
+                includeStatus.push(serverKey);
+            }
+        }
+
         // Combine include + exclude arrays for has-filter checks
         const artistNames = [...includeArtists, ...excludeArtists];
         const collectionNames = [...includeCollections, ...excludeCollections];
+        const statusNames = [...includeStatus, ...excludeStatus];
 
         const hasSupportedStructuredFilters = Boolean(
-            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || a1111Hires || a1111RegionalPrompter || a1111Adetailer || includeTags.length || excludeTags.length || missingData.length || missingSources.length
+            generationSoftwares.length || sourceSites.length || mimetypes.length || nsfwRatings.length || nsfwSafety.length || artistNames.length || collectionNames.length || a1111Hires || a1111RegionalPrompter || a1111Adetailer || includeTags.length || excludeTags.length || missingData.length || missingSources.length || statusNames.length
         );
 
         const normalizedQuery = String(query || '').trim();
@@ -1516,6 +1557,8 @@ document.addEventListener('DOMContentLoaded', () => {
             excludeTags,
             missingData,
             missingSources,
+            includeStatus,
+            excludeStatus,
             signature: JSON.stringify({
                 search: normalizedQuery,
                 generationSoftwares,
@@ -1534,6 +1577,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 excludeTags,
                 missingData,
                 missingSources,
+                includeStatus,
+                excludeStatus,
             }),
         };
 
@@ -1722,6 +1767,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     ...(body.filter.missing || []),
                     ...config.missingSources.map((s) => `source:${s}`),
                 ];
+            }
+            // Status filters
+            if (config.includeStatus && config.includeStatus.length) {
+                inc.status = config.includeStatus;
+            }
+            if (config.excludeStatus && config.excludeStatus.length) {
+                exc.status = config.excludeStatus;
             }
         }
 
@@ -2109,10 +2161,14 @@ document.addEventListener('DOMContentLoaded', () => {
             };
         }
 
+        // Extract from legacy blob fields (civitai_data)
         const civitai = image.civitai_data || image.civitai || {};
         addTagCollection(bySource.civitai, civitai?.tags);
         addTagCollection(bySource.civitai, civitai?.meta?.tags);
         addTagCollection(bySource.civitai, civitai?.image?.tags);
+
+        // Extract from post-backfill observation data (newer images)
+        addTagCollection(bySource.civitai, image.civitai_tags);
 
         const exif = image.exif_data && typeof image.exif_data === 'object' ? image.exif_data : {};
         addTagCollection(bySource.prompt, image.prompt_tags);
@@ -2393,6 +2449,218 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         return Array.from(pool).sort();
+    }
+
+    function getAuthorityCloud(source) {
+        if (source === 'civitai') return civitaiTagsCloud;
+        if (source === 'danbooru') return danbooruTagsCloud;
+        if (source === 'prompt') return promptTagsCloud;
+        if (source === 'user') return userTagsCloud;
+        return null;
+    }
+
+    function collectAuthorityTagsAcrossGroup(images, source) {
+        const tagMap = new Map();
+        for (const image of images) {
+            const bySource = extractImageScopeTags(image);
+            const names = Array.isArray(bySource[source]) ? bySource[source] : [];
+            names.forEach((name) => {
+                const normalized = normalizeTagName(name);
+                if (!normalized) {
+                    return;
+                }
+                const existing = tagMap.get(normalized);
+                if (existing) {
+                    existing.count += 1;
+                } else {
+                    tagMap.set(normalized, { name: normalized, count: 1 });
+                }
+            });
+        }
+        return new Map([...tagMap.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+    }
+
+    function isAuthorityTagFilterActive(source, tagName) {
+        if (!Array.isArray(state.treeTagFilter)) {
+            return false;
+        }
+        const normalizedSource = normalizeTagName(source);
+        const normalizedName = normalizeTagName(tagName);
+        return state.treeTagFilter.some((filter) => (
+            filter
+            && filter.mode !== 'exclude'
+            && normalizeTagName(filter.source) === normalizedSource
+            && normalizeTagName(filter.name) === normalizedName
+        ));
+    }
+
+    function toggleAuthorityTagFilter(source, tagName) {
+        const normalizedSource = normalizeTagName(source);
+        const normalizedName = normalizeTagName(tagName);
+        if (!normalizedSource || !normalizedName) {
+            return;
+        }
+
+        const existing = Array.isArray(state.treeTagFilter) ? state.treeTagFilter : [];
+        const keep = existing.filter((filter) => filter && filter.mode === 'exclude');
+        const include = existing.filter((filter) => filter && filter.mode !== 'exclude');
+        const nextInclude = include.filter((filter) => !(
+            normalizeTagName(filter.source) === normalizedSource
+            && normalizeTagName(filter.name) === normalizedName
+        ));
+
+        const wasActive = nextInclude.length !== include.length;
+        if (!wasActive) {
+            nextInclude.push({ source: normalizedSource, name: normalizedName, mode: 'include' });
+        }
+
+        const nextFilters = [...nextInclude, ...keep];
+        state.treeTagFilter = nextFilters.length > 0 ? nextFilters : null;
+        renderTreeTagFilterIndicator();
+    }
+
+    async function toggleNegativeOverrideForTag(tagName) {
+        const normalized = normalizeTagName(tagName);
+        if (!normalized) {
+            return;
+        }
+
+        const targets = getDetailSelectionGroup(getSelectedImage());
+        if (!targets.length) {
+            return;
+        }
+
+        const total = targets.length;
+        let alreadyApplied = 0;
+        targets.forEach((image) => {
+            if (getImageNegativeUserTags(image).includes(normalized)) {
+                alreadyApplied += 1;
+            }
+        });
+        const shouldApply = alreadyApplied < total;
+
+        let successCount = 0;
+        for (const image of targets) {
+            const editableHash = getEditableFileHash(image);
+            if (!editableHash) {
+                continue;
+            }
+
+            const current = getImageNegativeUserTags(image);
+            const hasTag = current.includes(normalized);
+            if ((shouldApply && hasTag) || (!shouldApply && !hasTag)) {
+                successCount += 1;
+                continue;
+            }
+
+            const next = shouldApply
+                ? [...current, normalized]
+                : current.filter((entry) => entry !== normalized);
+
+            try {
+                const result = await saveImageMetadata(editableHash, { user_negative_tags: next });
+                const saved = Array.isArray(result?.user_negative_tags)
+                    ? result.user_negative_tags.map((entry) => normalizeTagName(entry)).filter(Boolean)
+                    : next;
+                image.user_negative_tags = [...saved];
+                successCount += 1;
+            } catch {
+                // Keep processing remaining images.
+            }
+        }
+
+        if (successCount > 0) {
+            const action = shouldApply ? 'Applied' : 'Removed';
+            showToast(`${action} negative override for "${normalized}" on ${successCount}/${total} image(s).`, 'success');
+            renderAuthorityTagPanels();
+            renderFullscreenEffectiveTags(getSelectedImage());
+            await postSelectedImageTagsToTree(getSelectedImage());
+        }
+    }
+
+    function renderAuthorityTagPanel(source) {
+        const cloud = getAuthorityCloud(source);
+        if (!cloud) {
+            return;
+        }
+        cloud.innerHTML = '';
+
+        const targets = getDetailSelectionGroup(getSelectedImage());
+        if (!targets.length) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-tag-empty';
+            empty.textContent = 'Select an image to view tags.';
+            cloud.appendChild(empty);
+            return;
+        }
+
+        const total = targets.length;
+        const tagMap = collectAuthorityTagsAcrossGroup(targets, source);
+        if (!tagMap.size) {
+            const empty = document.createElement('p');
+            empty.className = 'detail-tag-empty';
+            empty.textContent = `No ${source} tags for the current selection.`;
+            cloud.appendChild(empty);
+            return;
+        }
+
+        for (const [, entry] of tagMap) {
+            const chip = document.createElement('span');
+            chip.className = `authority-tag-chip source-${source}${isAuthorityTagFilterActive(source, entry.name) ? ' filter-active' : ''}`;
+
+            let overrideCount = 0;
+            targets.forEach((image) => {
+                if (getImageNegativeUserTags(image).includes(entry.name)) {
+                    overrideCount += 1;
+                }
+            });
+            if (overrideCount === total) {
+                chip.classList.add('override-active');
+            }
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'authority-tag-remove';
+            removeBtn.textContent = 'x';
+            removeBtn.title = chip.classList.contains('override-active')
+                ? `Remove negative override for ${entry.name}`
+                : `Add negative override for ${entry.name}`;
+            removeBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void toggleNegativeOverrideForTag(entry.name);
+            });
+            chip.appendChild(removeBtn);
+
+            const labelBtn = document.createElement('button');
+            labelBtn.type = 'button';
+            labelBtn.className = 'authority-tag-label';
+            labelBtn.textContent = entry.name;
+            labelBtn.title = `Toggle ${source} filter for "${entry.name}"`;
+            labelBtn.addEventListener('click', () => {
+                toggleAuthorityTagFilter(source, entry.name);
+                void applyFilter();
+                renderAuthorityTagPanels();
+            });
+            chip.appendChild(labelBtn);
+
+            if (total > 1) {
+                const countBadge = document.createElement('span');
+                countBadge.className = 'authority-tag-count';
+                countBadge.textContent = `${entry.count}`;
+                countBadge.title = `${entry.count} of ${total} selected image(s) have this tag`;
+                chip.appendChild(countBadge);
+            }
+
+            cloud.appendChild(chip);
+        }
+    }
+
+    function renderAuthorityTagPanels() {
+        renderAuthorityTagPanel('civitai');
+        renderAuthorityTagPanel('danbooru');
+        renderAuthorityTagPanel('prompt');
+        renderAuthorityTagPanel('user');
     }
 
     async function applyUserTagToGroup(tagName) {
@@ -2696,12 +2964,53 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    function postSelectedImageTagsToTree(image) {
+    async function ensureImageTagsHydratedForTree(image) {
+        if (!image || typeof image !== 'object') {
+            return;
+        }
+
+        const hasCivitaiTags = Array.isArray(image.civitai_tags) && image.civitai_tags.length > 0;
+        if (hasCivitaiTags) {
+            return;
+        }
+
+        const imageId = image.base_image_id ?? image.id;
+        if (imageId == null || image._tree_tag_loading) {
+            return;
+        }
+
+        image._tree_tag_loading = true;
+        try {
+            const response = await fetch(`/api/images/${imageId}`);
+            if (!response.ok) {
+                return;
+            }
+            const detail = await response.json();
+            image.exif_data = detail?.exif_data ?? image.exif_data ?? null;
+            image.civitai_data = detail?.civitai_data ?? image.civitai_data ?? null;
+            image.json_metadata = detail?.json_metadata ?? image.json_metadata ?? null;
+            image.civitai_tags = Array.isArray(detail?.civitai_tags) ? detail.civitai_tags : [];
+        } catch {
+            // Best-effort hydration for tree selected-scope tags.
+        } finally {
+            image._tree_tag_loading = false;
+        }
+    }
+
+    async function postSelectedImageTagsToTree(image) {
         if (!treeEmbedFrame || !treeEmbedFrame.contentWindow) {
             return;
         }
 
-        const payload = buildSelectedImageTagsPayload(image);
+        const activeImage = image || getSelectedImage();
+        const selectionGroup = getDetailSelectionGroup(activeImage);
+        if (selectionGroup.length > 0) {
+            await Promise.all(selectionGroup.map((item) => ensureImageTagsHydratedForTree(item)));
+        } else if (activeImage) {
+            await ensureImageTagsHydratedForTree(activeImage);
+        }
+
+        const payload = buildSelectedImageTagsPayload(activeImage);
 
         treeEmbedFrame.contentWindow.postMessage(
             {
@@ -2733,24 +3042,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
-     * Send current gallery image keys to the models browser iframe so
-     * Gallery scope can mirror the main page's current filtered set.
+     * Send current gallery filter to the models browser iframe so
+     * Gallery scope can resolve usage counts server-side.
      */
     function postGalleryKeysToModelsFrame() {
         if (!modelsEmbedFrame || !modelsEmbedFrame.contentWindow) {
             return;
         }
 
-        const keys = Array.isArray(state.filteredImages)
-            ? state.filteredImages
-                .map((img) => img?.__key)
-                .filter((key) => typeof key === 'string' && key.length > 0)
-            : [];
+        // Send the filter body so the models iframe can POST it to the backend
+        const filterBody = _buildFilterBody();
 
         modelsEmbedFrame.contentWindow.postMessage(
             {
-                type: 'atelier:gallery-keys',
-                payload: { keys },
+                type: 'atelier:gallery-filter',
+                payload: filterBody,
             },
             window.location.origin,
         );
@@ -2940,20 +3246,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const bySource = extractImageScopeTags(image);
-        const allTagNames = new Set();
-        Object.values(bySource).forEach((names) => {
-            if (Array.isArray(names)) {
-                names.forEach((n) => {
-                    const norm = normalizeTagName(n);
-                    if (norm) allTagNames.add(norm);
-                });
-            }
-        });
         const filters = state.treeTagFilter;
 
         // All filters must be satisfied (AND logic)
         for (const filter of filters) {
-            const hasTag = allTagNames.has(filter.name);
+            const filterSource = normalizeTagName(filter.source);
+            const sourceTags = Array.isArray(bySource[filterSource]) ? bySource[filterSource] : [];
+            const hasTag = sourceTags.some((name) => normalizeTagName(name) === filter.name);
 
             if (filter.mode === 'exclude') {
                 // Exclude: image must NOT have this tag
@@ -4989,6 +5288,26 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function renderStatusPills(container) {
+        if (!container) {
+            return;
+        }
+        container.innerHTML = '';
+        STATUS_PILL_ORDER.forEach((label) => {
+            const isActive = isAdvancedFilterValueActive('status', label);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = `advanced-filter-pill${isActive ? ' is-active' : ''}`;
+            button.textContent = label;
+            button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+            button.title = isActive ? `Remove filter: ${label}` : `Add filter: ${label}`;
+            button.addEventListener('click', () => {
+                void toggleDetailFilter('status', label, label);
+            });
+            container.appendChild(button);
+        });
+    }
+
     function renderAdvancedFilterPillGroup(container, category, values) {
         if (!container) {
             return;
@@ -5144,9 +5463,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function getSearchDebounceMs(text) {
         const len = text.trim().length;
         if (len <= 0) return 0;
-        if (len === 1) return 2000;
-        if (len === 2) return 1000;
-        return 0; // 3+ chars: immediate
+        if (len === 1) return 600;
+        if (len === 2) return 400;
+        return 300; // 3+ chars: short debounce to avoid firing per-keystroke
     }
 
     async function fetchSuggestions(query) {
@@ -5442,6 +5761,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderAdvancedFilterSelectedChips(advancedTagSelected, 'tags');
         renderAdvancedFilterSelectedChips(advancedCollectionSelected, 'collections');
         renderDataExtractionPills(advancedMissingDataPills);
+        renderStatusPills(advancedStatusPills);
         populateDatalist(advancedAuthorOptions, authorOptions);
         // Tag datalist is managed dynamically by wireDynamicTagDatalist
         _refreshTagDatalistCache();
@@ -5932,6 +6252,19 @@ document.addEventListener('DOMContentLoaded', () => {
             return directDisplayUrl;
         }
         const localUrl = getImageUrl(image);
+        
+        // Transcode WebM to MP4 for Electron browsers (VSCode integrated browser)
+        const isElectron = /Electron/i.test(navigator.userAgent);
+        const filePath = String(image?.file_path || image?.file_name || '').toLowerCase();
+        const isWebM = filePath.endsWith('.webm') || (image?.mimetype || '').toLowerCase() === 'video/webm';
+        
+        if (isElectron && isWebM && image?.file_hash) {
+            const fileHash = image.file_hash.trim();
+            const versionToken = image?.date_modified || image?.id || image?.file_size || fileHash;
+            const version = versionToken ? `?v=${encodeURIComponent(String(versionToken))}` : '';
+            return `/api/images/${encodeURIComponent(fileHash)}/video_mp4${version}`;
+        }
+        
         const civitaiUrl = getCivitaiMediaUrl(image);
         if (looksLikeVideoUrl(civitaiUrl)) {
             const playableVideoUrl = getCivitaiPlayableVideoUrl(civitaiUrl);
@@ -8814,12 +9147,23 @@ document.addEventListener('DOMContentLoaded', () => {
                         image.exif_data = detail.exif_data ?? null;
                         image.civitai_data = detail.civitai_data ?? null;
                         image.json_metadata = detail.json_metadata ?? null;
+                        image.civitai_tags = Array.isArray(detail.civitai_tags)
+                            ? detail.civitai_tags
+                            : [];
                     }
                     image._detail_loaded = true;
                     image._detail_loading = false;
                     // Re-render detail panel only if this image is still selected.
                     if (getSelectedImage()?.__key === image.__key) {
                         showDetails(image);
+                        postSelectedImageTagsToTree(image);
+                    }
+                    // Also refresh fullscreen effective tags if fullscreen is
+                    // open and showing this image (tags depend on the
+                    // lazy-loaded exif/civitai/json_metadata blobs).
+                    const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
+                    if (fullscreenOpen && state.fullscreenSelectedKey === image.__key) {
+                        renderFullscreenEffectiveTags(image);
                     }
                 })
                 .catch(() => {
@@ -8836,6 +9180,7 @@ document.addEventListener('DOMContentLoaded', () => {
             releaseVideoElement(detailVideo);
             detailVideo.classList.add('hidden');
             detailVideo.style.display = 'none';
+            detailVideoError.classList.add('hidden');
             detailsContent.classList.add('hidden');
             detailsEmpty.classList.remove('hidden');
             if (sendToGenerationLabBtn) {
@@ -8961,6 +9306,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             detailVideo.classList.add('hidden');
             detailVideo.style.display = 'none';
+            detailVideoError.classList.add('hidden');
             releaseVideoElement(detailVideo);
             detailImage.classList.remove('hidden');
             detailImage.style.display = 'block';
@@ -9104,7 +9450,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         postSelectedImageTagsToTree(image);
         postSelectedImageModelsToModelsFrame(image);
-        renderUserTagsPanel();
+        renderAuthorityTagPanels();
 
         scheduleGalleryGridHeightSync();
     }
@@ -9892,6 +10238,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     page: pageImages,
                     filteredCount: pageInfo.total != null ? String(pageInfo.total) : null,
                     nextCursor: pageInfo.next_cursor != null ? String(pageInfo.next_cursor) : null,
+                    hasMore: pageInfo.has_more != null ? Boolean(pageInfo.has_more) : null,
                 };
             })
             .catch((err) => {
@@ -9921,6 +10268,7 @@ document.addEventListener('DOMContentLoaded', () => {
             let normalizedPage;
             let filteredCountHeader;
             let nextCursorHeader;
+            let _hasMoreFromServer = null;
 
             // Check for a usable prefetch result first.
             const prefetchUsable =
@@ -9937,6 +10285,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 normalizedPage = cached.page;
                 filteredCountHeader = cached.filteredCount;
                 nextCursorHeader = cached.nextCursor;
+                _hasMoreFromServer = cached.hasMore;
             } else {
                 // Discard stale prefetch.
                 _clearPrefetch();
@@ -9965,6 +10314,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pageInfo = result.page || {};
                 filteredCountHeader = pageInfo.total != null ? String(pageInfo.total) : null;
                 nextCursorHeader = pageInfo.next_cursor != null ? String(pageInfo.next_cursor) : null;
+                _hasMoreFromServer = pageInfo.has_more != null ? Boolean(pageInfo.has_more) : null;
                 normalizedPage = pageImages;
             }
 
@@ -9982,10 +10332,11 @@ document.addEventListener('DOMContentLoaded', () => {
             state.allImages = state.allImages.concat(dedupedPage);
             state.offset += dedupedPage.length;
 
-            // Cursor-based pagination: use page metadata to determine hasMore.
+            // Cursor-based pagination: prefer server's explicit has_more flag
+            // when available, otherwise fall back to cursor-presence heuristic.
             if (nextCursorHeader != null) {
                 state.cursor = Number(nextCursorHeader);
-                state.hasMore = true;
+                state.hasMore = _hasMoreFromServer !== null ? _hasMoreFromServer : true;
             } else if (state.cursor != null) {
                 // No next cursor returned — this was the last page.
                 state.cursor = null;
@@ -9994,6 +10345,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.hasMore = state.offset < state.filteredMatchCount;
             } else if (normalizedPage.length < state.pageSize) {
                 state.hasMore = false;
+            }
+
+            // Safety: if the server claims more data but this page yielded zero
+            // new images (after dedup), the pagination cursor is stuck in a loop.
+            // Force-stop to avoid infinite load/render jitter.
+            if (state.hasMore && dedupedPage.length === 0 && state.allImages.length > 0) {
+                state.hasMore = false;
+                state.cursor = null;
             }
 
             if (!state.selectedKey && state.selectedKeys.size === 0 && state.allImages.length) {
@@ -10359,7 +10718,8 @@ document.addEventListener('DOMContentLoaded', () => {
             ...getImageLayoutDebug(),
         });
     });
-    detailImage.addEventListener('click', () => {
+    detailImage.addEventListener('click', (event) => {
+        console.log('detailImage clicked', { hasImage: !!getSelectedImage(), isHidden: detailImage.classList.contains('hidden') });
         const image = getSelectedImage();
         if (!image || detailImage.classList.contains('hidden')) {
             return;
@@ -10414,39 +10774,57 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         scheduleGalleryGridHeightSync();
     });
+    
+    // Hide error UI when video successfully loads
+    detailVideo.addEventListener('loadeddata', () => {
+        detailVideoError.classList.add('hidden');
+    });
+    
     detailVideo.addEventListener('error', () => {
         if (!currentDebugImage) {
             return;
         }
         const failingUrl = detailVideo.currentSrc || getMediaUrlForDisplay(currentDebugImage) || '';
-        if (looksLikeImageUrl(failingUrl)) {
+        
+        // Show error UI for video files
+        if (!looksLikeImageUrl(failingUrl)) {
             detailVideo.classList.add('hidden');
             detailVideo.style.display = 'none';
-            releaseVideoElement(detailVideo);
-            detailImage.classList.remove('hidden');
-            detailImage.style.display = 'block';
-            detailImage.style.visibility = 'visible';
-            detailImage.style.opacity = '1';
-            detailImage.src = failingUrl;
+            
+            // Show error UI with download link and retry button
+            detailVideoError.classList.remove('hidden');
+            detailVideoDownload.href = failingUrl;
+            detailVideoDownload.style.display = 'inline-flex';
+            
             setDebugBadge({
                 key: currentDebugImage.__key,
                 file_hash: currentDebugImage.file_hash,
                 file_path: currentDebugImage.file_path,
                 ...getVariantFilenameDebug(currentDebugImage),
-                url: failingUrl,
-                status: 'video-fallback-to-image',
-                ...getImageLayoutDebug(detailImage),
+                url: failingUrl || getImageUrl(currentDebugImage),
+                status: 'video-error',
+                ...getImageLayoutDebug(detailVideo),
             });
             return;
         }
+        
+        // For image URLs that failed to load as video, try loading as image
+        detailVideo.classList.add('hidden');
+        detailVideo.style.display = 'none';
+        releaseVideoElement(detailVideo);
+        detailImage.classList.remove('hidden');
+        detailImage.style.display = 'block';
+        detailImage.style.visibility = 'visible';
+        detailImage.style.opacity = '1';
+        detailImage.src = failingUrl;
         setDebugBadge({
             key: currentDebugImage.__key,
             file_hash: currentDebugImage.file_hash,
             file_path: currentDebugImage.file_path,
             ...getVariantFilenameDebug(currentDebugImage),
-            url: failingUrl || getImageUrl(currentDebugImage),
-            status: 'video-error',
-            ...getImageLayoutDebug(detailVideo),
+            url: failingUrl,
+            status: 'video-fallback-to-image',
+            ...getImageLayoutDebug(detailImage),
         });
     });
     detailVideo.addEventListener('click', () => {
@@ -10456,6 +10834,47 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         openFullscreenPreviewFromImage(image);
     });
+    
+    // Video container click handler for fullscreen (catches clicks on video controls)
+    // Only handle clicks when video is visible - image clicks are handled by detailImage.addEventListener
+    detailMediaFrame.addEventListener('click', (event) => {
+        console.log('detailMediaFrame clicked', { target: event.target.tagName, videoHidden: detailVideo.classList.contains('hidden') });
+        const image = getSelectedImage();
+        if (!image) {
+            return;
+        }
+        // Only handle video clicks - image clicks are handled by detailImage listener
+        if (detailVideo.classList.contains('hidden')) {
+            return;
+        }
+        // Check if the click was on the video element or its container
+        // but not on the error overlay or other buttons
+        if (event.target.closest('#detail-video-error') ||
+            event.target.closest('button') ||
+            event.target.closest('a')) {
+            return;
+        }
+        openFullscreenPreviewFromImage(image);
+    });
+    
+    // Video error UI event handlers
+    detailVideoRetry.addEventListener('click', () => {
+        // Hide error UI and retry loading video
+        detailVideoError.classList.add('hidden');
+        detailVideo.classList.remove('hidden');
+        detailVideo.style.display = 'block';
+        
+        // Reload the video
+        const videoUrl = detailVideo.src;
+        detailVideo.load();
+        
+        setDebugBadge({
+            key: currentDebugImage?.__key || 'unknown',
+            status: 'video-retry',
+            url: videoUrl,
+        });
+    });
+    
     fullscreenCloseBtn.addEventListener('click', closeFullscreenPreview);
     if (fullscreenLoopBtn) {
         fullscreenLoopBtn.addEventListener('click', () => {
@@ -11836,6 +12255,40 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial auth status check
     void checkCivitaiAuthStatus();
+
+    // ── CivitAI Rate Limit Status ──────────────────────────────────────
+    const civitaiRateLimitText = document.getElementById('civitai-rate-limit-text');
+
+    async function refreshCivitaiRateLimit() {
+        if (!civitaiRateLimitText) return;
+        try {
+            const resp = await fetch('/api/civitai/auth/rate-limit-status');
+            const data = await resp.json();
+            if (!data.available) {
+                civitaiRateLimitText.textContent = data.message || 'Rate limit info unavailable';
+                return;
+            }
+            const rpm = data.rpm_window ?? 0;
+            const limit = data.rpm_limit ?? '?';
+            const total = data.total_requests ?? 0;
+            const throttles = data.throttle_count ?? 0;
+            const limited429 = data.rate_limited_429 ?? 0;
+            const backoff = data.backoff_active ? ` ⏸️ ${data.backoff_remaining_seconds}s backoff` : '';
+            const pct = typeof limit === 'number' ? Math.round((rpm / limit) * 100) : '?';
+            const bar = '█'.repeat(Math.min(20, Math.round((typeof pct === 'number' ? pct : 0) / 5))) +
+                        '░'.repeat(Math.max(0, 20 - Math.min(20, Math.round((typeof pct === 'number' ? pct : 0) / 5))));
+            civitaiRateLimitText.textContent =
+                `${bar} ${rpm}/${limit} req/min (${pct}%)${backoff}\n` +
+                `Total: ${total}  •  Paused: ${throttles}  •  429s: ${limited429}`;
+            civitaiRateLimitText.style.whiteSpace = 'pre-line';
+        } catch (_err) {
+            civitaiRateLimitText.textContent = 'Could not load rate limit status';
+        }
+    }
+
+    void refreshCivitaiRateLimit();
+    // Refresh every 30 seconds while the page is open
+    setInterval(refreshCivitaiRateLimit, 30000);
 
     infiniteScrollToggle.checked = state.infiniteEnabled;
     if (variantGroupingToggle) {

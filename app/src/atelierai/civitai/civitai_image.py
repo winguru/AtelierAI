@@ -56,6 +56,7 @@ class CivitaiImage:
         self.nsfw = False
         self.nsfw_level: Optional[int] = None
         self.published_at = None
+        self.post_id: Optional[int] = None
         self.url_hash_only = True  # If True, need to construct full URL
 
         # Generation data from getGenerationData endpoint
@@ -177,6 +178,14 @@ class CivitaiImage:
         self.url_hash = basic_data.get("url", self.url_hash)
         self.created_at = basic_data.get("createdAt")
         self.published_at = basic_data.get("publishedAt")
+
+        # Post association
+        raw_post_id = basic_data.get("postId")
+        if raw_post_id is not None:
+            try:
+                self.post_id = int(raw_post_id)
+            except (TypeError, ValueError):
+                pass
 
         # Author information
         user = basic_data.get("user")
@@ -455,6 +464,7 @@ class CivitaiImage:
             "nsfw": self.nsfw,
             "nsfwLevel": self.nsfw_level,
             "nsfw_level": self.nsfw_level,
+            "post_id": self.post_id,
             "model": self.model,
             "model_version": self.model_version,
             "base_model": self.base_model,

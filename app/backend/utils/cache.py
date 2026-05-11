@@ -273,10 +273,12 @@ class _SuppressAccessPathFilter(logging.Filter):
         if len(args) >= 3:
             method = str(args[1] or "").upper()
             path = str(args[2] or "")
+            # Strip query string so /api/images/state?t=123 matches /api/images/state
+            path_without_query = path.split("?", 1)[0]
             if method == self._blocked_method:
-                if path in self._exact_prefixes:
+                if path_without_query in self._exact_prefixes:
                     return False
-                if any(path.startswith(prefix) for prefix in self._blocked_prefixes):
+                if any(path_without_query.startswith(prefix) for prefix in self._blocked_prefixes):
                     return False
         return True
 
@@ -289,5 +291,5 @@ def _configure_uvicorn_access_logging(*, suppress_status_get_logs: bool) -> None
         if not isinstance(existing_filter, _SuppressAccessPathFilter)
     ]
     if suppress_status_get_logs:
-        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/tasks"]))
-        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/images/state"]))
+        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/tasks"]))
+        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/images/state"]))

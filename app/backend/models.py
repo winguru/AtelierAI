@@ -58,6 +58,7 @@ class ImageModel(Base):
     original_file_name = Column(String, nullable=True)
     file_hash = Column(String, index=True, nullable=False)  # Not unique — CivitAI duplicate assets can share the same SHA256
     file_size = Column(Integer)
+    expected_file_size = Column(Integer, nullable=True, comment="Size (bytes) declared by source API (e.g. CivitAI metadata.size). NULL for non-CivitAI images or before enrichment.")
     width = Column(Integer)
     height = Column(Integer)
     mimetype = Column(String, nullable=True)
@@ -76,6 +77,10 @@ class ImageModel(Base):
     civitai_image_id = Column(Integer, nullable=True, index=True)
     civitai_uuid = Column(String, nullable=True, index=True)
     civitai_hash = Column(String, nullable=True, index=True)
+    civitai_post_id = Column(Integer, nullable=True, index=True)
+    civitai_post_title = Column(String, nullable=True, comment="Title of the CivitAI post this image belongs to")
+    civitai_post_index = Column(Integer, nullable=True, comment="Position of this image within its CivitAI post (0-based)")
+    civitai_deleted_at = Column(DateTime, nullable=True, comment="When CivitAI confirmed this image no longer exists (404 from image.get)")
     blurhash = Column(String, nullable=True)
     artist_id = Column(Integer, ForeignKey("artists.id"), nullable=True)
     license_id = Column(Integer, ForeignKey("licenses.id"), nullable=True)
@@ -108,6 +113,9 @@ class ImageModel(Base):
     a1111_adetailer = Column(Boolean, nullable=False, default=False)
     has_comfyui_metadata = Column(Boolean, nullable=False, default=False)
     has_generation_prompt = Column(Boolean, nullable=False, default=False)
+
+    # Health / integrity flags
+    is_corrupt = Column(Boolean, nullable=False, default=False, comment="True when PIL verify() fails — truncated, bad header, or undecodable image data")
 
     # Relationships
     license = relationship("License", back_populates="images")
@@ -168,6 +176,8 @@ class ImageModel(Base):
             "file_name": self.file_name,
             "file_hash": self.file_hash,
             "file_size": self.file_size,
+            "expected_file_size": self.expected_file_size,
+            "is_corrupt": self.is_corrupt or False,
             "width": self.width,
             "height": self.height,
             "mimetype": self.mimetype,
@@ -189,6 +199,12 @@ class ImageModel(Base):
             "source_site": self.source_site,
             "civitai_uuid": self.civitai_uuid,
             "civitai_hash": self.civitai_hash,
+            "civitai_post_id": self.civitai_post_id,
+            "civitai_post_title": self.civitai_post_title,
+            "civitai_post_index": self.civitai_post_index,
+            "civitai_deleted_at": (
+                self.civitai_deleted_at.isoformat() if self.civitai_deleted_at is not None else None
+            ),
             "collection_type": self.collection_type,
             "artist": artist_info,
             "license": license_info,
@@ -1153,4 +1169,104 @@ class ModelObservation(Base):
             "ix_model_obs_type_primary_image",
             "resource_type", "is_primary", "image_id",
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sync Sessions — resumable sync-lab workflow state
+# ---------------------------------------------------------------------------
+
+class SyncSession(Base):
+    """Persists sync-lab workflow state so jobs can resume after page refresh,
+    server restart, or step failures."""
+
+    __tablename__ = "sync_sessions"
+
+    id = Column(String, primary_key=True)  # UUID4 string
+
+    # Collection identity (set at creation)
+    collection_id = Column(Integer, nullable=False, index=True)
+    collection_type = Column(String, nullable=False, default="image")  # "image" | "post"
+    collection_name = Column(String, nullable=True)
+
+    # Step statuses: "pending" | "in_progress" | "complete" | "failed" | "cancelled"
+    step_3_status = Column(String, nullable=False, default="pending")  # fetch items
+    step_4_status = Column(String, nullable=False, default="pending")  # analyze local
+    step_5_status = Column(String, nullable=False, default="pending")  # fetch metadata
+    step_6_status = Column(String, nullable=False, default="pending")  # download
+    step_7_status = Column(String, nullable=False, default="pending")  # ingest
+
+    # Step output data (JSON blobs persisted after each step completes)
+    step_3_data = Column(JSON, nullable=True)  # {image_ids, total_items, ...}
+    step_4_data = Column(JSON, nullable=True)  # {existing, new, tombstoned, ...}
+    step_5_data = Column(JSON, nullable=True)  # {results by image_id, ...}
+    step_6_data = Column(JSON, nullable=True)  # {downloaded_ids, failed_ids, temp_paths, ...}
+    step_7_data = Column(JSON, nullable=True)  # {ingested_ids, failed_ids, ...}
+
+    # Prepared imports serialized for step 6→7 handoff (survives restart)
+    prepared_imports = Column(JSON, nullable=True)
+
+    # Overall session state
+    active_step = Column(Integer, nullable=True)  # last step that was running
+    error_message = Column(Text, nullable=True)
+    is_complete = Column(Boolean, nullable=False, default=False, index=True)
+
+    # Timestamps
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("ix_sync_sessions_active", "is_complete", "updated_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CivitAI API Response Cache
+# ---------------------------------------------------------------------------
+
+
+class CivitaiApiCacheEntry(Base):
+    """Append-on-change cache for CivitAI tRPC API responses.
+
+    Each row represents one fetch of a specific (endpoint, request_key) pair.
+    Only the most recent row per (endpoint, request_key) has is_latest=True.
+    A new row is appended only when the response hash differs from the current
+    latest — identical re-fetches update fetched_at on the existing row.
+
+    request_key is a human-readable canonical key string (e.g. "id=12345" or
+    "id=12345&type=Image") derived from the request payload by the service
+    layer.  response_hash is a SHA-256 over the sorted-keys JSON serialization
+    of response_json.
+    """
+
+    __tablename__ = "civitai_api_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    endpoint = Column(Text, nullable=False)
+    request_key = Column(Text, nullable=False)
+    request_payload = Column(JSON, nullable=True)
+    response_json = Column(JSON, nullable=True)
+    response_hash = Column(Text, nullable=True)
+    http_status = Column(Integer, nullable=True)
+    fetched_at = Column(DateTime, nullable=False)
+    is_latest = Column(Boolean, nullable=False, default=True)
+    prev_id = Column(Integer, ForeignKey("civitai_api_cache.id"), nullable=True)
+
+    prev_entry = relationship(
+        "CivitaiApiCacheEntry",
+        remote_side=[id],
+        foreign_keys=[prev_id],
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "endpoint", "request_key", "response_hash",
+            name="uq_civitai_cache_endpoint_key_hash",
+        ),
+        Index(
+            "ix_civitai_cache_endpoint_key_fetched",
+            "endpoint", "request_key", "fetched_at",
+        ),
+        Index("ix_civitai_cache_latest", "endpoint", "is_latest"),
+        Index("ix_civitai_cache_fetched_at", "fetched_at"),
     )

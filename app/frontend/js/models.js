@@ -49,7 +49,7 @@
     selectedImageKey: null,
     selectedImageModels: { checkpoint: [], lora: [] },
     /** Gallery keys from parent */
-    galleryKeys: [],
+    galleryFilter: null,
     /** Pane scroll positions */
     scrollTopByType: { checkpoint: 0, lora: 0 },
     /** Loading state */
@@ -85,8 +85,12 @@
 
   // ── API ────────────────────────────────────────────────────────────────────
 
-  async function apiRequest(url) {
-    const resp = await fetch(url);
+  async function apiPost(url, body) {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
     if (!resp.ok) {
       throw new Error(`API error: ${resp.status}`);
     }
@@ -97,18 +101,20 @@
     state.loading = true;
 
     try {
-      const params = new URLSearchParams();
-      if (state.galleryKeys.length > 0) {
-        params.set("gallery_keys", state.galleryKeys.join(","));
+      const body = {};
+      // Gallery scope: send filter + search from parent page
+      if (state.galleryFilter) {
+        body.filter = state.galleryFilter.filter;
+        if (state.galleryFilter.search) {
+          body.search = state.galleryFilter.search;
+        }
       }
+      // Selected scope: send single image key
       if (state.selectedImageKey) {
-        params.set("selected_keys", state.selectedImageKey);
+        body.selected_keys = [state.selectedImageKey];
       }
 
-      const qs = params.toString();
-      const url = qs ? `${API_BASE}/state?${qs}` : `${API_BASE}/state`;
-
-      const payload = await apiRequest(url);
+      const payload = await apiPost(`${API_BASE}/state`, body);
 
       if (payload?.hierarchy) {
         state.hierarchy = payload.hierarchy;
@@ -143,9 +149,9 @@
       return;
     }
 
-    // Gallery sends gallery keys
-    if (data.type === "atelier:gallery-keys") {
-      state.galleryKeys = Array.isArray(data.payload?.keys) ? data.payload.keys : [];
+    // Gallery sends filter body for server-side resolution
+    if (data.type === "atelier:gallery-filter") {
+      state.galleryFilter = data.payload || null;
       loadState().then(() => render());
       return;
     }

@@ -44,6 +44,19 @@
       </div>
     </header>
 
+    <!-- CivitAI Rate Limit Status Bar -->
+    <div class="rate-limit-bar" id="rate-limit-bar">
+      <span class="rate-limit-icon" id="rate-limit-icon" title="CivitAI API rate limit status">📊</span>
+      <span class="rate-limit-text" id="rate-limit-text">Loading rate limit info…</span>
+    </div>
+
+    <!-- Resume Session Banner (hidden by default) -->
+    <div class="resume-banner" id="resume-banner" style="display:none">
+      <span class="resume-icon">🔄</span>
+      <span class="resume-info">Resuming previous session…</span>
+      <button class="btn-sm btn-secondary" id="btn-resume-dismiss" title="Dismiss this banner">Dismiss</button>
+    </div>
+
     <main class="sync-lab-layout">
 
       <!-- ── Step 1: Fetch Collections ── -->

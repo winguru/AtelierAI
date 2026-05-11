@@ -1,0 +1,35 @@
+# TODO List
+
+## Completed
+
+- [x] **Fix post collection progress display** — Fixed the progress display in the Sync Lab UI that shows sync progress after a collection is posted. The progress bar and status messages now update correctly during the sync process.
+- [x] **Add resumable sessions to Sync Lab** — Implemented full session persistence for the Sync Lab workflow. Sessions survive page refreshes, server restarts, and step failures/cancellations. Users can resume from the last completed step instead of re-downloading everything from step 1. Backend: `SyncSession` model, session CRUD API, checkpointing in steps 4–7. Frontend: auto-resume on page load, session cleanup on completion, resume banner UI.
+- [x] **Fix fullscreen tags lazy-load timing** — Tags were not showing consistently in fullscreen preview because `showDetails()` lazy-fetch completion callback only re-rendered the side detail panel, not the fullscreen effective tags panel. Fixed by adding `renderFullscreenEffectiveTags(image)` call after the detail fetch completes when fullscreen is open and showing that image.
+- [x] **Fix fullscreen selection outline** — The `fullscreen-selected` class was being toggled on the wrong media element during navigation due to a double-call of `updateFullscreenSelectionUi()` in `renderSelectionState()` followed by `openFullscreenPreviewFromImage()`. The first call operated on the old media element with the new selection key, causing the CSS `box-shadow` transition to bleed across navigation. Resolved by correcting the call sequence.
+
+## Pending
+
+- [ ] Add a "CivitAI Post Title" column to the database and display it in the Sync Lab UI, alongside the existing "CivitAI Post ID" column. This will help users more easily identify which CivitAI post each image belongs to without needing to cross-reference post IDs.
+- [ ] Add CivitAI Post ID, Title, and Index fields to the ImageData dataclass and ensure they are populated when fetching image data from the database. This will allow the Sync Lab UI to display this information for each image and enable sorting/filtering by CivitAI post metadata in the future if desired.
+- [ ] Update the CivitAI sync process to populate the new CivitAI Post Title field in the database when syncing images. This will ensure that existing images in the database have their post titles filled in without requiring a separate backfill process.
+- [ ] Add an index on the CivitAI Post ID column in the database to optimize queries that filter or sort by post ID. This will help maintain good performance when running ad-hoc gallery queries as the number of images grows.
+- [ ] Add CivitAI Post ID, Title, and Index to the image details pane in the Gallery. This will provide users with more context about each image and its source post when viewing image details in the Gallery.  Clikcing on the Post ID could also open the corresponding CivitAI post in a web browser for easy reference.
+- [ ] I like the request throttle display in the Sync Lab. Let's make this into a collapsible "CivitAI API Queue Status" section in the Sync Lab UI that shows the current API queue length, the active request details (one per line), estimated wait time, and recent API request history. This will give users better visibility into the sync process and help them understand any delays due to API rate limits.  We can also add a "Clear Queue" button for advanced users who want to break out of the current job and reset the sync state in case of errors or long backlogs.
+- [ ] In the Gallery view, when selecting a group of images, the image details pane currently only shows the artist names separated by a vertical bar (|). It would be better to have a tabular format with one artist per line and how many images in the selection belong to each artist, and if possible, make each artist name clickable to filter the gallery by that artist. This would improve readability and allow users to easily explore more images by the same artist.
+- [ ] In the fullscreen preview mode, the `fullscreen debug` detail box should be taller so that there is more room to show the image details without needing to scroll.  This will make it easier for users to see all the relevant information about the image, such as tags, artists, and CivitAI post details, without having to scroll through a small box.  A taller detail box would improve the overall user experience in the fullscreen preview mode.
+- [ ] CivitAI stores the Post index as an indication of the order of the images in the post, but this is not currently displayed as such in the UI.  Our first preference is to order the images in a variant group by the CivitAI Post Index, and then by the image ID as a tiebreaker.  This will ensure that the images are displayed in the same order as they appear in the original CivitAI post, which is likely more intuitive for users when browsing through images from a specific post.  Displaying the Post Index in the UI could also help users understand the relationship between images in a variant group and their original post on CivitAI.
+- [ ] Wire up authority tag detail tabs (CivitAI, Danbooru, Prompt, User) for iterative UI testing.
+	- Single selected image: show all tags for the authority as rounded chip/bubble elements.
+		- Chips should keep rounded-box appearance for long/multiline labels (not stretched ellipses).
+		- Multiline text should be center-aligned and balanced as reasonably as possible.
+		- No count badge for single-image selection.
+	- Multiple selected images: show union of tags for the authority with an in-chip count badge indicating number of selected images that contain the tag.
+	- Tag text click behavior:
+		- Click tag text to toggle a gallery filter for that exact authority+tag.
+		- Clicking the same tag again clears that specific filter.
+		- Clicking additional tags adds logical AND behavior across selected filters.
+	- Negative override UX:
+		- On hover, show an "x" badge on the left side of the chip.
+		- Clicking "x" persists it in bold and applies strikethrough to tag text.
+		- Persisted "x" means a negative override is saved to user-negative tags for selected image(s), marking the authority tag as incorrect.
+		- Clicking the persisted/bold "x" removes the override and restores normal chip/text state.

@@ -24,6 +24,7 @@ from atelierai.platform_detect import resolve_binary
 
 from models import ImageModel, Artist
 from image_data import ImageData
+from utils.url_helpers import normalize_civitai_url
 
 # A set of supported media extensions for easy lookup.
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".jfif", ".mp4", ".webm"}
@@ -1250,7 +1251,7 @@ class ImageProcessor:
             date_created=datetime.fromtimestamp(stat.st_ctime),
             date_modified=datetime.fromtimestamp(stat.st_mtime),
             artist_id=artist_obj.id if artist_obj else None,
-            source_url=source_url,
+            source_url=normalize_civitai_url(source_url),
             source_site=source_site,
             license_id=license_id if license_id else None,
             exif_data=self.exif_data,

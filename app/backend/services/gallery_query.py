@@ -29,8 +29,11 @@ from sqlalchemy import func, text
 from sqlalchemy.orm import Session, joinedload
 
 from models import (
+    AuthorityTerm,
+    ImageConceptObservation,
     ImageModel,
     ImageVariantGroupMembership,
+    TagAuthority,
 )
 from services.image_query_service import ImageQueryService
 from services.query_model import (
@@ -592,6 +595,38 @@ class GalleryQuery:
                             if img_id not in image_to_variant_group:
                                 image_to_variant_group[img_id] = grp_id
 
+        # ── Batched tag query ────────────────────────────────────────────
+        # Fetch civitai, prompt, and danbooru tags for ALL images on the
+        # page in a single query, then group by (image_id, authority).
+        _TAG_AUTHORITIES = ("civitai", "prompt", "danbooru")
+        image_ids = [img.id for img in images]
+        _tags_by_image: dict[int, dict[str, list[str]]] = {}
+        if image_ids:
+            tag_rows = (
+                db.query(
+                    ImageConceptObservation.image_id,
+                    TagAuthority.name,
+                    AuthorityTerm.external_name,
+                )
+                .join(
+                    AuthorityTerm,
+                    AuthorityTerm.id == ImageConceptObservation.authority_term_id,
+                )
+                .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+                .filter(
+                    ImageConceptObservation.image_id.in_(image_ids),
+                    TagAuthority.name.in_(_TAG_AUTHORITIES),
+                )
+                .order_by(AuthorityTerm.external_name.asc())
+                .all()
+            )
+            for img_id, authority, tag_name in tag_rows:
+                if tag_name:
+                    _tags_by_image.setdefault(img_id, {}).setdefault(
+                        authority, [],
+                    ).append(tag_name)
+
+        # ── Per-image display-item construction ──────────────────────────
         display_items: list[dict[str, Any]] = []
         for image in images:
             db_dict = self._image_data_from_db(image).to_dict()
@@ -637,6 +672,12 @@ class GalleryQuery:
             db_user_neg_tags = getattr(image, "user_negative_tags", None)
             if isinstance(db_user_neg_tags, list) and db_user_neg_tags:
                 merged["user_negative_tags"] = db_user_neg_tags
+
+            # Assign pre-fetched tags from batched query
+            img_tags = _tags_by_image.get(image.id, {})
+            merged["civitai_tags"] = img_tags.get("civitai", [])
+            merged["prompt_tags"] = img_tags.get("prompt", [])
+            merged["danbooru_tags"] = img_tags.get("danbooru", [])
 
             display_items.extend(
                 self._build_display_items_for_image(

@@ -6166,6 +6166,14 @@ document.addEventListener('DOMContentLoaded', () => {
         Object.assign(nextImage, basePayload);
         if (nextVariant && typeof nextVariant === 'object') {
             Object.assign(nextImage, nextVariant);
+            // Overwrite tag fields with the active variant's per-image tags.
+            // Without this, all variants show the base/first image's tags.
+            // Only copy when the variant actually carries tag data (non-null).
+            for (const tagField of ['civitai_tags', 'user_tags', 'user_negative_tags', 'prompt_tags', 'danbooru_tags']) {
+                if (nextVariant[tagField] != null) {
+                    nextImage[tagField] = nextVariant[tagField];
+                }
+            }
         }
         nextImage.__baseImageData = basePayload;
         nextImage.__variants = variants;
@@ -10928,8 +10936,10 @@ document.addEventListener('DOMContentLoaded', () => {
             closeFullscreenPreview();
         }
     });
+    // Capture-phase listener ensures arrow keys are intercepted before the
+    // browser's native <video> controls handle them (seeking ±5–10 s).
     document.addEventListener('keydown', (event) => {
-        if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) {
+        if (event.altKey || event.ctrlKey || event.metaKey) {
             return;
         }
 
@@ -10990,7 +11000,7 @@ document.addEventListener('DOMContentLoaded', () => {
             toggleFullscreenSelection();
             return;
         }
-    });
+    }, { capture: true });
     galleryGrid.addEventListener('scroll', () => {
         if (!state.infiniteEnabled || !state.hasMore || state.loadingPage) {
             return;

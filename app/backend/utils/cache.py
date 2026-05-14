@@ -293,3 +293,4 @@ def _configure_uvicorn_access_logging(*, suppress_status_get_logs: bool) -> None
     if suppress_status_get_logs:
         access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/tasks"]))
         access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/images/state"]))
+        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/civitai/auth/rate-limit-status"]))

@@ -806,6 +806,7 @@ def sync_lab_fetch_collection_items(
                         collection_id=collection_id,
                         limit=limit,
                         progress_callback=on_progress,
+                        collection_type=collection_type.capitalize() if collection_type else None,
                     )
                 q.put(("result", items))
             except CivitaiRequestError as exc:

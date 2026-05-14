@@ -114,22 +114,36 @@ class CivitaiPrivateScraper:
         limit: Optional[int] = None,
         debug: bool = False,
         progress_callback: Optional[Callable[[int, int, int], None]] = None,
+        collection_name: Optional[str] = None,
+        collection_type: Optional[str] = None,
+        initial_items: Optional[List[Dict]] = None,
+        initial_cursor: Optional[str] = None,
     ) -> List[Dict]:
         """Fetch collection items with full pagination support.
 
         Args:
             collection_id: The CivitAI collection ID
             limit: Maximum number of items to fetch (None = all)
+            collection_name: Human-readable collection name for log output
+            collection_type: Collection type label ("Image" or "Post")
+            initial_items: Pre-fetched items to prepend (e.g. from a probe),
+                avoiding a redundant first-page fetch.
+            initial_cursor: Cursor to resume pagination from (skips page 1
+                when ``initial_items`` contains those results already).
 
         Returns:
             List of collection items
         """
-        items: List[Dict] = []
-        cursor = None
+        items: list[dict] = list(initial_items) if initial_items else []
+        cursor = initial_cursor
         page_count = 0
-        seen_item_ids: set[int] = set()
+        seen_item_ids: set[int] = {item.get("id") for item in items}
 
-        print(f"Fetching collection items for ID: {collection_id}")
+        type_qualifier = f" {collection_type}" if collection_type else ""
+        if collection_name:
+            print(f"Fetching items for CivitAI{type_qualifier} Collection: {collection_id} ({collection_name})")
+        else:
+            print(f"Fetching items for CivitAI{type_qualifier} Collection: {collection_id}")
         self._debug_session_token(debug)
 
         while True:

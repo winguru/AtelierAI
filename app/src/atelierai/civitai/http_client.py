@@ -179,7 +179,7 @@ def _classify_request(url: str) -> tuple[RequestType, str, str]:
         → (TRPC, "civitai.red", "image.get")
 
         _classify_request("https://image.civitai.com/xyz123/original=true/123")
-        → (CDN_DOWNLOAD, "image.civitai.com", "/xyz123/original=true/123")
+        → (CDN_DOWNLOAD, "image.civitai.com", "cdn_get.image.civitai.com")
 
         _classify_request("https://civitai.red/api/v1/images")
         → (UNKNOWN, "civitai.red", "/api/v1/images")
@@ -198,8 +198,9 @@ def _classify_request(url: str) -> tuple[RequestType, str, str]:
         return RequestType.TRPC, fqdn, endpoint
 
     if "cdn" in fqdn.lower() or fqdn.startswith("image."):
-        # CDN path like /{uuid}/width=450/12345
-        return RequestType.CDN_DOWNLOAD, fqdn, path
+        # CDN path like /{uuid}/width=450/12345 — collapse to a single
+        # endpoint name so per-resource paths don't pollute the TPM table.
+        return RequestType.CDN_DOWNLOAD, fqdn, f"cdn_get.{fqdn}"
 
     return RequestType.UNKNOWN, fqdn, path
 
@@ -244,6 +245,20 @@ class CivitaiHttpClient:
     _FQDN_COUNTS: dict[str, int] = {}  # total by FQDN
     _ENDPOINT_COUNTS: dict[str, int] = {}  # total by endpoint name
 
+    # ── Per-endpoint sliding-window timestamps for per-endpoint RPM ─────────
+    _ENDPOINT_TIMESTAMPS: dict[str, list[float]] = {}  # endpoint → monotonic ts
+    _FIRST_REQUEST_TIME: Optional[float] = None  # wall-clock of first request
+
+    # ── Cache hit tracking (set by CivitaiAPI on DB cache hits) ─────────────
+    _CACHE_HIT_TOTAL: int = 0  # lifetime cache hits
+    _CACHE_HIT_COUNTS: dict[str, int] = {}  # per-endpoint cache hit count
+
+    # ── Periodic console status ─────────────────────────────────────────────
+    _PERIODIC_STATUS_INTERVAL: float = float(
+        os.environ.get("CIVITAI_STATUS_INTERVAL", "60")
+    )
+    _LAST_STATUS_PRINT_TIME: Optional[float] = None  # monotonic; None = never printed
+
     # ── 503 / rate-at-failure tracking ──────────────────────────────────────
     _TYPE_503_COUNTS: dict[RequestType, int] = {}  # 503s by type
     _RATE_LIMITED_503: int = 0  # lifetime 503 responses received
@@ -264,8 +279,17 @@ class CivitaiHttpClient:
     _REQUEST_QUEUE: _queue_module.Queue = _queue_module.Queue()
     _CONSUMER_THREAD: Optional[threading.Thread] = None
     _CONSUMER_LOCK = threading.Lock()
-    _MIN_REQUEST_INTERVAL: float = float(
-        os.environ.get("CIVITAI_MIN_REQUEST_INTERVAL", "0.25")
+    _TARGET_TPM: int = int(
+        os.environ.get("CIVITAI_TARGET_TPM", "225")
+    )
+    # Maximum seconds of pacing credit the token bucket may accumulate.
+    # A single anomalous stall (e.g. 5-minute timeout) would otherwise bank
+    # huge burst capacity and let a future flood of fast calls overshoot the
+    # target by orders of magnitude. Capping at N seconds bounds the burst
+    # to N / min_interval requests. At 200 TPM (300 ms interval), a 30 s cap
+    # → max 100 back-to-back requests; 60 s → max 200.
+    _MAX_BURST_SECONDS: float = float(
+        os.environ.get("CIVITAI_MAX_BURST_SECONDS", "30")
     )
     _QUEUE_STARTED = False
 
@@ -275,7 +299,7 @@ class CivitaiHttpClient:
     _CDN_DOWNLOAD_MIN_INTERVAL: float = float(
         os.environ.get("CIVITAI_CDN_MIN_INTERVAL", "1.0")
     )
-    _LAST_CDN_DOWNLOAD_TIME: float = 0.0  # monotonic timestamp
+    _NEXT_CDN_ALLOWED_TIME: Optional[float] = None  # monotonic; CDN token bucket
     # ── Last-request debug info ──────────────────────────────────────────────
     # Updated by the consumer thread after each completed request.
     # Single-threaded callers (scripts) can read this immediately after a
@@ -363,6 +387,8 @@ class CivitaiHttpClient:
         with cls._REQUEST_COUNTER_LOCK:
             counter[key] = counter.get(key, 0) + 1
 
+    _NEXT_ALLOWED_TIME: Optional[float] = None  # monotonic; token-bucket pacing
+
     @classmethod
     def _request_consumer_loop(cls) -> None:
         """Main loop for the FIFO request consumer daemon thread.
@@ -370,9 +396,9 @@ class CivitaiHttpClient:
         Dequeues one request at a time, records per-type / per-FQDN /
         per-endpoint counters, and dispatches to the singleton for execution.
 
-        Pacing is **observational only** — requests are sent as fast as the
-        queue provides them, and the observed rate is recorded so we can
-        correlate it with any 429 / 503 responses.
+        Proactive pacing enforces ``60 / _TARGET_TPM`` seconds between each
+        dispatched request, keeping the combined tRPC RPM near the target.
+        CDN downloads have their own separate pacing.
         """
         while True:
             try:
@@ -396,23 +422,58 @@ class CivitaiHttpClient:
                 cls._increment_type_counter(cls._FQDN_COUNTS, envelope.fqdn)
                 cls._increment_type_counter(cls._ENDPOINT_COUNTS, envelope.endpoint)
 
-                # ── CDN download pacing ────────────────────────────────────
-                # CDN (image.civitai.com) 503s at high concurrency.
-                # Enforce a minimum interval between CDN requests.
-                if envelope.request_type == RequestType.CDN_DOWNLOAD:
+                # ── Proactive API pacing (token bucket) ──────────────────
+                # Maintain `_NEXT_ALLOWED_TIME` as the earliest monotonic
+                # time at which the next request may dispatch. Each dispatch
+                # advances it by exactly `min_interval` — never clamped to
+                # `now`. This means slow calls (RTT > interval) leave
+                # `_NEXT_ALLOWED_TIME` in the past, banking credit that fast
+                # calls then consume by firing back-to-back with no sleep.
+                # Steady-state throughput converges to `_TARGET_TPM`
+                # regardless of per-call RTT variation.
+                min_interval = 60.0 / cls._TARGET_TPM
+                if envelope.request_type != RequestType.CDN_DOWNLOAD:
                     with cls._REQUEST_COUNTER_LOCK:
-                        last_cdn = cls._LAST_CDN_DOWNLOAD_TIME
                         now_mono = time.monotonic()
-                        wait_needed = cls._CDN_DOWNLOAD_MIN_INTERVAL - (
-                            now_mono - last_cdn
-                        )
+                        if cls._NEXT_ALLOWED_TIME is None:
+                            # First dispatch: bucket starts with 1 credit
+                            # available now — fires immediately.
+                            cls._NEXT_ALLOWED_TIME = now_mono
+                        else:
+                            # Cap accumulated credit so a single stalled
+                            # request can't bank an unbounded burst.
+                            burst_floor = now_mono - cls._MAX_BURST_SECONDS
+                            if cls._NEXT_ALLOWED_TIME < burst_floor:
+                                cls._NEXT_ALLOWED_TIME = burst_floor
+                        wait_needed = cls._NEXT_ALLOWED_TIME - now_mono
+                    if wait_needed > 0:
+                        cls._THROTTLE_COUNT += 1
+                        time.sleep(wait_needed)
+                    with cls._REQUEST_COUNTER_LOCK:
+                        cls._NEXT_ALLOWED_TIME += min_interval
+
+                # ── CDN download pacing (token bucket) ─────────────────────
+                # Same token-bucket pattern as tRPC pacing above: advance
+                # by `cdn_interval` per dispatch with no clamp, so slow
+                # CDN downloads bank credit for subsequent faster ones.
+                if envelope.request_type == RequestType.CDN_DOWNLOAD:
+                    cdn_interval = cls._CDN_DOWNLOAD_MIN_INTERVAL
+                    with cls._REQUEST_COUNTER_LOCK:
+                        now_mono = time.monotonic()
+                        if cls._NEXT_CDN_ALLOWED_TIME is None:
+                            cls._NEXT_CDN_ALLOWED_TIME = now_mono
+                        else:
+                            burst_floor = now_mono - cls._MAX_BURST_SECONDS
+                            if cls._NEXT_CDN_ALLOWED_TIME < burst_floor:
+                                cls._NEXT_CDN_ALLOWED_TIME = burst_floor
+                        wait_needed = cls._NEXT_CDN_ALLOWED_TIME - now_mono
                     if wait_needed > 0:
                         time.sleep(wait_needed)
                     with cls._REQUEST_COUNTER_LOCK:
-                        cls._LAST_CDN_DOWNLOAD_TIME = time.monotonic()
+                        cls._NEXT_CDN_ALLOWED_TIME += cdn_interval
 
                 # Record in the sliding window (used for observed-rate metrics)
-                cls._record_request()
+                cls._record_request(endpoint=envelope.endpoint)
 
                 # Execute the actual HTTP request with retries.
                 # _execute_envelope_request is an instance method (needs
@@ -496,7 +557,8 @@ class CivitaiHttpClient:
                 print(
                     f"⏳ CivitAI rate limit reached ({envelope.request_type.value} "
                     f"{envelope.endpoint}) at {rpm_now} RPM; "
-                    f"enforcing global backoff for {enforced_wait:.1f}s"
+                    f"enforcing global backoff for {enforced_wait:.1f}s\n"
+                    f"{self.__class__._format_tpm_table()}"
                 )
                 last_error = CivitaiRequestError(
                     "CivitAI rate limit reached (HTTP 429)",
@@ -526,7 +588,8 @@ class CivitaiHttpClient:
                         self.__class__._LAST_503_TIME = time.time()
                     print(
                         f"🚫 CivitAI 503 ({envelope.request_type.value} "
-                        f"{envelope.endpoint}) at {rpm_now} RPM"
+                        f"{envelope.endpoint}) at {rpm_now} RPM\n"
+                        f"{self.__class__._format_tpm_table()}"
                     )
                 if attempt >= self._max_attempts:
                     raise last_error
@@ -553,10 +616,15 @@ class CivitaiHttpClient:
                         self.__class__._RATE_LIMITED_403_CLOUDFLARE += 1
                         self.__class__._LAST_RPM_AT_403_CF = rpm_now
                         self.__class__._LAST_403_CF_TIME = time.time()
+                    backoff = self.activate_global_backoff(
+                        90.0, reason="HTTP 403 (Cloudflare)"
+                    )
                     print(
                         f"🚫 CivitAI 403 Cloudflare "
                         f"({envelope.request_type.value} {envelope.endpoint}) "
-                        f"at {rpm_now} RPM"
+                        f"at {rpm_now} RPM; "
+                        f"pausing all requests for {backoff:.0f}s\n"
+                        f"{self.__class__._format_tpm_table()}"
                     )
 
                 detail = f"CivitAI request failed with HTTP {response.status_code}"
@@ -612,7 +680,7 @@ class CivitaiHttpClient:
             observed_rps: observed requests-per-second (rpm_window / window)
             rpm_limit: configured RPM ceiling (informational — not enforced)
             total_requests: lifetime request count
-            throttle_count: always 0 (pacing removed)
+            throttle_count: number of proactive pacing pauses applied
             rate_limited_429: number of HTTP 429 responses received
             rate_limited_503: number of HTTP 503 responses received
             rate_limited_403_cloudflare: number of Cloudflare 403 challenges received
@@ -625,7 +693,7 @@ class CivitaiHttpClient:
             backoff_active: whether a global backoff is currently active
             backoff_remaining_seconds: seconds remaining in current backoff
             queue_depth: number of requests waiting in the FIFO queue
-            min_interval: configured minimum interval (seconds — not enforced)
+            target_tpm: configured target transactions-per-minute for tRPC requests
             consumer_alive: whether the FIFO consumer thread is running
             type_counts: lifetime requests broken down by RequestType
             type_429_counts: 429 responses broken down by RequestType
@@ -670,6 +738,9 @@ class CivitaiHttpClient:
         # Observed requests-per-second (across the sliding window)
         observed_rps = round(rpm_window / cls._RATE_LIMIT_WINDOW, 2) if rpm_window else 0.0
 
+        # Per-endpoint RPM and session stats
+        tpm_breakdown = cls._build_tpm_breakdown()
+
         return {
             "rpm_window": rpm_window,
             "observed_rps": observed_rps,
@@ -690,7 +761,8 @@ class CivitaiHttpClient:
                 cls.get_global_backoff_remaining_seconds(), 1
             ),
             "queue_depth": cls._REQUEST_QUEUE.qsize(),
-            "min_interval": cls._MIN_REQUEST_INTERVAL,
+            "target_tpm": cls._TARGET_TPM,
+            "min_interval": round(60.0 / cls._TARGET_TPM, 3),
             "consumer_alive": consumer_alive,
             "type_counts": {
                 rt.value: type_counts.get(rt, 0) for rt in RequestType
@@ -707,13 +779,18 @@ class CivitaiHttpClient:
             "cdn_min_interval": cdn_min_interval,
             "fqdn_counts": fqdn_counts,
             "endpoint_counts": endpoint_counts,
+            "tpm_breakdown": tpm_breakdown,
         }
 
     @classmethod
-    def _record_request(cls) -> None:
+    def _record_request(cls, endpoint: Optional[str] = None) -> None:
         """Record an outgoing request in the sliding window."""
         now = time.time()
+        now_mono = time.monotonic()
+        should_print_status = False
         with cls._REQUEST_COUNTER_LOCK:
+            if cls._FIRST_REQUEST_TIME is None:
+                cls._FIRST_REQUEST_TIME = now
             cls._REQUEST_TIMESTAMPS.append(now)
             cls._REQUEST_TOTAL += 1
             # Prune timestamps older than the window to keep the list bounded
@@ -721,6 +798,32 @@ class CivitaiHttpClient:
             cls._REQUEST_TIMESTAMPS = [
                 ts for ts in cls._REQUEST_TIMESTAMPS if ts >= window_start
             ]
+            # Per-endpoint sliding window for per-endpoint RPM
+            if endpoint:
+                ep_ts = cls._ENDPOINT_TIMESTAMPS.setdefault(endpoint, [])
+                ep_ts.append(now)
+                cls._ENDPOINT_TIMESTAMPS[endpoint] = [
+                    ts for ts in ep_ts if ts >= window_start
+                ]
+            # ── Periodic status table ────────────────────────────────────
+            # Print a status table every N seconds while requests are active.
+            # _LAST_STATUS_PRINT_TIME is None until the first print, so the
+            # first table appears at exactly N seconds from session start.
+            if cls._PERIODIC_STATUS_INTERVAL > 0:
+                last_print = cls._LAST_STATUS_PRINT_TIME
+                elapsed = now_mono - last_print if last_print is not None else 0.0
+                # For the very first check, anchor to session age instead
+                # of the uninitialized sentinel.
+                if last_print is None and cls._FIRST_REQUEST_TIME:
+                    session_age = now - cls._FIRST_REQUEST_TIME
+                    if session_age >= cls._PERIODIC_STATUS_INTERVAL:
+                        cls._LAST_STATUS_PRINT_TIME = now_mono
+                        should_print_status = True
+                elif last_print is not None and elapsed >= cls._PERIODIC_STATUS_INTERVAL:
+                    cls._LAST_STATUS_PRINT_TIME = now_mono
+                    should_print_status = True
+        if should_print_status:
+            print(f"\n{cls._format_tpm_table()}")
 
     @classmethod
     def _current_rpm(cls) -> int:
@@ -729,6 +832,196 @@ class CivitaiHttpClient:
         with cls._REQUEST_COUNTER_LOCK:
             window_start = now - cls._RATE_LIMIT_WINDOW
             return sum(1 for ts in cls._REQUEST_TIMESTAMPS if ts >= window_start)
+
+    @classmethod
+    def record_cache_hit(cls, endpoint: str) -> None:
+        """Record a cache hit for an endpoint (called by CivitaiAPI on DB cache hits).
+
+        These are NOT counted in TPM / RPM calculations — they represent
+        responses served from the local DB cache without making any HTTP request.
+        """
+        with cls._REQUEST_COUNTER_LOCK:
+            cls._CACHE_HIT_TOTAL += 1
+            cls._CACHE_HIT_COUNTS[endpoint] = (
+                cls._CACHE_HIT_COUNTS.get(endpoint, 0) + 1
+            )
+
+    @classmethod
+    def _build_tpm_breakdown(cls) -> dict[str, Any]:
+        """Build a dict with per-endpoint RPM, aggregate RPM, and session stats.
+
+        Returns::
+            {
+                "aggregate_rpm": int,       # 60s sliding-window RPM across all endpoints
+                "endpoints": {name: {"60s_rpm": int, "total": int, "cached": int}},
+                                            # per-endpoint detail (top 10 by RPM)
+                "session_total": int,        # lifetime request count
+                "session_duration_s": float, # seconds since first request
+                "session_avg_tpm": float,    # lifetime average TPM
+                "session_cached": int,       # total cache hits
+            }
+        """
+        now = time.time()
+        with cls._REQUEST_COUNTER_LOCK:
+            window_start = now - cls._RATE_LIMIT_WINDOW
+            aggregate = sum(
+                1 for ts in cls._REQUEST_TIMESTAMPS if ts >= window_start
+            )
+            total = cls._REQUEST_TOTAL
+            first_time = cls._FIRST_REQUEST_TIME
+            endpoint_totals = dict(cls._ENDPOINT_COUNTS)
+            cache_counts = dict(cls._CACHE_HIT_COUNTS)
+            cache_total = cls._CACHE_HIT_TOTAL
+            # Per-endpoint 60s window RPM from per-endpoint sliding windows.
+            # Include endpoints with active requests.
+            ep_detail: dict[str, dict[str, int]] = {}
+            for ep_name, ep_ts in cls._ENDPOINT_TIMESTAMPS.items():
+                rpm_60s = sum(1 for ts in ep_ts if ts >= window_start)
+                ep_cached = cache_counts.get(ep_name, 0)
+                if rpm_60s > 0 or ep_cached > 0:
+                    ep_detail[ep_name] = {
+                        "60s_rpm": rpm_60s,
+                        "total": endpoint_totals.get(ep_name, 0),
+                        "cached": ep_cached,
+                    }
+            # Also include endpoints that were purely cache-served (no HTTP
+            # requests).  These won't appear in _ENDPOINT_TIMESTAMPS at all.
+            for ep_name, ep_cached in cache_counts.items():
+                if ep_name not in ep_detail and ep_cached > 0:
+                    ep_detail[ep_name] = {
+                        "60s_rpm": 0,
+                        "total": 0,
+                        "cached": ep_cached,
+                    }
+
+        duration_s = 0.0
+        avg_tpm = 0.0
+        if first_time is not None:
+            duration_s = now - first_time
+            if duration_s > 0:
+                avg_tpm = round(total / (duration_s / 60.0), 1)
+
+        # Top 10 endpoints by 60s RPM (descending), then by cached count
+        top_eps = dict(
+            sorted(
+                ep_detail.items(),
+                key=lambda item: (item[1]["60s_rpm"], item[1]["cached"]),
+                reverse=True,
+            )[:10]
+        )
+
+        return {
+            "aggregate_rpm": aggregate,
+            "endpoints": top_eps,
+            "session_total": total,
+            "session_duration_s": round(duration_s, 1),
+            "session_avg_tpm": avg_tpm,
+            "session_cached": cache_total,
+        }
+
+    @classmethod
+    def _format_tpm_summary(cls) -> str:
+        """Format a human-readable TPM summary for log messages."""
+        breakdown = cls._build_tpm_breakdown()
+        parts = [f"aggregate {breakdown['aggregate_rpm']} RPM"]
+        if breakdown["session_total"] > 0:
+            parts.append(
+                f"session: {breakdown['session_total']} req "
+                f"in {breakdown['session_duration_s']:.0f}s "
+                f"(avg {breakdown['session_avg_tpm']:.1f} TPM)"
+            )
+        ep_items = breakdown.get("endpoints")
+        if ep_items:
+            ep_str = ", ".join(
+                f"{name}={detail['60s_rpm']}" for name, detail in ep_items.items()
+            )
+            parts.append(f"per-endpoint: [{ep_str}]")
+        return " | ".join(parts)
+
+    @classmethod
+    def _format_tpm_table(cls) -> str:
+        """Format endpoint stats as a readable table for backoff log messages.
+
+        Columns: API Endpoint | Cached | Total Reqs | Total Time | RPM | 60s RPM
+        Rows: one per active endpoint (top 10 by 60s RPM) + Total Aggregate.
+
+        Uses console_utils helpers for Unicode-aware display width.
+        """
+        from atelierai.civitai.console_utils import (
+            pad_to_width,
+            rpad_to_width,
+            truncate_to_width,
+        )
+
+        breakdown = cls._build_tpm_breakdown()
+        session_total = breakdown["session_total"]
+        session_cached = breakdown["session_cached"]
+        session_s = breakdown["session_duration_s"]
+        aggregate_rpm = breakdown["aggregate_rpm"]
+        ep_items = breakdown.get("endpoints", {})
+
+        # Calculate aggregate RPM as total / (session_duration / 60)
+        aggregate_lifetime_rpm = 0.0
+        if session_s > 0:
+            aggregate_lifetime_rpm = round(session_total / (session_s / 60.0), 1)
+
+        # Column widths
+        col_ep = 25
+        col_cached = 8
+        col_n = 11
+        col_t = 11
+        col_rpm = 8
+        col_60rpm = 9
+
+        headers = [
+            pad_to_width("API Endpoint", col_ep),
+            rpad_to_width("Cached", col_cached),
+            rpad_to_width("Total Reqs", col_n),
+            rpad_to_width("Total Time", col_t),
+            rpad_to_width("RPM", col_rpm),
+            rpad_to_width("60s RPM", col_60rpm),
+        ]
+        header_line = " ".join(headers)
+        sep = "─" * len(header_line)
+
+        lines = [sep, header_line, sep]
+
+        for ep_name, detail in ep_items.items():
+            ep_total = detail["total"]
+            ep_cached = detail.get("cached", 0)
+            rpm_60s = detail["60s_rpm"]
+            # Per-endpoint session time is the global session time
+            ep_session_rpm = 0.0
+            if session_s > 0:
+                ep_session_rpm = round(ep_total / (session_s / 60.0), 1)
+            # Truncate long endpoint names (CDN paths)
+            display_name = truncate_to_width(ep_name, col_ep)
+            lines.append(
+                " ".join([
+                    pad_to_width(display_name, col_ep),
+                    rpad_to_width(str(ep_cached), col_cached),
+                    rpad_to_width(str(ep_total), col_n),
+                    rpad_to_width(f"{session_s:.0f}s", col_t),
+                    rpad_to_width(str(ep_session_rpm), col_rpm),
+                    rpad_to_width(str(rpm_60s), col_60rpm),
+                ])
+            )
+
+        # Aggregate row
+        lines.append(sep)
+        lines.append(
+            " ".join([
+                pad_to_width("Total Aggregate", col_ep),
+                rpad_to_width(str(session_cached), col_cached),
+                rpad_to_width(str(session_total), col_n),
+                rpad_to_width(f"{session_s:.0f}s", col_t),
+                rpad_to_width(str(aggregate_lifetime_rpm), col_rpm),
+                rpad_to_width(str(aggregate_rpm), col_60rpm),
+            ])
+        )
+        lines.append(sep)
+
+        return "\n".join(lines)
 
     @classmethod
     def activate_global_backoff(

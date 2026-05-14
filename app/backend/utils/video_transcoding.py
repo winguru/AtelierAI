@@ -157,7 +157,7 @@ async def transcode_webm_to_mp4(
     except asyncio.TimeoutError:
         if process:
             process.kill()
-        raise VideoTranscodingError(f"Transcoding timed out after 5 minutes")
+        raise VideoTranscodingError("Transcoding timed out after 5 minutes")
     except FileNotFoundError:
         raise VideoTranscodingError("ffmpeg not found. Please install ffmpeg to enable video transcoding.")
     except Exception as e:

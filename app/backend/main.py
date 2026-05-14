@@ -126,8 +126,39 @@ from services.image_query_service import ImageQueryService
 from services.metadata_extraction import extract_civitai_nsfw_level
 from services.model_reference_service import ModelReferenceService
 from services.taxonomy_service import TaxonomyService
+from services.db_migrations import (
+    _backfill_civitai_base_model_ids as _backfill_civitai_base_model_ids,
+    _backfill_civitai_users as _backfill_civitai_users,
+    _backfill_user_tags_from_sidecars as _backfill_user_tags_from_sidecars,
+    _backfill_user_tags_to_observations as _backfill_user_tags_to_observations,
+    _ensure_base_model_id_column as _ensure_base_model_id_column,
+    _ensure_blurhash_column as _ensure_blurhash_column,
+    _ensure_civitai_creator_id_column as _ensure_civitai_creator_id_column,
+    _ensure_civitai_deleted_at_column as _ensure_civitai_deleted_at_column,
+    _ensure_civitai_hash_column as _ensure_civitai_hash_column,
+    _ensure_civitai_image_id_column as _ensure_civitai_image_id_column,
+    _ensure_civitai_post_id_column as _ensure_civitai_post_id_column,
+    _ensure_civitai_post_title_index_columns as _ensure_civitai_post_title_index_columns,
+    _ensure_civitai_user_columns as _ensure_civitai_user_columns,
+    _ensure_civitai_uuid_column as _ensure_civitai_uuid_column,
+    _ensure_collection_sync_columns as _ensure_collection_sync_columns,
+    _ensure_expected_file_size_column as _ensure_expected_file_size_column,
+    _ensure_file_hash_nonunique as _ensure_file_hash_nonunique,
+    _ensure_image_lifecycle_columns as _ensure_image_lifecycle_columns,
+    _ensure_image_variant_columns as _ensure_image_variant_columns,
+    _ensure_is_corrupt_column as _ensure_is_corrupt_column,
+    _ensure_observation_authority_term_unique_index as _ensure_observation_authority_term_unique_index,
+    _ensure_observation_unique_constraint as _ensure_observation_unique_constraint,
+    _ensure_original_file_name_column as _ensure_original_file_name_column,
+    _ensure_promoted_metadata_columns as _ensure_promoted_metadata_columns,
+    _ensure_user_negative_tags_column as _ensure_user_negative_tags_column,
+    _ensure_user_nsfw_columns as _ensure_user_nsfw_columns,
+    _ensure_user_tags_column as _ensure_user_tags_column,
+    _seed_civitai_base_models as _seed_civitai_base_models,
+    create_initial_data as create_initial_data,
+)
 from services import a1111_parser_service as _a1111_svc
-from bootstrap import populate_initial_data
+# populate_initial_data moved to services/db_migrations.py
 from schemas import (
     ImageUpdateRequest,
     CivitaiImportRequest,
@@ -254,6 +285,7 @@ class _PreparedCivitaiImport:
     civitai_post_id: Optional[int] = None
     civitai_post_title: Optional[str] = None
     civitai_post_index: Optional[int] = None
+    raw_tag_records: Optional[list[dict[str, Any]]] = None
 
 
 @dataclass
@@ -279,6 +311,10 @@ class _CivitaiCollectionProbe:
     image_ids: list[int]
     fingerprint: str
     has_more: bool
+    # Pre-fetched first-page items for reuse by the import pipeline.
+    # Avoids re-fetching page 1 when the probe already has it.
+    first_page_items: Optional[list[dict[str, Any]]] = None
+    first_page_cursor: Optional[str] = None
 
 
 class _CivitaiImageUnavailableError(RuntimeError):
@@ -706,6 +742,7 @@ def _configure_uvicorn_access_logging(*, suppress_status_get_logs: bool) -> None
     if suppress_status_get_logs:
         access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/tasks"]))
         access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/images/state"]))
+        access_logger.addFilter(_SuppressAccessPathFilter("GET", ["/api/civitai/auth/rate-limit-status"]))
 
 
 def _build_media_cache_headers(path: Path) -> dict[str, str]:
@@ -1353,936 +1390,9 @@ def _commit_with_lock_retry(db: Session, context: str = "database write") -> Non
             raise
 
 
-def _ensure_image_lifecycle_columns() -> None:
-    """Backfill lifecycle columns for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
+# ── Migration functions extracted to services/db_migrations.py ──────────────
 
-        if "image_status" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE images ADD COLUMN image_status VARCHAR DEFAULT 'active' NOT NULL"
-                )
-            )
-        if "status_reason" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN status_reason VARCHAR")
-            )
-        if "replaced_by_image_id" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN replaced_by_image_id INTEGER")
-            )
 
-        connection.execute(
-            text(
-                "UPDATE images SET image_status = 'active' WHERE image_status IS NULL OR image_status = ''"
-            )
-        )
-
-
-def _ensure_user_nsfw_columns() -> None:
-    """Backfill user NSFW override columns for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "user_nsfw_rating" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN user_nsfw_rating VARCHAR")
-            )
-        if "user_nsfw_safety_class" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN user_nsfw_safety_class VARCHAR")
-            )
-
-
-def _ensure_collection_sync_columns() -> None:
-    """Backfill CivitAI collection sync metadata columns for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(
-                text("PRAGMA table_info(collections)")
-            ).fetchall()
-        }
-
-        if "civitai_head_fingerprint" not in existing:
-            connection.execute(
-                text("ALTER TABLE collections ADD COLUMN civitai_head_fingerprint TEXT")
-            )
-        if "civitai_head_item_count" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE collections ADD COLUMN civitai_head_item_count INTEGER"
-                )
-            )
-        if "civitai_head_has_more" not in existing:
-            connection.execute(
-                text("ALTER TABLE collections ADD COLUMN civitai_head_has_more BOOLEAN")
-            )
-        if "civitai_last_full_item_count" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE collections ADD COLUMN civitai_last_full_item_count INTEGER"
-                )
-            )
-        if "civitai_last_synced_at" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE collections ADD COLUMN civitai_last_synced_at DATETIME"
-                )
-            )
-        if "civitai_last_full_scan_at" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE collections ADD COLUMN civitai_last_full_scan_at DATETIME"
-                )
-            )
-
-
-def _ensure_civitai_uuid_column() -> None:
-    """Backfill CivitAI UUID column for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-
-        if "civitai_uuid" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN civitai_uuid VARCHAR")
-            )
-
-
-def _ensure_civitai_hash_column() -> None:
-    """Backfill CivitAI perceptual hash column for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-
-        if "civitai_hash" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN civitai_hash VARCHAR")
-            )
-
-
-def _ensure_user_tags_column() -> None:
-    """Backfill user_tags JSON column for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-
-        if "user_tags" not in existing:
-            connection.execute(text("ALTER TABLE images ADD COLUMN user_tags JSON"))
-
-
-def _ensure_user_negative_tags_column() -> None:
-    """Add user_negative_tags JSON column for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-
-        if "user_negative_tags" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN user_negative_tags JSON")
-            )
-
-
-def _ensure_observation_authority_term_unique_index() -> None:
-    """Add a unique index on (image_id, authority_term_id) for observations.
-
-    The existing uq_obs_image_concept_authority constraint on
-    (image_id, concept_id, authority_id) does not prevent duplicates when
-    concept_id is NULL (SQLite treats NULLs as distinct in unique constraints).
-    Since user-tag observations will have NULL concept_id, we need a unique
-    index on authority_term_id instead.
-    """
-    with engine.begin() as connection:
-        indexes = {
-            row[1]
-            for row in connection.execute(
-                text("PRAGMA index_list(image_concept_observations)")
-            ).fetchall()
-        }
-        if "uq_obs_image_authority_term" not in indexes:
-            connection.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_obs_image_authority_term "
-                    "ON image_concept_observations (image_id, authority_term_id) "
-                    "WHERE authority_term_id IS NOT NULL"
-                )
-            )
-
-
-def _backfill_user_tags_to_observations() -> None:
-    """One-time migration: convert user_tags and user_negative_tags JSON into
-    authority_terms + image_concept_observations rows under the 'user' authority.
-
-    This makes user tags queryable via the same observation path as every other
-    tag authority, enabling proper joins and filtering without json_each().
-    """
-
-    from models import (
-        AuthorityTerm,
-        ImageConceptObservation,
-        ObservationCertainty,
-        ObservationSource,
-        TagAuthority,
-    )
-
-    with SessionLocal() as db:
-        # Resolve the 'user' authority (id=3).
-        user_authority = (
-            db.query(TagAuthority).filter(TagAuthority.name == "user").first()
-        )
-        if user_authority is None:
-            print("   Skipping user_tags observation backfill: no 'user' authority.")
-            return
-        user_authority_id = user_authority.id
-
-        # Collect all images with user_tags or user_negative_tags JSON.
-        images = (
-            db.query(
-                ImageModel.id,
-                ImageModel.user_tags,
-                ImageModel.user_negative_tags,
-            )
-            .filter(
-                sa.or_(
-                    ImageModel.user_tags.isnot(None),
-                    ImageModel.user_negative_tags.isnot(None),
-                )
-            )
-            .all()
-        )
-
-        if not images:
-            print("   No images with user tags to backfill.")
-            return
-
-        # Build a cache of existing user authority_terms by normalized name.
-        existing_terms: dict[str, int] = {}
-        for term in (
-            db.query(
-                AuthorityTerm.id,
-                AuthorityTerm.normalized_external_name,
-            )
-            .filter(AuthorityTerm.authority_id == user_authority_id)
-            .all()
-        ):
-            existing_terms[term.normalized_external_name] = term.id
-
-        # Build a set of existing (image_id, authority_term_id) to skip dupes.
-        existing_obs: set[tuple[int, int]] = set()
-        for row in db.query(
-            ImageConceptObservation.image_id,
-            ImageConceptObservation.authority_term_id,
-        ).filter(
-            ImageConceptObservation.authority_id == user_authority_id,
-            ImageConceptObservation.authority_term_id.isnot(None),
-        ).all():
-            existing_obs.add((row.image_id, row.authority_term_id))
-
-        now = datetime.now()
-        terms_created = 0
-        obs_created = 0
-        skipped = 0
-
-        for img_id, user_tags, user_negative_tags in images:
-            tag_pairs: list[tuple[list[str] | None, bool]] = [
-                (user_tags, True),
-                (user_negative_tags, False),
-            ]
-
-            for tags_json, is_present in tag_pairs:
-                if not isinstance(tags_json, list):
-                    continue
-                for raw_tag in tags_json:
-                    tag_name = str(raw_tag or "").strip()
-                    if not tag_name:
-                        continue
-                    normalized = tag_name.lower()
-
-                    # Find or create authority_term.
-                    term_id = existing_terms.get(normalized)
-                    if term_id is None:
-                        term = AuthorityTerm(
-                            authority_id=user_authority_id,
-                            external_tag_id=None,
-                            external_name=tag_name,
-                            normalized_external_name=normalized,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        db.add(term)
-                        db.flush()
-                        term_id = term.id
-                        existing_terms[normalized] = term_id
-                        terms_created += 1
-
-                    # Check for existing observation.
-                    if (img_id, term_id) in existing_obs:
-                        skipped += 1
-                        continue
-
-                    obs = ImageConceptObservation(
-                        image_id=img_id,
-                        concept_id=None,
-                        authority_id=user_authority_id,
-                        authority_term_id=term_id,
-                        source_type=ObservationSource.IMPORT,
-                        certainty_label=ObservationCertainty.LIKELY,
-                        is_present=is_present,
-                        is_curated=False,
-                        confidence=None,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    db.add(obs)
-                    existing_obs.add((img_id, term_id))
-                    obs_created += 1
-
-        if obs_created or terms_created:
-            db.commit()
-            print(
-                f"   Backfilled user_tags → observations: "
-                f"{terms_created} terms, {obs_created} observations "
-                f"({skipped} already existed)."
-            )
-        else:
-            print("   All user tags already have observations.")
-
-
-def _backfill_user_tags_from_sidecars() -> None:
-    """One-time migration: copy user_tags from sidecar JSON files into the DB column."""
-    import json as _json
-
-    with SessionLocal() as db:
-        images_needing_backfill = (
-            db.query(ImageModel.id, ImageModel.file_path)
-            .filter(ImageModel.user_tags.is_(None))
-            .filter(ImageModel.file_path.isnot(None))
-            .limit(5000)
-            .all()
-        )
-        updated = 0
-        for img_id, file_path in images_needing_backfill:
-            try:
-                sidecar_path = (Path(IMAGE_LIBRARY_PATH) / str(file_path)).with_suffix(
-                    ".json"
-                )
-                if not sidecar_path.exists():
-                    continue
-                with open(sidecar_path, "r", encoding="utf-8") as f:
-                    sidecar = _json.load(f)
-                if not isinstance(sidecar, dict):
-                    continue
-                sc_user_tags = sidecar.get("user_tags")
-                if isinstance(sc_user_tags, list) and sc_user_tags:
-                    db.query(ImageModel).filter(ImageModel.id == img_id).update(
-                        {ImageModel.user_tags: _json.dumps(sc_user_tags)},
-                        synchronize_session="fetch",
-                    )
-                    updated += 1
-                # Also backfill user_negative_tags from sidecar if missing in DB.
-                sc_neg_tags = sidecar.get("user_negative_tags")
-                if isinstance(sc_neg_tags, list) and sc_neg_tags:
-                    db.query(ImageModel).filter(ImageModel.id == img_id).update(
-                        {ImageModel.user_negative_tags: _json.dumps(sc_neg_tags)},
-                        synchronize_session="fetch",
-                    )
-                    updated += 1
-            except Exception:
-                continue
-        if updated:
-            db.commit()
-            print(f"   Backfilled user_tags from sidecars for {updated} image(s).")
-
-
-def _ensure_civitai_creator_id_column() -> None:
-    """Add creator_id FK column to civitai_models if missing.
-
-    Points to the new civitai_users table. Backfills from existing
-    civitai_user_id column data.
-    """
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(civitai_models)")).fetchall()
-        }
-        if "creator_id" not in existing:
-            connection.execute(
-                text("ALTER TABLE civitai_models ADD COLUMN creator_id INTEGER")
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_civitai_models_creator_id "
-                    "ON civitai_models(creator_id)"
-                )
-            )
-            # Backfill from existing civitai_user_id
-            connection.execute(
-                text(
-                    "UPDATE civitai_models SET creator_id = civitai_user_id "
-                    "WHERE creator_id IS NULL AND civitai_user_id IS NOT NULL"
-                )
-            )
-            print("Backfilled civitai_models.creator_id from civitai_user_id")
-
-
-def _ensure_base_model_id_column() -> None:
-    """Add base_model_id FK column to civitai_model_versions if missing.
-
-    Points to the new civitai_base_models table. Left NULL for now;
-    population happens via backfill script after base models are seeded.
-    """
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(civitai_model_versions)")).fetchall()
-        }
-        if "base_model_id" not in existing:
-            connection.execute(
-                text("ALTER TABLE civitai_model_versions ADD COLUMN base_model_id INTEGER")
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_civitai_model_versions_base_model_id "
-                    "ON civitai_model_versions(base_model_id)"
-                )
-            )
-            print("Added civitai_model_versions.base_model_id column")
-
-
-def _seed_civitai_base_models() -> None:
-    """Seed civitai_base_models with canonical entries.
-
-    Each entry has a canonical_key (matches _normalize_base_model output),
-    a display label, optional family grouping, and sort_order for UI.
-    Idempotent — skips rows that already exist.
-    """
-    from models import CivitaiBaseModel
-
-    seeds = [
-        # key, label, base_model_type, family, sort_order
-        ("sdxl", "SDXL", "sdxl", "stable-diffusion", 10),
-        ("sd15", "SD 1.5", "sd", "stable-diffusion", 20),
-        ("sd21", "SD 2.1", "sd", "stable-diffusion", 30),
-        ("sd3", "SD 3", "sd3", "stable-diffusion", 35),
-        ("pony", "Pony", "sdxl", "pony", 40),
-        ("illustrious", "Illustrious", "sdxl", "illustrious", 50),
-        ("noobai", "NoobAI", "sdxl", "noobai", 55),
-        ("flux", "Flux", "flux", "flux", 60),
-        ("animagine", "Animagine", "sd", "animagine", 70),
-        ("cyberrealistic", "CyberRealistic", "sd", "stable-diffusion", 75),
-        ("unknown", "Unknown", None, None, 999),
-    ]
-
-    with SessionLocal() as db:
-        existing = {
-            r[0]
-            for r in db.query(CivitaiBaseModel.canonical_key).all()
-        }
-        added = 0
-        for key, label, bm_type, family, sort in seeds:
-            if key not in existing:
-                db.add(CivitaiBaseModel(
-                    canonical_key=key,
-                    label=label,
-                    base_model_type=bm_type,
-                    family=family,
-                    sort_order=sort,
-                ))
-                added += 1
-        if added:
-            db.commit()
-            print(f"Seeded {added} civitai_base_models rows")
-
-
-def _backfill_civitai_base_model_ids() -> None:
-    """Set base_model_id on civitai_model_versions by normalizing base_model.
-
-    Uses the same _normalize_base_model logic as the models tree router.
-    Auto-creates civitai_base_models rows for previously unseen keys.
-    """
-    from models import CivitaiBaseModel, CivitaiModelVersion
-    from routers.models_tree import _normalize_base_model
-
-    with SessionLocal() as db:
-        # Find versions with NULL base_model_id but non-NULL base_model
-        versions = (
-            db.query(CivitaiModelVersion)
-            .filter(
-                CivitaiModelVersion.base_model_id.is_(None),
-                CivitaiModelVersion.base_model.isnot(None),
-            )
-            .all()
-        )
-        if not versions:
-            return
-
-        # Load all existing base models into a lookup
-        bm_map: dict[str, int] = {
-            r.canonical_key: r.id
-            for r in db.query(
-                CivitaiBaseModel.id, CivitaiBaseModel.canonical_key
-            ).all()
-        }
-
-        updated = 0
-        for ver in versions:
-            key = _normalize_base_model(ver.base_model)
-            if key not in bm_map:
-                # Auto-create a row for this key
-                new_bm = CivitaiBaseModel(
-                    canonical_key=key,
-                    label=ver.base_model,
-                    sort_order=900,
-                )
-                db.add(new_bm)
-                db.flush()
-                bm_map[key] = new_bm.id
-                print(
-                    f"Auto-created civitai_base_models row: "
-                    f"{key!r} → {ver.base_model!r}"
-                )
-            ver.base_model_id = bm_map[key]
-            updated += 1
-
-        db.commit()
-        if updated:
-            print(
-                f"Backfilled base_model_id for {updated} "
-                f"civitai_model_versions"
-            )
-
-
-def _backfill_civitai_users() -> None:
-    """Populate civitai_users from existing civitai_models columns.
-
-    Extracts distinct (civitai_user_id, civitai_username,
-    civitai_user_deleted) from civitai_models and creates CivitaiUser rows.
-    """
-    from models import CivitaiUser
-
-    with SessionLocal() as db:
-        # Check if any users exist already
-        if db.query(CivitaiUser).first() is not None:
-            return
-
-        # Extract distinct users from civitai_models
-        with engine.begin() as connection:
-            rows = connection.execute(text("""
-                SELECT civitai_user_id,
-                       MAX(civitai_username) AS civitai_username,
-                       MAX(COALESCE(civitai_user_deleted, 0)) AS deleted
-                FROM civitai_models
-                WHERE civitai_user_id IS NOT NULL
-                GROUP BY civitai_user_id
-            """)).fetchall()
-
-        if not rows:
-            return
-
-        for uid, name, deleted in rows:
-            db.add(CivitaiUser(
-                civitai_user_id=uid,
-                name=name or "",
-                deleted_at=None,
-                original_name=name,
-            ))
-
-        db.commit()
-        print(f"Backfilled {len(rows)} civitai_users from existing models")
-
-
-def _ensure_is_corrupt_column() -> None:
-    """Add is_corrupt column to flag images that failed PIL verify()."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "is_corrupt" in existing:
-            return
-
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN is_corrupt BOOLEAN DEFAULT 0 NOT NULL")
-        )
-
-
-def _ensure_expected_file_size_column() -> None:
-    """Add expected_file_size column for CivitAI-declared size (size-mismatch detection)."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "expected_file_size" in existing:
-            return
-
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN expected_file_size INTEGER")
-        )
-
-
-def _ensure_file_hash_nonunique() -> None:
-    """Drop the UNIQUE index on images.file_hash so CivitAI duplicate assets can coexist.
-
-    SQLite does not support ALTER TABLE ... DROP CONSTRAINT, so we must
-    identify and drop the unique index by name.  SQLAlchemy creates this as
-    ``ix_images_file_hash`` when ``unique=True`` is declared on the Column.
-    """
-    with engine.begin() as connection:
-        indexes = {
-            row[1]
-            for row in connection.execute(text("PRAGMA index_list(images)")).fetchall()
-        }
-        # SQLAlchemy auto-generates the unique index name
-        for idx_name in ("ix_images_file_hash",):
-            if idx_name in indexes:
-                # Verify it is actually unique before dropping
-                # Note: PRAGMA doesn't support parameterized queries
-                is_unique = any(
-                    row
-                    for row in connection.execute(
-                        text("PRAGMA index_list(images)")
-                    ).fetchall()
-                    if row[1] == idx_name and row[2] == 1
-                )
-                if is_unique:
-                    print(f"Dropping UNIQUE index {idx_name} on images.file_hash")
-                    connection.execute(text(f"DROP INDEX {idx_name}"))
-                    # Recreate as non-unique for query performance
-                    connection.execute(
-                        text("CREATE INDEX ix_images_file_hash ON images (file_hash)")
-                    )
-
-
-def _ensure_image_variant_columns() -> None:
-    """Backfill image variant grouping columns for existing sqlite databases."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-
-        if "variant_group_key" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN variant_group_key VARCHAR")
-            )
-        if "variant_sort_index" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN variant_sort_index INTEGER")
-            )
-        if "variant_role" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN variant_role VARCHAR")
-            )
-
-        # Default variant_group_key to file_hash so that visually identical
-        # assets (same SHA256, different CivitAI IDs) are grouped as variants.
-        connection.execute(
-            text(
-                "UPDATE images "
-                "SET variant_group_key = file_hash "
-                "WHERE (variant_group_key IS NULL OR variant_group_key = '') "
-                "AND file_hash IS NOT NULL AND file_hash != ''"
-            )
-        )
-        # Fix any rows that were incorrectly backfilled with file_path —
-        # restore file_hash grouping so duplicate assets share a group.
-        connection.execute(
-            text(
-                "UPDATE images "
-                "SET variant_group_key = file_hash "
-                "WHERE variant_group_key = file_path "
-                "AND file_hash IS NOT NULL AND file_hash != ''"
-            )
-        )
-
-
-def _ensure_promoted_metadata_columns() -> None:
-    """Add promoted metadata columns for existing sqlite databases.
-
-    These columns move filterable data out of json_metadata / sidecar JSON
-    into proper indexed columns.  Values are backfilled by the standalone
-    ``backfill_image_columns.py`` migration script.
-    """
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-
-        new_columns = {
-            "generation_software": "ALTER TABLE images ADD COLUMN generation_software VARCHAR",
-            "civitai_nsfw_level": "ALTER TABLE images ADD COLUMN civitai_nsfw_level INTEGER",
-            "has_a1111_metadata": "ALTER TABLE images ADD COLUMN has_a1111_metadata BOOLEAN NOT NULL DEFAULT 0",
-            "a1111_hires": "ALTER TABLE images ADD COLUMN a1111_hires BOOLEAN NOT NULL DEFAULT 0",
-            "a1111_regional_prompter": "ALTER TABLE images ADD COLUMN a1111_regional_prompter BOOLEAN NOT NULL DEFAULT 0",
-            "a1111_adetailer": "ALTER TABLE images ADD COLUMN a1111_adetailer BOOLEAN NOT NULL DEFAULT 0",
-            "has_comfyui_metadata": "ALTER TABLE images ADD COLUMN has_comfyui_metadata BOOLEAN NOT NULL DEFAULT 0",
-            "has_generation_prompt": "ALTER TABLE images ADD COLUMN has_generation_prompt BOOLEAN NOT NULL DEFAULT 0",
-        }
-
-        for col_name, ddl in new_columns.items():
-            if col_name not in existing:
-                connection.execute(text(ddl))
-
-
-def _ensure_original_file_name_column() -> None:
-    """Add original_file_name column and backfill from json_metadata or file_name."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "original_file_name" in existing:
-            return
-
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN original_file_name VARCHAR")
-        )
-        # Backfill: try json_metadata.original_filename first, fall back to file_name
-        connection.execute(
-            text(
-                "UPDATE images "
-                "SET original_file_name = COALESCE("
-                "  NULLIF(TRIM(json_extract(json_metadata, '$.original_filename')), ''), "
-                "  file_name"
-                ") "
-                "WHERE original_file_name IS NULL"
-            )
-        )
-
-
-def _ensure_blurhash_column() -> None:
-    """Add blurhash column and backfill from civitai_hash where available."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "blurhash" in existing:
-            return
-
-        connection.execute(text("ALTER TABLE images ADD COLUMN blurhash VARCHAR"))
-        # Instant backfill: CivitAI's `hash` field IS a BlurHash string.
-        connection.execute(
-            text(
-                "UPDATE images SET blurhash = civitai_hash "
-                "WHERE civitai_hash IS NOT NULL AND blurhash IS NULL"
-            )
-        )
-
-
-def _ensure_civitai_image_id_column() -> None:
-    """Add civitai_image_id column and index, then backfill from source_url."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "civitai_image_id" in existing:
-            return
-
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN civitai_image_id INTEGER")
-        )
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_images_civitai_image_id "
-                "ON images(civitai_image_id)"
-            )
-        )
-        # Backfill: extract the numeric image ID from source_url paths like
-        # "/images/12345" for existing CivitAI rows.
-        connection.execute(
-            text(
-                "UPDATE images "
-                "SET civitai_image_id = CAST("
-                "  SUBSTR("
-                "    source_url,"
-                "    INSTR(source_url, '/images/') + 8"
-                "  )"
-                "  AS INTEGER"
-                ") "
-                "WHERE source_site = 'civitai' "
-                "AND source_url LIKE '%/images/%' "
-                "AND civitai_image_id IS NULL"
-            )
-        )
-
-
-def _ensure_civitai_post_id_column() -> None:
-    """Add civitai_post_id column and index, then backfill from json_metadata."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "civitai_post_id" in existing:
-            return
-
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN civitai_post_id INTEGER")
-        )
-        connection.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_images_civitai_post_id "
-                "ON images(civitai_post_id)"
-            )
-        )
-        # Backfill from json_metadata.civitai.post_id where available.
-        # This uses json_extract (SQLite JSON1 extension) to pull the value.
-        connection.execute(
-            text(
-                "UPDATE images "
-                "SET civitai_post_id = CAST("
-                "  json_extract(json_extract(json_metadata, '$.civitai'), '$.post_id')"
-                "  AS INTEGER"
-                ") "
-                "WHERE source_site = 'civitai' "
-                "AND json_metadata IS NOT NULL "
-                "AND civitai_post_id IS NULL "
-                "AND json_extract(json_extract(json_metadata, '$.civitai'), '$.post_id') IS NOT NULL"
-            )
-        )
-
-
-def _ensure_civitai_deleted_at_column() -> None:
-    """Add civitai_deleted_at column to track images removed from CivitAI."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "civitai_deleted_at" in existing:
-            return
-
-        connection.execute(
-            text("ALTER TABLE images ADD COLUMN civitai_deleted_at DATETIME")
-        )
-
-
-def _ensure_civitai_post_title_index_columns() -> None:
-    """Add civitai_post_title and civitai_post_index columns to images."""
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
-        }
-        if "civitai_post_title" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN civitai_post_title VARCHAR")
-            )
-        if "civitai_post_index" not in existing:
-            connection.execute(
-                text("ALTER TABLE images ADD COLUMN civitai_post_index INTEGER")
-            )
-
-
-def _ensure_civitai_user_columns() -> None:
-    """Add civitai_user_id, civitai_user_deleted, civitai_user_original_name to artists.
-
-    Backfills civitai_user_id from json_metadata.author_id where available.
-    """
-    with engine.begin() as connection:
-        existing = {
-            row[1]
-            for row in connection.execute(text("PRAGMA table_info(artists)")).fetchall()
-        }
-
-        if "civitai_user_id" not in existing:
-            connection.execute(
-                text("ALTER TABLE artists ADD COLUMN civitai_user_id INTEGER")
-            )
-            connection.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_artists_civitai_user_id "
-                    "ON artists(civitai_user_id)"
-                )
-            )
-
-        if "civitai_user_deleted" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE artists ADD COLUMN civitai_user_deleted BOOLEAN "
-                    "DEFAULT 0"
-                )
-            )
-
-        if "civitai_user_original_name" not in existing:
-            connection.execute(
-                text(
-                    "ALTER TABLE artists ADD COLUMN civitai_user_original_name VARCHAR"
-                )
-            )
-
-        # Backfill civitai_user_id from image json_metadata where artist_id is set
-        if "civitai_user_id" not in existing:
-            import json as _json
-
-            rows = connection.execute(
-                text(
-                    "SELECT a.id, a.name, i.json_metadata "
-                    "FROM artists a "
-                    "JOIN images i ON i.artist_id = a.id "
-                    "WHERE a.civitai_user_id IS NULL "
-                    "AND i.json_metadata IS NOT NULL "
-                    "GROUP BY a.id"
-                )
-            ).fetchall()
-
-            for artist_id, artist_name, metadata_str in rows:
-                try:
-                    metadata = _json.loads(metadata_str) if metadata_str else {}
-                    author_id = metadata.get("author_id")
-                    if author_id is not None:
-                        connection.execute(
-                            text(
-                                "UPDATE artists SET civitai_user_id = :uid "
-                                "WHERE id = :aid AND civitai_user_id IS NULL"
-                            ),
-                            {"uid": int(author_id), "aid": artist_id},
-                        )
-                except (ValueError, TypeError, _json.JSONDecodeError):
-                    continue
-
-
-def _ensure_observation_unique_constraint() -> None:
-    """Add unique constraint to image_concept_observations if missing.
-
-    SQLite does not support ALTER TABLE ADD CONSTRAINT, so we check for the
-    index that SQLAlchemy generates from the UniqueConstraint declaration and
-    create it manually when absent.
-    """
-    index_name = "uq_obs_image_concept_authority"
-    with engine.begin() as connection:
-        existing_indexes = {
-            row[1]
-            for row in connection.execute(
-                text("PRAGMA index_list(image_concept_observations)")
-            ).fetchall()
-        }
-        if index_name not in existing_indexes:
-            connection.execute(
-                text(
-                    f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} "
-                    "ON image_concept_observations (image_id, concept_id, authority_id)"
-                )
-            )
 
 
 def _parse_civitai_image_id(value: str) -> int:
@@ -3741,31 +2851,46 @@ def _archive_civitai_collection_items(items: list[dict[str, Any]]) -> None:
 
 
 def _resolve_civitai_image_target(
-    api: CivitaiAPI, image_id: int, *, strict: bool = False
+    api: CivitaiAPI,
+    image_id: int,
+    *,
+    strict: bool = False,
+    listing_item: Optional[dict[str, Any]] = None,
+    pre_fetched_generation_data: Optional[dict[str, Any]] = None,
 ) -> dict:
-    try:
-        basic_info = api.fetch_basic_info(image_id, strict=strict)
-    except CivitaiRequestError as exc:
-        if exc.status_code == 404:
-            raise _CivitaiImageUnavailableError(
-                image_id=image_id,
-                endpoint="image.get",
-                reason=str(exc),
-                status_code=exc.status_code,
-            ) from exc
-        raise
+    # When a collection listing item is available (from image.getInfinite),
+    # use it as basic_info instead of making a separate image.get API call.
+    # The listing item contains all the fields we extract: mimeType, name,
+    # url, hash, metadata.size, user.*, postId, etc.
+    if isinstance(listing_item, dict) and listing_item.get("id") == image_id:
+        basic_info = listing_item
+    else:
+        try:
+            basic_info = api.fetch_basic_info_cached(image_id, strict=strict)
+        except CivitaiRequestError as exc:
+            if exc.status_code == 404:
+                raise _CivitaiImageUnavailableError(
+                    image_id=image_id,
+                    endpoint="image.get",
+                    reason=str(exc),
+                    status_code=exc.status_code,
+                ) from exc
+            raise
 
-    try:
-        generation_data = api.fetch_generation_data(image_id, strict=strict)
-    except CivitaiRequestError as exc:
-        if exc.status_code == 404:
-            raise _CivitaiImageUnavailableError(
-                image_id=image_id,
-                endpoint="image.getGenerationData",
-                reason=str(exc),
-                status_code=exc.status_code,
-            ) from exc
-        raise
+    if pre_fetched_generation_data is not None:
+        generation_data = pre_fetched_generation_data
+    else:
+        try:
+            generation_data = api.fetch_generation_data_cached(image_id, strict=strict)
+        except CivitaiRequestError as exc:
+            if exc.status_code == 404:
+                raise _CivitaiImageUnavailableError(
+                    image_id=image_id,
+                    endpoint="image.getGenerationData",
+                    reason=str(exc),
+                    status_code=exc.status_code,
+                ) from exc
+            raise
 
     if not basic_info and not generation_data:
         raise _CivitaiImageUnavailableError(
@@ -3775,10 +2900,13 @@ def _resolve_civitai_image_target(
             status_code=404,
         )
 
+    # NOTE: api=None prevents merge_basic_info from making an uncached
+    # tag.getVotableTags call.  Tags are fetched separately (and cached) in
+    # _prepare_civitai_download via fetch_image_tag_records_cached().
     image = CivitaiImage.from_single_image(
         basic_info=basic_info or {"id": image_id},
         generation_data=generation_data or {},
-        api=api,
+        api=None,
     )
     image_data = image.to_dict(include_full_url=True)
 
@@ -6663,8 +5791,8 @@ def _build_generation_prototype_civitai_payload(image_id: int) -> dict:
             },
         }
 
-    basic_info = api.fetch_basic_info(image_id, strict=False) or {}
-    generation_data = api.fetch_generation_data(image_id, strict=False) or {}
+    basic_info = api.fetch_basic_info_cached(image_id, strict=False) or {}
+    generation_data = api.fetch_generation_data_cached(image_id, strict=False) or {}
     image_data = CivitaiImage.from_single_image(
         basic_info=basic_info or {"id": image_id},
         generation_data=generation_data,
@@ -9361,6 +8489,52 @@ def _hydrate_observations_from_payload(
         print(f"Warning: observation hydration failed for image {image.id}: {exc}")
 
 
+def _resolve_tag_ids_from_local_db(
+    db: Session, tag_ids: list[int]
+) -> tuple[list[dict[str, Any]], set[int]]:
+    """Resolve CivitAI tag IDs to full tag record dicts from local AuthorityTerm rows.
+
+    For each tag_id that has a matching AuthorityTerm under the 'civitai' authority,
+    reconstruct a tag record dict suitable for ``_upsert_civitai_authority_terms``
+    and ``_insert_tag_observations_for_image``.
+
+    Returns:
+        (resolved_records, unresolved_ids) — resolved tag record dicts and the set
+        of tag IDs that could not be found locally.
+    """
+    if not tag_ids:
+        return [], set()
+
+    civitai_authority = _get_or_create_authority(db, "civitai")
+    terms = (
+        db.query(
+            AuthorityTerm.external_tag_id,
+            AuthorityTerm.external_name,
+            AuthorityTerm.metadata_json,
+        )
+        .filter(
+            AuthorityTerm.authority_id == civitai_authority.id,
+            AuthorityTerm.external_tag_id.in_(tag_ids),
+        )
+        .all()
+    )
+
+    resolved: list[dict[str, Any]] = []
+    resolved_ids: set[int] = set()
+    for ext_id, name, meta_json in terms:
+        if ext_id is None:
+            continue
+        record: dict[str, Any] = {"id": ext_id, "name": name or ""}
+        if isinstance(meta_json, dict):
+            # metadata_json stores camelCase keys from the API (type, nsfwLevel, etc.)
+            record.update(meta_json)
+        resolved.append(record)
+        resolved_ids.add(ext_id)
+
+    unresolved = set(tag_ids) - resolved_ids
+    return resolved, unresolved
+
+
 def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
     """Sync CivitAI tag records into the taxonomy authority_terms table.
 
@@ -9470,6 +8644,88 @@ def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
         db.flush()
 
     return stats
+
+
+def _insert_tag_observations_for_image(
+    db: Session,
+    *,
+    image_db_id: int,
+    tag_records: list[dict[str, Any]],
+) -> int:
+    """Insert image_concept_observations for CivitAI tag records.
+
+    First upserts authority_terms from the tag records, then creates
+    observation rows linking the image to matched authority_terms.
+    Skips terms whose authority_term row has no matching external_tag_id.
+
+    Returns the number of observations inserted.
+    """
+    if not tag_records:
+        return 0
+
+    # 1. Upsert authority_terms so they exist before we reference them.
+    _upsert_civitai_authority_terms(db, {"tags": tag_records})
+
+    # 2. Collect external tag IDs from the records.
+    tag_ids: list[int] = []
+    for tag in tag_records:
+        raw_id = tag.get("id")
+        if raw_id is not None:
+            try:
+                tag_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                pass
+    if not tag_ids:
+        return 0
+
+    # 3. Find authority_terms matching these tag IDs.
+    civitai_authority = _get_or_create_authority(db, "civitai")
+    terms = (
+        db.query(AuthorityTerm.id, AuthorityTerm.concept_id)
+        .filter(
+            AuthorityTerm.authority_id == civitai_authority.id,
+            AuthorityTerm.external_tag_id.in_(tag_ids),
+        )
+        .all()
+    )
+    if not terms:
+        return 0
+
+    now = datetime.utcnow()
+    inserted = 0
+    for term_id, concept_id in terms:
+        # Check for existing observation to avoid duplicates.
+        existing = (
+            db.query(ImageConceptObservation.id)
+            .filter(
+                ImageConceptObservation.image_id == image_db_id,
+                ImageConceptObservation.authority_id == civitai_authority.id,
+                ImageConceptObservation.authority_term_id == term_id,
+            )
+            .first()
+        )
+        if existing is not None:
+            continue
+
+        db.add(
+            ImageConceptObservation(
+                image_id=image_db_id,
+                concept_id=concept_id,
+                authority_id=civitai_authority.id,
+                authority_term_id=term_id,
+                source_type=ObservationSource.IMPORT,
+                certainty_label=ObservationCertainty.LIKELY,
+                is_present=True,
+                is_curated=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        inserted += 1
+
+    if inserted:
+        db.flush()
+    return inserted
 
 
 def _normalize_collection_name(name: str) -> str:
@@ -9695,6 +8951,8 @@ def _probe_civitai_collection_head(
         image_ids=image_ids,
         fingerprint=_build_civitai_collection_fingerprint(image_ids),
         has_more=bool(next_cursor),
+        first_page_items=page_items,
+        first_page_cursor=next_cursor,
     )
 
 
@@ -10948,17 +10206,73 @@ def _prepare_civitai_download(
     task_context: TaskContext,
     collection_context: Optional[dict[str, Any]] = None,
 ) -> _PreparedCivitaiImport:
-    task_context.mark_item(item_key, "fetching_metadata", "Fetching CivitAI metadata")
-    target = _resolve_civitai_image_target(api, image_id, strict=True)
+    # Extract collection listing item BEFORE resolve so we can skip image.get
+    collection_item = _collection_context_item(collection_context, image_id)
+
+    # ── Phase 4: local DB tag resolution (zero API calls) ──────────────
+    raw_tag_records: list[dict[str, Any]] = []
+    unresolved_tag_ids: set[int] = set()
+    tags_fully_resolved_locally = False
+
+    if isinstance(collection_item, dict):
+        listing_tag_ids = collection_item.get("tagIds")
+        if isinstance(listing_tag_ids, list) and listing_tag_ids:
+            int_tag_ids: list[int] = []
+            for raw_tid in listing_tag_ids:
+                try:
+                    int_tag_ids.append(int(raw_tid))
+                except (TypeError, ValueError):
+                    pass
+            if int_tag_ids:
+                try:
+                    with SessionLocal() as db:
+                        resolved, unresolved_tag_ids = _resolve_tag_ids_from_local_db(
+                            db, int_tag_ids
+                        )
+                    raw_tag_records.extend(resolved)
+                    if resolved and not unresolved_tag_ids:
+                        tags_fully_resolved_locally = True
+                except Exception:
+                    # DB lookup failure — fall through to API
+                    unresolved_tag_ids = set()
+
+    # ── Phase 3: batch fetch (generation_data + tags in one HTTP call) ─
+    pre_fetched_generation_data: Optional[dict[str, Any]] = None
+
+    if not tags_fully_resolved_locally:
+        # Tags need API fetch — batch generation_data + tag.getVotableTags
+        # into a single HTTP call to reduce API overhead.
+        task_context.mark_item(item_key, "fetching_metadata", "Fetching CivitAI metadata (batch)")
+        try:
+            batch_result = api.fetch_batch_for_image(image_id)
+            pre_fetched_generation_data = batch_result.get("generation_data")
+            batch_tag_records = batch_result.get("tag_records")
+            if batch_tag_records:
+                # Merge: prefer batch API records (more complete/fresh) but
+                # keep locally-resolved records for tags the API might not return.
+                api_ids = {t.get("id") for t in batch_tag_records if isinstance(t, dict)}
+                local_only = [
+                    t for t in raw_tag_records
+                    if isinstance(t, dict) and t.get("id") not in api_ids
+                ]
+                raw_tag_records = batch_tag_records + local_only
+        except Exception:
+            pass  # Best-effort; fall through to individual fetch in _resolve
+
+    # ── Resolve image target (basic_info + generation_data) ────────────
+    if pre_fetched_generation_data is None:
+        task_context.mark_item(item_key, "fetching_metadata", "Fetching CivitAI metadata")
+
+    target = _resolve_civitai_image_target(
+        api, image_id, strict=True, listing_item=collection_item,
+        pre_fetched_generation_data=pre_fetched_generation_data,
+    )
     task_context.mark_item(item_key, "downloading", "Downloading media")
     download_result = _download_civitai_image_with_validation(
         image_id=image_id,
         target=target,
     )
     temp_path = download_result.temp_path
-
-    # Extract collection item (get.Infinite metadata) if available
-    collection_item = _collection_context_item(collection_context, image_id)
 
     # Save collection metadata immediately if available (before download attempt)
     collection_paths = {}
@@ -10995,6 +10309,7 @@ def _prepare_civitai_download(
         civitai_post_id=target.get("civitai_post_id"),
         civitai_post_title=target.get("civitai_post_title"),
         civitai_post_index=target.get("civitai_post_index"),
+        raw_tag_records=raw_tag_records if raw_tag_records else None,
     )
 
 
@@ -11095,6 +10410,22 @@ def _ingest_prepared_civitai_import(
                         db,
                         image,
                         effective_source_url,
+                    )
+
+            # ── CivitAI tag processing ────────────────────────────────────
+            # Insert authority_terms and image_concept_observations from
+            # tag records fetched during the prepare/download step.
+            if prepared.raw_tag_records:
+                try:
+                    _insert_tag_observations_for_image(
+                        db,
+                        image_db_id=image_db_id,
+                        tag_records=prepared.raw_tag_records,
+                    )
+                except Exception as exc:
+                    print(
+                        f"Warning: CivitAI tag observation insert failed for "
+                        f"image {prepared.image_id}: {exc}"
                     )
 
         if attach_collection_id is not None:
@@ -11660,6 +10991,13 @@ def _build_local_image_variant(
         "is_remote": False,
         "is_local": True,
         "editable_file_hash": image.file_hash,
+        # Per-variant tag data so the frontend can switch tags when the
+        # user picks a different variant in a grouped display item.
+        "civitai_tags": merged_payload.get("civitai_tags"),
+        "user_tags": merged_payload.get("user_tags"),
+        "user_negative_tags": merged_payload.get("user_negative_tags"),
+        "prompt_tags": merged_payload.get("prompt_tags"),
+        "danbooru_tags": merged_payload.get("danbooru_tags"),
     }
     return variant
 
@@ -12050,6 +11388,13 @@ def _merge_display_item_variant(
         "preview_image_url",
         "civitai_uuid",
         "civitai_hash",
+        # Per-variant tag data — overwrite base tags with the active
+        # variant's tags so the frontend displays the correct set.
+        "civitai_tags",
+        "user_tags",
+        "user_negative_tags",
+        "prompt_tags",
+        "danbooru_tags",
     ):
         if field_name in variant:
             display_item[field_name] = variant.get(field_name)
@@ -13805,6 +13150,7 @@ def _run_civitai_collection_import_pipeline(
     overall_discovered_before: int = 0,
     on_collection_progress: Optional[Callable[..., None]] = None,
     on_pending_activity: Optional[Callable[[str], None]] = None,
+    prefetched_probe: Optional[_CivitaiCollectionProbe] = None,
 ) -> dict:
     collection_label = collection_name or f"Collection {collection_id}"
 
@@ -13861,10 +13207,19 @@ def _run_civitai_collection_import_pipeline(
     if on_pending_activity is not None:
         on_pending_activity(f"Fetching items for {collection_label}")
     scraper = CivitaiPrivateScraper(auto_authenticate=True)
+    # Reuse probe's first page to avoid redundant API call for page 1.
+    _probe_items = None
+    _probe_cursor = None
+    if prefetched_probe is not None and prefetched_probe.first_page_items:
+        _probe_items = prefetched_probe.first_page_items
+        _probe_cursor = prefetched_probe.first_page_cursor
     collection_items = scraper.fetch_collection_items(
         collection_id=collection_id,
         limit=limit,
         progress_callback=_on_collection_page,
+        collection_name=collection_name,
+        initial_items=_probe_items,
+        initial_cursor=_probe_cursor,
     )
     if isinstance(collection_items, list):
         normalized_items = [item for item in collection_items if isinstance(item, dict)]
@@ -14501,6 +13856,7 @@ def _run_civitai_collection_sync_job(
                     overall_discovered_before=overall_discovered,
                     on_collection_progress=_update_cp_entry,
                     on_pending_activity=_set_pending_activity,
+                    prefetched_probe=probe,
                 )
             # Finalize structured progress from pipeline results.
             if cp_entry["status"] not in ("completed", "skipped", "failed"):
@@ -15060,6 +14416,7 @@ def _sync_single_civitai_collection(
     collection_items = scraper.fetch_collection_items(
         collection_id=civitai_collection_id,
         limit=limit,
+        collection_name=civitai_collection_name,
     )
 
     seen_ids: set[int] = set()
@@ -15134,10 +14491,7 @@ def _sync_single_civitai_collection(
     }
 
 
-def create_initial_data():
-    """Populate initial tools/licenses/authorities through bootstrap module."""
-    populate_initial_data(SessionLocal)
-
+# create_initial_data() extracted to services/db_migrations.py
 
 # Define the lifespan context manager
 @asynccontextmanager
@@ -24408,7 +23762,7 @@ def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separ
                     "error": None,
                 }
                 try:
-                    basic = api.fetch_basic_info(img_id)
+                    basic = api.fetch_basic_info_cached(img_id)
                     info["basic_info"] = basic
                 except Exception as exc:
                     info["error"] = f"basic_info failed: {exc}"
@@ -24417,7 +23771,7 @@ def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separ
                     )
 
                 try:
-                    gen_data = api.fetch_generation_data(img_id)
+                    gen_data = api.fetch_generation_data_cached(img_id)
                     info["generation_data"] = gen_data
                 except Exception as exc:
                     err_msg = f"generation_data failed: {exc}"
@@ -24533,6 +23887,12 @@ def sync_lab_download(image_ids: str = Query(..., description="Comma-separated C
                     # Resolve metadata
                     target = _resolve_civitai_image_target(api, img_id)
 
+                    # Fetch CivitAI tag records (best-effort, non-blocking)
+                    try:
+                        raw_tag_records = api.fetch_image_tag_records_cached(img_id)
+                    except Exception:
+                        raw_tag_records = None
+
                     # Download
                     image_url = target.get("image_url", "")
                     mime_type = target.get("mime_type")
@@ -24563,6 +23923,7 @@ def sync_lab_download(image_ids: str = Query(..., description="Comma-separated C
                         civitai_post_id=target.get("civitai_post_id"),
                         civitai_post_title=target.get("civitai_post_title"),
                         civitai_post_index=target.get("civitai_post_index"),
+                        raw_tag_records=raw_tag_records,
                     )
                     _sync_lab_prepared[img_id] = prepared
 
@@ -24630,6 +23991,7 @@ def sync_lab_download(image_ids: str = Query(..., description="Comma-separated C
                                 "civitai_post_id": _prep.civitai_post_id,
                                 "civitai_post_title": _prep.civitai_post_title,
                                 "civitai_post_index": _prep.civitai_post_index,
+                                "raw_tag_records": _prep.raw_tag_records,
                             }
                     _checkpoint_sync_step(session_id, 6, "complete", data={
                         "total": len(parsed_ids),
@@ -24736,6 +24098,7 @@ def sync_lab_ingest(
                             civitai_post_id=_v.get("civitai_post_id"),
                             civitai_post_title=_v.get("civitai_post_title"),
                             civitai_post_index=_v.get("civitai_post_index"),
+                            raw_tag_records=_v.get("raw_tag_records"),
                         )
                         _sync_lab_prepared[int(_k)] = _restored
             finally:
@@ -24757,6 +24120,8 @@ def sync_lab_ingest(
             errors: list[dict] = []
 
             db = SessionLocal()
+            # Track (image_db_id, civitai_post_id, post_title) for variant grouping
+            _post_image_pairs: list[tuple[int, int, Optional[str]]] = []
             try:
                 for idx, img_id in enumerate(parsed_ids, 1):
                     id_t0 = time.monotonic()
@@ -24803,6 +24168,21 @@ def sync_lab_ingest(
                             )
 
                         db.commit()
+
+                        # Track for variant group creation (step after loop)
+                        resolved_db_id = (
+                            ingest_result.get("image_id")
+                            or ingest_result.get("existing_image_id")
+                        )
+                        if isinstance(resolved_db_id, int) and prepared.civitai_post_id is not None:
+                            _post_image_pairs.append(
+                                (
+                                    resolved_db_id,
+                                    prepared.civitai_post_id,
+                                    prepared.civitai_post_title,
+                                )
+                            )
+
                         result["status"] = "ingested"
                         result["ingest_result"] = ingest_result
                         # Clean up session store
@@ -24818,6 +24198,27 @@ def sync_lab_ingest(
                     result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
                     results[str(img_id)] = result
                     q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
+
+                # ── Create variant groups for images sharing a CivitAI post ──
+                if _post_image_pairs:
+                    _post_groups: dict[int, list[int]] = {}
+                    _post_titles: dict[int, Optional[str]] = {}
+                    for _db_id, _pid, _ptitle in _post_image_pairs:
+                        _post_groups.setdefault(_pid, []).append(_db_id)
+                        if _ptitle and _pid not in _post_titles:
+                            _post_titles[_pid] = _ptitle
+                    for _pid, _db_ids in _post_groups.items():
+                        if len(_db_ids) >= 2:
+                            try:
+                                _ensure_variant_group_for_civitai_post(
+                                    db,
+                                    post_id=_pid,
+                                    image_db_ids=_db_ids,
+                                    post_title=_post_titles.get(_pid),
+                                )
+                                db.commit()
+                            except Exception:
+                                db.rollback()
             finally:
                 db.close()
 

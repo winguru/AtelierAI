@@ -1,6 +1,6 @@
 meta:
   api_name: CivitAI tRPC (Reverse-Engineered)
-  version: "0.2.0"
+  version: "0.3.0"
   base_url: https://civitai.com/api/trpc
   auth:
     - type: session_cookie
@@ -273,6 +273,213 @@ procedures:
         id: { type: integer }
         name: { type: string }
         modelId: { type: integer }
+
+  model.getAll:
+    description: Cursor-paginated listing of models, optionally filtered by username.
+    status:
+      implemented_in_civitai_api: true
+      implemented_in_civitai_models: true
+      validated_with_debug_data: true
+    http:
+      method: GET
+      path_template: "{base_url}/model.getAll"
+      headers:
+        x-client: web
+    input:
+      type: object
+      properties:
+        username:
+          type: string
+          description: Filter to models owned by this username.
+        sort:
+          type: string
+          enum: [Newest, MostLiked, MostComments, HighestRated, MostDownloaded]
+          default: Newest
+        period:
+          type: string
+          enum: [AllTime, Day, Week, Month]
+          default: AllTime
+        cursor:
+          type: ["string", "null"]
+          description: Use null on first page, then prior nextCursor.
+        limit:
+          type: integer
+          default: 100
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              name: { type: string }
+              type: { type: string }
+              mode: { type: ["string", "null"] }
+              nsfw: { type: boolean }
+              tags:
+                type: array
+                items: { type: object }
+              user: { type: ["object", "null"] }
+              stats: { type: ["object", "null"] }
+              modelVersions:
+                type: array
+                items: { type: object }
+        nextCursor:
+          type: ["string", "null"]
+    notes:
+      - Used by civitai_models.py fetch_model_list() for full catalog sync.
+      - Each item includes a modelVersions array with basic version info.
+
+  model.getById:
+    description: Fetch full model detail by numeric ID.
+    status:
+      implemented_in_civitai_api: true
+      implemented_in_civitai_models: true
+      validated_with_debug_data: true
+    http:
+      method: GET
+      path_template: "{base_url}/model.getById"
+      headers:
+        x-client: web
+    input:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: integer
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        type: { type: string }
+        mode: { type: ["string", "null"] }
+        nsfw: { type: boolean }
+        description: { type: ["string", "null"] }
+        tags:
+          type: array
+          items: { type: object }
+        user: { type: ["object", "null"] }
+        stats: { type: ["object", "null"] }
+        modelVersions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              name: { type: string }
+              baseModel: { type: ["string", "null"] }
+              files:
+                type: array
+                items: { type: object }
+              downloadUrl: { type: ["string", "null"] }
+    notes:
+      - Used by civitai_models.py fetch_model_detail() for single model sync.
+      - modelVersions[].files[] includes hashes (SHA256, etc.) for verification.
+
+  post.get:
+    description: Fetch a single post by numeric ID. Returns post metadata without the images array.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: true
+    http:
+      method: GET
+      path_template: "{base_url}/post.get"
+      headers:
+        x-client: web
+    input:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: integer
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        id: { type: integer }
+        title: { type: ["string", "null"] }
+        body: { type: ["string", "null"] }
+        url: { type: ["string", "null"] }
+        user: { type: ["object", "null"] }
+        tags:
+          type: array
+          items: { type: object }
+        nsfwLevel: { type: ["integer", "null"] }
+        stats: { type: ["object", "null"] }
+        cosmetics:
+          type: array
+          items: { type: object }
+        createdAt: { type: ["string", "null"] }
+        updatedAt: { type: ["string", "null"] }
+    notes:
+      - The response does NOT include an images array. Use post.getInfinite with postId filter to fetch associated images.
+      - Used by CivitaiAPI.fetch_post().
+
+  post.getInfinite:
+    description: Cursor-paginated listing of posts, filterable by user or collection.
+    status:
+      implemented_in_civitai_api: true
+      validated_with_debug_data: true
+    http:
+      method: GET
+      path_template: "{base_url}/post.getInfinite"
+      headers:
+        x-client: web
+    input:
+      type: object
+      properties:
+        userId:
+          type: integer
+          description: Filter to posts by this user.
+        collectionId:
+          type: integer
+          description: Filter to posts in this collection.
+        sort:
+          type: string
+          enum: [Newest, MostLiked, MostComments]
+          default: Newest
+        limit:
+          type: integer
+          default: 20
+        cursor:
+          type: ["string", "null"]
+          description: Use null on first page, then prior nextCursor.
+        authed:
+          type: boolean
+          default: true
+    output:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              title: { type: ["string", "null"] }
+              url: { type: ["string", "null"] }
+              user: { type: ["object", "null"] }
+              nsfwLevel: { type: ["integer", "null"] }
+              stats: { type: ["object", "null"] }
+              cosmetics:
+                type: array
+                items: { type: object }
+        nextCursor:
+          type: ["string", "null"]
+    notes:
+      - Used by CivitaiAPI.fetch_user_posts() (userId filter) and fetch_collection_posts() (collectionId filter).
+      - Items do NOT include full images. Use image.getInfinite with postId filter for post images.
 
   system.getBrowsingSettingAddons:
     description: Return account/profile browsing presets and content-filter defaults.

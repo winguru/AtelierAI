@@ -1,360 +1,269 @@
-# CivitAIPrivate Scraper & Analyzer
+# CivitAI Integration Package (`atelierai.civitai`)
 
-A comprehensive Python toolkit for CivitAI that automatically authenticates with Google OAuth and extracts full generation metadata including models, versions, prompts, LoRAs, tags, and image URLs.
-
-## ⚠️ IMPORTANT: Correct Cookie Name
-
-The scraper uses `__Secure-civitai-token` cookie, **NOT** `__Secure-next-auth.session-token`.
-
-If you're manually extracting the token from your browser's DevTools, make sure you copy the value from the cookie named `__Secure-civitai-token`.
-
-## ✨ New Architecture (v2.0)
-
-The project has been refactored with a modern, maintainable architecture:
-
-- **`CivitaiAPI` (Singleton)** - Centralized API client for all CivitAI API calls
-- **`CivitaiImage` (Class)** - Image data model with consistent URL construction and display
-- **`analyze_image.py`** - Single image analysis with full metadata and tags
-- **`analyze_collection.py`** - Collection-wide analysis with statistics and common patterns
-
-The legacy `CivitaiPrivateScraper` class is still available but deprecated.
-
-## Features
-
-- ✅ **Automatic Authentication** - Google OAuth with Playwright
-- ✅ **Stealth Mode** - Avoids bot detection during OAuth flow
-- ✅ **Token Caching** - Session tokens cached for ~30 days
-- ✅ **Browser State Persistence** - Stay logged in across runs
-- ✅ **Full Metadata Extraction**:
-  - Image URLs (direct download links with correct extensions)
-  - Model names and versions
-  - Generation parameters (sampler, steps, CFG, seed)
-  - LoRAs with weights
-  - Full prompts and negative prompts
-  - Author information with profile URLs
-  - **Tags** (votable tags from CivitAI API)
-- ✅ **Single Image Analysis** - Detailed breakdown of individual images
-- ✅ **Collection Analysis** - Find common patterns across collections
-  - Top models, LoRAs, samplers, tags
-  - Common prompt concepts and phrases
-  - Statistical analysis
-- ✅ **Model Availability Detection** - Automatically detect deleted/removed LoRAs
-  - Identifies models that have been deleted from Civitai
-  - Provides links to CivitAI Archive (civitaiarchive.com) for deleted models
-  - Shows model status and usage count
-  - **Model availability detection** - Identifies deleted/removed models with archive links
+A shared Python package providing authenticated access to the CivitAI tRPC API, dual-backend image search (Meilisearch + REST), model catalog sync, Playwright-based OAuth authentication, and rate-limited HTTP transport.
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.11+
-- Playwright browsers
-
 ```bash
-# Install dependencies
-pip install playwright requests
-
-# Install Playwright browsers
-playwright install chromium
-
-# Optional: Install playwright-stealth for anti-detection
-pip install playwright-stealth
+# From repo root (editable install)
+pip install -e app/src
 ```
 
-### First-Time Setup
-
-1. Copy configuration file:
-```bash
-cp config.example.py config.py
-```
-
-2. Edit `config.py` if needed (optional - auto-authentication handles everything)
-
-3. Run authentication:
-```bash
-python setup_session_token.py
-```
-
-This will:
-- Open a browser window
-- Prompt you to sign in with Google (or your preferred OAuth provider)
-- Save browser state to `.civitai_browser_state`
-- Cache session token to `.civitai_session`
-
-## Authentication
-
-### First-Time Authentication
-
-```bash
-python setup_session_token.py
-```
-
-A browser window will open. Click "Sign In with Google" and complete authentication. The script will automatically detect when you're logged in and save your session.
-
-### Using Visible Browser
-
-```bash
-python setup_session_token.py --headless=false
-```
-
-### Force Re-Authentication
-
-If your token expires or you want to sign in with a different account:
-
-```bash
-python setup_session_token.py --force
-```
-
-This deletes old cache files and prompts you to authenticate again.
-
-## Usage
-
-### Analyze a Single Image
-
-```bash
-python analyze_image.py 117165031
-```
-
-Output includes:
-- Basic information (ID, URL, author, NSFW status)
-- Model information (model, version, sampler, steps, CFG, seed)
-- LoRAs used (with weights)
-- **Tags** (sorted by relevance)
-- Full prompts (positive and negative)
-- Additional parameters (CLIP skip, workflow, etc.)
-- Raw scraped data
-
-Save analysis to JSON:
-```bash
-python analyze_image.py 117165031 --save
-```
-
-### Analyze a Collection
-
-```bash
-# Analyze first 50 images
-python analyze_collection.py 11035255 --limit 50
-
-# Analyze all images
-python analyze_collection.py 11035255 --limit -1
-
-# Save results to JSON
-python analyze_collection.py 11035255 --save
-```
-
-Output includes:
-- Overview statistics (total images, unique models, samplers)
-- Top models and versions
-- Sampler, steps, and CFG distributions
-- Top LoRAs with average weights
-- **Deleted/Unavailable Models** - Models removed from CivitAI with archive links
-- **Top Tags** (most common across collection)
-- Common prompt concepts and phrases
-- Sample prompts
-
-### Programmatic Usage with New API
+After installation, import with:
 
 ```python
-from civitai_api import CivitaiAPI
-from civitai_image import CivitaiImage
+from atelierai.civitai import CivitaiAPI, CivitaiImage, CivitaiSearchClient, CivitaiPrivateScraper
+```
 
-# Get API singleton instance
+## Architecture Overview
+
+```
+atelierai.civitai/
+├── __init__.py                 # Public exports
+├── civitai_api.py              # CivitaiAPI — singleton tRPC client (~1300 lines)
+├── http_client.py              # CivitaiHttpClient — rate-limited HTTP transport
+├── civitai_search.py           # CivitaiSearchClient — dual-backend image search
+├── civitai_models.py           # Model catalog sync (model.getAll / model.getById)
+├── civitai_auth.py             # Playwright OAuth authentication
+├── civitai_image.py            # CivitaiImage — image data model + URL construction
+├── civitai.py                  # CivitaiPrivateScraper — legacy collection scraper
+├── console_utils.py            # ConsoleFormatter — terminal output with Unicode width
+├── rate_limiter.py             # Generic rate limiter (3 RPM / 10K TPM — VoyageAI)
+├── civitai_trpc_spec.yaml      # Reverse-engineered tRPC API spec
+└── civitai_search_spec.yaml    # Reverse-engineered Meilisearch search spec
+```
+
+## Core Components
+
+### CivitaiAPI (Singleton)
+
+**File:** `civitai_api.py`
+
+Central singleton for all CivitAI tRPC operations. Wraps `CivitaiHttpClient` with retry logic, response caching (DB-backed), and automatic response archiving to JSON files.
+
+```python
 api = CivitaiAPI.get_instance()
 
-# Fetch basic info
-basic_info = api.fetch_basic_info(117165031)
+# Image metadata
+basic_info = api.fetch_basic_info(117165031)           # image.get
+gen_data = api.fetch_generation_data(117165031)         # image.getGenerationData
+tags = api.fetch_image_tags(117165031)                  # tag.getVotableTags
+both = api.fetch_image_data(117165031)                  # basic + generation combined
 
-# Fetch generation data
-generation_data = api.fetch_generation_data(117165031)
+# Model catalog
+page = api.fetch_model_list(username="artist", cursor=None)  # model.getAll
+detail = api.fetch_model_detail(model_id=12345)               # model.getById
+avail = api.check_model_availability(model_id=1, model_version_id=2)  # modelVersion.getById
 
-# Fetch tags
-tags = api.fetch_image_tags(117165031)
+# Posts
+post = api.fetch_post(post_id=999)                      # post.get
+posts = api.fetch_user_posts(user_id=42, cursor=None)    # post.getInfinite
+images = api.fetch_post_images(post_id=999)              # image.getInfinite filtered by postId
 
-# Create image instance
-image = CivitaiImage.from_single_image(basic_info, generation_data, api=api)
+# Collections
+items = api.fetch_collection_items(collection_id=11035255)        # image.getInfinite
+enriched = api.fetch_collection_with_details(collection_id=11035255)  # items + generation data
+posts = api.fetch_collection_posts(collection_id=11035255)        # post.getInfinite filtered by collectionId
 
-# Print details
-CivitaiImage.print_details(image)
-
-# Get URL (auto-constructed with correct extension)
-print(f"Image URL: {image.image_url}")
-
-# Get display URL (shortened)
-print(f"Display URL: {image.display_url}")
+# Cache-first variants (DB cache → live fetch)
+api.fetch_basic_info_cached(image_id, max_age=timedelta(hours=24))
+api.fetch_generation_data_cached(image_id, max_age=timedelta(hours=24))
+api.fetch_image_tag_records_cached(image_id, max_age=timedelta(hours=24))
+api.fetch_model_detail_cached(model_id, max_age=timedelta(hours=24))
 ```
 
-## Data Structure
+### CivitaiHttpClient
 
-### CivitaiImage Class
+**File:** `http_client.py`
 
-The `CivitaiImage` class provides consistent access to image data:
+Low-level HTTP transport with:
 
-#### Properties
-
-| Property | Type | Description |
-|-----------|------|-------------|
-| `image_id` | int | Unique image identifier |
-| `image_url` | str | Full direct download URL (auto-constructed) |
-| `display_url` | str | Shortened URL for display |
-| `author` | str | Username of uploader |
-| `tags` | list | List of tag strings (sorted by relevance) |
-| `model` | str | Primary checkpoint model name |
-| `model_version` | str | Model version |
-| `loras` | list | List of LoRA objects |
-| `models` | list | List of model objects |
-| `embeddings` | list | List of embedding objects |
-
-#### Methods
-
-| Method | Description |
-|---------|-------------|
-| `from_single_image(basic_info, generation_data, api)` | Factory method from API responses |
-| `from_collection_item(item, generation_data)` | Factory method from collection data |
-| `print_details(image, fmt)` | Print formatted analysis |
-| `to_dict(include_full_url)` | Export to dictionary |
-
-### LoRA Structure
+- **FIFO request queue** — daemon consumer thread serializes all CivitAI requests
+- **Sliding-window rate limiting** — 25 RPM target, 60-second window, 3-request headroom
+- **Per-endpoint TPM tracking** — per-endpoint sliding-window timestamps for telemetry
+- **Global backoff** — activated on 429/503/403 Cloudflare responses; pauses all requests
+- **CDN download pacing** — minimum interval between `image.civitai.com` downloads
+- **DNS fallback** — UDP-based resolver for macOS stale-cache issues (`_DnsFallbackAdapter`)
+- **Request classification** — `_classify_request()` categorizes URLs as `TRPC`, `CDN_DOWNLOAD`, or `UNKNOWN`
 
 ```python
-{
-    "name": "Detail Tweaker XL",
-    "weight": 1.2,
-    "modelId": "Unknown",
-    "modelVersionId": 123456,
-    "versionName": "v1.0",
-    "baseModel": "Pony"
-}
+client = CivitaiHttpClient(headers_factory=lambda: {"Cookie": f"__Secure-civitai-token={token}"})
+
+# Blocking request (enqueued to FIFO, processed by daemon thread)
+response = client.request("GET", url, headers=headers)
+
+# JSON convenience
+data = client.request_json("GET", url, headers=headers)
+
+# Download to temp file
+path = client.download_to_temp(url, headers=headers)
+
+# Metrics
+metrics = client.get_request_metrics()  # includes tpm_breakdown, session stats
 ```
 
-### Tag Structure
+**Request rate categories:**
 
-Tags are simple strings, sorted by relevance score from CivitAI API:
+| Category | Rate-limited | Transport |
+|---|---|---|
+| tRPC (`/api/trpc/*`) | Yes — 25 RPM sliding window | `CivitaiHttpClient` FIFO queue |
+| CDN (`image.civitai.com`) | Yes — shared limiter + CDN pacing | `CivitaiHttpClient` FIFO queue |
+| REST search (`/api/v1/images`) | No | Direct `requests.get` |
+| Meilisearch (`/multi-search`) | No | Direct `requests.post` |
+
+### CivitaiSearchClient
+
+**File:** `civitai_search.py`
+
+Dual-backend image search with automatic fallback:
+
+1. **Meilisearch** (preferred) — full-text search at `search-new.civitai.com` with tag/NSFW filtering, facets, sort. Requires `CIVITAI_MEILISEARCH_KEY` (auto-scraped from CivitAI frontend JS bundle).
+2. **REST API** (fallback) — `GET /api/v1/images` — no auth required, cursor pagination only.
 
 ```python
-[
-    "breasts",
-    "woman",
-    "solo focus",
-    "nudity",
-    "looking at viewer"
-]
+client = CivitaiSearchClient()
+
+results = client.search_images(
+    query="landscape",
+    tags=["scenery", "nature"],
+    nsfw_level=1,
+    limit=20,
+    offset=0,
+)
 ```
 
-Tags are fetched using the `tag.getVotableTags` API endpoint.
+### CivitaiModelSync (`civitai_models.py`)
 
-## CivitaiAPI Singleton
+Functions for model catalog scraping and database sync:
 
-The `CivitaiAPI` class provides a singleton instance for all API operations:
+- `fetch_model_list(api, username, cursor, limit)` — cursor-paginated `model.getAll`
+- `fetch_model_detail(api, model_id)` — full detail via `model.getById`
+- `sync_models_for_user(db, api, username)` — full catalog sync to DB
+- `sync_model_detail(db, api, model_id)` — single model detail sync
 
-### Methods
+Dynamically loads DB model classes (`CivitaiModel`, `CivitaiModelVersion`, etc.) to avoid circular imports.
 
-| Method | Description |
-|---------|-------------|
-| `get_instance()` | Get singleton instance |
-| `fetch_basic_info(image_id)` | Fetch basic image info |
-| `fetch_generation_data(image_id)` | Fetch generation parameters |
-| `fetch_image_tags(image_id)` | Fetch tags (sorted by relevance) |
-| `fetch_image_data(image_id)` | Fetch both basic info and generation data |
-| `fetch_collection_items(collection_id)` | Fetch collection items list |
-| `fetch_collection_with_details(collection_id, limit)` | Fetch items with generation data |
-| `check_model_availability(model_id, model_version_id)` | Check if model/version is available or deleted |
+### CivitaiImage
 
-## File Structure
+**File:** `civitai_image.py`
 
-```
-.
-├── src/                           # Core source code
-│   ├── civitai_api.py          # API singleton
-│   ├── civitai_auth.py         # Authentication module
-│   ├── civitai_image.py       # Image data model
-│   └── console_utils.py         # Console formatting utilities
-│
-├── scripts/                       # Main executable scripts
-│   ├── analyze_image.py         # Single image analyzer
-│   ├── analyze_collection.py     # Collection analyzer
-│   └── setup_session_token.py # Authentication script
-│
-├── docs/                          # Documentation
-│   ├── api/                    # API reference
-│   ├── guides/                 # User guides
-│   ├── features/               # Feature documentation
-│   ├── auth/                   # Authentication docs
-│   └── archive/                # Historical docs
-│
-├── tests/                         # Test files
-├── legacy/                       # Deprecated code
-├── dev/                          # Development/debug scripts
-├── examples/                      # Example code (to be added)
-├── data/                         # Generated data (gitignored)
-├── config.example.py               # Configuration template
-├── requirements.txt               # Python dependencies
-├── entrypoint.sh, start.sh        # Docker entrypoints
-└── README.md                     # This file
+Image data model providing:
+
+- Consistent URL construction from URL hashes with correct file extensions
+- Factory methods: `from_single_image()`, `from_collection_item()`
+- Properties: `image_id`, `image_url`, `display_url`, `author`, `tags`, `model`, `loras`, `embeddings`
+- `ConsoleFormatter`-based display via `print_details()`
+
+### CivitaiPrivateScraper
+
+**File:** `civitai.py`
+
+Legacy high-level collection scraper. Delegates to `CivitaiAPI` for all API calls. Primary use: `scrape(collection_id, limit)`.
+
+### CivitaiAuth
+
+**File:** `civitai_auth.py`
+
+Playwright-based OAuth authentication with:
+
+- **Stealth mode** — `playwright-stealth` with macOS platform override (`MacIntel`)
+- **Token caching** — session token persisted to file (~30-day validity)
+- **Browser state persistence** — Chrome user data directory survives across runs
+- **Auto-refresh** — `get_cached_or_refresh_session_token()` checks cache then refreshes
+
+```python
+from atelierai.civitai.civitai_auth import get_cached_or_refresh_session_token
+
+token = get_cached_or_refresh_session_token(cache_file=".civitai_session", headless=True)
 ```
 
-## API Endpoints Used
+### ConsoleFormatter
 
-| Endpoint | Purpose |
-|----------|---------|
-| `image.get` | Fetch basic image info (URL, author, NSFW, etc.) |
-| `image.getGenerationData` | Fetch generation parameters (prompts, models, LoRAs) |
-| `image.getInfinite` | Fetch collection items (with pagination) |
-| `tag.getVotableTags` | Fetch votable tags for an image |
-| `tag.getById` | Fetch tag details by ID |
-| `modelVersion.getById` | Fetch model version details (including status) |
+**File:** `console_utils.py`
 
-## Troubleshooting
+Terminal output utilities with Unicode display-width support (CJK, emoji) via `wcwidth`. Provides:
 
-### "Authentication failed" or "401 Unauthorized"
+- `get_display_width(text)` — terminal columns occupied
+- `truncate_to_width(text, max_width)` — ellipsis-aware truncation
+- `ConsoleFormatter` class — styled tables, headers, separators
 
-**Cause:** Session token expired
+### RateLimiter
 
-**Solution:**
-```bash
-python setup_session_token.py --force
-```
+**File:** `rate_limiter.py`
 
-### "No tags found for this image"
+Generic sliding-window rate limiter (3 RPM / 10K TPM). **Note:** This is for VoyageAI integration, NOT used by the CivitAI HTTP client (which has its own built-in rate limiting).
 
-**Cause:** Image has no tags assigned on CivitAI (common for newer images)
+## tRPC API Endpoints
 
-**Solution:** This is expected behavior. The API returns empty tags for images without tags.
+All tRPC procedures are accessed via GET requests with JSON-encoded `input=` query parameter. Responses use the `result.data.json` envelope.
 
-### "OAuth authentication failed in headless mode"
+| Procedure | CivitaiAPI Method | Description |
+|---|---|---|
+| `image.get` | `fetch_basic_info()` | Single image metadata (URL, author, NSFW) |
+| `image.getGenerationData` | `fetch_generation_data()` | Generation params (prompts, models, LoRAs) |
+| `image.getInfinite` | `fetch_collection_items()`, `fetch_post_images()`, `fetch_collection_with_details()` | Paginated image listing (collection/post filters) |
+| `tag.getVotableTags` | `fetch_image_tag_records()` | Votable tags for an image/model/post |
+| `model.getAll` | `fetch_model_list()` | Cursor-paginated model listing by username |
+| `model.getById` | `fetch_model_detail()` | Full model detail by ID |
+| `modelVersion.getById` | `check_model_availability()` | Model version detail + status check |
+| `post.get` | `fetch_post()` | Post metadata by ID |
+| `post.getInfinite` | `fetch_user_posts()`, `fetch_collection_posts()` | Paginated post listing |
+| `collection.getById` | *(via CivitaiAPI)* | Collection metadata |
 
-**Cause:** First-time authentication requires visible browser
+**Not implemented in Python but documented in spec:**
+- `signals.getToken` — bearer token for search service
+- `system.getBrowsingSettingAddons` — account content-filter presets
+- `hiddenPreferences.getHidden` — user hidden/blocked entities
+- `collection.getAllUser` — user's collections list
 
-**Solution:**
-```bash
-python setup_session_token.py --headless=false
-```
+## Configuration
 
-## Changelog
+All config values are loaded from `atelierai.config` (or fallback `backend.config`). Key values:
 
-### v2.1.0 (Latest)
-- ✅ Added model availability detection for LoRAs
-- ✅ Automatically checks if models have been deleted from Civitai
-- ✅ Provides links to CivitAI Archive (civitaiarchive.com) for deleted models
-- ✅ Shows model status and usage count for deleted models
-- ✅ Added `check_model_availability()` method to CivitaiAPI
+| Variable | Default | Purpose |
+|---|---|---|
+| `CIVITAI_WEB_BASE_URL` | `https://civitai.red` | Frontend URL for link generation |
+| `CIVITAI_TRPC_BASE_URL` | `https://civitai.red/api/trpc` | tRPC API base URL |
+| `CIVITAI_CDN_BASE_URL` | `https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA` | CDN base for image URLs |
+| `CIVITAI_BASE_DOMAIN` | `civitai.red` | Domain for DNS/cookie resolution |
+| `CIVITAI_SEARCH_BASE_URL` | `https://search-new.civitai.com` | Meilisearch host |
+| `CIVITAI_SESSION_CACHE` | *(project-specific)* | Token cache file path |
+| `CIVITAI_MEILISEARCH_KEY` | *(auto-scraped)* | Meilisearch API key |
 
-### v2.0.0
-- ✅ Refactored to use `CivitaiAPI` singleton pattern
-- ✅ Added `CivitaiImage` class for consistent data handling
-- ✅ Added `analyze_image.py` for single image analysis
-- ✅ Added `analyze_collection.py` for collection-wide analysis
-- ✅ Added tag fetching via `tag.getVotableTags` API
-- ✅ Added `ConsoleFormatter` for consistent output
-- ✅ Improved URL construction with automatic extension detection
-- ✅ Added author URL generation
-- ✅ Enhanced display formatting (full URLs, simplified LoRA tables)
+Environment variable overrides:
 
-### v1.0.0
-- Google OAuth authentication with Playwright
-- Stealth mode support (playwright-stealth)
-- Session token caching
-- Browser state persistence
-- Full metadata extraction (model, version, LoRAs, etc.)
-- Image URL generation
-- Batch collection scraping
+| Variable | Default | Purpose |
+|---|---|---|
+| `CIVITAI_MIN_REQUEST_INTERVAL` | `0.25` | Min seconds between queued requests |
+| `CIVITAI_CDN_MIN_INTERVAL` | `1.0` | Min seconds between CDN downloads |
+
+## Response Archiving
+
+`CivitaiAPI` automatically archives raw tRPC responses to `image_resources/civitai_api_responses/`:
+
+- `image.get` → `civitai_image_get_{uuid}.json`
+- `image.getGenerationData` → `civitai_image_getGenerationData_{uuid}.json`
+- `image.getInfinite` → `civitai_image_getInfinite_{uuid}.json` (per-item)
+
+Archival uses a UUID-to-image-ID index for cross-referencing.
+
+## DB Cache
+
+Live API responses are persisted to a database cache table via `_record_to_db_cache()`. Cache-first methods (`fetch_*_cached()`) check the DB before making network calls, with optional `max_age` and `cache_only` modes.
+
+## Rate Limiting Details
+
+The `CivitaiHttpClient` implements a sliding-window rate limiter:
+
+- **Target:** 25 RPM (requests per minute)
+- **Window:** 60 seconds
+- **Headroom:** stops 3 requests before the ceiling (effective limit: 22 RPM)
+- **Global backoff:** 30-second cooldown on 429 responses, triggered by Cloudflare 403 challenges and 503 responses
+- **Per-endpoint TPM:** sliding-window timestamps tracked per tRPC procedure name
+- **FIFO queue:** all tRPC and CDN requests serialized through a daemon consumer thread
+- **CDN pacing:** separate minimum interval for `image.civitai.com` downloads
+
+## Full Spec Files
+
+- **tRPC API:** `civitai_trpc_spec.yaml` — all reverse-engineered tRPC procedures with input/output schemas
+- **Search API:** `civitai_search_spec.yaml` — Meilisearch multi-search endpoint at `search-new.civitai.com`

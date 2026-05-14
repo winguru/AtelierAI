@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import Optional
 
 import sqlalchemy as sa
-from sqlalchemy.orm import Session
 
 from models import ImageConceptObservation, ImageModel, TagAuthority
 

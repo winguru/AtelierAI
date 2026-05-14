@@ -115,7 +115,7 @@ class ImageData:
         if data is None:
             return cls()  # Return an empty ImageData instance if input is None
 
-        return cls(
+        return cls(  # type: ignore[call-arg]
             file_path=data.get("file_path"),
             file_name=data.get("file_name"),
             original_file_name=data.get("original_file_name"),
@@ -192,7 +192,7 @@ class ImageData:
         Returns:
             A new ImageData instance populated with the database record data.
         """
-        return cls(
+        return cls(  # type: ignore[call-arg]
             file_path=db_record.file_path,
             file_name=db_record.file_name,
             original_file_name=getattr(db_record, "original_file_name", None),

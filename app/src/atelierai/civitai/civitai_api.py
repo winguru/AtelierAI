@@ -13,6 +13,7 @@ from datetime import timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from urllib.parse import quote
 
 from .http_client import CivitaiHttpClient, CivitaiRequestError
 
@@ -276,11 +277,8 @@ class CivitaiAPI:
             return self.http_client.request_json("GET", url, params=params)
         except CivitaiRequestError as e:
             if e.status_code == 403:
-                backoff = self.http_client.activate_global_backoff(
+                self.http_client.activate_global_backoff(
                     90.0, reason="HTTP 403 (Cloudflare)"
-                )
-                print(
-                    f"🚫 CivitAI returned HTTP 403 (Cloudflare challenge); pausing all requests for {backoff:.0f}s"
                 )
             if strict:
                 raise
@@ -894,6 +892,7 @@ class CivitaiAPI:
         *,
         max_age: Optional[timedelta] = None,
         cache_only: bool = False,
+        strict: bool = False,
     ) -> Any:
         """Return a cached response if available and fresh, otherwise fetch live.
 
@@ -904,6 +903,8 @@ class CivitaiAPI:
                 cached row is acceptable.  Ignored when ``cache_only=False`` and
                 no cache row exists.
             cache_only: When True, return None instead of making a network call.
+            strict: When True, raise CivitaiRequestError on API errors instead of
+                returning None.
 
         Returns:
             Parsed response dict/list, or None.
@@ -923,15 +924,17 @@ class CivitaiAPI:
 
             if entry is not None:
                 if max_age is None:
+                    self.http_client.record_cache_hit(endpoint)
                     return entry.response_json
                 age = datetime.utcnow() - entry.fetched_at
                 if age <= max_age:
+                    self.http_client.record_cache_hit(endpoint)
                     return entry.response_json
 
         if cache_only:
             return None
 
-        return self._make_request(endpoint=endpoint, payload_data=payload_data)
+        return self._make_request(endpoint=endpoint, payload_data=payload_data, strict=strict)
 
     def fetch_basic_info_cached(
         self,
@@ -939,6 +942,7 @@ class CivitaiAPI:
         *,
         max_age: Optional[timedelta] = None,
         cache_only: bool = False,
+        strict: bool = False,
     ) -> Optional[Dict]:
         """Cache-first variant of fetch_basic_info (image.get)."""
         return self.get_cached_or_fetch(
@@ -946,7 +950,255 @@ class CivitaiAPI:
             {"id": int(image_id), "authed": True},
             max_age=max_age,
             cache_only=cache_only,
+            strict=strict,
         )
+
+    # ===== Batch helpers =====
+
+    def _make_batch_request(
+        self,
+        calls: list[tuple[str, Dict]],
+        *,
+        strict: bool = False,
+    ) -> list[Optional[Dict]]:
+        """Send a tRPC batch request combining multiple procedures.
+
+        Args:
+            calls: List of ``(endpoint, payload_data)`` tuples.  Each endpoint
+                is a single tRPC procedure name (e.g. ``"image.getGenerationData"``).
+            strict: When True, raise on API errors instead of returning None items.
+
+        Returns:
+            List of parsed response JSON objects (one per call), in the same
+            order as *calls*.  Items that failed parsing return ``None``.
+
+        tRPC batch format::
+
+            GET /api/trpc/proc1,proc2?batch=1&input={json1}&input={json2}
+            → [{result: {data: {json: ...}}}, {result: {data: {json: ...}}}]
+        """
+        if not calls:
+            return []
+
+        procedures = ",".join(ep for ep, _ in calls)
+        url = f"{self.base_url}/{procedures}"
+
+        # tRPC batch format: ?batch=1&input={json1}&input={json2}
+        # requests doesn't support duplicate keys in params dict, so we build
+        # the query string manually for multi-call batches.
+        if len(calls) == 1:
+            # Single call — use standard params dict (no duplicate key issue)
+            params = {
+                "batch": "1",
+                "input": self._build_trpc_payload(calls[0][1]),
+            }
+        else:
+            # Multi-call batch — build full URL with duplicate input params
+            input_parts = [
+                f"batch=1&input={quote(self._build_trpc_payload(pd), safe='')}"
+                for _, pd in calls
+            ]
+            url = f"{url}?{'&'.join(input_parts)}"
+            params = None
+
+        try:
+            if params is not None:
+                raw_response = self.http_client.request_json("GET", url, params=params)
+            else:
+                raw_response = self.http_client.request_json("GET", url)
+        except CivitaiRequestError as e:
+            if e.status_code == 403:
+                self.http_client.activate_global_backoff(90.0, reason="HTTP 403 (Cloudflare)")
+            if strict:
+                raise
+            print(f"❌ Batch request error (HTTP {e.status_code}): {e}")
+            return [None] * len(calls)
+
+        if not isinstance(raw_response, list):
+            # Single-item response (server may unwrap batches of 1)
+            raw_response = [raw_response]
+
+        results: list[Optional[Dict]] = []
+        for i, item in enumerate(raw_response):
+            if i >= len(calls):
+                break
+            endpoint, payload_data = calls[i]
+
+            if not isinstance(item, dict):
+                results.append(None)
+                continue
+
+            # Check for error payload
+            error_payload = item.get("error")
+            if isinstance(error_payload, dict):
+                raw_error_json = error_payload.get("json")
+                error_json = raw_error_json if isinstance(raw_error_json, dict) else {}
+                raw_error_data = error_json.get("data")
+                error_data = raw_error_data if isinstance(raw_error_data, dict) else {}
+                status_code = error_data.get("httpStatus")
+                message = (
+                    error_json.get("message")
+                    or error_payload.get("message")
+                    or "Batch item failed"
+                )
+                normalized_status = status_code if isinstance(status_code, int) else None
+                exc = CivitaiRequestError(
+                    f"Batch item [{i}] {endpoint}: {message}",
+                    status_code=normalized_status,
+                    retryable=bool(normalized_status in self._TRPC_RETRYABLE_STATUS_CODES),
+                )
+                if exc.status_code is not None:
+                    self._record_to_db_cache(endpoint, payload_data, None, exc.status_code)
+                if strict:
+                    raise exc
+                results.append(None)
+                continue
+
+            # Extract result data
+            result_wrapper = item.get("result")
+            if not isinstance(result_wrapper, dict):
+                results.append(None)
+                continue
+
+            result_data = result_wrapper.get("data")
+            if isinstance(result_data, dict) and "json" in result_data:
+                result_json = result_data["json"]
+            else:
+                result_json = result_data
+
+            self._archive_metadata_response(
+                endpoint=endpoint,
+                payload_data=payload_data,
+                response_json=result_json,
+            )
+            self._record_to_db_cache(endpoint, payload_data, result_json, 200)
+            results.append(result_json)
+
+        # Pad missing results
+        while len(results) < len(calls):
+            results.append(None)
+
+        return results
+
+    def fetch_batch_for_image(
+        self,
+        image_id: int,
+        *,
+        need_generation_data: bool = True,
+        need_tag_records: bool = True,
+        max_age: Optional[timedelta] = None,
+    ) -> Dict[str, Any]:
+        """Fetch generation data and tag records for an image in a single HTTP call.
+
+        Checks the DB cache for each endpoint first.  Only uncached endpoints
+        are included in the batch request.  When both are cached, no network
+        call is made at all.
+
+        Args:
+            image_id: CivitAI image ID.
+            need_generation_data: Whether to include ``image.getGenerationData``.
+            need_tag_records: Whether to include ``tag.getVotableTags``.
+            max_age: Maximum cache age for cached lookups.
+
+        Returns:
+            Dict with keys ``"generation_data"`` and/or ``"tag_records"``.
+            Each value is the parsed response (or ``None`` / ``[]`` on failure).
+        """
+        from datetime import datetime
+
+        result: Dict[str, Any] = {}
+
+        # Build call specs with cache check
+        uncached_calls: list[tuple[str, Dict, str]] = []  # (endpoint, payload, result_key)
+
+        gen_payload = {"id": int(image_id), "authed": True}
+        tag_payload = {"id": int(image_id), "type": "image", "authed": True}
+
+        svc = self._load_cache_service()
+        session_factory = self._load_session_factory()
+
+        def _check_cache(endpoint: str, payload: Dict) -> Optional[Any]:
+            if svc is None or session_factory is None:
+                return None
+            request_key = svc.build_request_key(endpoint, payload)
+            db = session_factory()
+            try:
+                entry = svc.get_latest(db, endpoint=endpoint, request_key=request_key)
+            finally:
+                db.close()
+            if entry is not None:
+                if max_age is None:
+                    self.http_client.record_cache_hit(endpoint)
+                    return entry.response_json
+                age = datetime.utcnow() - entry.fetched_at
+                if age <= max_age:
+                    self.http_client.record_cache_hit(endpoint)
+                    return entry.response_json
+            return None
+
+        if need_generation_data:
+            cached = _check_cache("image.getGenerationData", gen_payload)
+            if cached is not None:
+                result["generation_data"] = cached
+            else:
+                uncached_calls.append(("image.getGenerationData", gen_payload, "generation_data"))
+
+        if need_tag_records:
+            cached = _check_cache("tag.getVotableTags", tag_payload)
+            if cached is not None:
+                result["tag_records"] = self._normalize_tag_records(cached)
+            else:
+                uncached_calls.append(("tag.getVotableTags", tag_payload, "tag_records"))
+
+        if uncached_calls:
+            batch_results = self._make_batch_request(
+                [(ep, pd) for ep, pd, _ in uncached_calls]
+            )
+            for i, batch_item in enumerate(batch_results):
+                _, _, result_key = uncached_calls[i]
+                if result_key == "tag_records":
+                    result[result_key] = self._normalize_tag_records(batch_item) if batch_item else []
+                else:
+                    result[result_key] = batch_item
+
+        # Fill defaults for missing keys
+        if need_generation_data and "generation_data" not in result:
+            result["generation_data"] = None
+        if need_tag_records and "tag_records" not in result:
+            result["tag_records"] = []
+
+        return result
+
+    def _normalize_tag_records(self, raw: Any) -> List[Dict[str, Any]]:
+        """Normalize raw tag.getVotableTags response into sorted, cleaned tag dicts."""
+        if not isinstance(raw, list):
+            return []
+        sorted_tags = sorted(
+            raw,
+            key=lambda t: t.get("score", 0) if isinstance(t, dict) else 0,
+            reverse=True,
+        )
+        out: List[Dict[str, Any]] = []
+        for tag in sorted_tags:
+            if not isinstance(tag, dict):
+                continue
+            tag_name = tag.get("name")
+            tag_id = tag.get("id")
+            if tag_id is None and not isinstance(tag_name, str):
+                continue
+            normalized: Dict[str, Any] = {}
+            if tag_id is not None:
+                try:
+                    normalized["id"] = int(tag_id)
+                except (TypeError, ValueError):
+                    normalized["id"] = str(tag_id)
+            if isinstance(tag_name, str) and tag_name.strip():
+                normalized["name"] = tag_name.strip()
+            for field in ("score", "type", "nsfwLevel", "automated", "concrete"):
+                if tag.get(field) is not None:
+                    normalized[field] = tag.get(field)
+            out.append(normalized)
+        return out
 
     def fetch_generation_data_cached(
         self,
@@ -954,6 +1206,7 @@ class CivitaiAPI:
         *,
         max_age: Optional[timedelta] = None,
         cache_only: bool = False,
+        strict: bool = False,
     ) -> Optional[Dict]:
         """Cache-first variant of fetch_generation_data (image.getGenerationData)."""
         return self.get_cached_or_fetch(
@@ -961,6 +1214,7 @@ class CivitaiAPI:
             {"id": int(image_id), "authed": True},
             max_age=max_age,
             cache_only=cache_only,
+            strict=strict,
         )
 
     def fetch_image_tag_records_cached(
@@ -969,6 +1223,7 @@ class CivitaiAPI:
         *,
         max_age: Optional[timedelta] = None,
         cache_only: bool = False,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """Cache-first variant of fetch_image_tag_records (tag.getVotableTags).
 
@@ -981,6 +1236,7 @@ class CivitaiAPI:
             {"id": int(image_id), "type": "image", "authed": True},
             max_age=max_age,
             cache_only=cache_only,
+            strict=strict,
         )
         if raw is None:
             return []

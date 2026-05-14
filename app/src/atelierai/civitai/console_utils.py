@@ -86,18 +86,33 @@ def truncate_to_width(text: str, max_width: int) -> str:
 
 
 def pad_to_width(text: str, target_width: int) -> str:
-    """Pad text to a specific display width using spaces.
+    """Pad text to a specific display width using spaces (left-aligned).
 
     Args:
         text: The text to pad
         target_width: Target display width (terminal columns)
 
     Returns:
-        Text padded with spaces to reach target_width
+        Text padded with trailing spaces to reach target_width
     """
     display_width = get_display_width(text)
     padding_needed = max(0, target_width - display_width)
     return str(text) + (" " * padding_needed)
+
+
+def rpad_to_width(text: str, target_width: int) -> str:
+    """Right-align text within a specific display width using spaces.
+
+    Args:
+        text: The text to right-align
+        target_width: Target display width (terminal columns)
+
+    Returns:
+        Text padded with leading spaces to reach target_width
+    """
+    display_width = get_display_width(text)
+    padding_needed = max(0, target_width - display_width)
+    return (" " * padding_needed) + str(text)
 
 
 class ConsoleFormatter:

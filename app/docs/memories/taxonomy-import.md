@@ -10,6 +10,27 @@ This was changed because auto-creating concepts from tag imports produced root-l
 ### Root concepts must never be created automatically
 A hard constraint. The only way to create a concept is via the explicit `POST /taxonomy/concepts` endpoint. No background process, import, or enrichment may create concepts.
 
+### Concept transfer import/export endpoints
+Concept transfer now has dedicated routes:
+
+- `GET /taxonomy/concepts/export`
+- `POST /taxonomy/concepts/import`
+- `POST /taxonomy/concepts/import_file`
+
+Import is a graft merge, keyed by slug/name/alias matching rather than IDs. Local taxonomy remains authoritative on collisions.
+
+### Root policy during concept transfer import
+Concept transfer import supports two policies:
+
+- `strict` (default): imported roots without overlap are skipped.
+- `permissive`: imported roots without overlap may be created.
+
+This preserves the default no-auto-root behavior while allowing explicit migration workflows.
+
+### Tag collision behavior for concept transfer
+Authority-term collisions do not overwrite existing concept associations.
+If an imported authority term is already linked to a different local concept, the imported link is skipped and recorded as a conflict.
+
 ### Tag storage: two models
 1. **Flat JSON** on `images.user_tags` column
 2. **Relational taxonomy**: `tag_authorities` → `authority_terms` → `concepts` → `image_concept_observations`

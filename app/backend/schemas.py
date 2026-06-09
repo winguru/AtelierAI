@@ -35,6 +35,24 @@ class CivitaiImportRequest(BaseModel):
     limit: Optional[int] = None
 
 
+class CivitaiBatchImportRequest(BaseModel):
+    """Import multiple CivitAI images by their IDs in a single batch.
+
+    The endpoint chunks IDs internally (20 per sub-batch) so the frontend
+    can send any number of IDs in one request.
+    """
+
+    civitai_image_ids: list[int] = Field(
+        ..., min_length=1, description="CivitAI image IDs to import"
+    )
+    collection_id: Optional[int] = Field(
+        None, description="Existing collection ID to add imported images to"
+    )
+    create_collection_name: Optional[str] = Field(
+        None, description="Name for a new collection to create and add images to"
+    )
+
+
 class CivitaiCollectionSyncRequest(BaseModel):
     limit: Optional[int] = None
 
@@ -98,6 +116,13 @@ class TaxonomyConceptUpdateRequest(BaseModel):
 
 class TaxonomyBootstrapImportRequest(BaseModel):
     authority_name: str = "user"
+
+
+class TaxonomyConceptTransferImportRequest(BaseModel):
+    document: dict[str, Any]
+    mode: Literal["graft"] = "graft"
+    root_policy: Literal["strict", "permissive"] = "strict"
+    dry_run: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +321,8 @@ class CivitaiSearchRequest(BaseModel):
 class SyncLabAnalyzeRequest(BaseModel):
     """Sync Lab: analyze-local and fetch-metadata step payload."""
     image_ids: list[int]
+    collection_id: Optional[int] = None
+    is_retry_run: bool = False
 
 
 class SyncLabIngestRequest(BaseModel):

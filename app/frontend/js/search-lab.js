@@ -4,8 +4,11 @@
   'use strict';
 
   /* ── Constants ── */
-  const API_SEARCH = '/civitai-search';
-  const API_AUTH_STATUS = '/civitai-search/auth-status';
+  const API_SEARCH = '/api/civitai-search';
+  const API_AUTH_STATUS = '/api/civitai-search/auth-status';
+  const API_LIBRARY_STATUS = '/api/civitai-search/library-status';
+  const API_BATCH_IMPORT = '/api/import_civitai/batch';
+  const API_COLLECTIONS = '/api/collections/';
 
   // Fallback; overwritten once /api/config resolves.
   let CIVITAI_IMAGE_URL = 'https://civitai.red/images/';
@@ -17,6 +20,7 @@
 
   const THUMB_SIZE = 180;
   const PAGE_SIZE = 51;
+  const MAX_RESULTS = 500; // Display cap for total count (scrolling still loads all)
   const STORAGE_KEYS = {
     theme: 'atelier.searchLab.theme',
   };
@@ -175,6 +179,8 @@
     loading: false,
     currentQuery: null,
     detailFolderWorkspace: null,
+    importedIds: new Set(),     // civitai_image_ids already in library
+    importTasks: new Map(),    // civitaiId → task_id (pending imports)
   };
 
   /* ── Initialise ── */
@@ -191,6 +197,311 @@
     bindEvents();
     initFolderTabs();
     checkAuthStatus();
+    createImportUI();
+
+    // Restore state from URL if present — just repopulate form and search
+    const saved = loadStateFromUrl();
+    if (saved) {
+      els.search_query.value = saved.query;
+      els.filter_tags.value = saved.tags;
+      els.filter_sort.value = saved.sortBy;
+      els.filter_base_model.value = saved.baseModel;
+      els.filter_username.value = saved.username;
+      els.filter_nsfw.value = saved.nsfw;
+      executeSearch();
+    }
+
+    // Save scroll position before unload for restore after reload
+    window.addEventListener('beforeunload', saveScrollPosition);
+  }
+
+  /* ── Import feature: fetch library status ── */
+  async function fetchLibraryStatus() {
+    const ids = state.hits.map(h => h.id).filter(Boolean);
+    if (!ids.length) return;
+
+    const BATCH_SIZE = 200;
+    let allImported = {};
+
+    try {
+      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+        const batch = ids.slice(i, i + BATCH_SIZE);
+        const res = await fetch(`${API_LIBRARY_STATUS}?civitai_image_ids=${batch.join(',')}`);
+        if (!res.ok) continue;
+        const data = await res.json();
+        Object.assign(allImported, data.imported || {});
+      }
+      state.importedIds = new Set(Object.keys(allImported).map(Number));
+      // Re-render badges on existing tiles
+      refreshLibraryBadges();
+      // Update import button if details are showing
+      if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
+        updateImportButtonState(state.hits[state.selectedHitIndex]);
+      }
+    } catch {
+      // Silently fail — badges are non-essential
+    }
+  }
+
+  /* ── Import feature: refresh badge overlays on tiles ── */
+  function refreshLibraryBadges() {
+    const tiles = els.gallery_grid.querySelectorAll('.tile');
+    tiles.forEach((tile, idx) => {
+      if (idx >= state.hits.length) return;
+      const hit = state.hits[idx];
+      const existing = tile.querySelector('.tile-in-library-badge');
+      if (state.importedIds.has(hit.id)) {
+        if (!existing) {
+          const badge = document.createElement('span');
+          badge.className = 'tile-in-library-badge';
+          badge.textContent = '✓ In Library';
+          badge.title = 'This image is already in your library';
+          tile.appendChild(badge);
+        }
+      } else if (existing) {
+        existing.remove();
+      }
+    });
+  }
+
+  /* ── Import feature: get importable IDs from selected indices ── */
+  function getImportableSelectedIds() {
+    const ids = [];
+    for (const idx of state.selectedIndices) {
+      const hit = state.hits[idx];
+      if (hit && hit.id && !state.importedIds.has(hit.id)) {
+        ids.push(hit.id);
+      }
+    }
+    return ids;
+  }
+
+  /* ── Import feature: create import UI elements ── */
+  function createImportUI() {
+    // Import button in detail header actions
+    const actionsDiv = document.querySelector('.detail-header-actions');
+    if (actionsDiv) {
+      const importBtn = document.createElement('button');
+      importBtn.id = 'import-single-btn';
+      importBtn.className = 'btn ghost btn-sm import-btn';
+      importBtn.type = 'button';
+      importBtn.textContent = '⬇ Import';
+      importBtn.title = 'Import this image to your library';
+      importBtn.style.display = 'none';
+      importBtn.addEventListener('click', () => {
+        const hit = state.hits[state.selectedHitIndex];
+        if (hit) showImportDialog([hit.id]);
+      });
+      // Insert before the fullscreen button
+      actionsDiv.insertBefore(importBtn, actionsDiv.firstChild);
+    }
+
+    // Bulk import button in gallery footer
+    const footer = els.gallery_footer;
+    if (footer) {
+      const bulkBtn = document.createElement('button');
+      bulkBtn.id = 'bulk-import-btn';
+      bulkBtn.type = 'button';
+      bulkBtn.textContent = 'Import Selected';
+      bulkBtn.style.display = 'none';
+      bulkBtn.addEventListener('click', () => {
+        const ids = getImportableSelectedIds();
+        if (ids.length) showImportDialog(ids);
+      });
+      // Insert before results-count
+      footer.insertBefore(bulkBtn, els.results_count);
+    }
+  }
+
+  /* ── Import feature: update single-import button visibility ── */
+  function updateImportButtonState(hit) {
+    const btn = document.getElementById('import-single-btn');
+    if (!btn) return;
+    if (!hit || !hit.id) {
+      btn.style.display = 'none';
+      return;
+    }
+    const isImported = state.importedIds.has(hit.id);
+    const isPending = state.importTasks.has(hit.id);
+    btn.style.display = '';
+    if (isPending) {
+      btn.textContent = '⏳ Importing…';
+      btn.disabled = true;
+    } else if (isImported) {
+      btn.textContent = '✓ In Library';
+      btn.disabled = true;
+    } else {
+      btn.textContent = '⬇ Import';
+      btn.disabled = false;
+    }
+  }
+
+  /* ── Import feature: show collection picker dialog ── */
+  function showImportDialog(civitaiIds) {
+    // Remove any existing dialog
+    const existing = document.getElementById('import-dialog-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'import-dialog-overlay';
+    overlay.className = 'import-dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'import-dialog';
+
+    const plural = civitaiIds.length !== 1 ? 's' : '';
+    dialog.innerHTML = `
+      <div class="import-dialog-header">
+        <h3>Import ${civitaiIds.length} Image${plural}</h3>
+        <button type="button" class="import-dialog-close" title="Close">✕</button>
+      </div>
+      <div class="import-dialog-body">
+        <label class="import-dialog-label">Add to collection (optional)</label>
+        <select id="import-collection-select" class="import-dialog-select">
+          <option value="">Don't add to a collection</option>
+          <option value="__new__">➕ Create new collection…</option>
+        </select>
+        <input id="import-new-collection-name" type="text" class="import-dialog-input hidden"
+               placeholder="New collection name">
+        <p class="import-dialog-hint">
+          Images will be downloaded and added to your library.
+        </p>
+      </div>
+      <div class="import-dialog-footer">
+        <button type="button" id="import-dialog-cancel" class="btn ghost">Cancel</button>
+        <button type="button" id="import-dialog-confirm" class="btn solid import-dialog-confirm-btn">Import</button>
+      </div>
+    `;
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    // Populate collections dropdown
+    fetchCollections(dialog.querySelector('#import-collection-select'));
+
+    // Show/hide new collection name input
+    const select = dialog.querySelector('#import-collection-select');
+    const nameInput = dialog.querySelector('#import-new-collection-name');
+    select.addEventListener('change', () => {
+      nameInput.classList.toggle('hidden', select.value !== '__new__');
+    });
+
+    // Close handlers
+    dialog.querySelector('.import-dialog-close').addEventListener('click', () => overlay.remove());
+    dialog.querySelector('#import-dialog-cancel').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    // Confirm handler
+    dialog.querySelector('#import-dialog-confirm').addEventListener('click', async () => {
+      const confirmBtn = dialog.querySelector('#import-dialog-confirm');
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Starting import…';
+
+      const body = { civitai_image_ids: civitaiIds };
+      const colVal = select.value;
+      if (colVal === '__new__') {
+        const name = nameInput.value.trim();
+        if (!name) {
+          nameInput.style.borderColor = '#c0392b';
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = 'Import';
+          return;
+        }
+        body.create_collection_name = name;
+      } else if (colVal) {
+        body.collection_id = parseInt(colVal, 10);
+      }
+
+      try {
+        const res = await fetch(API_BATCH_IMPORT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => null);
+          throw new Error(err?.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        // Mark as pending
+        for (const id of civitaiIds) {
+          state.importTasks.set(id, data.task?.id);
+        }
+        overlay.remove();
+        // Poll for completion
+        pollImportTasks(civitaiIds, data.task?.id);
+      } catch (err) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Import';
+        alert(`Import failed: ${err.message}`);
+      }
+    });
+  }
+
+  /* ── Import feature: fetch user collections for the picker ── */
+  async function fetchCollections(selectEl) {
+    try {
+      const res = await fetch(API_COLLECTIONS);
+      if (!res.ok) return;
+      const collections = await res.json();
+      if (!Array.isArray(collections)) return;
+      for (const col of collections) {
+        const opt = document.createElement('option');
+        opt.value = String(col.id);
+        opt.textContent = col.name;
+        selectEl.appendChild(opt);
+      }
+    } catch {
+      // Non-essential — user can still import without collection
+    }
+  }
+
+  /* ── Import feature: poll task for completion ── */
+  async function pollImportTasks(civitaiIds, taskId) {
+    if (!taskId) return;
+    const maxPolls = 120; // ~2 min at 1s intervals
+    let polls = 0;
+
+    updateImportButtonState(state.hits[state.selectedHitIndex]);
+    updateSelectionCounter();
+
+    const interval = setInterval(async () => {
+      polls++;
+      if (polls >= maxPolls) {
+        clearInterval(interval);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`);
+        if (!res.ok) { clearInterval(interval); return; }
+        const task = await res.json();
+        if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+          clearInterval(interval);
+          if (task.status === 'completed') {
+            for (const id of civitaiIds) {
+              state.importedIds.add(id);
+              state.importTasks.delete(id);
+            }
+            refreshLibraryBadges();
+            updateSelectionCounter();
+            if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
+              updateImportButtonState(state.hits[state.selectedHitIndex]);
+            }
+          } else {
+            for (const id of civitaiIds) {
+              state.importTasks.delete(id);
+            }
+            updateImportButtonState(state.hits[state.selectedHitIndex]);
+            updateSelectionCounter();
+            // Show error to the user
+            const msg = task.error || task.message || `Import ${task.status}`;
+            setStatus(`Import failed: ${msg}`, 'is-error');
+          }
+        }
+      } catch {
+        // Keep polling
+      }
+    }, 1000);
   }
 
   /* ── Auth check ── */
@@ -210,6 +521,117 @@
     }
   }
 
+  /* ── URL State Persistence ── */
+  const SCROLL_KEY = 'searchLab_scrollY';
+
+  function saveStateToUrl() {
+    const p = new URLSearchParams();
+    const q = els.search_query.value.trim();
+    const tags = els.filter_tags.value.trim();
+    const sort = els.filter_sort.value;
+    const baseModel = els.filter_base_model.value;
+    const username = els.filter_username.value.trim();
+    const nsfw = els.filter_nsfw.value;
+
+    if (q) p.set('q', q);
+    if (tags) p.set('tags', tags);
+    if (sort) p.set('sort', sort);
+    if (baseModel) p.set('baseModel', baseModel);
+    if (username) p.set('username', username);
+    if (nsfw) p.set('nsfw', nsfw);
+    if (state.hits.length > 0) p.set('offset', String(state.hits.length));
+
+    const search = p.toString();
+    const url = window.location.pathname + (search ? '?' + search : '');
+    history.replaceState(null, '', url);
+  }
+
+  function loadStateFromUrl() {
+    const p = new URLSearchParams(window.location.search);
+    if (!p.has('q') && !p.has('tags') && !p.has('baseModel') && !p.has('username')) return null;
+
+    return {
+      query: p.get('q') || '',
+      tags: p.get('tags') || '',
+      sortBy: p.get('sort') || '',
+      baseModel: p.get('baseModel') || '',
+      username: p.get('username') || '',
+      nsfw: p.get('nsfw') || '',
+      offset: parseInt(p.get('offset') || '0', 10),
+    };
+  }
+
+  function saveScrollPosition() {
+    try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch (_e) { /* quota */ }
+  }
+
+  function restoreScrollPosition() {
+    try {
+      const y = parseInt(sessionStorage.getItem(SCROLL_KEY) || '0', 10);
+      sessionStorage.removeItem(SCROLL_KEY);
+      if (y > 0) {
+        requestAnimationFrame(() => window.scrollTo(0, y));
+      }
+    } catch (_e) { /* unavailable */ }
+  }
+
+  /* ── Infinite Scroll ── */
+  let _scrollObserver = null;
+  let _scrollHandler = null;
+  let _scrollPending = false;     // Guard against rapid re-entry
+  let _lastLoadTime = 0;          // Timestamp of last triggered load
+
+  function _triggerLoadMore() {
+    if (_scrollPending || state.loading) return;
+    if (state.total > 0 && state.hits.length >= state.total) return;
+    // Debounce: don't re-trigger within 2 seconds of the last load
+    const now = Date.now();
+    if (now - _lastLoadTime < 2000) return;
+    _scrollPending = true;
+    _lastLoadTime = now;
+    _scrollPending = true;
+    _lastLoadScrollY = window.scrollY || window.pageYOffset;
+    state.offset += state.limit;
+    executeSearch(true).finally(() => { _scrollPending = false; });
+  }
+
+  function setupInfiniteScroll() {
+    if (_scrollObserver) return; // Already attached
+
+    // IntersectionObserver: fires when the "Load more" button enters the
+    // viewport (with 400px lookahead). Works in real browsers.
+    _scrollObserver = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) _triggerLoadMore();
+    }, { rootMargin: '400px' });
+    _scrollObserver.observe(els.load_more_btn);
+
+    // Scroll-event fallback (headless Chromium / Playwright where IO may not
+    // fire). Same algorithm as the main gallery: trigger when the viewport
+    // is within ~3 viewport-heights of the document bottom.
+    // Requires the user to have scrolled at least 100px since the last load
+    // to prevent re-triggering on the same position after a page is appended.
+    _scrollHandler = () => {
+      if (_scrollPending || state.loading) return;
+      if (state.total > 0 && state.hits.length >= state.total) return;
+
+      const scrollY = window.scrollY || window.pageYOffset;
+      const viewportH = window.innerHeight;
+      const docH = document.documentElement.scrollHeight;
+      const distanceToBottom = docH - scrollY - viewportH;
+      const earlyTrigger = viewportH * 3;
+
+      if (distanceToBottom < Math.max(earlyTrigger, 240)) {
+        _triggerLoadMore();
+      }
+    };
+    window.addEventListener('scroll', _scrollHandler, { passive: true });
+  }
+
+  function teardownInfiniteScroll() {
+    if (_scrollObserver) { _scrollObserver.disconnect(); _scrollObserver = null; }
+    if (_scrollHandler) { window.removeEventListener('scroll', _scrollHandler); _scrollHandler = null; }
+  }
+
   /* ── Events ── */
   function bindEvents() {
     // Search form
@@ -220,8 +642,9 @@
       executeSearch();
     });
 
-    // Load more
+    // Load more — manual fallback; infinite scroll is primary
     els.load_more_btn.addEventListener('click', () => {
+      if (state.loading) return;
       state.offset += state.limit;
       executeSearch(true);
     });
@@ -282,6 +705,9 @@
   async function executeSearch(append = false) {
     if (state.loading) return;
 
+    if (!append) _preloadCache.clear();
+    const savedOffset = state.offset;
+
     const query = els.search_query.value.trim();
     const tags = els.filter_tags.value.trim();
     const sortBy = els.filter_sort.value;
@@ -295,6 +721,7 @@
     }
 
     state.loading = true;
+    teardownInfiniteScroll(); // Prevent observer from firing while loading
     state.currentQuery = { query, tags, sortBy, baseModel, username, nsfwLevels };
     setStatus('Searching…', 'is-loading');
 
@@ -324,7 +751,13 @@
       const data = await res.json();
 
       if (append) {
-        state.hits = state.hits.concat(data.hits || []);
+        const newHits = data.hits || [];
+        // If append returned zero new hits, we've exhausted all results.
+        // Set total to current count so UI knows we're done.
+        if (newHits.length === 0 && state.total <= 0) {
+          state.total = state.hits.length;
+        }
+        state.hits = state.hits.concat(newHits);
       } else {
         state.hits = data.hits || [];
         // Reset multi-select on fresh search
@@ -334,97 +767,143 @@
       state.total = data.total || 0;
       state.facets = data.facets || null;
 
-      renderResults();
+      renderResults(append);
       renderFacets();
-      setStatus(`Showing ${state.hits.length} of ${state.total.toLocaleString()} results`, '');
+
+      // Display: cap total at MAX_RESULTS to avoid showing unrealistic counts
+      const displayTotal = state.total > MAX_RESULTS ? MAX_RESULTS : state.total;
+      const totalLabel = displayTotal > 0
+        ? (state.total > MAX_RESULTS
+            ? `Showing ${state.hits.length} of ${displayTotal.toLocaleString()}+ results`
+            : `Showing ${state.hits.length} of ${displayTotal.toLocaleString()} results`)
+        : `Showing ${state.hits.length} results`;
+      setStatus(totalLabel, '');
+
+      // Persist search state to URL
+      saveStateToUrl();
 
       // Select first tile on fresh search
       if (!append && state.hits.length > 0) {
         setSingleSelection(0);
       }
+
+      // Fetch library status for current hits
+      fetchLibraryStatus();
     } catch (err) {
+      // Revert offset on failure so "Load More" can be retried.
+      if (append) state.offset = savedOffset;
       setStatus(`Search failed: ${err.message}`, 'is-error');
     } finally {
       state.loading = false;
+      // Re-enable infinite scroll if more results may be available.
+      // When total is unknown (0), let the API return an empty page to
+      // signal completion.
+      const hasMore = state.total <= 0 || state.hits.length < state.total;
+      if (hasMore) {
+        setupInfiniteScroll();
+      }
     }
   }
 
   /* ── Render gallery tiles ── */
-  function renderResults() {
+  function renderTile(hit, idx) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tile';
+    btn.dataset.index = idx;
+
+    if (idx === state.selectedHitIndex) {
+      btn.classList.add('selected', 'active');
+    } else if (state.selectedIndices.has(idx)) {
+      btn.classList.add('selected');
+    }
+
+    // BlurHash placeholder — decode instantly so the tile has colour
+    // before the real thumbnail loads over the network.
+    const placeholderURL = hit.blurhash ? blurHashToDataURL(hit.blurhash, 32, 32) : '';
+
+    const img = document.createElement('img');
+    img.alt = hit.prompt ? hit.prompt.substring(0, 80) : `Image ${hit.id}`;
+    img.classList.add('tile-real-img');
+
+    // Start with blurhash placeholder, swap to real thumbnail on load.
+    const thumbURL = hit.thumbnail_url || hit.url || '';
+    if (placeholderURL) {
+      img.src = placeholderURL;
+      img.style.filter = 'blur(8px)';
+      img.style.transition = 'filter 300ms ease, opacity 300ms ease';
+      // Load real image in background, swap on ready.
+      // We use a hidden preloader instead of lazy loading so tiles that
+      // scroll into view *after* the preload finishes still swap instantly.
+      const realImg = new Image();
+      realImg.onload = () => {
+        img.src = thumbURL;
+        img.style.filter = '';
+      };
+      realImg.onerror = () => {
+        // Keep blurhash placeholder — real image failed.
+        img.style.filter = 'blur(4px)';
+      };
+      realImg.src = thumbURL;
+    } else {
+      img.loading = 'lazy';
+      img.src = thumbURL;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'tile-overlay';
+    const reactions = hit.stats?.reactionCount ?? '';
+    const comments = hit.stats?.commentCount ?? '';
+    overlay.innerHTML = `<span>♥ ${reactions}</span><span>💬 ${comments}</span>`;
+
+    btn.appendChild(img);
+    btn.appendChild(overlay);
+
+    // Selection indicator badge (inserted as first child for z-index layering)
+    if (state.selectedIndices.size > 0) {
+      const indicator = document.createElement('span');
+      indicator.className = 'tile-selection-indicator';
+      indicator.setAttribute('aria-hidden', 'true');
+      btn.insertBefore(indicator, btn.firstChild);
+    }
+
+    // "In Library" badge for imported images
+    if (state.importedIds.has(hit.id)) {
+      const badge = document.createElement('span');
+      badge.className = 'tile-in-library-badge';
+      badge.textContent = '✓ In Library';
+      badge.title = 'This image is already in your library';
+      btn.appendChild(badge);
+    }
+
+    return btn;
+  }
+
+  function renderResults(append = false) {
     const grid = els.gallery_grid;
 
-    // Preserve scroll position on append
-    grid.innerHTML = '';
+    if (!append) grid.innerHTML = '';
 
-    state.hits.forEach((hit, idx) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'tile';
-      btn.dataset.index = idx;
+    const startIdx = append ? grid.children.length : 0;
+    for (let i = startIdx; i < state.hits.length; i++) {
+      grid.appendChild(renderTile(state.hits[i], i));
+    }
 
-      if (idx === state.selectedHitIndex) {
-        btn.classList.add('selected', 'active');
-      } else if (state.selectedIndices.has(idx)) {
-        btn.classList.add('selected');
-      }
-
-      // BlurHash placeholder — decode instantly so the tile has colour
-      // before the real thumbnail loads over the network.
-      const placeholderURL = hit.blurhash ? blurHashToDataURL(hit.blurhash, 32, 32) : '';
-
-      const img = document.createElement('img');
-      img.loading = 'lazy';
-      img.alt = hit.prompt ? hit.prompt.substring(0, 80) : `Image ${hit.id}`;
-      img.classList.add('tile-real-img');
-
-      // Start with blurhash placeholder, swap to real thumbnail on load.
-      const thumbURL = hit.thumbnail_url || hit.url || '';
-      if (placeholderURL) {
-        img.src = placeholderURL;
-        img.style.filter = 'blur(8px)';
-        img.style.transition = 'filter 300ms ease, opacity 300ms ease';
-        // Load real image in background, swap on ready.
-        const realImg = new Image();
-        realImg.onload = () => {
-          img.src = thumbURL;
-          img.style.filter = '';
-        };
-        realImg.onerror = () => {
-          // Keep blurhash placeholder — real image failed.
-          img.style.filter = 'blur(4px)';
-        };
-        realImg.src = thumbURL;
-      } else {
-        img.src = thumbURL;
-      }
-
-      const overlay = document.createElement('div');
-      overlay.className = 'tile-overlay';
-      const reactions = hit.stats?.reactionCount ?? '';
-      const comments = hit.stats?.commentCount ?? '';
-      overlay.innerHTML = `<span>♥ ${reactions}</span><span>💬 ${comments}</span>`;
-
-      btn.appendChild(img);
-      btn.appendChild(overlay);
-
-      // Selection indicator badge (inserted as first child for z-index layering)
-      if (state.selectedIndices.size > 0) {
-        const indicator = document.createElement('span');
-        indicator.className = 'tile-selection-indicator';
-        indicator.setAttribute('aria-hidden', 'true');
-        btn.insertBefore(indicator, btn.firstChild);
-      }
-
-      grid.appendChild(btn);
-    });
-
-    // Footer visibility
+    // Footer visibility + infinite scroll
     if (state.hits.length > 0) {
       els.gallery_footer.classList.remove('hidden');
-      els.results_count.textContent = `${state.hits.length} / ${state.total.toLocaleString()}`;
-      els.load_more_btn.disabled = state.hits.length >= state.total;
+      const displayTotal = state.total > MAX_RESULTS ? MAX_RESULTS : state.total;
+      els.results_count.textContent = displayTotal > 0
+        ? (state.total > MAX_RESULTS
+            ? `${state.hits.length} / ${displayTotal.toLocaleString()}+`
+            : `${state.hits.length} / ${displayTotal.toLocaleString()}`)
+        : `${state.hits.length} results`;
+      const allLoaded = state.total > 0 && state.hits.length >= state.total;
+      els.load_more_btn.disabled = allLoaded;
+      els.load_more_btn.textContent = allLoaded ? 'All results loaded' : 'Load more';
     } else {
       els.gallery_footer.classList.add('hidden');
+      teardownInfiniteScroll();
     }
   }
 
@@ -473,6 +952,8 @@
     }
 
     showDetails(state.hits[index]);
+    // Preload adjacent images' mid-res URLs for faster navigation.
+    _preloadAdjacent(index);
   }
 
   /* ── Multi-select: toggle one index ── */
@@ -572,6 +1053,14 @@
       els.selection_count.textContent = '';
       els.selection_count.classList.add('hidden');
     }
+
+    // Show/hide bulk import button
+    const bulkBtn = document.getElementById('bulk-import-btn');
+    if (bulkBtn) {
+      const importableCount = getImportableSelectedIds().length;
+      bulkBtn.style.display = importableCount > 0 ? '' : 'none';
+      bulkBtn.textContent = `Import ${importableCount} Image${importableCount !== 1 ? 's' : ''}`;
+    }
   }
 
   /* ── Show details ── */
@@ -579,8 +1068,9 @@
     els.details_empty.classList.add('hidden');
     els.details_content.classList.remove('hidden');
 
-    // Image
-    const imageUrl = hit.url || hit.thumbnail_url || '';
+    // Image — use thumbnail (already cached from tiles) for instant display.
+    // Full-res loading only happens in fullscreen mode.
+    const imageUrl = hit.thumbnail_url || hit.mid_res_url || hit.url || '';
     els.detail_image.src = imageUrl;
     els.detail_image.alt = hit.prompt ? hit.prompt.substring(0, 120) : `CivitAI image ${hit.id}`;
 
@@ -599,6 +1089,9 @@
     // Action links
     els.open_civitai_link.href = `${CIVITAI_IMAGE_URL}${hit.id}`;
     els.send_to_gen_lab_link.href = `/frontend/generation-lab.html?civitaiId=${hit.id}`;
+
+    // Update import button state
+    updateImportButtonState(hit);
 
     // Info panel (meta grid)
     renderMetaGrid(hit);
@@ -751,11 +1244,64 @@
   }
 
   /* ── Fullscreen ── */
+
+  /* Preload cache: mid-res URLs for adjacent images so navigation is instant. */
+  const _preloadCache = new Map(); // civitaiId → 'loaded' | HTMLImageElement
+  const PRELOAD_RANGE = 2; // preload ±2 neighbors
+
+  function _preloadAdjacent(index) {
+    for (let d = -PRELOAD_RANGE; d <= PRELOAD_RANGE; d++) {
+      const i = index + d;
+      if (i < 0 || i >= state.hits.length) continue;
+      const hit = state.hits[i];
+      const midUrl = hit.mid_res_url || hit.url;
+      if (!midUrl || _preloadCache.has(hit.id)) continue;
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => _preloadCache.set(hit.id, 'loaded');
+      img.onerror = () => {}; // silent — preloading is best-effort
+      img.src = midUrl;
+      _preloadCache.set(hit.id, img); // store the HTMLImageElement while loading
+    }
+  }
+
+  function _setFullscreenImage(hit) {
+    // Tiered loading strategy:
+    //   1. Show thumbnail immediately (already cached from tiles)
+    //   2. Upgrade to mid-res (1260px) when loaded — sweet spot for fullscreen
+    //   3. Don't load original unless user explicitly requests it (future: "view original" button)
+    const thumbUrl = hit.thumbnail_url || '';
+    const midUrl = hit.mid_res_url || hit.url || '';
+
+    // If the mid-res is already preloaded, use it directly
+    if (_preloadCache.get(hit.id) === 'loaded' && midUrl) {
+      els.fullscreen_image.src = midUrl;
+      return;
+    }
+
+    // Show thumbnail first (instant from browser cache)
+    if (thumbUrl) {
+      els.fullscreen_image.src = thumbUrl;
+    }
+
+    // Upgrade to mid-res in background
+    if (midUrl && midUrl !== thumbUrl) {
+      const upgrade = new Image();
+      upgrade.onload = () => {
+        // Only apply if user hasn't navigated away
+        if (state.hits[state.selectedHitIndex]?.id === hit.id) {
+          els.fullscreen_image.src = midUrl;
+        }
+      };
+      upgrade.src = midUrl;
+    }
+  }
+
   function openFullscreen() {
     if (state.selectedHitIndex < 0 || !state.hits[state.selectedHitIndex]) return;
 
     const hit = state.hits[state.selectedHitIndex];
-    els.fullscreen_image.src = hit.url || hit.thumbnail_url || '';
+    _setFullscreenImage(hit);
     els.fullscreen_image.alt = hit.prompt ? hit.prompt.substring(0, 120) : '';
     updateFullscreenCounter();
     renderFullscreenTags(hit);
@@ -775,9 +1321,9 @@
     const next = state.selectedHitIndex + delta;
     if (next < 0 || next >= state.hits.length) return;
     selectTile(next);
-    // Update fullscreen image
+    // Tiered loading: show thumbnail instantly, upgrade to mid-res.
     const hit = state.hits[next];
-    els.fullscreen_image.src = hit.url || hit.thumbnail_url || '';
+    _setFullscreenImage(hit);
     updateFullscreenCounter();
     renderFullscreenTags(hit);
   }
@@ -888,7 +1434,7 @@
   function navigateFullscreenTo(index) {
     if (index < 0 || index >= state.hits.length) return;
     const hit = state.hits[index];
-    els.fullscreen_image.src = hit.url || hit.thumbnail_url || '';
+    _setFullscreenImage(hit);
     updateFullscreenCounter();
     renderFullscreenTags(hit);
   }

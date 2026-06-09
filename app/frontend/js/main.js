@@ -2660,7 +2660,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderAuthorityTagPanel('civitai');
         renderAuthorityTagPanel('danbooru');
         renderAuthorityTagPanel('prompt');
-        renderAuthorityTagPanel('user');
+        renderUserTagsPanel();
     }
 
     async function applyUserTagToGroup(tagName) {

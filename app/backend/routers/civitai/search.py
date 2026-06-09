@@ -13,8 +13,11 @@ import threading
 from typing import Any
 
 import atelierai.config as app_config
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
 
+from database import get_db
+from models import ImageModel
 from schemas import CivitaiSearchRequest
 from utils.cache import (
     _build_search_cache_key,
@@ -72,10 +75,12 @@ def _normalize_meili_hit(hit: dict) -> dict:
     out = dict(hit)
 
     # ── Image URLs ──
+    # Three tiers: thumbnail (tiles), mid-res (details/fullscreen), original
     uuid = hit.get("url", "")
     if uuid and "/" not in uuid:
         # Meilisearch stores just the UUID slug.
         out["thumbnail_url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=450/{uuid}"
+        out["mid_res_url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=1260/{uuid}"
         out["url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/original=true/{uuid}"
 
     # Keep the BlurHash as ``blurhash`` for client-side decoding.
@@ -207,7 +212,7 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
 
     response = {
         "hits": normalized_hits,
-        "total": result.get("estimatedTotalHits", 0),
+        "total": result.get("estimatedTotalHits") or 0,
         "offset": result.get("offset", payload.offset),
         "limit": result.get("limit", payload.limit),
         "processing_time_ms": result.get("processingTimeMs", 0),
@@ -215,12 +220,66 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
             "distribution": result.get("facetDistribution"),
             "stats": result.get("facetStats"),
         },
+        "backend": result.get("backend", "unknown"),
     }
 
     # Cache with a shorter TTL for search results.
     _search_cache_put(cache_key, response, ttl_seconds=60)
 
     return response
+
+
+@router.get("/library-status", response_model=dict)
+def civitai_search_library_status(
+    civitai_image_ids: str = Query("", description="Comma-separated CivitAI image IDs"),
+    db: Session = Depends(get_db),
+):
+    """Check which CivitAI image IDs are already in the local library.
+
+    Returns a dict mapping each found CivitAI ID to its local file info.
+    IDs not present in the library are simply absent from the response.
+    """
+    if not civitai_image_ids:
+        return {"imported": {}}
+
+    try:
+        ids = [int(x.strip()) for x in civitai_image_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="civitai_image_ids must be comma-separated integers.",
+        )
+
+    if not ids:
+        return {"imported": {}}
+
+    # Cap to prevent abuse
+    if len(ids) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many IDs ({len(ids)}). Maximum 200 per request.",
+        )
+
+    rows = (
+        db.query(
+            ImageModel.civitai_image_id,
+            ImageModel.file_hash,
+            ImageModel.file_name,
+        )
+        .filter(
+            ImageModel.civitai_image_id.in_(ids),
+            ImageModel.image_status.in_(["active", "placeholder"]),
+        )
+        .all()
+    )
+
+    imported = {
+        str(row.civitai_image_id): {"file_hash": row.file_hash, "file_name": row.file_name}
+        for row in rows
+        if row.civitai_image_id is not None
+    }
+
+    return {"imported": imported}
 
 
 @router.get("/auth-status", response_model=dict)

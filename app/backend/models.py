@@ -81,6 +81,7 @@ class ImageModel(Base):
     civitai_post_title = Column(String, nullable=True, comment="Title of the CivitAI post this image belongs to")
     civitai_post_index = Column(Integer, nullable=True, comment="Position of this image within its CivitAI post (0-based)")
     civitai_deleted_at = Column(DateTime, nullable=True, comment="When CivitAI confirmed this image no longer exists (404 from image.get)")
+    civitai_cdn_url = Column(Text, nullable=True, comment="Actual CivitAI CDN URL used to download the image (may differ from source_url)")
     blurhash = Column(String, nullable=True)
     artist_id = Column(Integer, ForeignKey("artists.id"), nullable=True)
     license_id = Column(Integer, ForeignKey("licenses.id"), nullable=True)
@@ -471,6 +472,21 @@ class CollectionModel(Base):
     images = relationship(
         "ImageModel", secondary="image_collections", back_populates="collections"
     )
+
+
+class CollectionCivitaiMapping(Base):
+    """Junction table: many-to-many between local collections and CivitAI collection IDs.
+
+    A single local ``CollectionModel`` may be associated with multiple CivitAI
+    collection IDs (e.g. an image-collection and a post-collection that share
+    the same name).  Conversely, each CivitAI collection ID maps to exactly
+    one local collection (``civitai_collection_id`` is UNIQUE).
+    """
+
+    __tablename__ = "collection_civitai_mappings"
+
+    collection_id = Column(Integer, ForeignKey("collections.id"), primary_key=True)
+    civitai_collection_id = Column(Integer, primary_key=True, unique=True, index=True)
 
 
 class ImageCollectionMembership(Base):

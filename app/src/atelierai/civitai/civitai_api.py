@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
 """
 CivitAI API singleton for managing all CivitAI API calls.
 Refer to CIVITAI_API_REFERENCE.md for details on endpoints and usage.
@@ -13,7 +16,7 @@ from datetime import timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from urllib.parse import quote
+
 
 from .http_client import CivitaiHttpClient, CivitaiRequestError
 
@@ -955,81 +958,44 @@ class CivitaiAPI:
 
     # ===== Batch helpers =====
 
-    def _make_batch_request(
+    def _make_trpc_request(
         self,
-        calls: list[tuple[str, Dict]],
+        endpoint: str,
+        payload_data: Dict,
         *,
         strict: bool = False,
-    ) -> list[Optional[Dict]]:
-        """Send a tRPC batch request combining multiple procedures.
+    ) -> Optional[Dict]:
+        """Send a single tRPC procedure request.
+
+        CivitAI's tRPC server no longer supports batched calls (``batch=1`` /
+        comma-separated paths).  Each procedure must be called individually:
+
+            GET /api/trpc/{endpoint}?input={"json":{...},"meta":{...}}
 
         Args:
-            calls: List of ``(endpoint, payload_data)`` tuples.  Each endpoint
-                is a single tRPC procedure name (e.g. ``"image.getGenerationData"``).
-            strict: When True, raise on API errors instead of returning None items.
+            endpoint: Single tRPC procedure name (e.g. ``"image.getGenerationData"``).
+            payload_data: Dict to wrap as the ``json`` field of the tRPC input.
+            strict: When True, raise on API errors instead of returning None.
 
         Returns:
-            List of parsed response JSON objects (one per call), in the same
-            order as *calls*.  Items that failed parsing return ``None``.
-
-        tRPC batch format::
-
-            GET /api/trpc/proc1,proc2?batch=1&input={json1}&input={json2}
-            → [{result: {data: {json: ...}}}, {result: {data: {json: ...}}}]
+            Parsed response JSON, or ``None`` on failure.
         """
-        if not calls:
-            return []
-
-        procedures = ",".join(ep for ep, _ in calls)
-        url = f"{self.base_url}/{procedures}"
-
-        # tRPC batch format: ?batch=1&input={json1}&input={json2}
-        # requests doesn't support duplicate keys in params dict, so we build
-        # the query string manually for multi-call batches.
-        if len(calls) == 1:
-            # Single call — use standard params dict (no duplicate key issue)
-            params = {
-                "batch": "1",
-                "input": self._build_trpc_payload(calls[0][1]),
-            }
-        else:
-            # Multi-call batch — build full URL with duplicate input params
-            input_parts = [
-                f"batch=1&input={quote(self._build_trpc_payload(pd), safe='')}"
-                for _, pd in calls
-            ]
-            url = f"{url}?{'&'.join(input_parts)}"
-            params = None
+        url = f"{self.base_url}/{endpoint}"
+        params = {"input": self._build_trpc_payload(payload_data)}
 
         try:
-            if params is not None:
-                raw_response = self.http_client.request_json("GET", url, params=params)
-            else:
-                raw_response = self.http_client.request_json("GET", url)
+            raw_response = self.http_client.request_json("GET", url, params=params)
         except CivitaiRequestError as e:
             if e.status_code == 403:
                 self.http_client.activate_global_backoff(90.0, reason="HTTP 403 (Cloudflare)")
             if strict:
                 raise
-            print(f"❌ Batch request error (HTTP {e.status_code}): {e}")
-            return [None] * len(calls)
+            print(f"❌ tRPC request error for {endpoint} (HTTP {e.status_code}): {e}")
+            return None
 
-        if not isinstance(raw_response, list):
-            # Single-item response (server may unwrap batches of 1)
-            raw_response = [raw_response]
-
-        results: list[Optional[Dict]] = []
-        for i, item in enumerate(raw_response):
-            if i >= len(calls):
-                break
-            endpoint, payload_data = calls[i]
-
-            if not isinstance(item, dict):
-                results.append(None)
-                continue
-
-            # Check for error payload
-            error_payload = item.get("error")
+        # Check for error payload
+        if isinstance(raw_response, dict):
+            error_payload = raw_response.get("error")
             if isinstance(error_payload, dict):
                 raw_error_json = error_payload.get("json")
                 error_json = raw_error_json if isinstance(raw_error_json, dict) else {}
@@ -1039,11 +1005,11 @@ class CivitaiAPI:
                 message = (
                     error_json.get("message")
                     or error_payload.get("message")
-                    or "Batch item failed"
+                    or "tRPC request failed"
                 )
                 normalized_status = status_code if isinstance(status_code, int) else None
                 exc = CivitaiRequestError(
-                    f"Batch item [{i}] {endpoint}: {message}",
+                    f"{endpoint}: {message}",
                     status_code=normalized_status,
                     retryable=bool(normalized_status in self._TRPC_RETRYABLE_STATUS_CODES),
                 )
@@ -1051,32 +1017,54 @@ class CivitaiAPI:
                     self._record_to_db_cache(endpoint, payload_data, None, exc.status_code)
                 if strict:
                     raise exc
-                results.append(None)
-                continue
+                return None
 
-            # Extract result data
-            result_wrapper = item.get("result")
-            if not isinstance(result_wrapper, dict):
-                results.append(None)
-                continue
-
+        # Extract result data from {"result": {"data": {"json": ...}}}
+        result_wrapper = raw_response.get("result") if isinstance(raw_response, dict) else None
+        if isinstance(result_wrapper, dict):
             result_data = result_wrapper.get("data")
             if isinstance(result_data, dict) and "json" in result_data:
                 result_json = result_data["json"]
             else:
                 result_json = result_data
+        else:
+            result_json = raw_response
 
-            self._archive_metadata_response(
-                endpoint=endpoint,
-                payload_data=payload_data,
-                response_json=result_json,
-            )
-            self._record_to_db_cache(endpoint, payload_data, result_json, 200)
-            results.append(result_json)
+        self._archive_metadata_response(
+            endpoint=endpoint,
+            payload_data=payload_data,
+            response_json=result_json,
+        )
+        self._record_to_db_cache(endpoint, payload_data, result_json, 200)
+        return result_json
 
-        # Pad missing results
-        while len(results) < len(calls):
-            results.append(None)
+    def _make_batch_request(
+        self,
+        calls: list[tuple[str, Dict]],
+        *,
+        strict: bool = False,
+    ) -> list[Optional[Dict]]:
+        """Send individual tRPC requests for each procedure.
+
+        CivitAI deprecated the batch format (``batch=1`` with comma-separated
+        paths).  This method now issues one GET request per procedure and
+        returns results in the same order as *calls*.
+
+        Args:
+            calls: List of ``(endpoint, payload_data)`` tuples.
+            strict: When True, raise on API errors instead of returning None items.
+
+        Returns:
+            List of parsed response JSON objects (one per call), in the same
+            order as *calls*.  Items that failed return ``None``.
+        """
+        if not calls:
+            return []
+
+        results: list[Optional[Dict]] = []
+        for endpoint, payload_data in calls:
+            result = self._make_trpc_request(endpoint, payload_data, strict=strict)
+            results.append(result)
 
         return results
 
@@ -1325,6 +1313,48 @@ class CivitaiAPI:
         }
         if cursor is not None:
             payload_data["cursor"] = cursor
+        return self._make_request(
+            endpoint="post.getInfinite",
+            payload_data=payload_data,
+        )
+
+    def fetch_user_draft_posts(
+        self, username: str, *, cursor: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Fetch a user's unpublished/draft posts via post.getInfinite.
+
+        Uses the same post.getInfinite endpoint but with section=draft,
+        draftOnly=true, and pending=true to surface unpublished posts.
+        Requires authentication — only works for the authenticated user's
+        own posts or posts visible to them.
+
+        Discovered by inspecting the CivitAI website's network requests on
+        the /user/{username}/posts?section=draft profile page.
+
+        Args:
+            username: CivitAI username whose drafts to fetch.
+            cursor: Pagination cursor from a previous response's nextCursor.
+                    Pass None for the first page.
+
+        Returns:
+            Dict with 'items' (list of draft posts) and 'nextCursor', or None.
+        """
+        payload_data: Dict[str, Any] = {
+            "browsingLevel": self.default_params.get("browsingLevel", 31),
+            "period": "AllTime",
+            "periodMode": "published",
+            "sort": "Newest",
+            "username": username,
+            "section": "draft",
+            "draftOnly": True,
+            "pending": True,
+            "include": self.default_params.get("include", ["cosmetics"]),
+            "excludedTagIds": [],
+            "disablePoi": True,
+            "disableMinor": True,
+            "cursor": cursor,
+            "authed": True,
+        }
         return self._make_request(
             endpoint="post.getInfinite",
             payload_data=payload_data,

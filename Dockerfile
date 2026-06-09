@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     libimage-exiftool-perl \
     gosu \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY app/requirements.txt /tmp/atelier-deps/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \

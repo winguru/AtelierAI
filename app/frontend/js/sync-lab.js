@@ -15,6 +15,16 @@
     downloadResults: [],     // download results
     ingestResults: [],       // ingest results
     sessionId: null,         // resumable sync session ID
+    stageSelections: {
+      5: new Set(),
+      6: new Set(),
+      7: new Set(),
+    },
+    stageSelectionInitialized: {
+      5: false,
+      6: false,
+      7: false,
+    },
   };
 
   /* ── DOM helpers ── */
@@ -127,6 +137,180 @@
   function disableBtn(id) {
     const b = el(id);
     if (b) b.disabled = true;
+  }
+
+  function resetStageSelection(stepNum) {
+    state.stageSelections[stepNum] = new Set();
+    state.stageSelectionInitialized[stepNum] = false;
+  }
+
+  function _collectStep5Candidates() {
+    const data = state.analysis || {};
+    const rank = new Map();
+    (state.collectionItems || []).forEach((it, idx) => {
+      const id = Number(it?.id || it?.imageId);
+      if (id) rank.set(id, idx);
+    });
+
+    const candidates = new Map();
+    const pushCandidate = (id, status, eligible) => {
+      const num = Number(id);
+      if (!num) return;
+      if (candidates.has(num)) return;
+      candidates.set(num, {
+        id: num,
+        status,
+        eligible,
+        rank: rank.has(num) ? rank.get(num) : Number.MAX_SAFE_INTEGER,
+      });
+    };
+
+    (data.new || []).forEach((it) => pushCandidate(it, 'new', true));
+    (data.existing || []).forEach((it) => pushCandidate(it.civitai_image_id || it.image_id, 'existing', false));
+    (data.tombstoned || []).forEach((it) => pushCandidate(it.civitai_image_id || it.image_id, 'tombstoned', false));
+    (data.placeholders || []).forEach((it) => pushCandidate(it.civitai_image_id || it.image_id, 'placeholder', false));
+
+    return Array.from(candidates.values()).sort((a, b) => a.rank - b.rank || a.id - b.id);
+  }
+
+  function _collectStep6Candidates() {
+    return (state.metadataResults || []).map((r) => ({
+      id: Number(r.image_id),
+      status: r.error ? 'failed' : 'ready',
+      eligible: !r.error,
+    })).filter((x) => x.id);
+  }
+
+  function _collectStep7Candidates() {
+    return (state.downloadResults || []).map((r) => ({
+      id: Number(r.image_id),
+      status: r.status === 'downloaded' ? 'ready' : (r.status || 'failed'),
+      eligible: r.status === 'downloaded',
+    })).filter((x) => x.id);
+  }
+
+  function _getStageCandidates(stepNum) {
+    if (stepNum === 5) return _collectStep5Candidates();
+    if (stepNum === 6) return _collectStep6Candidates();
+    if (stepNum === 7) return _collectStep7Candidates();
+    return [];
+  }
+
+  function _getStageLimit(stepNum) {
+    const raw = (el(`step${stepNum}-limit`)?.value || '').trim();
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  function _isStageShowExtra(stepNum) {
+    return !!el(`step${stepNum}-show-extra`)?.checked;
+  }
+
+  function getStageExecutionPlan(stepNum) {
+    const candidates = _getStageCandidates(stepNum);
+    const selectedSet = state.stageSelections[stepNum] || new Set();
+    const selected = candidates.filter((c) => selectedSet.has(c.id));
+    let ids = selected.map((c) => c.id);
+    const limit = _getStageLimit(stepNum);
+    if (limit !== null && ids.length > limit) {
+      ids = ids.slice(0, limit);
+    }
+    return {
+      ids,
+      selectedCount: selected.length,
+      totalCandidates: candidates.length,
+      eligibleCount: candidates.filter((c) => c.eligible).length,
+      limit,
+    };
+  }
+
+  function renderStageCandidates(stepNum) {
+    const container = el(`step${stepNum}-candidates`);
+    if (!container) return;
+
+    const candidates = _getStageCandidates(stepNum);
+    const selectedSet = state.stageSelections[stepNum];
+
+    if (!state.stageSelectionInitialized[stepNum]) {
+      selectedSet.clear();
+      candidates.forEach((c) => {
+        if (c.eligible) selectedSet.add(c.id);
+      });
+      state.stageSelectionInitialized[stepNum] = true;
+    }
+
+    const showExtra = _isStageShowExtra(stepNum);
+    const visible = showExtra ? candidates : candidates.filter((c) => c.eligible);
+    if (!visible.length) {
+      container.innerHTML = '<span class="detail-label">No candidates for this stage.</span>';
+      return;
+    }
+
+    container.innerHTML = visible.map((c) => {
+      const selected = selectedSet.has(c.id);
+      const cls = [
+        'candidate-chip',
+        c.eligible ? 'eligible' : '',
+        selected ? 'selected' : '',
+      ].filter(Boolean).join(' ');
+      const statusSuffix = c.eligible ? '' : ` (${c.status})`;
+      return `<button type="button" class="${cls}" data-stage="${stepNum}" data-image-id="${c.id}" title="${c.status}">#${c.id}${statusSuffix}</button>`;
+    }).join('');
+  }
+
+  function setupStageControls(stepNum) {
+    const showExtra = el(`step${stepNum}-show-extra`);
+    const selectEligible = el(`step${stepNum}-select-eligible`);
+    const selectAll = el(`step${stepNum}-select-all`);
+    const clear = el(`step${stepNum}-clear`);
+    const candidates = el(`step${stepNum}-candidates`);
+
+    if (showExtra) {
+      showExtra.addEventListener('change', () => renderStageCandidates(stepNum));
+    }
+
+    if (selectEligible) {
+      selectEligible.addEventListener('click', () => {
+        const set = state.stageSelections[stepNum];
+        set.clear();
+        _getStageCandidates(stepNum).forEach((c) => {
+          if (c.eligible) set.add(c.id);
+        });
+        renderStageCandidates(stepNum);
+      });
+    }
+
+    if (selectAll) {
+      selectAll.addEventListener('click', () => {
+        const set = state.stageSelections[stepNum];
+        set.clear();
+        const visible = _isStageShowExtra(stepNum)
+          ? _getStageCandidates(stepNum)
+          : _getStageCandidates(stepNum).filter((c) => c.eligible);
+        visible.forEach((c) => set.add(c.id));
+        renderStageCandidates(stepNum);
+      });
+    }
+
+    if (clear) {
+      clear.addEventListener('click', () => {
+        state.stageSelections[stepNum].clear();
+        renderStageCandidates(stepNum);
+      });
+    }
+
+    if (candidates) {
+      candidates.addEventListener('click', (e) => {
+        const chip = e.target.closest('.candidate-chip[data-image-id]');
+        if (!chip) return;
+        const imageId = Number(chip.dataset.imageId);
+        if (!imageId) return;
+        const set = state.stageSelections[stepNum];
+        if (set.has(imageId)) set.delete(imageId);
+        else set.add(imageId);
+        renderStageCandidates(stepNum);
+      });
+    }
   }
 
   /* ────────────────────────────────────────
@@ -502,7 +686,11 @@
       const resp = await fetch('/api/sync-lab/analyze-local' + (state.sessionId ? `?session_id=${state.sessionId}` : ''), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_ids: imageIds }),
+        body: JSON.stringify({
+          image_ids: imageIds,
+          collection_id: state.selectedCollectionId || null,
+          is_retry_run: false,
+        }),
       });
       const data = await resp.json();
 
@@ -529,6 +717,8 @@
 
       renderDedupSummary(existing, newCount, tombstoned, placeholders);
       renderAnalysisDetails();
+      resetStageSelection(5);
+      renderStageCandidates(5);
       setStepState(4, 'complete');
 
       // Enable step 5 only if there are new items to process
@@ -537,7 +727,16 @@
         enableStep(5);
         enableBtn('btn-fetch-metadata');
       } else if (existing > 0) {
-        setStatus(4, 'info', 'All items already exist locally. No new items to process.');
+        const finalization = state.analysis.sync_finalization || {};
+        if (finalization.updated) {
+          const at = finalization.last_synced_at ? ` (${fmtTimestamp(finalization.last_synced_at)})` : '';
+          setStatus(4, 'success', `All items already exist locally. Sync status refreshed${at}.`);
+        } else {
+          setStatus(4, 'info', 'All items already exist locally. No new items to process.');
+        }
+        setFlowState('flow-4-5', true, 'No new items to fetch metadata for.');
+        enableStep(5);
+        enableBtn('btn-fetch-metadata');
       }
     } catch (err) {
       setStepState(4, 'error');
@@ -597,18 +796,15 @@
     clearStatus(5);
     el('step5-results').innerHTML = '';
 
-    const newItems = (state.analysis.new || []);
-    const imageIds = newItems.map(it => typeof it === 'number' ? it : (it.civitai_image_id || it.image_id)).filter(Boolean);
-
-    if (!imageIds.length) {
-      setStatus(5, 'warning', 'No new items to fetch metadata for.');
-      setStepState(5, 'complete');
-      btnLoading(btn, false);
-      return;
-    }
+    const plan = getStageExecutionPlan(5);
+    const imageIds = plan.ids;
 
     try {
-      const url = `/api/sync-lab/fetch-metadata?image_ids=${imageIds.join(',')}` + (state.sessionId ? `&session_id=${state.sessionId}` : '');
+      const params = new URLSearchParams();
+      params.set('image_ids', imageIds.join(','));
+      if (plan.limit != null) params.set('limit', String(plan.limit));
+      if (state.sessionId) params.set('session_id', state.sessionId);
+      const url = `/api/sync-lab/fetch-metadata?${params.toString()}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -645,18 +841,25 @@
       const ok = state.metadataResults.filter(r => !r.error).length;
       const failed = state.metadataResults.filter(r => r.error).length;
 
-      setStatus(5, 'success',
-        `Metadata fetched: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
-      );
+      if (!imageIds.length) {
+        setStatus(5, 'info', 'No new items to fetch metadata for.');
+      } else {
+        setStatus(5, 'success',
+          `Metadata fetched: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
+        );
+      }
 
       renderMetadataDetails();
+      resetStageSelection(6);
+      renderStageCandidates(6);
       setStepState(5, 'complete');
 
-      if (ok > 0) {
-        setFlowState('flow-5-6', true, `${ok} item(s) ready for download`);
-        enableStep(6);
-        enableBtn('btn-download');
-      }
+      const flowLabel = ok > 0
+        ? `${ok} item(s) ready for download`
+        : 'No new items to download.';
+      setFlowState('flow-5-6', true, flowLabel);
+      enableStep(6);
+      enableBtn('btn-download');
     } catch (err) {
       setStepState(5, 'error');
       if (err.status_code === 503) {
@@ -855,7 +1058,10 @@
      Step 6: Download Images
      ──────────────────────────────────────── */
   async function downloadImages() {
-    if (!state.metadataResults.length) return;
+    if (!state.metadataResults.length) {
+      resetStageSelection(6);
+      renderStageCandidates(6);
+    }
 
     const btn = el('btn-download');
     btnLoading(btn, true);
@@ -863,20 +1069,15 @@
     clearStatus(6);
     el('step6-results').innerHTML = '';
 
-    const imageIds = state.metadataResults
-      .filter(r => !r.error)
-      .map(r => r.image_id)
-      .filter(Boolean);
-
-    if (!imageIds.length) {
-      setStatus(6, 'warning', 'No items with successful metadata to download.');
-      setStepState(6, 'complete');
-      btnLoading(btn, false);
-      return;
-    }
+    const plan = getStageExecutionPlan(6);
+    const imageIds = plan.ids;
 
     try {
-      const url = `/api/sync-lab/download?image_ids=${imageIds.join(',')}` + (state.sessionId ? `&session_id=${state.sessionId}` : '');
+      const params = new URLSearchParams();
+      params.set('image_ids', imageIds.join(','));
+      if (plan.limit != null) params.set('limit', String(plan.limit));
+      if (state.sessionId) params.set('session_id', state.sessionId);
+      const url = `/api/sync-lab/download?${params.toString()}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -913,18 +1114,25 @@
       const ok = state.downloadResults.filter(r => r.status === 'downloaded').length;
       const failed = state.downloadResults.filter(r => r.error).length;
 
-      setStatus(6, 'success',
-        `Downloaded: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
-      );
+      if (!imageIds.length) {
+        setStatus(6, 'info', 'No new items to download.');
+      } else {
+        setStatus(6, 'success',
+          `Downloaded: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
+        );
+      }
 
       renderDownloadDetails();
+      resetStageSelection(7);
+      renderStageCandidates(7);
       setStepState(6, 'complete');
 
-      if (ok > 0) {
-        setFlowState('flow-6-7', true, `${ok} image(s) ready to ingest`);
-        enableStep(7);
-        enableBtn('btn-ingest');
-      }
+      const flowLabel = ok > 0
+        ? `${ok} image(s) ready to ingest`
+        : 'No new items to ingest.';
+      setFlowState('flow-6-7', true, flowLabel);
+      enableStep(7);
+      enableBtn('btn-ingest');
     } catch (err) {
       setStepState(6, 'error');
       setStatus(6, 'error', err.detail || `Network error: ${err.message || err}`);
@@ -963,15 +1171,13 @@
      Step 7: Ingest to Library
      ──────────────────────────────────────── */
   async function ingestToLibrary() {
-    const okIds = state.downloadResults
-      .filter(r => r.status === 'downloaded')
-      .map(r => r.image_id)
-      .filter(Boolean);
-
-    if (!okIds.length) {
-      setStatus(7, 'warning', 'No successfully downloaded items to ingest.');
-      return;
+    if (!state.downloadResults.length) {
+      resetStageSelection(7);
+      renderStageCandidates(7);
     }
+
+    const plan = getStageExecutionPlan(7);
+    const okIds = plan.ids;
 
     const btn = el('btn-ingest');
     btnLoading(btn, true);
@@ -980,7 +1186,12 @@
     el('step7-results').innerHTML = '';
 
     try {
-      const url = `/api/sync-lab/ingest?image_ids=${okIds.join(',')}&collection_id=${state.selectedCollectionId || ''}` + (state.sessionId ? `&session_id=${state.sessionId}` : '');
+      const params = new URLSearchParams();
+      params.set('image_ids', okIds.join(','));
+      if (plan.limit != null) params.set('limit', String(plan.limit));
+      if (state.selectedCollectionId) params.set('collection_id', String(state.selectedCollectionId));
+      if (state.sessionId) params.set('session_id', state.sessionId);
+      const url = `/api/sync-lab/ingest?${params.toString()}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
 
@@ -1019,12 +1230,16 @@
       const skipped = state.ingestResults.filter(r => r.status === 'skipped').length;
       const failed = state.ingestResults.filter(r => r.error).length;
 
-      let msg = `Ingested: ${ok} OK`;
-      if (dups) msg += ` (${dups} duplicate assets)`;
-      if (skipped) msg += `, ${skipped} skipped`;
-      if (failed) msg += `, ${failed} failed`;
-      msg += ` in ${fmtMs(result.timing?.duration_ms)}`;
-      setStatus(7, failed ? 'warning' : 'success', msg);
+      if (!okIds.length) {
+        setStatus(7, 'info', 'No new items to ingest.');
+      } else {
+        let msg = `Ingested: ${ok} OK`;
+        if (dups) msg += ` (${dups} duplicate assets)`;
+        if (skipped) msg += `, ${skipped} skipped`;
+        if (failed) msg += `, ${failed} failed`;
+        msg += ` in ${fmtMs(result.timing?.duration_ms)}`;
+        setStatus(7, failed ? 'warning' : 'success', msg);
+      }
 
       renderIngestDetails();
       setStepState(7, 'complete');
@@ -1266,6 +1481,8 @@
     el('btn-download').addEventListener('click', downloadImages);
     el('btn-ingest').addEventListener('click', ingestToLibrary);
 
+    [5, 6, 7].forEach((stepNum) => setupStageControls(stepNum));
+
     // Auto-select when dropdown changes
     el('collection-dropdown').addEventListener('change', () => {
       if (el('collection-dropdown').value) {
@@ -1475,6 +1692,8 @@
         if (session.step_4_data) {
           state.analysis = session.step_4_data;
         }
+        resetStageSelection(5);
+        renderStageCandidates(5);
         setFlowState('flow-4-5', true);
       }
       if (lastComplete >= 5) {
@@ -1484,6 +1703,8 @@
           state.metadataResults = typeof raw === 'object' && !Array.isArray(raw)
             ? Object.values(raw) : raw;
         }
+        resetStageSelection(6);
+        renderStageCandidates(6);
         setStatus(5, 'success', `Metadata fetched (resumed — ${state.metadataResults.length} items)`);
         setFlowState('flow-5-6', true);
       }
@@ -1494,6 +1715,8 @@
           state.downloadResults = typeof raw === 'object' && !Array.isArray(raw)
             ? Object.values(raw) : raw;
         }
+        resetStageSelection(7);
+        renderStageCandidates(7);
         setStatus(6, 'success', `Downloads complete (resumed — ${state.downloadResults.length} items)`);
         setFlowState('flow-6-7', true);
       }

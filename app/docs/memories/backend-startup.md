@@ -32,3 +32,4 @@ Runtime DB configuration comes from `atelierai.config` (backed by `app/backend/c
 ## Gotchas
 - Starting without `cd app/` causes `ModuleNotFoundError` or `RuntimeError: Directory 'frontend' does not exist`
 - `main.py` is very large (~12000 lines) — contains both legacy inline routes and newer router-based routes
+- Older SQLite DBs can miss `image_concept_observations.is_present`; startup migrations now add `is_present`/`is_curated` additively before ingestion paths write observations.

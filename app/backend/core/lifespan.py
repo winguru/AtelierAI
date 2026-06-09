@@ -17,7 +17,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import sqlalchemy as sa
 from fastapi import FastAPI
@@ -232,6 +232,133 @@ def _ensure_observation_authority_term_unique_index() -> None:
             )
 
 
+def _ensure_observation_schema_current() -> None:
+    """Recreate image_concept_observations if the schema pre-dates the current ORM.
+
+    Legacy schema markers that trigger recreation:
+      - concept_id INTEGER NOT NULL  (should be nullable)
+      - dimension / polarity VARCHAR NOT NULL  (obsolete columns)
+      - source_type / certainty_label stored as VARCHAR  (should be INTEGER)
+
+    Existing rows are migrated by copying columns shared by both schemas.
+    Rows where concept_id IS NULL in the legacy table are discarded (would be
+    malformed under the old NOT NULL constraint anyway).
+    """
+    with engine.connect() as connection:
+        col_info = {
+            row[1]: row
+            for row in connection.execute(
+                text("PRAGMA table_info(image_concept_observations)")
+            ).fetchall()
+        }
+
+    # PRAGMA row: (cid, name, type, notnull, dflt_value, pk) — notnull=1 means NOT NULL.
+    concept_id_col = col_info.get("concept_id")
+    if concept_id_col is None or concept_id_col[3] == 0:
+        # Already nullable — schema is current.
+        return
+
+    print(
+        "  [migration] image_concept_observations has legacy NOT NULL concept_id "
+        "— recreating table with current schema..."
+    )
+
+    with engine.begin() as connection:
+        result = connection.execute(
+            text("SELECT COUNT(*) FROM image_concept_observations")
+        ).fetchone()
+        row_count = result[0] if result else 0
+
+        # Drop auxiliary indexes; auto-indexes on PK/UNIQUE drop with the table.
+        for (idx_name,) in connection.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='image_concept_observations' "
+                "  AND name NOT LIKE 'sqlite_autoindex%'"
+            )
+        ).fetchall():
+            connection.execute(text(f'DROP INDEX IF EXISTS "{idx_name}"'))
+
+        connection.execute(
+            text(
+                "ALTER TABLE image_concept_observations "
+                "RENAME TO _ico_legacy"
+            )
+        )
+
+    # Create the corrected table using the ORM's current metadata.
+    Base.metadata.tables["image_concept_observations"].create(engine)
+
+    if row_count > 0:
+        # Build the list of columns that exist in both old and new schemas.
+        new_col_names = {
+            row[1]
+            for row in engine.connect().execute(
+                text("PRAGMA table_info(image_concept_observations)")
+            ).fetchall()
+        }
+        shared_cols = ", ".join(
+            c
+            for c in new_col_names
+            if c in col_info and c != "id"
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    f"INSERT INTO image_concept_observations ({shared_cols}) "
+                    f"SELECT {shared_cols} FROM _ico_legacy "
+                    f"WHERE concept_id IS NOT NULL"
+                )
+            )
+        print(f"  [migration] Migrated {row_count} rows from legacy schema.")
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS _ico_legacy"))
+
+    print("  [migration] image_concept_observations schema is now current.")
+
+
+def _ensure_observation_presence_columns() -> None:
+    """Add observation presence/curation columns for older sqlite databases."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(image_concept_observations)")
+            ).fetchall()
+        }
+
+        if "is_present" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE image_concept_observations "
+                    "ADD COLUMN is_present BOOLEAN DEFAULT 1 NOT NULL"
+                )
+            )
+        if "is_curated" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE image_concept_observations "
+                    "ADD COLUMN is_curated BOOLEAN DEFAULT 0 NOT NULL"
+                )
+            )
+
+        connection.execute(
+            text(
+                "UPDATE image_concept_observations "
+                "SET is_present = 1 "
+                "WHERE is_present IS NULL"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE image_concept_observations "
+                "SET is_curated = 0 "
+                "WHERE is_curated IS NULL"
+            )
+        )
+
+
 def _backfill_user_tags_to_observations() -> None:
     """One-time migration: convert user_tags and user_negative_tags JSON into
     authority_terms + image_concept_observations rows under the 'user' authority.
@@ -325,7 +452,7 @@ def _backfill_user_tags_to_observations() -> None:
                         )
                         db.add(term)
                         db.flush()
-                        term_id = term.id
+                        term_id = cast(int, term.id)
                         existing_terms[normalized] = term_id
                         terms_created += 1
 
@@ -672,6 +799,109 @@ def _ensure_observation_unique_constraint() -> None:
             )
 
 
+def _attempt_schema_migration_1_3_to_1_4() -> bool:
+    """Attempt in-place migration from schema 1.3 to 1.4."""
+    print("   Attempting in-place schema upgrade 1.3 -> 1.4...")
+    try:
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+        with SessionLocal() as db:
+            db.query(SchemaVersion).delete()
+            db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+            db.commit()
+        print("✅ In-place schema upgrade complete.")
+        return True
+    except Exception as migrate_exc:
+        print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
+        return False
+
+
+def _attempt_schema_migration_1_4_to_1_5() -> bool:
+    """Attempt in-place migration from schema 1.4 to 1.5 (user_tags column)."""
+    print("   Attempting in-place schema upgrade 1.4 -> 1.5 (user_tags column)...")
+    try:
+        _ensure_user_tags_column()
+        _backfill_user_tags_from_sidecars()
+        with SessionLocal() as db:
+            db.query(SchemaVersion).delete()
+            db.add(SchemaVersion(version_num=CURRENT_SCHEMA_VERSION))
+            db.commit()
+        print("✅ In-place schema upgrade complete.")
+        return True
+    except Exception as migrate_exc:
+        print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
+        return False
+
+
+def _handle_schema_mismatch(
+    version_result: str, db_file_path: str | None
+) -> tuple[bool, str | None]:
+    """Handle schema version mismatch. Returns (should_delete_db, new_version)."""
+    print(
+        f"⚠️ Schema version mismatch. Found {version_result}, expected {CURRENT_SCHEMA_VERSION}."
+    )
+    migrated = False
+
+    if str(version_result or "") == "1.3" and str(CURRENT_SCHEMA_VERSION) == "1.4":
+        migrated = _attempt_schema_migration_1_3_to_1_4()
+
+    if str(version_result or "") == "1.4" and str(CURRENT_SCHEMA_VERSION) == "1.5":
+        migrated = _attempt_schema_migration_1_4_to_1_5()
+
+    if migrated:
+        version_result = CURRENT_SCHEMA_VERSION
+
+    if db_file_path and os.path.exists(db_file_path):
+        if version_result == CURRENT_SCHEMA_VERSION:
+            print("✅ Database schema is up to date.")
+            return False, None
+        elif ALLOW_SCHEMA_RESET:
+            print("   Recreating database (ALLOW_SCHEMA_RESET=true)...")
+            return True, db_file_path
+        else:
+            raise RuntimeError(
+                "Schema mismatch detected and automatic reset is disabled. "
+                "Set ALLOW_SCHEMA_RESET=true in .env for development-only "
+                "auto-rebuild, or migrate/update the database manually."
+            )
+    else:
+        raise RuntimeError(
+            "Schema mismatch detected, but automatic reset is only supported "
+            "for sqlite file databases. Please migrate/update the database manually."
+        )
+
+
+def _check_existing_database_schema(db_file_path: str | None) -> bool:
+    """Check and handle schema version for existing database. Returns True if DB should be recreated."""
+    try:
+        with engine.connect() as connection:
+            version_result = connection.execute(
+                SchemaVersion.__table__.select()
+            ).scalar_one_or_none()
+            if version_result != CURRENT_SCHEMA_VERSION:
+                should_delete, _ = _handle_schema_mismatch(str(version_result) if version_result else "", db_file_path)
+                return should_delete
+            else:
+                print("✅ Database schema is up to date.")
+                return False
+    except Exception as e:
+        print(f"⚠️ Could not check schema version (table might not exist): {e}")
+        if db_file_path and os.path.exists(db_file_path):
+            if ALLOW_SCHEMA_RESET:
+                print("   Recreating database to be safe (ALLOW_SCHEMA_RESET=true)...")
+                return True
+            else:
+                raise RuntimeError(
+                    "Could not verify schema version and automatic reset is disabled. "
+                    "Set ALLOW_SCHEMA_RESET=true in .env for development-only auto-rebuild, "
+                    "or inspect/fix the database manually."
+                ) from e
+        else:
+            raise RuntimeError(
+                "Could not verify schema version for a non-sqlite database. "
+                "Automatic reset is unavailable; inspect/fix the database manually."
+            ) from e
+
+
 # ---------------------------------------------------------------------------
 # Initial data + lifespan
 # ---------------------------------------------------------------------------
@@ -702,98 +932,10 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         db_exists = os.path.exists(db_file_path)
 
     if db_exists:
-        try:
-            with engine.connect() as connection:
-                version_result = connection.execute(
-                    SchemaVersion.__table__.select()
-                ).scalar_one_or_none()
-                if version_result != CURRENT_SCHEMA_VERSION:
-                    print(
-                        f"⚠️ Schema version mismatch. Found {version_result}, expected {CURRENT_SCHEMA_VERSION}."
-                    )
-                    migrated = False
-                    if (
-                        str(version_result or "") == "1.3"
-                        and str(CURRENT_SCHEMA_VERSION) == "1.4"
-                    ):
-                        print("   Attempting in-place schema upgrade 1.3 -> 1.4...")
-                        try:
-                            Base.metadata.create_all(bind=engine, checkfirst=True)
-                            with SessionLocal() as db:
-                                db.query(SchemaVersion).delete()
-                                db.add(
-                                    SchemaVersion(version_num=CURRENT_SCHEMA_VERSION)
-                                )
-                                db.commit()
-                            migrated = True
-                            print("✅ In-place schema upgrade complete.")
-                        except Exception as migrate_exc:
-                            print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
-
-                    if (
-                        str(version_result or "") == "1.4"
-                        and str(CURRENT_SCHEMA_VERSION) == "1.5"
-                    ):
-                        print(
-                            "   Attempting in-place schema upgrade 1.4 -> 1.5 (user_tags column)..."
-                        )
-                        try:
-                            _ensure_user_tags_column()
-                            _backfill_user_tags_from_sidecars()
-                            with SessionLocal() as db:
-                                db.query(SchemaVersion).delete()
-                                db.add(
-                                    SchemaVersion(version_num=CURRENT_SCHEMA_VERSION)
-                                )
-                                db.commit()
-                            migrated = True
-                            print("✅ In-place schema upgrade complete.")
-                        except Exception as migrate_exc:
-                            print(f"⚠️ In-place schema upgrade failed: {migrate_exc}")
-
-                    if migrated:
-                        version_result = CURRENT_SCHEMA_VERSION
-
-                    if db_file_path and os.path.exists(db_file_path):
-                        if version_result == CURRENT_SCHEMA_VERSION:
-                            print("✅ Database schema is up to date.")
-                        elif ALLOW_SCHEMA_RESET:
-                            print("   Recreating database (ALLOW_SCHEMA_RESET=true)...")
-                            os.remove(db_file_path)
-                            db_exists = False
-                        else:
-                            raise RuntimeError(
-                                "Schema mismatch detected and automatic reset is disabled. "
-                                "Set ALLOW_SCHEMA_RESET=true in .env for development-only "
-                                "auto-rebuild, or migrate/update the database manually."
-                            )
-                    else:
-                        raise RuntimeError(
-                            "Schema mismatch detected, but automatic reset is only supported "
-                            "for sqlite file databases. Please migrate/update the database manually."
-                        )
-                else:
-                    print("✅ Database schema is up to date.")
-        except Exception as e:
-            print(f"⚠️ Could not check schema version (table might not exist): {e}")
-            if db_file_path and os.path.exists(db_file_path):
-                if ALLOW_SCHEMA_RESET:
-                    print(
-                        "   Recreating database to be safe (ALLOW_SCHEMA_RESET=true)..."
-                    )
-                    os.remove(db_file_path)
-                    db_exists = False
-                else:
-                    raise RuntimeError(
-                        "Could not verify schema version and automatic reset is disabled. "
-                        "Set ALLOW_SCHEMA_RESET=true in .env for development-only auto-rebuild, "
-                        "or inspect/fix the database manually."
-                    ) from e
-            else:
-                raise RuntimeError(
-                    "Could not verify schema version for a non-sqlite database. "
-                    "Automatic reset is unavailable; inspect/fix the database manually."
-                ) from e
+        should_delete = _check_existing_database_schema(db_file_path)
+        if should_delete and db_file_path:
+            os.remove(db_file_path)
+            db_exists = False
 
     if not db_exists:
         print("Creating new database and initial data...")
@@ -821,6 +963,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _ensure_civitai_hash_column()
     _ensure_user_tags_column()
     _ensure_user_negative_tags_column()
+    _ensure_observation_schema_current()
+    _ensure_observation_presence_columns()
     _ensure_observation_authority_term_unique_index()
     _backfill_user_tags_to_observations()
     _ensure_image_variant_columns()

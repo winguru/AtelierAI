@@ -4,3 +4,4 @@ openai
 voyageai
 pytest
 types-requests
+ruff

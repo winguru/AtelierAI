@@ -7,7 +7,8 @@
   "shutdownAction": "stopCompose",
   "remoteEnv": {
     "PYTHONPATH": "${containerWorkspaceFolder}/app:${containerWorkspaceFolder}/app/src:${containerWorkspaceFolder}/app/backend:${containerWorkspaceFolder}/app/dev:${PYTHONPATH}",
-    "ATELIER_APP_ROOT": "${containerWorkspaceFolder}/app"
+    "ATELIER_APP_ROOT": "${containerWorkspaceFolder}/app",
+    "PATH": "${containerEnv:PATH}:/root/.local/bin"
   },
   
   // Configure VS Code to install these extensions inside the container

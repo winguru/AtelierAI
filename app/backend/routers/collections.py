@@ -32,8 +32,14 @@ from sqlalchemy.orm import Session, joinedload
 
 from core.lifespan import task_manager
 from database import get_db
-from models import CollectionModel, ImageCollectionMembership, ImageModel
+from models import (
+    CollectionCivitaiMapping,
+    CollectionModel,
+    ImageCollectionMembership,
+    ImageModel,
+)
 from schemas import (
+    CivitaiBatchImportRequest,
     CivitaiCollectionSyncRequest,
     CivitaiImportRequest,
     CollectionBulkMembershipRequest,
@@ -50,6 +56,86 @@ from utils.cache import (
 )
 
 router = APIRouter(tags=["collections"])
+
+
+# ---------------------------------------------------------------------------
+# Draft-post fallback helper (shared between Sync Lab and import pipeline)
+# ---------------------------------------------------------------------------
+
+def _fetch_collection_posts_with_draft_fallback(
+    api: Any,
+    collection_id: int,
+) -> list[dict]:
+    """Fetch posts for a collection with three-tier draft fallback.
+
+    Tier 1: post.getInfinite with collectionId (published posts).
+    Tier 2a: collectionId + draft params (collection-scoped unpublished posts).
+    Tier 2b: fetch_user_draft_posts(username) (all user drafts — broader).
+
+    Returns the merged list of post dicts (may be empty).
+    """
+    import logging  # noqa: PLC0415
+
+    posts = api.fetch_collection_posts(collection_id=collection_id)
+    if posts:
+        return posts
+
+    # Tier 2a: collection-scoped draft query
+    try:
+        coll_raw = api._make_raw_request(
+            "collection.getById", {"id": collection_id}, strict=True,
+        )
+        coll_json = (
+            coll_raw.get("result", {}).get("data", {}).get("json", {})
+            if isinstance(coll_raw, dict)
+            else {}
+        )
+        coll_user = _resolve_collection_owner(coll_json)
+
+        if coll_user:
+            draft_resp = api._make_request(
+                endpoint="post.getInfinite",
+                payload_data={
+                    "collectionId": collection_id,
+                    "section": "draft",
+                    "draftOnly": True,
+                    "pending": True,
+                    "username": coll_user,
+                    "browsingLevel": api.default_params.get("browsingLevel", 31),
+                    "period": "AllTime",
+                    "periodMode": "published",
+                    "sort": "Newest",
+                    "excludedTagIds": [],
+                    "authed": True,
+                },
+            )
+            if draft_resp and isinstance(draft_resp, dict):
+                posts = draft_resp.get("items", [])
+
+            # Tier 2b: broader user-draft fallback
+            if not posts:
+                draft_resp = api.fetch_user_draft_posts(coll_user)
+                if draft_resp and isinstance(draft_resp, dict):
+                    posts = draft_resp.get("items", [])
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Draft fallback failed for collection %s: %s", collection_id, exc,
+        )
+
+    return posts
+
+
+def _resolve_collection_owner(coll_json: dict) -> str | None:
+    """Extract the owner username from a collection.getById response."""
+    coll_meta = coll_json.get("collection") or coll_json
+    if isinstance(coll_meta, dict):
+        user_obj = coll_meta.get("user")
+        if isinstance(user_obj, dict):
+            return user_obj.get("username")
+    perms = coll_json.get("permissions", {})
+    if isinstance(perms, dict):
+        return perms.get("username")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -73,11 +159,31 @@ def _normalize_collection_name(name: str) -> str:
 
 
 def _serialize_collection(collection: CollectionModel) -> dict:
+    # Include every CivitAI collection id mapped to this local collection
+    # via the junction table.  The legacy scalar is retained for older
+    # clients that still read ``civitai_collection_id``.
+    from sqlalchemy import inspect as _inspect  # noqa: PLC0415
+
+    mapped_ids: list[int] = []
+    session = _inspect(collection).session
+    if session is not None:
+        mapped_ids = [
+            row.civitai_collection_id
+            for row in session.query(CollectionCivitaiMapping)
+            .filter(CollectionCivitaiMapping.collection_id == collection.id)
+            .all()
+        ]
+
+    legacy = collection.civitai_collection_id
+    if legacy is not None and legacy not in mapped_ids:
+        mapped_ids.append(legacy)
+
     return {
         "id": collection.id,
         "name": collection.name,
         "source": collection.source,
-        "civitai_collection_id": collection.civitai_collection_id,
+        "civitai_collection_id": legacy,  # deprecated
+        "civitai_collection_ids": sorted(mapped_ids),
         "civitai_last_synced_at": _isoformat_or_none(collection.civitai_last_synced_at),
         "civitai_last_full_scan_at": _isoformat_or_none(
             collection.civitai_last_full_scan_at
@@ -633,6 +739,86 @@ def import_civitai_images(payload: CivitaiImportRequest, db: Session = Depends(g
     return response_data
 
 
+@router.post("/import_civitai/batch", status_code=http_status.HTTP_202_ACCEPTED)
+def import_civitai_batch(payload: CivitaiBatchImportRequest, db: Session = Depends(get_db)):
+    """Import CivitAI images by their IDs.
+
+    Accepts any number of IDs — chunks internally into sub-batches of 20.
+    Optionally add imported images to an existing collection or create a
+    new collection for them.
+    """
+    civitai_ids = payload.civitai_image_ids
+    collection_id = payload.collection_id
+    new_collection_name = payload.create_collection_name
+
+    # Validate / resolve collection
+    if collection_id is not None:
+        existing = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Collection {collection_id} not found.")
+    elif new_collection_name:
+        normalized = _normalize_collection_name(new_collection_name)
+        new_col = CollectionModel(name=normalized, source="user")
+        db.add(new_col)
+        db.commit()
+        db.refresh(new_col)
+        collection_id = new_col.id
+
+    plural = "image" if len(civitai_ids) == 1 else "images"
+    title = f"Batch import {len(civitai_ids)} CivitAI {plural}"
+    if collection_id:
+        col = db.query(CollectionModel).filter(CollectionModel.id == collection_id).first()
+        if col:
+            title += f" → {col.name}"
+
+    # Chunk IDs so _process_civitai_image_ids processes them in groups of 20
+    _CHUNK = 20
+    chunks = [civitai_ids[i : i + _CHUNK] for i in range(0, len(civitai_ids), _CHUNK)]
+    total_ids = len(civitai_ids)
+
+    def _run_batch(context):
+        from main import _process_civitai_image_ids as _process  # noqa: PLC0415
+        from atelierai.civitai.civitai_api import CivitaiAPI as _API  # noqa: PLC0415
+
+        api = _API.get_instance()
+        context.set_total(total_ids)
+        all_results = []
+        for chunk in chunks:
+            results, _ = _process(
+                context,
+                api=api,
+                image_ids=chunk,
+                attach_collection_id=collection_id,
+                item_key_prefix="civitai-batch-import",
+            )
+            all_results.extend(results)
+        imported_count = sum(1 for r in all_results if r.get("status") != "skipped")
+        return {
+            "requested": total_ids,
+            "imported": imported_count,
+            "skipped": total_ids - imported_count,
+            "collection_id": collection_id,
+            "results": all_results,
+        }
+
+    task = task_manager.create_task(
+        kind="civitai-batch-import",
+        title=title,
+        metadata={
+            "import_type": "batch",
+            "civitai_image_ids": civitai_ids,
+            "collection_id": collection_id,
+        },
+        runner=_run_batch,
+    )
+
+    return {
+        "message": "Batch import task queued.",
+        "task": task,
+        "collection_id": collection_id,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Sync-lab routes (SSE streaming)
 # ---------------------------------------------------------------------------
@@ -690,7 +876,12 @@ def delete_sync_session(session_id: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/sync-lab/collections", response_model=dict)
-def sync_lab_list_collections():
+def sync_lab_list_collections(
+    force_refresh: bool = Query(
+        False,
+        description="Bypass local API cache and fetch live from CivitAI",
+    ),
+):
     """Step 1: Fetch the authenticated user's CivitAI image collections."""
     import time  # noqa: PLC0415
 
@@ -702,7 +893,13 @@ def sync_lab_list_collections():
     t0 = time.monotonic()
     api = CivitaiAPI.get_instance()
     try:
-        collections = _fetch_civitai_user_image_collections(api)
+        from datetime import timedelta  # noqa: PLC0415
+
+        collections = _fetch_civitai_user_image_collections(
+            api,
+            max_age=None if force_refresh else timedelta(minutes=2),
+            force_refresh=force_refresh,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -760,11 +957,11 @@ def sync_lab_fetch_collection_items(
         ) -> list[dict]:
             """Fetch images from a post-type collection.
 
-            Uses post.getInfinite to get posts, then image.getInfinite
-            with postId to get images from each post.
+            Uses three-tier draft fallback via _fetch_collection_posts_with_draft_fallback
+            to discover both published and unpublished posts, then fetches images per post.
             """
             all_images: list[dict] = []
-            posts = api.fetch_collection_posts(collection_id=cid)
+            posts = _fetch_collection_posts_with_draft_fallback(api, cid)
             total_posts = len(posts)
 
             for i, post in enumerate(posts, 1):
@@ -878,7 +1075,6 @@ def sync_lab_fetch_collection_items(
         normalized = [item for item in items if isinstance(item, dict)]
         _archive_civitai_collection_items(normalized)
 
-
         seen: set[int] = set()
         image_ids: list[int] = []
         item_index: dict[int, dict] = {}
@@ -929,45 +1125,102 @@ def sync_lab_analyze_local(
 @router.get("/sync-lab/fetch-metadata")
 def sync_lab_fetch_metadata(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    selected_ids: Optional[str] = Query(
+        None,
+        description="Optional comma-separated subset of image IDs to process",
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Optional max number of IDs to process",
+    ),
     session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 5: Fetch CivitAI API metadata for specified image IDs (SSE streaming)."""
     from main import sync_lab_fetch_metadata as _impl  # noqa: PLC0415
 
-    return _impl(image_ids=image_ids, session_id=session_id)
+    return _impl(
+        image_ids=image_ids,
+        selected_ids=selected_ids,
+        limit=limit,
+        session_id=session_id,
+    )
 
 
 @router.get("/sync-lab/download")
 def sync_lab_download(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    selected_ids: Optional[str] = Query(
+        None,
+        description="Optional comma-separated subset of image IDs to process",
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Optional max number of IDs to process",
+    ),
     session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
     from main import sync_lab_download as _impl  # noqa: PLC0415
 
-    return _impl(image_ids=image_ids, session_id=session_id)
+    return _impl(
+        image_ids=image_ids,
+        selected_ids=selected_ids,
+        limit=limit,
+        session_id=session_id,
+    )
 
 
 @router.get("/sync-lab/ingest")
 def sync_lab_ingest(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    selected_ids: Optional[str] = Query(
+        None,
+        description="Optional comma-separated subset of image IDs to process",
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Optional max number of IDs to process",
+    ),
     collection_id: Optional[int] = Query(None, description="CivitAI collection ID to attach"),
     session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 7: Ingest previously downloaded images into the library (SSE streaming)."""
     from main import sync_lab_ingest as _impl  # noqa: PLC0415
 
-    return _impl(image_ids=image_ids, collection_id=collection_id, session_id=session_id)
+    return _impl(
+        image_ids=image_ids,
+        selected_ids=selected_ids,
+        limit=limit,
+        collection_id=collection_id,
+        session_id=session_id,
+    )
 
 
 @router.get("/sync-lab/collection-status/{collection_id}", response_model=dict)
 def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)):
     """Get the current local DB state for a CivitAI collection."""
-    collection = (
-        db.query(CollectionModel)
-        .filter(CollectionModel.civitai_collection_id == collection_id)
+    # Resolve via junction table first, fall back to legacy column.
+    mapping = (
+        db.query(CollectionCivitaiMapping)
+        .filter(CollectionCivitaiMapping.civitai_collection_id == collection_id)
         .first()
     )
+    collection: Optional[CollectionModel] = None
+    if mapping is not None:
+        collection = (
+            db.query(CollectionModel)
+            .filter(CollectionModel.id == mapping.collection_id)
+            .first()
+        )
+    if collection is None:
+        collection = (
+            db.query(CollectionModel)
+            .filter(CollectionModel.civitai_collection_id == collection_id)
+            .first()
+        )
     if not collection:
         return {
             "status": "ok",
@@ -1009,6 +1262,25 @@ def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)
             "images": images,
         },
     }
+
+
+@router.post("/sync-lab/collection-status/{collection_id}/refresh", response_model=dict)
+def sync_lab_refresh_collection_sync_metadata(
+    collection_id: int,
+    set_full_snapshot: bool = Query(
+        False,
+        description="When true, also update full-item snapshot fields",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Manually refresh local sync metadata for a CivitAI collection."""
+    from main import sync_lab_refresh_collection_sync_metadata as _impl  # noqa: PLC0415
+
+    return _impl(
+        collection_id=collection_id,
+        set_full_snapshot=set_full_snapshot,
+        db=db,
+    )
 
 
 @router.get("/sync-lab")

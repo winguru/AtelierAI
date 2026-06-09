@@ -108,6 +108,19 @@ def _remaining_collection_ids(conn: sqlite3.Connection) -> list[tuple[int, str]]
     """Return CivitAI collection IDs that contain images missing CivitAI observations."""
     rows = conn.execute(
         """
+        SELECT DISTINCT m.civitai_collection_id, c.name
+        FROM collection_civitai_mappings m
+        JOIN collections c ON c.id = m.collection_id
+        JOIN image_collections ic ON ic.collection_id = c.id
+        JOIN images i ON i.id = ic.image_id
+                WHERE i.civitai_image_id IS NOT NULL
+                    AND NOT EXISTS (
+                            SELECT 1
+                            FROM image_concept_observations o
+                            WHERE o.image_id = i.id
+                                AND o.authority_id = 1
+                    )
+        UNION
         SELECT DISTINCT c.civitai_collection_id, c.name
         FROM collections c
         JOIN image_collections ic ON ic.collection_id = c.id
@@ -120,7 +133,10 @@ def _remaining_collection_ids(conn: sqlite3.Connection) -> list[tuple[int, str]]
                             WHERE o.image_id = i.id
                                 AND o.authority_id = 1
                     )
-        ORDER BY c.id
+                    AND c.civitai_collection_id NOT IN (
+                        SELECT civitai_collection_id FROM collection_civitai_mappings
+                    )
+        ORDER BY 2
         """
     ).fetchall()
     return [(int(cid), str(name or f"collection_{cid}")) for cid, name in rows]

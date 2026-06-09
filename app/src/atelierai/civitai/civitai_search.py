@@ -15,6 +15,7 @@ full endpoint documentation.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -24,6 +25,8 @@ from typing import Any, Optional
 import requests
 
 from .http_client import CivitaiRequestError
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -113,7 +116,7 @@ class CivitaiSearchClient:
         *,
         meili_key: Optional[str] = None,
         session_cookie: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 60.0,
         backend: str = "auto",  # "auto" | "meilisearch" | "rest"
     ) -> None:
         self._meili_key = meili_key
@@ -151,6 +154,14 @@ class CivitaiSearchClient:
             return key
 
         return None
+
+    def _invalidate_meili_key(self) -> None:
+        """Clear the cached Meilisearch key so the next call re-scrapes."""
+        global _scraped_key
+        self._meili_key = None
+        with _scrape_lock:
+            _scraped_key = None
+        _log.info("Invalidated cached Meilisearch key.")
 
     # ------------------------------------------------------------------
     # Public search dispatcher
@@ -204,12 +215,109 @@ class CivitaiSearchClient:
                     )
                     result["backend"] = "meilisearch"
                     return result
-                except CivitaiRequestError:
+                except CivitaiRequestError as exc:
                     if backend == "meilisearch":
                         raise
-                    # Fall through to REST API.
+                    is_timeout = "timed out" in str(exc).lower()
+                    _log.warning(
+                        "Meilisearch request failed (offset=%d): %s.%s",
+                        offset,
+                        exc,
+                        (" Attempting retry with longer timeout…"
+                         if is_timeout
+                         else " Attempting retry with fresh key…"),
+                    )
 
-        # REST API path.
+                    # For timeout errors, retry once with a longer timeout
+                    # before trying key refresh or REST fallback.
+                    if is_timeout:
+                        saved_timeout = self._timeout
+                        try:
+                            self._timeout = 120.0
+                            result = self._meili_search(
+                                key=key,
+                                query=query,
+                                tags=tags,
+                                exclude_tags=exclude_tags,
+                                sort_by=sort_by,
+                                limit=limit,
+                                offset=offset,
+                                nsfw_levels=nsfw_levels,
+                                base_models=base_models,
+                                exclude_poi=exclude_poi,
+                                exclude_minor=exclude_minor,
+                                username=username,
+                                facets=facets,
+                                extra_filters=extra_filters,
+                            )
+                            result["backend"] = "meilisearch"
+                            _log.info(
+                                "Meilisearch retry succeeded (extended timeout)."
+                            )
+                            return result
+                        except CivitaiRequestError as retry_exc:
+                            _log.warning(
+                                "Meilisearch retry also failed: %s",
+                                retry_exc,
+                            )
+                        finally:
+                            self._timeout = saved_timeout
+                    else:
+                        # Non-timeout error — invalidate cached key and
+                        # retry once with a freshly scraped key.
+                        self._invalidate_meili_key()
+                        retry_key = self._get_meili_key()
+                        if retry_key and retry_key != key:
+                            try:
+                                result = self._meili_search(
+                                    key=retry_key,
+                                    query=query,
+                                    tags=tags,
+                                    exclude_tags=exclude_tags,
+                                    sort_by=sort_by,
+                                    limit=limit,
+                                    offset=offset,
+                                    nsfw_levels=nsfw_levels,
+                                    base_models=base_models,
+                                    exclude_poi=exclude_poi,
+                                    exclude_minor=exclude_minor,
+                                    username=username,
+                                    facets=facets,
+                                    extra_filters=extra_filters,
+                                )
+                                result["backend"] = "meilisearch"
+                                _log.info(
+                                    "Meilisearch retry succeeded (fresh key)."
+                                )
+                                return result
+                            except CivitaiRequestError as retry_exc:
+                                _log.warning(
+                                    "Meilisearch retry also failed: %s",
+                                    retry_exc,
+                                )
+                        else:
+                            _log.warning(
+                                "No fresh Meilisearch key available for retry."
+                            )
+
+                    # REST API does not support offset pagination — falling
+                    # back for offset > 0 would return wrong (first-page)
+                    # results.  Raise the original error instead.
+                    if offset and offset > 0:
+                        _log.error(
+                            "Refusing REST fallback for paginated query "
+                            "(offset=%d): REST API ignores offset and would "
+                            "return wrong results.",
+                            offset,
+                        )
+                        raise
+
+                    _log.warning(
+                        "Falling back to REST API for first-page query "
+                        "(offset=0). Some filters will be lost."
+                    )
+
+        # REST API path (only reached for offset=0 after Meilisearch failure).
         result = self._rest_search(
             query=query,
             sort_by=sort_by,

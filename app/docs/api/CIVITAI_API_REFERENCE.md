@@ -45,6 +45,8 @@ This document documents all known CivitAI API endpoints, request formats, and re
 - [tag.getById](#taggetbyid)
 - [modelVersion.getById](#modelversiongetbyid)
 - [post.get](#postget)
+- [post.getInfinite](#postgetinfinite)
+- [post.getInfinite — Draft/Unpublished Posts](#postgetinfinite--draftunpublished-posts)
 - [system.getBrowsingSettingAddons](#systemgetbrowsingsettingaddons)
 - [hiddenPreferences.getHidden](#hiddenpreferencesgethidden)
 - [collection.getAllUser](#collectiongetalluser)
@@ -973,6 +975,179 @@ Fetch post details (includes tags array).
 
 ---
 
+#### `post.getInfinite`
+
+Fetch a paginated list of posts. Supports multiple "modes" depending on parameters:
+- **Public browsing** with optional `collectionId` filter (returns only published posts).
+- **Profile posts** for a specific user's published content.
+- **Draft/Unpublished** discovery (see dedicated section below).
+
+**URL:** `https://civitai.com/api/trpc/post.getInfinite`
+
+**Payload (public browsing):**
+```json
+{
+  "json": {
+    "collectionId": <collection_id>,
+    "browsingLevel": 31,
+    "periodMode": "published",
+    "sort": "Newest",
+    "period": "AllTime",
+    "excludedTagIds": []
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+
+**Response Shape:**
+```json
+{
+  "result": {
+    "data": {
+      "json": {
+        "items": [
+          {
+            "id": 28603881,
+            "title": "Windranger | DOTA 2",
+            "publishedAt": "2026-03-10T12:00:00.000Z",
+            "nsfwLevel": 8,
+            "availability": "Public",
+            "user": { "id": 1234, "username": "winguru" },
+            "tags": [],
+            "images": []
+          }
+        ],
+        "nextCursor": 123
+      }
+    }
+  }
+}
+```
+
+**Key Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `collectionId` | `int?` | Filter to posts in a specific collection. Only returns **published** posts. |
+| `browsingLevel` | `int` | NSFW filter level. `31` = all ratings. |
+| `sort` | `string` | Sort order: `"Newest"`, `"Most Reactions"`, etc. |
+| `period` | `string` | Time period: `"AllTime"`, `"Day"`, `"Week"`, `"Month"`, `"Year"`. |
+| `excludedTagIds` | `int[]` | Tag IDs to exclude from results. |
+| `section` | `string?` | Profile section: `"draft"` for unpublished posts. |
+| `draftOnly` | `bool?` | When `true`, only return draft/unpublished posts. |
+| `pending` | `bool?` | Include pending (not yet published) posts. |
+| `username` | `string?` | Filter to a specific user's posts (required for draft mode). |
+| `cursor` | `int?` | Pagination cursor from previous response's `nextCursor`. |
+
+**⚠️ Important:** When using `collectionId` alone, unpublished posts (`publishedAt: null`) are **NOT returned**, even if they belong to the collection. However, you **can** combine `collectionId` with the draft parameters (`section: "draft"`, `draftOnly: true`, `pending: true`, `username`) to get unpublished posts **scoped to that specific collection** (verified 2026-05-15). Use this as the Tier 2 fallback when Tier 1 returns empty.
+
+---
+
+#### `post.getInfinite` — Draft/Unpublished Posts
+
+Discover unpublished (draft) posts for the authenticated user. Discovered by inspecting network requests on `https://civitai.red/user/<username>/posts?section=draft`.
+
+**URL:** `https://civitai.com/api/trpc/post.getInfinite` (same endpoint, different parameters)
+
+**Payload:**
+```json
+{
+  "json": {
+    "section": "draft",
+    "draftOnly": true,
+    "pending": true,
+    "username": "winguru",
+    "browsingLevel": 31,
+    "periodMode": "published",
+    "sort": "Newest",
+    "period": "AllTime",
+    "excludedTagIds": []
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+
+**Response Example (tested 2026-03-11):**
+```json
+{
+  "result": {
+    "data": {
+      "json": {
+        "items": [
+          {
+            "id": 28603881,
+            "title": "Windranger | DOTA 2",
+            "publishedAt": null,
+            "nsfwLevel": 8,
+            "availability": "Unpublished",
+            "user": { "id": 1234, "username": "winguru" },
+            "tags": [],
+            "images": [
+              { "id": 30077730, "name": "01761-383545367.png", "url": "...", "nsfwLevel": 8 }
+            ]
+          }
+        ],
+        "nextCursor": null
+      }
+    }
+  }
+}
+```
+
+**Key Differences from Public Browsing:**
+
+| Aspect | Public Browsing | Draft Discovery |
+|--------|----------------|-----------------|
+| `section` | unset / `"published"` | `"draft"` |
+| `draftOnly` | unset | `true` |
+| `pending` | unset | `true` |
+| `username` | optional | **required** |
+| `collectionId` | optional | unset |
+| `publishedAt` | always set | `null` |
+| Auth required | no | **yes** |
+
+**⚠️ Authentication Required:** This mode only works with a valid session cookie. Unauthenticated requests will not return draft posts.
+
+**Collection-scoped draft query (Tier 2a):** You can combine `collectionId` with the draft parameters to get only unpublished posts belonging to a specific collection:
+```json
+{
+  "json": {
+    "collectionId": 16572192,
+    "section": "draft",
+    "draftOnly": true,
+    "pending": true,
+    "username": "winguru",
+    "browsingLevel": 31,
+    "periodMode": "published",
+    "sort": "Newest",
+    "period": "AllTime",
+    "excludedTagIds": []
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+This returns only draft posts that belong to collection 16572192 — much more precise than the broad draft query above.
+
+**Implementation in AtelierAI:** See `CivitaiAPI.fetch_user_draft_posts()` in `app/src/atelierai/civitai/civitai_api.py`. The two-tier fallback in `_run_civitai_post_collection_import_pipeline()` uses:
+- **Tier 1:** `post.getInfinite` with `collectionId` only (published posts)
+- **Tier 2a:** `collectionId` + draft params (collection-scoped unpublished posts)
+- **Tier 2b:** `fetch_user_draft_posts(username)` without collectionId (broader fallback)
+- **Manual override:** Explicit `post_ids` list
+
+---
+
 ### System and Preferences Endpoints
 
 #### `system.getBrowsingSettingAddons`
@@ -1292,3 +1467,4 @@ This API reference is based on reverse-engineering and testing. CivitAI may chan
 | Version | Date       | Changes                                  |
 |---------|------------|------------------------------------------|
 | 1.0     | 2026-01-30 | Initial documentation of known endpoints |
+| 1.1     | 2026-03-11 | Documented `post.getInfinite` (public browsing + draft/unpublished discovery), `fetch_user_draft_posts()` API method, and two-tier fallback pattern |

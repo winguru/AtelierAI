@@ -170,11 +170,18 @@ def _scan_collections(
         "pages_fetched": 0,
     }
 
-    # Get all collections with civitai IDs
+    # Get all collections with civitai IDs (junction table first, then legacy column)
     with engine.connect() as conn:
         rows = conn.execute(text(
+            "SELECT c.id, c.name, m.civitai_collection_id "
+            "FROM collection_civitai_mappings m "
+            "JOIN collections c ON c.id = m.collection_id "
+            "UNION "
             "SELECT id, name, civitai_collection_id FROM collections "
             "WHERE civitai_collection_id IS NOT NULL "
+            "AND civitai_collection_id NOT IN ("
+            " SELECT civitai_collection_id FROM collection_civitai_mappings"
+            ") "
             "ORDER BY id"
         )).fetchall()
 

@@ -25,7 +25,7 @@ import urllib.parse as _urlparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from fastapi import (
     FastAPI,
@@ -69,6 +69,7 @@ from database import (
 from models import (
     ImageModel,
     CollectionModel,
+    CollectionCivitaiMapping,
     ImageCollectionMembership,
     ImageVariantGroupMembership,
     VariantGroup,
@@ -138,10 +139,12 @@ from services.db_migrations import (
     _ensure_civitai_hash_column as _ensure_civitai_hash_column,
     _ensure_civitai_image_id_column as _ensure_civitai_image_id_column,
     _ensure_civitai_post_id_column as _ensure_civitai_post_id_column,
+    _ensure_civitai_cdn_url_column as _ensure_civitai_cdn_url_column,
     _ensure_civitai_post_title_index_columns as _ensure_civitai_post_title_index_columns,
     _ensure_civitai_user_columns as _ensure_civitai_user_columns,
     _ensure_civitai_uuid_column as _ensure_civitai_uuid_column,
     _ensure_collection_sync_columns as _ensure_collection_sync_columns,
+    ensure_collection_civitai_mappings_table as _ensure_collection_civitai_mappings_table,
     _ensure_expected_file_size_column as _ensure_expected_file_size_column,
     _ensure_file_hash_nonunique as _ensure_file_hash_nonunique,
     _ensure_image_lifecycle_columns as _ensure_image_lifecycle_columns,
@@ -2125,6 +2128,91 @@ def _build_civitai_video_candidate_urls(target: dict[str, Any]) -> list[str]:
     return deduped
 
 
+def _build_civitai_image_candidate_urls(target: dict[str, Any]) -> list[str]:
+    """Build ordered candidate URLs for declared CivitAI image downloads."""
+    urls: list[str] = []
+
+    primary_url = str(target.get("image_url") or "").strip()
+    if primary_url:
+        urls.append(primary_url)
+
+    raw_image_url = str(target.get("raw_image_url") or "").strip()
+    if raw_image_url:
+        urls.append(raw_image_url)
+
+    url_hash = target.get("civitai_url_hash")
+    file_name = str(target.get("original_filename") or "").strip()
+    mime_type = target.get("mime_type")
+
+    original_url = _build_civitai_media_url(
+        url_hash,
+        file_name,
+        mime_type,
+        use_video_transcode=False,
+    )
+    if original_url:
+        urls.append(original_url)
+
+    civitai_uuid = str(
+        target.get("civitai_uuid") or ""
+    ).strip() or _extract_civitai_uuid_from_url_hash(url_hash)
+
+    # Some CivitAI image records return a broken "original=true/..." route
+    # (404 "File with such name does not exist") while transformed UUID-based
+    # routes remain valid. Add width-based fallbacks for those cases.
+    if civitai_uuid:
+        cdn_base = getattr(
+            app_config,
+            "CIVITAI_CDN_BASE_URL",
+            "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA",
+        )
+        suffix = _guess_suffix(mime_type)
+        uuid_filename = f"{civitai_uuid}{suffix}"
+
+        raw_basic = target.get("raw_basic_info")
+        raw_width = None
+        raw_height = None
+        if isinstance(raw_basic, dict):
+            try:
+                raw_width = int(raw_basic.get("width")) if raw_basic.get("width") else None
+            except (TypeError, ValueError):
+                raw_width = None
+            try:
+                raw_height = int(raw_basic.get("height")) if raw_basic.get("height") else None
+            except (TypeError, ValueError):
+                raw_height = None
+
+        width_candidates: list[int] = [2048]
+        if isinstance(raw_width, int) and raw_width > 0:
+            width_candidates.append(raw_width)
+        if isinstance(raw_height, int) and raw_height > 0:
+            width_candidates.append(raw_height)
+        width_candidates.extend([1600, 1536, 1200, 1024, 800, 768, 450])
+
+        seen_widths: set[int] = set()
+        for width in width_candidates:
+            if not isinstance(width, int) or width <= 0 or width in seen_widths:
+                continue
+            seen_widths.add(width)
+            urls.append(f"{cdn_base}/{civitai_uuid}/width={width}/{uuid_filename}")
+
+    if civitai_uuid:
+        cdn_alt = getattr(
+            app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"
+        )
+        urls.append(f"{cdn_alt}/file/civitai-media-cache/{civitai_uuid}/original")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in urls:
+        normalized = candidate.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
 def _download_civitai_image_with_validation(
     *,
     image_id: int,
@@ -2137,7 +2225,7 @@ def _download_civitai_image_with_validation(
     candidate_urls = (
         _build_civitai_video_candidate_urls(target)
         if declared_video
-        else [str(target.get("image_url") or "").strip()]
+        else _build_civitai_image_candidate_urls(target)
     )
     candidate_urls = [url for url in candidate_urls if url]
     if not candidate_urls:
@@ -2150,14 +2238,24 @@ def _download_civitai_image_with_validation(
     mismatch_source_url: Optional[str] = None
     mismatch_mime_type: Optional[str] = None
     mismatch_file_hash: Optional[str] = None
+    last_download_error: Optional[CivitaiRequestError] = None
 
     for image_url in candidate_urls:
-        temp_path = _download_civitai_image(
-            image_url=image_url,
-            image_id=image_id,
-            mime_type=target.get("mime_type"),
-            declared_file_size=declared_file_size,
-        )
+        try:
+            temp_path = _download_civitai_image(
+                image_url=image_url,
+                image_id=image_id,
+                mime_type=target.get("mime_type"),
+                declared_file_size=declared_file_size,
+            )
+        except CivitaiRequestError as exc:
+            last_download_error = exc
+            # Some CivitAI assets keep page visibility but rotate/cull
+            # one or more direct file URLs. Keep trying fallbacks on 404.
+            if exc.status_code == 404:
+                continue
+            raise
+
         media_category, media_mime = _detect_downloaded_media(temp_path)
 
         if declared_video and media_category != "video":
@@ -2183,6 +2281,15 @@ def _download_civitai_image_with_validation(
 
     if mismatch_temp_path is not None:
         _cleanup_temp_file(mismatch_temp_path)
+
+    if last_download_error is not None:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Could not download CivitAI image {image_id} from any candidate URL. "
+                f"Last error: {last_download_error}"
+            ),
+        )
 
     raise HTTPException(
         status_code=502,
@@ -3015,6 +3122,7 @@ def _resolve_civitai_image_target(
     return {
         "image_id": image_id,
         "image_url": image_url,
+        "raw_image_url": image_data.get("url"),
         "mime_type": mime_type,
         "declared_file_size": declared_file_size,
         "preview_image_url": preview_image_url,
@@ -8744,12 +8852,87 @@ def _collection_name_exists(
     return query.first() is not None
 
 
+def _ensure_civitai_mapping(
+    db: Session, collection_id: int, civitai_collection_id: int
+) -> None:
+    """Insert a junction-table row mapping *civitai_collection_id* → *collection_id*.
+
+    Idempotent — does nothing if the mapping already exists (either on the
+    same local collection or on another).  Because
+    ``CollectionCivitaiMapping.civitai_collection_id`` is UNIQUE, each CivitAI
+    collection ID can only point to one local collection.
+    """
+    existing = (
+        db.query(CollectionCivitaiMapping)
+        .filter(CollectionCivitaiMapping.civitai_collection_id == civitai_collection_id)
+        .first()
+    )
+    if existing is not None:
+        # Already mapped — if it points to a different local collection we
+        # don't silently move it; caller should handle that case explicitly.
+        return
+    db.add(
+        CollectionCivitaiMapping(
+            collection_id=collection_id,
+            civitai_collection_id=civitai_collection_id,
+        )
+    )
+    db.flush()
+
+
+def _resolve_local_collection_by_civitai_id(
+    db: Session, civitai_collection_id: int
+) -> Optional[CollectionModel]:
+    """Look up a local collection by CivitAI collection ID via the junction table.
+
+    Falls back to the legacy ``CollectionModel.civitai_collection_id`` column
+    for rows that have not yet been migrated.
+    """
+    mapping = (
+        db.query(CollectionCivitaiMapping)
+        .filter(CollectionCivitaiMapping.civitai_collection_id == civitai_collection_id)
+        .first()
+    )
+    if mapping is not None:
+        return (
+            db.query(CollectionModel)
+            .filter(CollectionModel.id == mapping.collection_id)
+            .first()
+        )
+    # Legacy fallback
+    return (
+        db.query(CollectionModel)
+        .filter(CollectionModel.civitai_collection_id == civitai_collection_id)
+        .first()
+    )
+
+
 def _serialize_collection(collection: CollectionModel) -> dict:
+    # Pull every CivitAI id mapped to this collection through the junction
+    # table so the frontend can show all remote IDs that feed into one local
+    # collection.  The legacy scalar is kept for backwards compatibility.
+    from sqlalchemy import inspect  # noqa: PLC0415
+
+    mapped_ids: list[int] = []
+    session = inspect(collection).session  # type: ignore[union-attr]
+    if session is not None:
+        mapped_ids = [
+            row.civitai_collection_id
+            for row in session.query(CollectionCivitaiMapping)
+            .filter(CollectionCivitaiMapping.collection_id == collection.id)
+            .all()
+        ]
+
+    legacy = collection.civitai_collection_id
+    if legacy is not None and legacy not in mapped_ids:
+        mapped_ids.append(legacy)
+
     return {
         "id": collection.id,
         "name": collection.name,
         "source": collection.source,
-        "civitai_collection_id": collection.civitai_collection_id,
+        "civitai_collection_id": legacy,  # deprecated — use civitai_collection_ids
+        "civitai_collection_ids": sorted(mapped_ids),
         "civitai_last_synced_at": _isoformat_or_none(collection.civitai_last_synced_at),
         "civitai_last_full_scan_at": _isoformat_or_none(
             collection.civitai_last_full_scan_at
@@ -8826,13 +9009,27 @@ def _classify_civitai_upstream_error(exc: CivitaiRequestError) -> HTTPException:
     )
 
 
-def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
+def _fetch_civitai_user_image_collections(
+    api: CivitaiAPI,
+    *,
+    max_age: Optional[timedelta] = None,
+    force_refresh: bool = False,
+) -> list[dict]:
     try:
-        response = api._make_request(
-            endpoint="collection.getAllUser",
-            payload_data={"authed": True},
-            strict=True,
-        )
+        payload = {"authed": True}
+        if force_refresh:
+            response = api._make_request(
+                endpoint="collection.getAllUser",
+                payload_data=payload,
+                strict=True,
+            )
+        else:
+            response = api.get_cached_or_fetch(
+                endpoint="collection.getAllUser",
+                payload_data=payload,
+                max_age=max_age,
+                strict=True,
+            )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)
     except Exception as e:
@@ -8883,12 +9080,50 @@ def _fetch_civitai_user_image_collections(api: CivitaiAPI) -> list[dict]:
     if collections:
         civitai_ids = [c["id"] for c in collections]
         with SessionLocal() as db:
+            # Join through junction table; fall back to legacy column for
+            # rows not yet migrated.
+            from sqlalchemy import or_ as _or_
+
             rows = (
-                db.query(CollectionModel)
-                .filter(CollectionModel.civitai_collection_id.in_(civitai_ids))
+                db.query(CollectionModel, CollectionCivitaiMapping.civitai_collection_id)
+                .join(
+                    CollectionCivitaiMapping,
+                    CollectionCivitaiMapping.collection_id == CollectionModel.id,
+                )
+                .filter(
+                    CollectionCivitaiMapping.civitai_collection_id.in_(civitai_ids)
+                )
                 .all()
             )
-            by_civitai_id = {r.civitai_collection_id: r for r in rows}
+            by_civitai_id: dict[int, CollectionModel] = {
+                civ_id: col for col, civ_id in rows
+            }
+            # Legacy fallback for unmigrated rows
+            unmigrated = [
+                cid for cid in civitai_ids
+                if cid not in by_civitai_id
+            ]
+            if unmigrated:
+                legacy_rows = (
+                    db.query(CollectionModel)
+                    .filter(
+                        CollectionModel.civitai_collection_id.in_(unmigrated),
+                        _or_(
+                            ~CollectionModel.id.in_(
+                                db.query(CollectionCivitaiMapping.collection_id)
+                                .filter(
+                                    CollectionCivitaiMapping.civitai_collection_id.in_(unmigrated)
+                                )
+                                .subquery()
+                            ),
+                            True,  # keep all rows; the NOT IN above is sufficient
+                        ),
+                    )
+                    .all()
+                )
+                for r in legacy_rows:
+                    if r.civitai_collection_id and r.civitai_collection_id not in by_civitai_id:
+                        by_civitai_id[r.civitai_collection_id] = r
 
         for col in collections:
             db_col = by_civitai_id.get(col["id"])
@@ -8984,6 +9219,55 @@ def _inspect_local_civitai_collection_health(
             return membership_count, True
 
     return membership_count, False
+
+
+def _refresh_local_collection_sync_metadata(
+    db: Session,
+    *,
+    civitai_collection_id: int,
+    set_full_snapshot: bool = False,
+) -> dict[str, Any]:
+    """Refresh collection sync metadata from current local membership state.
+
+    This updates ``civitai_last_synced_at`` on every call and refreshes
+    ``civitai_head_item_count`` from the current local collection size.
+
+    When ``set_full_snapshot`` is True, this also writes
+    ``civitai_last_full_item_count`` + ``civitai_last_full_scan_at``.
+    """
+    collection = _resolve_local_collection_by_civitai_id(db, civitai_collection_id)
+    if collection is None:
+        return {
+            "updated": False,
+            "reason": "collection_not_found",
+            "civitai_collection_id": civitai_collection_id,
+        }
+
+    local_count = (
+        db.query(func.count(ImageCollectionMembership.image_id))
+        .filter(ImageCollectionMembership.collection_id == collection.id)
+        .scalar()
+    )
+    local_count = int(local_count or 0)
+    now = datetime.utcnow()
+
+    collection.civitai_head_item_count = local_count
+    collection.civitai_last_synced_at = now
+
+    if set_full_snapshot:
+        collection.civitai_last_full_item_count = local_count
+        collection.civitai_last_full_scan_at = now
+
+    db.flush()
+    return {
+        "updated": True,
+        "civitai_collection_id": civitai_collection_id,
+        "local_collection_id": collection.id,
+        "local_count": local_count,
+        "set_full_snapshot": bool(set_full_snapshot),
+        "last_synced_at": _isoformat_or_none(collection.civitai_last_synced_at),
+        "last_full_scan_at": _isoformat_or_none(collection.civitai_last_full_scan_at),
+    }
 
 
 def _apply_civitai_collection_probe_state(
@@ -9330,52 +9614,55 @@ def _get_or_create_collection(
 ) -> CollectionModel:
     normalized_name = _normalize_collection_name(name)
 
+    # ── 1. Existing mapping via junction table ──────────────────────────
     if civitai_collection_id is not None:
-        existing_by_remote_id = (
-            db.query(CollectionModel)
-            .filter(CollectionModel.civitai_collection_id == civitai_collection_id)
-            .first()
+        existing_by_remote = _resolve_local_collection_by_civitai_id(
+            db, civitai_collection_id
         )
-        if existing_by_remote_id is not None:
+        if existing_by_remote is not None:
+            # Rename if the name has changed and no *other* collection owns it
             if not _collection_name_exists(
                 db,
                 normalized_name,
-                exclude_collection_id=existing_by_remote_id.id,
+                exclude_collection_id=existing_by_remote.id,
             ):
-                existing_by_remote_id.name = normalized_name
+                existing_by_remote.name = normalized_name
             if (
                 source == "civitai"
-                and str(existing_by_remote_id.source or "") != "civitai"
+                and str(existing_by_remote.source or "") != "civitai"
             ):
-                existing_by_remote_id.source = "civitai"
+                existing_by_remote.source = "civitai"
+            # Keep legacy column in sync for backward compatibility
+            if existing_by_remote.civitai_collection_id is None:
+                existing_by_remote.civitai_collection_id = civitai_collection_id
             db.flush()
-            return existing_by_remote_id
+            return existing_by_remote
 
+    # ── 2. Existing collection with the same name ──────────────────────
+    #     If found, add a junction-table mapping instead of creating a
+    #     suffixed duplicate.  This allows multiple CivitAI collection IDs
+    #     (e.g. an image-collection and a post-collection with the same
+    #     title) to share one local collection.
     existing = (
         db.query(CollectionModel)
         .filter(CollectionModel.name == normalized_name)
         .first()
     )
     if existing:
-        if civitai_collection_id is not None and existing.civitai_collection_id is None:
-            existing.civitai_collection_id = civitai_collection_id
-        elif (
-            civitai_collection_id is not None
-            and existing.civitai_collection_id is not None
-            and int(existing.civitai_collection_id) != int(civitai_collection_id)
-        ):
-            normalized_name = f"{normalized_name} (CivitAI {civitai_collection_id})"
-            existing = None
+        if civitai_collection_id is not None:
+            _ensure_civitai_mapping(db, existing.id, civitai_collection_id)
+            # Keep legacy column if it was previously unset
+            if existing.civitai_collection_id is None:
+                existing.civitai_collection_id = civitai_collection_id
         if (
-            existing is not None
-            and source == "civitai"
+            source == "civitai"
             and str(existing.source or "") == "user"
         ):
             existing.source = "civitai"
-        if existing is not None:
-            db.flush()
-            return existing
+        db.flush()
+        return existing
 
+    # ── 3. Create brand-new collection + mapping ────────────────────────
     created = CollectionModel(
         name=normalized_name,
         source=source,
@@ -9383,22 +9670,45 @@ def _get_or_create_collection(
     )
     db.add(created)
     db.flush()
+    if civitai_collection_id is not None:
+        _ensure_civitai_mapping(db, created.id, civitai_collection_id)
     return created
 
 
 def _ensure_image_in_collection(db: Session, image_id: int, collection_id: int) -> None:
+    # Resolve collection_id: the FK targets collections.id (local DB id), but
+    # callers may pass the CivitAI collection id instead.  Try the local PK
+    # first; if that doesn't match, look up via the junction table (and fall
+    # back to the legacy column for rows that haven't been migrated yet).
+    local_collection_id: Optional[int] = collection_id
+    if not db.query(CollectionModel).filter(CollectionModel.id == collection_id).first():
+        resolved = _resolve_local_collection_by_civitai_id(db, collection_id)
+        if resolved is not None:
+            local_collection_id = resolved.id
+        else:
+            # No local collection matches — SQLite won't enforce the FK, so
+            # the membership would be silently orphaned.  Bail out with a
+            # warning so the caller can create the collection first.
+            logging.getLogger(__name__).warning(
+                "_ensure_image_in_collection: no local collection found for "
+                "id=%s (looked up by local PK, junction table, and legacy "
+                "civitai_collection_id); image %s will NOT be attached to any collection",
+                collection_id, image_id,
+            )
+            return
+
     existing = (
         db.query(ImageCollectionMembership)
         .filter(
             ImageCollectionMembership.image_id == image_id,
-            ImageCollectionMembership.collection_id == collection_id,
+            ImageCollectionMembership.collection_id == local_collection_id,
         )
         .first()
     )
     if existing is not None:
         return
 
-    db.add(ImageCollectionMembership(image_id=image_id, collection_id=collection_id))
+    db.add(ImageCollectionMembership(image_id=image_id, collection_id=local_collection_id))
     db.flush()
 
 
@@ -10369,6 +10679,11 @@ def _ingest_prepared_civitai_import(
                 image.civitai_post_title = prepared.civitai_post_title
             if prepared.civitai_post_index is not None and image.civitai_post_index is None:
                 image.civitai_post_index = prepared.civitai_post_index
+
+            # Persist the actual CDN URL used for download (may differ from
+            # source_url when fallback width-based routes are used).
+            if prepared.effective_image_url and not image.civitai_cdn_url:
+                image.civitai_cdn_url = prepared.effective_image_url
 
             # Persist declared file size from CivitAI metadata
             if image.expected_file_size is None and prepared.declared_file_size is not None:
@@ -12994,13 +13309,19 @@ def _run_civitai_post_collection_import_pipeline(
     collection_id: int,
     collection_name: str,
     limit: Optional[int] = None,
+    post_ids: Optional[list[int]] = None,
 ) -> dict:
     """Import all images from a post-type CivitAI collection.
 
     Post-type collections contain Posts (not individual images).  Each post
     may contain multiple images.  This pipeline:
       1. Creates/gets the local collection in the DB.
-      2. Fetches the list of posts via post.getInfinite with collectionId.
+      2. Fetches the list of posts via a two-tier fallback strategy:
+         - Tier 1: post.getInfinite with collectionId (published posts).
+         - Tier 2: post.getInfinite with section=draft/draftOnly=true/pending=true
+           (unpublished posts) when Tier 1 returns nothing and the authenticated
+           user owns the collection.
+         - Manual override: explicit post_ids parameter.
       3. For each post, fetches images via fetch_post_images().
       4. Ingests images through _process_civitai_image_ids.
       5. Creates a civitai_post variant group for multi-image posts.
@@ -13024,12 +13345,112 @@ def _run_civitai_post_collection_import_pipeline(
         )
         local_collection_id = int(local_collection.id)
 
-    # 2. Fetch all posts in the collection
-    posts = api.fetch_collection_posts(collection_id)
+    # 2. Fetch all posts in the collection via two-tier fallback
+    posts: list[dict] = []
+    _fallback_used: Optional[str] = None
+
+    if post_ids:
+        # Manual override: fetch each post individually by ID
+        task_context.set_message(
+            f"{label}: fetching {len(post_ids)} posts by explicit ID..."
+        )
+        for pid in post_ids:
+            post_data = api.fetch_post(pid)
+            if post_data and isinstance(post_data, dict):
+                posts.append(post_data)
+            else:
+                logging.getLogger(__name__).warning(
+                    "Could not fetch post %s for collection %s",
+                    pid, collection_id,
+                )
+        if posts:
+            _fallback_used = "manual_post_ids"
+
+    if not posts:
+        # Tier 1: standard collection query (finds published posts)
+        posts = api.fetch_collection_posts(collection_id)
+
+    if not posts:
+        # Tier 2: try draft/unpublished posts via profile hook.
+        # post.getInfinite supports combining collectionId with section=draft,
+        # draftOnly=true, pending=true to return unpublished posts scoped to
+        # a specific collection. See CIVITAI_API_REFERENCE.md → post.getInfinite.
+        task_context.set_message(
+            f"{label}: no published posts found, trying draft fallback..."
+        )
+        try:
+            # Resolve collection owner username from collection metadata
+            coll_raw = api._make_raw_request(
+                "collection.getById",
+                {"id": collection_id},
+                strict=True,
+            )
+            coll_json = (
+                coll_raw.get("result", {}).get("data", {}).get("json", {})
+                if isinstance(coll_raw, dict)
+                else {}
+            )
+            coll_user = None
+            coll_meta = coll_json.get("collection") or coll_json
+            if isinstance(coll_meta, dict):
+                user_obj = coll_meta.get("user")
+                if isinstance(user_obj, dict):
+                    coll_user = user_obj.get("username")
+            if not coll_user:
+                perms = coll_json.get("permissions", {})
+                if isinstance(perms, dict):
+                    coll_user = perms.get("username")
+
+            if coll_user:
+                # Tier 2a: collectionId + draft params — returns drafts
+                # scoped to this specific collection (verified 2026-05-15).
+                draft_response = api._make_request(
+                    endpoint="post.getInfinite",
+                    payload_data={
+                        "collectionId": collection_id,
+                        "section": "draft",
+                        "draftOnly": True,
+                        "pending": True,
+                        "username": coll_user,
+                        "browsingLevel": api.default_params.get("browsingLevel", 31),
+                        "period": "AllTime",
+                        "periodMode": "published",
+                        "sort": "Newest",
+                        "excludedTagIds": [],
+                        "authed": True,
+                    },
+                )
+                draft_items = (
+                    draft_response.get("items", [])
+                    if isinstance(draft_response, dict)
+                    else []
+                )
+                if not draft_items:
+                    # Tier 2b: broader fallback — fetch all user drafts
+                    # (not scoped to collection, but catches edge cases).
+                    draft_response = api.fetch_user_draft_posts(coll_user)
+                    if draft_response and isinstance(draft_response, dict):
+                        draft_items = draft_response.get("items", [])
+
+                if draft_items:
+                    posts = draft_items
+                    _fallback_used = "draft_fallback"
+                    logging.getLogger(__name__).info(
+                        "Draft fallback found %d unpublished post(s) for user %s "
+                        "in collection %s",
+                        len(posts), coll_user, collection_id,
+                    )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Draft fallback failed for collection %s: %s",
+                collection_id, exc,
+            )
+
     if not posts:
         raise RuntimeError(
             f"No posts found in CivitAI collection {collection_id} ({label}). "
-            "The collection may be empty, private, or inaccessible."
+            "The collection may be empty, private, or inaccessible. "
+            "Try passing explicit post_ids to import specific posts."
         )
 
     # Apply limit to the number of posts
@@ -14663,6 +15084,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine, checkfirst=True)
     _ensure_image_lifecycle_columns()
     _ensure_collection_sync_columns()
+    _ensure_collection_civitai_mappings_table()
     _ensure_user_nsfw_columns()
     _ensure_civitai_uuid_column()
     _ensure_civitai_hash_column()
@@ -14678,6 +15100,7 @@ async def lifespan(app: FastAPI):
     _ensure_civitai_post_id_column()
     _ensure_civitai_deleted_at_column()
     _ensure_civitai_post_title_index_columns()
+    _ensure_civitai_cdn_url_column()
     _ensure_civitai_user_columns()
     _ensure_civitai_creator_id_column()
     _ensure_base_model_id_column()
@@ -23408,12 +23831,21 @@ def sync_session_delete(session_id: str, db: Session):
     return {"status": "ok", "detail": "Session deleted"}
 
 
-def sync_lab_list_collections():
+def sync_lab_list_collections(
+    force_refresh: bool = Query(
+        False,
+        description="Bypass local API cache and fetch live from CivitAI",
+    )
+):
     """Step 1: Fetch the authenticated user's CivitAI image collections."""
     t0 = time.monotonic()
     api = CivitaiAPI.get_instance()
     try:
-        collections = _fetch_civitai_user_image_collections(api)
+        collections = _fetch_civitai_user_image_collections(
+            api,
+            max_age=None if force_refresh else timedelta(minutes=2),
+            force_refresh=force_refresh,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -23582,6 +24014,8 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest, session_id: Optional[
     """Step 4: Check which CivitAI image IDs exist in the local DB."""
     t0 = time.monotonic()
     image_ids = payload.image_ids
+    requested_collection_id = payload.collection_id
+    is_retry_run = bool(payload.is_retry_run)
     if not image_ids:
         return {
             "status": "ok",
@@ -23604,6 +24038,7 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest, session_id: Optional[
     new_ids: list[int] = []
     tombstoned: list[dict] = []
     placeholders: list[dict] = []
+    sync_finalization: Optional[dict[str, Any]] = None
 
     db = SessionLocal()
     try:
@@ -23698,6 +24133,68 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest, session_id: Optional[
                         "filename": match.file_name,
                     }
                 )
+
+        # Auto-finalize sync status when this run cleanly concludes at Step 4
+        # (everything already local, with no tombstoned/placeholders), unless
+        # this is an explicit retry flow.
+        auto_finalize_eligible = (
+            (not is_retry_run)
+            and len(image_ids) > 0
+            and len(new_ids) == 0
+            and len(tombstoned) == 0
+            and len(placeholders) == 0
+        )
+
+        if auto_finalize_eligible:
+            target_collection_id: Optional[int] = requested_collection_id
+            if target_collection_id is None and session_id:
+                session = (
+                    db.query(SyncSession)
+                    .filter(SyncSession.id == session_id)
+                    .first()
+                )
+                if session is not None:
+                    target_collection_id = int(session.collection_id)
+
+            if target_collection_id is None:
+                sync_finalization = {
+                    "updated": False,
+                    "reason": "missing_collection_id",
+                    "eligible": True,
+                }
+            else:
+                try:
+                    sync_finalization = _refresh_local_collection_sync_metadata(
+                        db,
+                        civitai_collection_id=target_collection_id,
+                        set_full_snapshot=True,
+                    )
+                    sync_finalization["eligible"] = True
+                    db.commit()
+                except Exception as exc:
+                    db.rollback()
+                    sync_finalization = {
+                        "updated": False,
+                        "eligible": True,
+                        "reason": "auto_finalize_failed",
+                        "civitai_collection_id": target_collection_id,
+                        "error": str(exc),
+                    }
+        else:
+            reason = "not_eligible"
+            if is_retry_run:
+                reason = "retry_run"
+            elif len(new_ids) > 0:
+                reason = "new_items_present"
+            elif len(tombstoned) > 0:
+                reason = "tombstoned_items_present"
+            elif len(placeholders) > 0:
+                reason = "placeholder_items_present"
+            sync_finalization = {
+                "updated": False,
+                "eligible": False,
+                "reason": reason,
+            }
     finally:
         db.close()
 
@@ -23717,26 +24214,88 @@ def sync_lab_analyze_local(payload: SyncLabAnalyzeRequest, session_id: Optional[
                 "tombstoned": len(tombstoned),
                 "placeholders": len(placeholders),
             },
+            "sync_finalization": sync_finalization,
         },
     }
     _checkpoint_sync_step(session_id, 4, "complete", data=result.get("data"))
     return result
 
 
-def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
-                            session_id: Optional[str] = None):
-    """Step 5: Fetch CivitAI API metadata (basic info + generation data) for specified image IDs (SSE streaming)."""
-    import queue
-    import threading
-
+def _parse_sync_lab_image_ids(raw_ids: Optional[str]) -> list[int]:
     parsed_ids: list[int] = []
-    for part in image_ids.split(","):
+    for part in str(raw_ids or "").split(","):
         part = part.strip()
         if part:
             try:
                 parsed_ids.append(int(part))
             except ValueError:
-                pass
+                continue
+    return parsed_ids
+
+
+def _resolve_sync_lab_stage_inputs(
+    *,
+    image_ids: str,
+    selected_ids: Optional[str],
+    limit: Optional[int],
+) -> tuple[list[int], dict[str, int]]:
+    requested = _parse_sync_lab_image_ids(image_ids)
+    selected = _parse_sync_lab_image_ids(selected_ids)
+
+    if selected:
+        if requested:
+            requested_set = set(requested)
+            effective = [img_id for img_id in selected if img_id in requested_set]
+        else:
+            effective = list(selected)
+    else:
+        effective = list(requested)
+
+    dedup_seen: set[int] = set()
+    deduped: list[int] = []
+    for img_id in effective:
+        if img_id in dedup_seen:
+            continue
+        dedup_seen.add(img_id)
+        deduped.append(img_id)
+
+    truncated = list(deduped)
+    skipped_by_limit = 0
+    if isinstance(limit, int) and limit > 0 and len(truncated) > limit:
+        skipped_by_limit = len(truncated) - limit
+        truncated = truncated[:limit]
+
+    counts = {
+        "requested_total": len(requested),
+        "selected_total": len(selected) if selected else len(deduped),
+        "processed_total": len(truncated),
+        "skipped_by_limit": skipped_by_limit,
+    }
+    return truncated, counts
+
+
+def sync_lab_fetch_metadata(
+    image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    selected_ids: Optional[str] = Query(
+        None,
+        description="Optional comma-separated subset of image IDs to process",
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Optional max number of IDs to process",
+    ),
+    session_id: Optional[str] = None,
+):
+    """Step 5: Fetch CivitAI API metadata (basic info + generation data) for specified image IDs (SSE streaming)."""
+    import queue
+    import threading
+
+    parsed_ids, input_counts = _resolve_sync_lab_stage_inputs(
+        image_ids=image_ids,
+        selected_ids=selected_ids,
+        limit=limit,
+    )
 
     _checkpoint_sync_step(session_id, 5, "in_progress")
 
@@ -23800,6 +24359,7 @@ def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separ
                     "successful": ok_count,
                     "failed": len(errors),
                     "results": results,
+                    "input_counts": input_counts,
                 },
                 "errors": errors,
             }
@@ -23846,20 +24406,28 @@ def sync_lab_fetch_metadata(image_ids: str = Query(..., description="Comma-separ
     )
 
 
-def sync_lab_download(image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
-                      session_id: Optional[str] = None):
+def sync_lab_download(
+    image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    selected_ids: Optional[str] = Query(
+        None,
+        description="Optional comma-separated subset of image IDs to process",
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Optional max number of IDs to process",
+    ),
+    session_id: Optional[str] = None,
+):
     """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
     import queue
     import threading
 
-    parsed_ids: list[int] = []
-    for part in image_ids.split(","):
-        part = part.strip()
-        if part:
-            try:
-                parsed_ids.append(int(part))
-            except ValueError:
-                pass
+    parsed_ids, input_counts = _resolve_sync_lab_stage_inputs(
+        image_ids=image_ids,
+        selected_ids=selected_ids,
+        limit=limit,
+    )
 
     _checkpoint_sync_step(session_id, 6, "in_progress")
 
@@ -23962,6 +24530,7 @@ def sync_lab_download(image_ids: str = Query(..., description="Comma-separated C
                     "unavailable": sum(1 for v in results.values() if v.get("status") == "unavailable"),
                     "failed": sum(1 for v in results.values() if v.get("status") == "failed"),
                     "results": results,
+                    "input_counts": input_counts,
                 },
                 "errors": errors,
             }
@@ -24049,6 +24618,15 @@ def sync_lab_download(image_ids: str = Query(..., description="Comma-separated C
 
 def sync_lab_ingest(
     image_ids: str = Query(..., description="Comma-separated CivitAI image IDs"),
+    selected_ids: Optional[str] = Query(
+        None,
+        description="Optional comma-separated subset of image IDs to process",
+    ),
+    limit: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Optional max number of IDs to process",
+    ),
     collection_id: Optional[int] = Query(None, description="Civitai collection ID to attach"),
     session_id: Optional[str] = None,
 ):
@@ -24061,14 +24639,11 @@ def sync_lab_ingest(
     import queue
     import threading
 
-    parsed_ids: list[int] = []
-    for part in image_ids.split(","):
-        part = part.strip()
-        if part:
-            try:
-                parsed_ids.append(int(part))
-            except ValueError:
-                pass
+    parsed_ids, input_counts = _resolve_sync_lab_stage_inputs(
+        image_ids=image_ids,
+        selected_ids=selected_ids,
+        limit=limit,
+    )
 
     # Restore prepared imports from session if in-memory store is empty (server restart recovery)
     if session_id and not _sync_lab_prepared:
@@ -24118,11 +24693,35 @@ def sync_lab_ingest(
         def worker():
             results: dict[str, dict[str, Any]] = {}
             errors: list[dict] = []
+            collection_sync_update: Optional[dict[str, Any]] = None
 
             db = SessionLocal()
             # Track (image_db_id, civitai_post_id, post_title) for variant grouping
             _post_image_pairs: list[tuple[int, int, Optional[str]]] = []
             try:
+                # ── Ensure a local collection record exists before ingest ──
+                # The frontend passes the CivitAI collection ID; if no local
+                # CollectionModel exists yet, _ensure_image_in_collection cannot
+                # resolve it and memberships are silently lost (SQLite does not
+                # enforce FK constraints by default).  Create the collection
+                # upfront so memberships resolve correctly.
+                if collection_id is not None:
+                    _coll_name = f"CivitAI Collection {collection_id}"
+                    if session_id:
+                        _sess = db.query(SyncSession).filter(SyncSession.id == session_id).first()
+                        if _sess and _sess.collection_name:
+                            _coll_name = _sess.collection_name
+                    try:
+                        _get_or_create_collection(
+                            db,
+                            _coll_name,
+                            source="civitai",
+                            civitai_collection_id=collection_id,
+                        )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+
                 for idx, img_id in enumerate(parsed_ids, 1):
                     id_t0 = time.monotonic()
                     result: dict[str, Any] = {
@@ -24147,25 +24746,41 @@ def sync_lab_ingest(
                         continue
 
                     try:
-                        # Check for existing records with the same file hash
-                        temp_hash = _sha256_file(prepared.temp_path)
-                        existing_records = _find_existing_by_file_hash(db, temp_hash)
+                        # Prefer exact/same-source reconciliation first. This avoids
+                        # creating duplicate assets when we already have the same
+                        # CivitAI image under a legacy source_url format.
+                        existing_by_source = _find_existing_image_by_source_url(
+                            db,
+                            prepared.source_url,
+                        )
 
-                        if existing_records:
-                            # Duplicate asset — create independent record in civitai_source_variants
-                            ingest_result = _ingest_civitai_duplicate_asset(
-                                db,
-                                prepared=prepared,
-                                existing_records=existing_records,
-                                attach_collection_id=collection_id,
-                            )
-                        else:
-                            # Normal ingest — no hash collision
+                        if existing_by_source is not None:
                             ingest_result = _ingest_prepared_civitai_import(
                                 db,
                                 prepared=prepared,
                                 attach_collection_id=collection_id,
                             )
+                        else:
+                            # No source-url match: hash collisions represent a distinct
+                            # CivitAI asset sharing bytes with an existing local image.
+                            temp_hash = _sha256_file(prepared.temp_path)
+                            existing_records = _find_existing_by_file_hash(db, temp_hash)
+
+                            if existing_records:
+                                # Duplicate asset — create independent record in civitai_source_variants
+                                ingest_result = _ingest_civitai_duplicate_asset(
+                                    db,
+                                    prepared=prepared,
+                                    existing_records=existing_records,
+                                    attach_collection_id=collection_id,
+                                )
+                            else:
+                                # Normal ingest — no hash collision
+                                ingest_result = _ingest_prepared_civitai_import(
+                                    db,
+                                    prepared=prepared,
+                                    attach_collection_id=collection_id,
+                                )
 
                         db.commit()
 
@@ -24219,6 +24834,31 @@ def sync_lab_ingest(
                                 db.commit()
                             except Exception:
                                 db.rollback()
+
+                # Refresh collection sync metadata after ingest completes.
+                if collection_id is not None:
+                    try:
+                        collection_sync_update = _refresh_local_collection_sync_metadata(
+                            db,
+                            civitai_collection_id=collection_id,
+                            set_full_snapshot=(len(errors) == 0),
+                        )
+                        db.commit()
+                    except Exception as exc:
+                        db.rollback()
+                        collection_sync_update = {
+                            "updated": False,
+                            "reason": "metadata_refresh_failed",
+                            "civitai_collection_id": collection_id,
+                            "error": str(exc),
+                        }
+                        errors.append(
+                            {
+                                "stage": "collection_metadata_refresh",
+                                "collection_id": collection_id,
+                                "error": str(exc),
+                            }
+                        )
             finally:
                 db.close()
 
@@ -24236,6 +24876,8 @@ def sync_lab_ingest(
                     "skipped": sum(1 for v in results.values() if v.get("status") == "skipped"),
                     "failed": sum(1 for v in results.values() if v.get("status") == "failed"),
                     "results": results,
+                    "collection_sync_update": collection_sync_update,
+                    "input_counts": input_counts,
                 },
                 "errors": errors,
             }
@@ -24284,11 +24926,7 @@ def sync_lab_ingest(
 
 def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)):
     """Get the current local DB state for a CivitAI collection."""
-    collection = (
-        db.query(CollectionModel)
-        .filter(CollectionModel.civitai_collection_id == collection_id)
-        .first()
-    )
+    collection = _resolve_local_collection_by_civitai_id(db, collection_id)
     if not collection:
         return {
             "status": "ok",
@@ -24330,6 +24968,27 @@ def sync_lab_collection_status(collection_id: int, db: Session = Depends(get_db)
             "total": len(images),
             "images": images,
         },
+    }
+
+
+def sync_lab_refresh_collection_sync_metadata(
+    collection_id: int,
+    set_full_snapshot: bool = Query(
+        False,
+        description="When true, also update full-item snapshot fields",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Manually refresh local sync metadata for a CivitAI collection."""
+    data = _refresh_local_collection_sync_metadata(
+        db,
+        civitai_collection_id=collection_id,
+        set_full_snapshot=set_full_snapshot,
+    )
+    db.commit()
+    return {
+        "status": "ok",
+        "data": data,
     }
 
 

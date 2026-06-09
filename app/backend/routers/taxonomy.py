@@ -54,6 +54,7 @@ from models import (
 from schemas import (
     TaxonomyAliasCreateRequest,
     TaxonomyBootstrapImportRequest,
+    TaxonomyConceptTransferImportRequest,
     TaxonomyConceptCreateRequest,
     TaxonomyConceptUpdateRequest,
     TaxonomyMergeRequest,
@@ -100,6 +101,8 @@ _TAG_SOURCE_COLS = [
 ]
 
 _VALID_TAG_MAINT_SOURCES = {"civitai", "danbooru", "prompt", "user"}
+_CONCEPT_TRANSFER_AUTHORITIES = ("civitai", "danbooru", "prompt", "user")
+_CONCEPT_TRANSFER_VERSION = 1
 
 # -- Delegation helpers ------------------------------------------------------
 
@@ -402,6 +405,543 @@ def _execute_taxonomy_bootstrap_import(
         "dry_run": dry_run,
         "authority": authority.name,
         "stats": stats,
+    }
+
+
+def _concept_transfer_node_error(path: str, detail: str) -> HTTPException:
+    return HTTPException(status_code=422, detail=f"{path}: {detail}")
+
+
+def _coerce_concept_transfer_node(raw_node: Any, path: str) -> dict[str, Any]:
+    if not isinstance(raw_node, dict):
+        raise _concept_transfer_node_error(path, "node must be an object")
+
+    normalized_name = _normalize_taxonomy_text(str(raw_node.get("name") or ""))
+    if not normalized_name:
+        raise _concept_transfer_node_error(path, "name is required")
+
+    raw_slug = str(raw_node.get("slug") or "").strip()
+    normalized_slug = _slugify_concept_name(raw_slug or normalized_name)
+    if not normalized_slug:
+        raise _concept_transfer_node_error(path, "slug is required")
+
+    raw_aliases = raw_node.get("aliases")
+    if raw_aliases is None:
+        raw_aliases = []
+    if not isinstance(raw_aliases, list):
+        raise _concept_transfer_node_error(path, "aliases must be an array")
+
+    aliases: list[str] = []
+    seen_aliases: set[str] = set()
+    for raw_alias in raw_aliases:
+        normalized_alias = _normalize_taxonomy_text(str(raw_alias or ""))
+        if not normalized_alias or normalized_alias == normalized_name:
+            continue
+        if normalized_alias in seen_aliases:
+            continue
+        seen_aliases.add(normalized_alias)
+        aliases.append(normalized_alias)
+
+    raw_tags = raw_node.get("tags")
+    if raw_tags is None:
+        raw_tags = {}
+    if not isinstance(raw_tags, dict):
+        raise _concept_transfer_node_error(path, "tags must be an object")
+
+    tags: dict[str, list[str]] = {
+        authority_name: [] for authority_name in _CONCEPT_TRANSFER_AUTHORITIES
+    }
+    for raw_authority, raw_terms in raw_tags.items():
+        authority_name = str(raw_authority or "").strip().lower()
+        if authority_name not in tags:
+            continue
+        if raw_terms is None:
+            continue
+        if not isinstance(raw_terms, list):
+            raise _concept_transfer_node_error(
+                path, f"tags.{authority_name} must be an array"
+            )
+        seen_terms: set[str] = set()
+        normalized_terms: list[str] = []
+        for raw_term in raw_terms:
+            normalized_term = _normalize_taxonomy_text(str(raw_term or ""))
+            if not normalized_term or normalized_term in seen_terms:
+                continue
+            seen_terms.add(normalized_term)
+            normalized_terms.append(normalized_term)
+        tags[authority_name] = normalized_terms
+
+    raw_children = raw_node.get("children")
+    if raw_children is None:
+        raw_children = []
+    if not isinstance(raw_children, list):
+        raise _concept_transfer_node_error(path, "children must be an array")
+
+    children: list[dict[str, Any]] = []
+    for index, raw_child in enumerate(raw_children):
+        children.append(
+            _coerce_concept_transfer_node(raw_child, f"{path}.children[{index}]")
+        )
+
+    description = raw_node.get("description")
+    status = str(raw_node.get("status") or "active").strip() or "active"
+    return {
+        "name": normalized_name,
+        "slug": normalized_slug,
+        "description": description if isinstance(description, str) else None,
+        "status": status,
+        "aliases": aliases,
+        "tags": tags,
+        "children": children,
+    }
+
+
+def _coerce_concept_transfer_document(document: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise HTTPException(status_code=400, detail="document must be an object")
+    version = document.get("version")
+    if version is None:
+        version = _CONCEPT_TRANSFER_VERSION
+    try:
+        parsed_version = int(version)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="document.version must be an integer")
+    if parsed_version != _CONCEPT_TRANSFER_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Unsupported document version: {parsed_version}",
+        )
+
+    roots = document.get("roots")
+    if not isinstance(roots, list):
+        raise HTTPException(status_code=400, detail="document.roots must be an array")
+
+    normalized_roots: list[dict[str, Any]] = []
+    for index, raw_root in enumerate(roots):
+        normalized_roots.append(_coerce_concept_transfer_node(raw_root, f"roots[{index}]"))
+
+    authority_order = document.get("authority_order")
+    parsed_authority_order: list[str] = []
+    if isinstance(authority_order, list):
+        for raw_authority in authority_order:
+            authority_name = str(raw_authority or "").strip().lower()
+            if authority_name in _CONCEPT_TRANSFER_AUTHORITIES and authority_name not in parsed_authority_order:
+                parsed_authority_order.append(authority_name)
+    if not parsed_authority_order:
+        parsed_authority_order = list(_CONCEPT_TRANSFER_AUTHORITIES)
+
+    return {
+        "version": parsed_version,
+        "authority_order": parsed_authority_order,
+        "roots": normalized_roots,
+    }
+
+
+def _build_concept_transfer_indexes(db: Session) -> dict[str, Any]:
+    concepts = db.query(Concept).all()
+    concept_by_id = {int(concept.id): concept for concept in concepts}
+    by_slug: dict[str, Concept] = {}
+    by_name: dict[str, Concept] = {}
+    by_parent: dict[Optional[int], list[Concept]] = {}
+    for concept in concepts:
+        by_slug[str(concept.slug or "").strip().lower()] = concept
+        by_name[_normalize_taxonomy_text(concept.canonical_name or "")] = concept
+        by_parent.setdefault(concept.parent_concept_id, []).append(concept)
+
+    alias_rows = db.query(ConceptAlias.concept_id, ConceptAlias.normalized_alias).all()
+    alias_to_ids: dict[str, set[int]] = {}
+    for concept_id, normalized_alias in alias_rows:
+        alias_key = _normalize_taxonomy_text(normalized_alias or "")
+        if not alias_key or concept_id is None:
+            continue
+        alias_to_ids.setdefault(alias_key, set()).add(int(concept_id))
+
+    return {
+        "concept_by_id": concept_by_id,
+        "by_slug": by_slug,
+        "by_name": by_name,
+        "by_parent": by_parent,
+        "alias_to_ids": alias_to_ids,
+    }
+
+
+def _concept_transfer_path(concept: Concept, indexes: dict[str, Any]) -> str:
+    concept_by_id: dict[int, Concept] = indexes["concept_by_id"]
+    names: list[str] = []
+    current: Optional[Concept] = concept
+    visited: set[int] = set()
+    while current is not None:
+        current_id = int(current.id)
+        if current_id in visited:
+            break
+        visited.add(current_id)
+        names.append(str(current.canonical_name or ""))
+        parent_id = current.parent_concept_id
+        if parent_id is None:
+            break
+        current = concept_by_id.get(int(parent_id))
+    return "/".join(reversed([name for name in names if name]))
+
+
+def _match_transfer_node(
+    node: dict[str, Any],
+    parent_concept_id: Optional[int],
+    indexes: dict[str, Any],
+) -> tuple[Optional[Concept], str]:
+    by_parent: dict[Optional[int], list[Concept]] = indexes["by_parent"]
+    by_slug: dict[str, Concept] = indexes["by_slug"]
+    by_name: dict[str, Concept] = indexes["by_name"]
+    alias_to_ids: dict[str, set[int]] = indexes["alias_to_ids"]
+    concept_by_id: dict[int, Concept] = indexes["concept_by_id"]
+
+    slug_key = str(node.get("slug") or "").strip().lower()
+    name_key = _normalize_taxonomy_text(str(node.get("name") or ""))
+
+    if parent_concept_id in by_parent:
+        for candidate in by_parent[parent_concept_id]:
+            if slug_key and str(candidate.slug or "").strip().lower() == slug_key:
+                return candidate, "parent_slug"
+            if name_key and _normalize_taxonomy_text(candidate.canonical_name or "") == name_key:
+                return candidate, "parent_name"
+
+    if slug_key and slug_key in by_slug:
+        return by_slug[slug_key], "global_slug"
+    if name_key and name_key in by_name:
+        return by_name[name_key], "global_name"
+
+    if name_key:
+        alias_candidates = alias_to_ids.get(name_key, set())
+        if len(alias_candidates) == 1:
+            alias_concept_id = next(iter(alias_candidates))
+            alias_match = concept_by_id.get(alias_concept_id)
+            if alias_match is not None:
+                return alias_match, "global_alias"
+
+    return None, "none"
+
+
+def _index_concept(indexes: dict[str, Any], concept: Concept) -> None:
+    concept_id = int(concept.id)
+    indexes["concept_by_id"][concept_id] = concept
+    slug_key = str(concept.slug or "").strip().lower()
+    if slug_key:
+        indexes["by_slug"][slug_key] = concept
+    name_key = _normalize_taxonomy_text(concept.canonical_name or "")
+    if name_key:
+        indexes["by_name"][name_key] = concept
+    indexes["by_parent"].setdefault(concept.parent_concept_id, []).append(concept)
+
+
+def _index_alias(indexes: dict[str, Any], concept_id: int, alias_text: str) -> None:
+    alias_key = _normalize_taxonomy_text(alias_text)
+    if not alias_key:
+        return
+    indexes["alias_to_ids"].setdefault(alias_key, set()).add(int(concept_id))
+
+
+def _add_transfer_aliases(
+    db: Session,
+    concept: Concept,
+    aliases: list[str],
+    indexes: dict[str, Any],
+) -> int:
+    created_count = 0
+    for alias_text in aliases:
+        if _ensure_alias_for_concept(
+            db,
+            concept_id=int(concept.id),
+            alias_text=alias_text,
+            alias_type="imported",
+        ):
+            created_count += 1
+            _index_alias(indexes, int(concept.id), alias_text)
+    return created_count
+
+
+def _create_transfer_concept(
+    db: Session,
+    node: dict[str, Any],
+    parent_concept_id: Optional[int],
+    indexes: dict[str, Any],
+) -> Concept:
+    canonical_name = _normalize_taxonomy_text(str(node.get("name") or ""))
+    requested_slug = str(node.get("slug") or "").strip().lower()
+    base_slug = _slugify_concept_name(requested_slug or canonical_name)
+    slug = _ensure_unique_concept_slug(db, base_slug)
+    now = datetime.utcnow()
+    concept = Concept(
+        canonical_name=canonical_name,
+        slug=slug,
+        description=node.get("description"),
+        status=str(node.get("status") or "active"),
+        parent_concept_id=parent_concept_id,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(concept)
+    db.flush()
+    _ensure_alias_for_concept(
+        db,
+        concept_id=int(concept.id),
+        alias_text=canonical_name,
+        alias_type="canonical",
+    )
+    _index_concept(indexes, concept)
+    _index_alias(indexes, int(concept.id), canonical_name)
+    return concept
+
+
+def _link_transfer_tags(
+    db: Session,
+    concept: Concept,
+    node_tags: dict[str, list[str]],
+    authority_cache: dict[str, TagAuthority],
+    summary: dict[str, int],
+    conflicts: list[dict[str, Any]],
+    indexes: dict[str, Any],
+) -> None:
+    local_path = _concept_transfer_path(concept, indexes)
+    for authority_name, term_names in node_tags.items():
+        if authority_name not in _CONCEPT_TRANSFER_AUTHORITIES:
+            continue
+        authority = authority_cache.get(authority_name)
+        if authority is None:
+            authority = _get_or_create_authority(db, authority_name)
+            authority_cache[authority_name] = authority
+        for term_name in term_names:
+            normalized_term = _normalize_taxonomy_text(term_name)
+            if not normalized_term:
+                continue
+            existing_term = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority.id,
+                    AuthorityTerm.normalized_external_name == normalized_term,
+                )
+                .first()
+            )
+            if existing_term is None:
+                now = datetime.utcnow()
+                db.add(AuthorityTerm(
+                    authority_id=authority.id,
+                    external_tag_id=None,
+                    external_name=term_name,
+                    normalized_external_name=normalized_term,
+                    concept_id=int(concept.id),
+                    created_at=now,
+                    updated_at=now,
+                    last_seen_at=now,
+                ))
+                summary["tag_links_added"] += 1
+                continue
+            if existing_term.concept_id is None:
+                existing_term.concept_id = int(concept.id)
+                existing_term.updated_at = datetime.utcnow()
+                summary["tag_links_added"] += 1
+                continue
+            if int(existing_term.concept_id) == int(concept.id):
+                continue
+            conflict_concept = indexes["concept_by_id"].get(int(existing_term.concept_id))
+            conflicts.append({
+                "type": "tag_conflict",
+                "authority": authority_name,
+                "term": normalized_term,
+                "existing_concept": (
+                    _concept_transfer_path(conflict_concept, indexes)
+                    if conflict_concept is not None
+                    else str(existing_term.concept_id)
+                ),
+                "incoming_concept": local_path,
+                "action": "skipped",
+            })
+            summary["tag_conflicts_skipped"] += 1
+
+
+def _import_transfer_branch(
+    db: Session,
+    node: dict[str, Any],
+    *,
+    parent_concept: Optional[Concept],
+    root_policy: str,
+    indexes: dict[str, Any],
+    authority_cache: dict[str, TagAuthority],
+    summary: dict[str, int],
+    actions: list[dict[str, Any]],
+    conflicts: list[dict[str, Any]],
+    incoming_path: str,
+) -> None:
+    is_root = parent_concept is None
+    parent_id = int(parent_concept.id) if parent_concept is not None else None
+    matched, match_kind = _match_transfer_node(node, parent_id, indexes)
+
+    if matched is None and is_root and root_policy == "strict":
+        summary["roots_skipped_by_policy"] += 1
+        actions.append({
+            "type": "root_skipped_by_policy",
+            "incoming_path": incoming_path,
+            "policy": root_policy,
+        })
+        return
+
+    if matched is not None:
+        resolved_concept = matched
+        summary["concepts_matched"] += 1
+        summary["branches_grafted"] += 1
+        actions.append({
+            "type": "graft_existing",
+            "incoming_path": incoming_path,
+            "local_path": _concept_transfer_path(resolved_concept, indexes),
+            "match": match_kind,
+        })
+    else:
+        resolved_concept = _create_transfer_concept(db, node, parent_id, indexes)
+        summary["concepts_created"] += 1
+        summary["branches_grafted"] += 1
+        if is_root:
+            summary["roots_created"] += 1
+        actions.append({
+            "type": "create_concept",
+            "incoming_path": incoming_path,
+            "local_path": _concept_transfer_path(resolved_concept, indexes),
+            "parent_concept_id": parent_id,
+        })
+
+    summary["aliases_added"] += _add_transfer_aliases(
+        db,
+        resolved_concept,
+        list(node.get("aliases") or []),
+        indexes,
+    )
+    _link_transfer_tags(
+        db,
+        resolved_concept,
+        dict(node.get("tags") or {}),
+        authority_cache,
+        summary,
+        conflicts,
+        indexes,
+    )
+
+    for child_node in list(node.get("children") or []):
+        child_name = str(child_node.get("name") or "").strip()
+        child_path = f"{incoming_path}/{child_name}" if child_name else incoming_path
+        _import_transfer_branch(
+            db,
+            child_node,
+            parent_concept=resolved_concept,
+            root_policy=root_policy,
+            indexes=indexes,
+            authority_cache=authority_cache,
+            summary=summary,
+            actions=actions,
+            conflicts=conflicts,
+            incoming_path=child_path,
+        )
+
+
+def _build_concept_transfer_export_document(
+    db: Session,
+    *,
+    include_aliases: bool,
+    include_descriptions: bool,
+    status: str,
+    authorities: Optional[list[str]],
+) -> dict[str, Any]:
+    concept_query = db.query(Concept)
+    if status != "all":
+        concept_query = concept_query.filter(Concept.status == status)
+    concepts = concept_query.order_by(Concept.canonical_name.asc()).all()
+    concept_ids = [int(concept.id) for concept in concepts]
+
+    selected_authorities = list(_CONCEPT_TRANSFER_AUTHORITIES)
+    if authorities:
+        selected_authorities = [
+            authority
+            for authority in authorities
+            if authority in _CONCEPT_TRANSFER_AUTHORITIES
+        ]
+        if not selected_authorities:
+            raise HTTPException(status_code=400, detail="No valid authorities requested")
+
+    aliases_by_concept: dict[int, list[str]] = {concept_id: [] for concept_id in concept_ids}
+    if include_aliases and concept_ids:
+        alias_rows = (
+            db.query(ConceptAlias)
+            .filter(
+                ConceptAlias.concept_id.in_(concept_ids),
+                ConceptAlias.alias_type != "canonical",
+            )
+            .order_by(ConceptAlias.id.asc())
+            .all()
+        )
+        for alias in alias_rows:
+            concept_id = int(alias.concept_id)
+            normalized_alias = _normalize_taxonomy_text(alias.alias or "")
+            if not normalized_alias:
+                continue
+            existing_aliases = aliases_by_concept.setdefault(concept_id, [])
+            if normalized_alias not in existing_aliases:
+                existing_aliases.append(normalized_alias)
+
+    tags_by_concept: dict[int, dict[str, list[str]]] = {
+        concept_id: {
+            authority_name: [] for authority_name in selected_authorities
+        }
+        for concept_id in concept_ids
+    }
+    if concept_ids:
+        tag_rows = (
+            db.query(AuthorityTerm, TagAuthority)
+            .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+            .filter(AuthorityTerm.concept_id.in_(concept_ids))
+            .order_by(TagAuthority.name.asc(), AuthorityTerm.external_name.asc())
+            .all()
+        )
+        for term, authority in tag_rows:
+            if term.concept_id is None:
+                continue
+            authority_name = str(authority.name or "").strip().lower()
+            if authority_name not in selected_authorities:
+                continue
+            term_name = _normalize_taxonomy_text(term.external_name or "")
+            if not term_name:
+                continue
+            concept_id = int(term.concept_id)
+            concept_tags = tags_by_concept.setdefault(
+                concept_id,
+                {name: [] for name in selected_authorities},
+            )
+            bucket = concept_tags.setdefault(authority_name, [])
+            if term_name not in bucket:
+                bucket.append(term_name)
+
+    by_parent: dict[Optional[int], list[Concept]] = {}
+    for concept in concepts:
+        by_parent.setdefault(concept.parent_concept_id, []).append(concept)
+
+    def build_node(concept: Concept) -> dict[str, Any]:
+        concept_id = int(concept.id)
+        children = by_parent.get(concept.id, [])
+        description = concept.description if include_descriptions else None
+        return {
+            "name": _normalize_taxonomy_text(concept.canonical_name or ""),
+            "slug": str(concept.slug or "").strip().lower(),
+            "description": description,
+            "status": str(concept.status or "active"),
+            "aliases": list(aliases_by_concept.get(concept_id, [])) if include_aliases else [],
+            "tags": {
+                authority_name: list(tags_by_concept.get(concept_id, {}).get(authority_name, []))
+                for authority_name in selected_authorities
+            },
+            "children": [build_node(child) for child in children],
+        }
+
+    root_concepts = by_parent.get(None, [])
+    return {
+        "version": _CONCEPT_TRANSFER_VERSION,
+        "exported_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "authority_order": selected_authorities,
+        "roots": [build_node(root) for root in root_concepts],
     }
 
 
@@ -1228,6 +1768,125 @@ async def taxonomy_bootstrap_import_file(
         authority_name=authority_name,
         rows=rows,
         dry_run=dry_run,
+    )
+    result["source_file"] = file.filename
+    return result
+
+
+@router.get("/concepts/export", response_model=dict)
+def taxonomy_export_concepts(
+    include_aliases: bool = True,
+    include_descriptions: bool = True,
+    status: str = "active",
+    authorities: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    parsed_authorities: Optional[list[str]] = None
+    if authorities is not None:
+        parsed_authorities = []
+        for item in authorities.split(","):
+            authority_name = str(item or "").strip().lower()
+            if authority_name:
+                parsed_authorities.append(authority_name)
+    export_document = _build_concept_transfer_export_document(
+        db,
+        include_aliases=include_aliases,
+        include_descriptions=include_descriptions,
+        status=status,
+        authorities=parsed_authorities,
+    )
+    return export_document
+
+
+@router.post("/concepts/import", response_model=dict)
+def taxonomy_import_concepts(
+    payload: TaxonomyConceptTransferImportRequest,
+    db: Session = Depends(get_db),
+):
+    if payload.mode != "graft":
+        raise HTTPException(status_code=409, detail=f"Unsupported mode: {payload.mode}")
+    if payload.root_policy not in {"strict", "permissive"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Unsupported root policy: {payload.root_policy}",
+        )
+
+    document = _coerce_concept_transfer_document(dict(payload.document or {}))
+    indexes = _build_concept_transfer_indexes(db)
+    authority_cache: dict[str, TagAuthority] = {}
+    summary: dict[str, int] = {
+        "roots_processed": 0,
+        "roots_created": 0,
+        "roots_skipped_by_policy": 0,
+        "concepts_matched": 0,
+        "concepts_created": 0,
+        "branches_grafted": 0,
+        "aliases_added": 0,
+        "tag_links_added": 0,
+        "tag_conflicts_skipped": 0,
+        "validation_errors": 0,
+    }
+    conflicts: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+
+    for root_node in list(document.get("roots") or []):
+        summary["roots_processed"] += 1
+        root_name = str(root_node.get("name") or "").strip() or "<unnamed-root>"
+        _import_transfer_branch(
+            db,
+            root_node,
+            parent_concept=None,
+            root_policy=payload.root_policy,
+            indexes=indexes,
+            authority_cache=authority_cache,
+            summary=summary,
+            actions=actions,
+            conflicts=conflicts,
+            incoming_path=root_name,
+        )
+
+    if payload.dry_run:
+        db.rollback()
+    else:
+        db.commit()
+
+    return {
+        "ok": True,
+        "dry_run": payload.dry_run,
+        "summary": summary,
+        "conflicts": conflicts,
+        "actions": actions,
+    }
+
+
+@router.post("/concepts/import_file", response_model=dict)
+async def taxonomy_import_concepts_file(
+    mode: str = Form("graft"),
+    root_policy: str = Form("strict"),
+    dry_run: bool = Form(True),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded text")
+    try:
+        parsed_document = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON file: {exc}")
+
+    result = taxonomy_import_concepts(
+        TaxonomyConceptTransferImportRequest(
+            document=parsed_document,
+            mode=mode,
+            root_policy=root_policy,
+            dry_run=dry_run,
+        ),
+        db,
     )
     result["source_file"] = file.filename
     return result

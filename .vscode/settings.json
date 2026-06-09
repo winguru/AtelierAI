@@ -10,7 +10,8 @@
     "python.analysis.extraPaths": [
         "${workspaceFolder}/app/src",
         "${workspaceFolder}/app/backend",
-        "${workspaceFolder}/app/dev"
+        "${workspaceFolder}/app/dev",
+        "/root/.local/bin"
     ],
     "terminal.integrated.env.linux": {
         "PYTHONPATH": "${workspaceFolder}/app/src:${workspaceFolder}/app/backend:${workspaceFolder}/app/dev:${env:PYTHONPATH}"
@@ -20,5 +21,6 @@
     },
     "chat.tools.terminal.autoApprove": {
         "/Users/winguru/Sources/AtelierAI/.venv/bin/python": true
-    }
+    },
+    "makefile.configureOnOpen": false
 }

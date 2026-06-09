@@ -1043,3 +1043,203 @@ body[data-theme="dark"] .tag-chip {
     opacity: 0.6;
     font-style: italic;
 }
+
+/* ── "In Library" badge on tiles ── */
+.tile-in-library-badge {
+    position: absolute;
+    top: 0.42rem;
+    right: 0.42rem;
+    z-index: 5;
+    padding: 0.18rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(46, 160, 67, 0.88);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    line-height: 1.3;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+    animation: badge-in 200ms ease;
+}
+
+@keyframes badge-in {
+    from { opacity: 0; transform: scale(0.8); }
+    to   { opacity: 1; transform: scale(1); }
+}
+
+body[data-theme="dark"] .tile-in-library-badge {
+    background: rgba(46, 160, 67, 0.72);
+}
+
+/* ── Import button in detail header ── */
+.import-btn {
+    white-space: nowrap;
+}
+
+.import-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+/* ── Bulk import button in gallery footer ── */
+#bulk-import-btn {
+    border: 0;
+    border-radius: 10px;
+    padding: 0.5rem 0.95rem;
+    cursor: pointer;
+    font-weight: 600;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.88rem;
+    font-family: inherit;
+    transition: transform 120ms ease, opacity 160ms ease;
+    border: 1px solid transparent;
+}
+
+#bulk-import-btn:hover {
+    transform: translateY(-1px);
+    opacity: 0.9;
+}
+
+body[data-theme="dark"] #bulk-import-btn {
+    background: #c76a30;
+    color: #fff;
+}
+
+/* ── Import dialog (collection picker) ── */
+.import-dialog-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 4000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(3px);
+    animation: dialog-fade-in 150ms ease;
+}
+
+@keyframes dialog-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+.import-dialog {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+    width: 90%;
+    max-width: 440px;
+    overflow: hidden;
+    animation: dialog-slide-in 200ms ease;
+}
+
+@keyframes dialog-slide-in {
+    from { transform: translateY(12px); opacity: 0; }
+    to   { transform: translateY(0); opacity: 1; }
+}
+
+body[data-theme="dark"] .import-dialog {
+    background: #1e2028;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.import-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.2rem 0.6rem;
+}
+
+.import-dialog-header h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.import-dialog-close {
+    border: none;
+    background: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: var(--ink-soft);
+    padding: 0.2rem;
+    line-height: 1;
+    border-radius: 6px;
+    transition: background 120ms ease;
+}
+
+.import-dialog-close:hover {
+    background: color-mix(in oklab, var(--ink) 8%, transparent);
+}
+
+.import-dialog-body {
+    padding: 0.8rem 1.2rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+.import-dialog-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-soft);
+}
+
+.import-dialog-select,
+.import-dialog-input {
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--stroke);
+    border-radius: 8px;
+    font-size: 0.88rem;
+    font-family: inherit;
+    background: color-mix(in oklab, var(--panel) 88%, white 12%);
+    color: var(--ink);
+    width: 100%;
+    box-sizing: border-box;
+}
+
+body[data-theme="dark"] .import-dialog-select,
+body[data-theme="dark"] .import-dialog-input {
+    background: #171b22;
+    border-color: #3d4451;
+    color: var(--ink);
+}
+
+.import-dialog-select:focus,
+.import-dialog-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.import-dialog-hint {
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    line-height: 1.4;
+}
+
+.import-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: 0.6rem 1.2rem 1rem;
+}
+
+.import-dialog-confirm-btn {
+    background: var(--accent) !important;
+    color: #fff !important;
+    border-color: transparent !important;
+}
+
+.import-dialog-confirm-btn:hover {
+    opacity: 0.9;
+}
+
+body[data-theme="dark"] .import-dialog-confirm-btn {
+    background: #c76a30 !important;
+}

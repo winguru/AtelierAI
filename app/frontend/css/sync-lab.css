@@ -515,6 +515,71 @@ body {
 .dedup-stat.tombstoned { background: var(--yellow-bg); color: var(--yellow); }
 .dedup-stat.placeholder { background: var(--panel-muted); color: var(--ink-soft); }
 
+/* ── Stage candidate controls ── */
+.stage-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.35rem 0 0.7rem;
+    padding: 0.55rem 0.6rem;
+    border: 1px dashed var(--stroke);
+    border-radius: 8px;
+    background: var(--panel-muted);
+}
+
+.stage-limit {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+}
+
+.stage-limit input {
+    width: 84px;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--stroke);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+}
+
+.stage-candidates {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    max-height: 140px;
+    overflow-y: auto;
+    margin-top: 0.15rem;
+}
+
+.candidate-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid var(--stroke);
+    border-radius: 12px;
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    background: var(--panel);
+    cursor: pointer;
+    user-select: none;
+}
+
+.candidate-chip.eligible {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.candidate-chip.selected {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
 /* ── Detail Lists ── */
 .detail-list {
     list-style: none;

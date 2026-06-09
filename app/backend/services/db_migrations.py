@@ -25,7 +25,7 @@ from pathlib import Path
 import sqlalchemy as sa
 from sqlalchemy import text
 
-from database import SessionLocal, engine
+from database import Base, SessionLocal, engine
 from models import (
     AuthorityTerm,
     CivitaiBaseModel,
@@ -218,6 +218,127 @@ def _ensure_observation_authority_term_unique_index() -> None:
                     "WHERE authority_term_id IS NOT NULL"
                 )
             )
+
+
+def _ensure_observation_schema_current() -> None:
+    """Recreate image_concept_observations if the schema pre-dates the current ORM.
+
+    Legacy schema markers that trigger recreation:
+      - concept_id INTEGER NOT NULL  (should be nullable)
+      - dimension / polarity VARCHAR NOT NULL  (obsolete columns)
+      - source_type / certainty_label stored as VARCHAR  (should be INTEGER)
+
+    Existing rows are migrated by copying columns shared by both schemas.
+    Rows where concept_id IS NULL in the legacy table are discarded (would be
+    malformed under the old NOT NULL constraint anyway).
+    """
+    with engine.connect() as connection:
+        col_info = {
+            row[1]: row
+            for row in connection.execute(
+                text("PRAGMA table_info(image_concept_observations)")
+            ).fetchall()
+        }
+
+    concept_id_col = col_info.get("concept_id")
+    if concept_id_col is None or concept_id_col[3] == 0:
+        return
+
+    print(
+        "  [migration] image_concept_observations has legacy NOT NULL concept_id "
+        "— recreating table with current schema..."
+    )
+
+    with engine.begin() as connection:
+        row_count = connection.execute(
+            text("SELECT COUNT(*) FROM image_concept_observations")
+        ).fetchone()[0]
+
+        for (idx_name,) in connection.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='image_concept_observations' "
+                "  AND name NOT LIKE 'sqlite_autoindex%'"
+            )
+        ).fetchall():
+            connection.execute(text(f'DROP INDEX IF EXISTS "{idx_name}"'))
+
+        connection.execute(
+            text(
+                "ALTER TABLE image_concept_observations "
+                "RENAME TO _ico_legacy"
+            )
+        )
+
+    Base.metadata.tables["image_concept_observations"].create(engine)
+
+    if row_count > 0:
+        new_col_names = {
+            row[1]
+            for row in engine.connect().execute(
+                text("PRAGMA table_info(image_concept_observations)")
+            ).fetchall()
+        }
+        shared_cols = ", ".join(
+            c
+            for c in new_col_names
+            if c in col_info and c != "id"
+        )
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    f"INSERT INTO image_concept_observations ({shared_cols}) "
+                    f"SELECT {shared_cols} FROM _ico_legacy "
+                    f"WHERE concept_id IS NOT NULL"
+                )
+            )
+        print(f"  [migration] Migrated {row_count} rows from legacy schema.")
+
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS _ico_legacy"))
+
+    print("  [migration] image_concept_observations schema is now current.")
+
+
+def _ensure_observation_presence_columns() -> None:
+    """Add observation presence/curation columns for older sqlite databases."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(image_concept_observations)")
+            ).fetchall()
+        }
+
+        if "is_present" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE image_concept_observations "
+                    "ADD COLUMN is_present BOOLEAN DEFAULT 1 NOT NULL"
+                )
+            )
+        if "is_curated" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE image_concept_observations "
+                    "ADD COLUMN is_curated BOOLEAN DEFAULT 0 NOT NULL"
+                )
+            )
+
+        connection.execute(
+            text(
+                "UPDATE image_concept_observations "
+                "SET is_present = 1 "
+                "WHERE is_present IS NULL"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE image_concept_observations "
+                "SET is_curated = 0 "
+                "WHERE is_curated IS NULL"
+            )
+        )
 
 
 def _ensure_is_corrupt_column() -> None:
@@ -504,6 +625,24 @@ def _ensure_civitai_post_title_index_columns() -> None:
         if "civitai_post_index" not in existing:
             connection.execute(
                 text("ALTER TABLE images ADD COLUMN civitai_post_index INTEGER")
+            )
+
+
+def _ensure_civitai_cdn_url_column() -> None:
+    """Add civitai_cdn_url column to images.
+
+    Stores the actual CivitAI CDN URL used to download the image, which may
+    differ from ``source_url`` (the CivitAI page URL) when fallback width-based
+    CDN routes are used instead of the broken ``original=true`` route.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+        if "civitai_cdn_url" not in existing:
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN civitai_cdn_url TEXT")
             )
 
 
@@ -979,3 +1118,39 @@ def create_initial_data() -> None:
     from bootstrap import populate_initial_data
 
     populate_initial_data(SessionLocal)
+
+
+def ensure_collection_civitai_mappings_table() -> None:
+    """Create the ``collection_civitai_mappings`` junction table and backfill.
+
+    This table implements the many-to-many mapping between local collections
+    and CivitAI collection IDs.  On first run the table is created and any
+    existing ``CollectionModel.civitai_collection_id`` values are copied into
+    it.  The legacy column is kept for backward compatibility.
+    """
+    with engine.begin() as connection:
+        # Check whether the junction table already exists
+        existing_tables = {
+            row[0]
+            for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+        }
+
+        if "collection_civitai_mappings" not in existing_tables:
+            connection.execute(text(
+                "CREATE TABLE collection_civitai_mappings ("
+                "  collection_id INTEGER NOT NULL REFERENCES collections(id),"
+                "  civitai_collection_id INTEGER NOT NULL UNIQUE,"
+                "  PRIMARY KEY (collection_id, civitai_collection_id)"
+                ")"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_collection_civitai_mappings_civitai_collection_id "
+                "ON collection_civitai_mappings (civitai_collection_id)"
+            ))
+
+        # Backfill from legacy column (idempotent — uses INSERT OR IGNORE)
+        connection.execute(text(
+            "INSERT OR IGNORE INTO collection_civitai_mappings (collection_id, civitai_collection_id) "
+            "SELECT id, civitai_collection_id FROM collections "
+            "WHERE civitai_collection_id IS NOT NULL"
+        ))

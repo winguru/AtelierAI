@@ -145,6 +145,7 @@ from services.db_migrations import (
     _ensure_civitai_uuid_column as _ensure_civitai_uuid_column,
     _ensure_collection_sync_columns as _ensure_collection_sync_columns,
     ensure_collection_civitai_mappings_table as _ensure_collection_civitai_mappings_table,
+    _ensure_concept_prototype_columns as _ensure_concept_prototype_columns,
     _ensure_expected_file_size_column as _ensure_expected_file_size_column,
     _ensure_file_hash_nonunique as _ensure_file_hash_nonunique,
     _ensure_image_lifecycle_columns as _ensure_image_lifecycle_columns,
@@ -15111,12 +15112,63 @@ async def lifespan(app: FastAPI):
     _ensure_file_hash_nonunique()
     _ensure_is_corrupt_column()
     _ensure_expected_file_size_column()
+    _ensure_concept_prototype_columns()
+
+    # --- CLIP provider auto-detection ---
+    from services.clip_provider import (
+        LocalCLIPProvider,
+        RemoteCLIPProvider,
+        set_clip_provider,
+        close_http_client,
+    )
+    from config import (
+        CLIP_LOCAL_ENABLED,
+        CLIP_FORCE_CPU,
+        CLIP_PEER_URL,
+        CLIP_MODEL_NAME,
+        CLIP_PRETRAINED,
+    )
+
+    clip_provider = None
+    if CLIP_LOCAL_ENABLED:
+        try:
+            clip_provider = LocalCLIPProvider(
+                model_name=CLIP_MODEL_NAME,
+                pretrained=CLIP_PRETRAINED,
+                force_cpu=CLIP_FORCE_CPU,
+            )
+            print(f"[CLIP] Local provider ready (model={CLIP_MODEL_NAME})")
+        except Exception as exc:
+            print(f"[CLIP] Local provider failed: {exc}")
+
+    if clip_provider is None and CLIP_PEER_URL:
+        clip_provider = RemoteCLIPProvider(peer_url=CLIP_PEER_URL)
+        print(f"[CLIP] Remote provider ready (peer={CLIP_PEER_URL})")
+
+    if clip_provider is None:
+        print("[CLIP] No provider available — CLIP features disabled")
+
+    set_clip_provider(clip_provider)
 
     print("AtelierAI API is ready to go!")
 
     yield
 
     print("Shutting down AtelierAI API...")
+
+    # Cleanup CLIP provider
+    from services.clip_provider import get_clip_provider, close_http_client
+    provider = get_clip_provider()
+    if provider is not None and hasattr(provider, "close"):
+        try:
+            await provider.close()
+        except Exception:
+            pass
+    try:
+        await close_http_client()
+    except Exception:
+        pass
+
     task_manager.shutdown()
 
 
@@ -15170,6 +15222,7 @@ from routers import collections as _collections_router_mod  # noqa: E402, PLC041
 from routers import generation as _generation_router_mod  # noqa: E402, PLC0415
 from routers.civitai import router as _civitai_router  # noqa: E402, PLC0415
 from routers import models_tree as _models_tree_router_mod  # noqa: E402, PLC0415
+from routers import clip_router as _clip_router_mod  # noqa: E402, PLC0415
 
 app.include_router(_health_router_mod.router)
 app.include_router(_taxonomy_router_mod.router, prefix="/api")
@@ -15178,6 +15231,7 @@ app.include_router(_collections_router_mod.router, prefix="/api")
 app.include_router(_generation_router_mod.router, prefix="/api")
 app.include_router(_civitai_router, prefix="/api")
 app.include_router(_models_tree_router_mod.router, prefix="/api")
+app.include_router(_clip_router_mod.router, prefix="/api")
 
 
 # Define a root endpoint to serve the main index.html file

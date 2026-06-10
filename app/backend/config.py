@@ -180,3 +180,17 @@ ATELIER_COMFYUI_BASE_URL = os.getenv("ATELIER_COMFYUI_BASE_URL", "").strip()
 ATELIER_COMFY_MATCH_THRESHOLD = max(
     0.0, min(1.0, _env_float("ATELIER_COMFY_MATCH_THRESHOLD", 0.95))
 )
+
+# --- CLIP / Concept Prototype Configuration ---
+# When enabled and hardware is available, a LocalCLIPProvider loads OpenCLIP
+# in-process (CUDA if detected, otherwise CPU).  When a peer URL is configured
+# instead, a RemoteCLIPProvider forwards requests to another AtelierAI instance.
+# If neither condition is met, CLIP is unavailable and visual scoring degrades
+# gracefully to tag-only matching.
+CLIP_LOCAL_ENABLED: bool = _env_bool("CLIP_LOCAL_ENABLED", default=True)
+CLIP_FORCE_CPU: bool = _env_bool("CLIP_FORCE_CPU", default=False)
+CLIP_PEER_URL: str = os.getenv("CLIP_PEER_URL", "").strip()
+CLIP_MODEL_NAME: str = os.getenv("CLIP_MODEL_NAME", "ViT-B-32").strip()
+CLIP_PRETRAINED: str = os.getenv(
+    "CLIP_PRETRAINED", "laion2b_s34b_b79k"
+).strip()

@@ -1154,3 +1154,32 @@ def ensure_collection_civitai_mappings_table() -> None:
             "SELECT id, civitai_collection_id FROM collections "
             "WHERE civitai_collection_id IS NOT NULL"
         ))
+
+
+def _ensure_concept_prototype_columns() -> None:
+    """Add concept_type, prototype_vector, prototype_source_count, prototype_updated_at to concepts.
+
+    These columns support CLIP-based visual prototypes.  All are nullable so
+    existing concepts continue to work without prototypes.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(concepts)")).fetchall()
+        }
+        if "concept_type" not in existing:
+            connection.execute(
+                text("ALTER TABLE concepts ADD COLUMN concept_type VARCHAR")
+            )
+        if "prototype_vector" not in existing:
+            connection.execute(
+                text("ALTER TABLE concepts ADD COLUMN prototype_vector BLOB")
+            )
+        if "prototype_source_count" not in existing:
+            connection.execute(
+                text("ALTER TABLE concepts ADD COLUMN prototype_source_count INTEGER")
+            )
+        if "prototype_updated_at" not in existing:
+            connection.execute(
+                text("ALTER TABLE concepts ADD COLUMN prototype_updated_at DATETIME")
+            )

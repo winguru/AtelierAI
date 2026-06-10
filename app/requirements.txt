@@ -9,8 +9,16 @@ requests
 wcwidth
 ImageHash
 blurhash
+httpx
 
 # CivitAI automatic authentication
 
 playwright==1.52.0
 playwright-stealth
+
+# CLIP visual similarity
+# For ARM / CPU-only (e.g. Raspberry Pi):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# For GPU: install torch separately per https://pytorch.org/get-started/locally/
+open_clip_torch
+numpy

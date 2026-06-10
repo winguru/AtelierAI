@@ -7,10 +7,11 @@ import enum
 from sqlalchemy import (
     Boolean,
     Column,
-    ForeignKey,
     Float,
+    ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     DateTime,
@@ -257,6 +258,12 @@ class Concept(Base):
     description = Column(Text)
     status = Column(String, nullable=False, default="active")
     parent_concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=True)
+    # --- Prototype (CLIP visual centroid) ---
+    concept_type = Column(String, nullable=True, default=None)
+    prototype_vector = Column(LargeBinary, nullable=True, default=None)
+    prototype_source_count = Column(Integer, nullable=True, default=None)
+    prototype_updated_at = Column(DateTime, nullable=True, default=None)
+    # --- Timestamps ---
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 

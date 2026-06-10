@@ -17,8 +17,25 @@ playwright==1.52.0
 playwright-stealth
 
 # CLIP visual similarity
-# For ARM / CPU-only (e.g. Raspberry Pi):
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-# For GPU: install torch separately per https://pytorch.org/get-started/locally/
+# ─────────────────────────────────────────────────────────────────────────────
+# torch and torchvision are NOT pinned here because the correct wheel depends
+# on the target hardware:
+#
+#   ARM64 / CPU-only (Raspberry Pi 5, dev containers):
+#     pip install torch torchvision \
+#       --index-url https://download.pytorch.org/whl/cpu
+#
+#   NVIDIA GPU (workstation, cloud):
+#     pip install torch torchvision \
+#       --index-url https://download.pytorch.org/whl/cu126
+#
+#   Mixed environments: install torch FIRST from the correct index, then:
+#     pip install -r requirements.txt
+#
+# The Dockerfile handles this automatically (see --find-links logic below).
+# ─────────────────────────────────────────────────────────────────────────────
 open_clip_torch
 numpy
+# torch and torchvision are pulled in as dependencies of open_clip_torch.
+# If they are not already installed, pip will fetch GPU wheels from PyPI.
+# For CPU-only targets, pre-install them from the CPU index before this file.

@@ -13,6 +13,15 @@ RUN apt-get update && apt-get install -y \
 
 COPY app/requirements.txt /tmp/atelier-deps/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+      echo "Detected ARM64 — installing CPU-only PyTorch" && \
+      pip install --no-cache-dir torch torchvision \
+        --index-url https://download.pytorch.org/whl/cpu; \
+    else \
+      echo "Detected $ARCH — default PyTorch (may include CUDA)" && \
+      pip install --no-cache-dir torch torchvision; \
+    fi && \
     pip install --no-cache-dir -r /tmp/atelier-deps/requirements.txt
 
 COPY . /workspace

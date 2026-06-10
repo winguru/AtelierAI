@@ -20,7 +20,7 @@
 
   const THUMB_SIZE = 180;
   const PAGE_SIZE = 51;
-  const MAX_RESULTS = 500; // Display cap for total count (scrolling still loads all)
+  const MAX_RESULTS = 100_000; // Display cap — matches CivitAI's max reported result count
   const STORAGE_KEYS = {
     theme: 'atelier.searchLab.theme',
   };
@@ -149,7 +149,7 @@
   const els = {};
   const requiredIds = [
     'search-form', 'search-query', 'search-advanced',
-    'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username', 'filter-nsfw',
+    'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username', 'filter-nsfw', 'filter-match',
     'facet-bar', 'search-status', 'search-status-text',
     'gallery-grid', 'gallery-footer', 'load-more-btn', 'results-count',
     'selection-count',
@@ -208,11 +208,72 @@
       els.filter_base_model.value = saved.baseModel;
       els.filter_username.value = saved.username;
       els.filter_nsfw.value = saved.nsfw;
+      els.filter_match.value = saved.match || 'last';
       executeSearch();
     }
 
     // Save scroll position before unload for restore after reload
     window.addEventListener('beforeunload', saveScrollPosition);
+
+    // Set up shared infinite scroll on the gallery-grid container
+    _infiniteScroll = InfiniteScroll.create({
+      scrollContainer: els.gallery_grid,
+      hasMore: () => state.total <= 0 || state.hits.length < state.total,
+      isLoading: () => state.loading,
+      onLoadMore: () => {
+        state.offset += state.limit;
+        executeSearch(true);
+      },
+    });
+
+    // Set up shared gallery toolbar (thumb size, infinite scroll toggle, sort)
+    const toolbarMount = document.getElementById('gallery-toolbar-mount');
+    if (toolbarMount && typeof GalleryToolbar !== 'undefined') {
+      _galleryToolbar = GalleryToolbar.create({
+        container: toolbarMount,
+        position: 'beforeend',
+        cssVariableHost: els.gallery_grid,
+        idPrefix: 'lab',
+        storagePrefix: 'atelier.searchLab.',
+        sortOptions: [
+          { value: 'stats.reactionCountAllTime:desc', label: 'Most Reactions' },
+          { value: 'stats.commentCountAllTime:desc', label: 'Most Comments' },
+          { value: 'stats.collectedCountAllTime:desc', label: 'Most Collected' },
+          { value: 'createdAt:desc', label: 'Newest' },
+          { value: 'createdAtUnix:asc', label: 'Oldest' },
+        ],
+        onThumbSizeChange(/* size */) {
+          // CSS variable is updated by the module; nothing else needed
+        },
+        onInfiniteScrollToggle(enabled) {
+          _infiniteScroll.setEnabled(enabled);
+          // Show/hide manual load-more button based on infinite scroll state
+          if (els.load_more_btn) {
+            if (enabled && state.hits.length > 0) {
+              els.load_more_btn.style.display = 'none';
+            } else {
+              els.load_more_btn.style.display = '';
+            }
+          }
+        },
+        onSortChange(value) {
+          // Sync the advanced-filters sort dropdown and re-search
+          els.filter_sort.value = value;
+          state.offset = 0;
+          state.hits = [];
+          executeSearch();
+        },
+      });
+
+      // Apply stored infinite scroll state to the controller
+      _infiniteScroll.setEnabled(_galleryToolbar.getInfiniteScroll());
+
+      // Sync toolbar sort with advanced-filters sort (e.g. from URL state restore)
+      const filterSortValue = els.filter_sort.value;
+      if (filterSortValue) {
+        _galleryToolbar.setSortValue(filterSortValue);
+      }
+    }
   }
 
   /* ── Import feature: fetch library status ── */
@@ -532,6 +593,7 @@
     const baseModel = els.filter_base_model.value;
     const username = els.filter_username.value.trim();
     const nsfw = els.filter_nsfw.value;
+    const match = els.filter_match.value;
 
     if (q) p.set('q', q);
     if (tags) p.set('tags', tags);
@@ -539,6 +601,7 @@
     if (baseModel) p.set('baseModel', baseModel);
     if (username) p.set('username', username);
     if (nsfw) p.set('nsfw', nsfw);
+    if (match && match !== 'last') p.set('match', match);
     if (state.hits.length > 0) p.set('offset', String(state.hits.length));
 
     const search = p.toString();
@@ -557,6 +620,7 @@
       baseModel: p.get('baseModel') || '',
       username: p.get('username') || '',
       nsfw: p.get('nsfw') || '',
+      match: p.get('match') || 'last',
       offset: parseInt(p.get('offset') || '0', 10),
     };
   }
@@ -575,62 +639,11 @@
     } catch (_e) { /* unavailable */ }
   }
 
-  /* ── Infinite Scroll ── */
-  let _scrollObserver = null;
-  let _scrollHandler = null;
-  let _scrollPending = false;     // Guard against rapid re-entry
-  let _lastLoadTime = 0;          // Timestamp of last triggered load
-
-  function _triggerLoadMore() {
-    if (_scrollPending || state.loading) return;
-    if (state.total > 0 && state.hits.length >= state.total) return;
-    // Debounce: don't re-trigger within 2 seconds of the last load
-    const now = Date.now();
-    if (now - _lastLoadTime < 2000) return;
-    _scrollPending = true;
-    _lastLoadTime = now;
-    _scrollPending = true;
-    _lastLoadScrollY = window.scrollY || window.pageYOffset;
-    state.offset += state.limit;
-    executeSearch(true).finally(() => { _scrollPending = false; });
-  }
-
-  function setupInfiniteScroll() {
-    if (_scrollObserver) return; // Already attached
-
-    // IntersectionObserver: fires when the "Load more" button enters the
-    // viewport (with 400px lookahead). Works in real browsers.
-    _scrollObserver = new IntersectionObserver((entries) => {
-      if (entries.some(e => e.isIntersecting)) _triggerLoadMore();
-    }, { rootMargin: '400px' });
-    _scrollObserver.observe(els.load_more_btn);
-
-    // Scroll-event fallback (headless Chromium / Playwright where IO may not
-    // fire). Same algorithm as the main gallery: trigger when the viewport
-    // is within ~3 viewport-heights of the document bottom.
-    // Requires the user to have scrolled at least 100px since the last load
-    // to prevent re-triggering on the same position after a page is appended.
-    _scrollHandler = () => {
-      if (_scrollPending || state.loading) return;
-      if (state.total > 0 && state.hits.length >= state.total) return;
-
-      const scrollY = window.scrollY || window.pageYOffset;
-      const viewportH = window.innerHeight;
-      const docH = document.documentElement.scrollHeight;
-      const distanceToBottom = docH - scrollY - viewportH;
-      const earlyTrigger = viewportH * 3;
-
-      if (distanceToBottom < Math.max(earlyTrigger, 240)) {
-        _triggerLoadMore();
-      }
-    };
-    window.addEventListener('scroll', _scrollHandler, { passive: true });
-  }
-
-  function teardownInfiniteScroll() {
-    if (_scrollObserver) { _scrollObserver.disconnect(); _scrollObserver = null; }
-    if (_scrollHandler) { window.removeEventListener('scroll', _scrollHandler); _scrollHandler = null; }
-  }
+  /* ── Infinite Scroll & Toolbar ── */
+  // InfiniteScroll controller (set up after DOM ready)
+  let _infiniteScroll = null;
+  // GalleryToolbar controller (set up after DOM ready)
+  let _galleryToolbar = null;
 
   /* ── Events ── */
   function bindEvents() {
@@ -714,6 +727,7 @@
     const baseModel = els.filter_base_model.value;
     const username = els.filter_username.value.trim();
     const nsfwLevels = els.filter_nsfw.value;
+    const matchStrategy = els.filter_match.value;
 
     if (!query && !tags && !baseModel && !username) {
       setStatus('Enter a search query or apply filters.', '');
@@ -721,8 +735,7 @@
     }
 
     state.loading = true;
-    teardownInfiniteScroll(); // Prevent observer from firing while loading
-    state.currentQuery = { query, tags, sortBy, baseModel, username, nsfwLevels };
+    state.currentQuery = { query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy };
     setStatus('Searching…', 'is-loading');
 
     const body = {
@@ -734,6 +747,7 @@
       nsfw_levels: nsfwLevels ? nsfwLevels.split(',').map(Number) : undefined,
       base_models: baseModel ? [baseModel] : undefined,
       username: username || undefined,
+      matching_strategy: matchStrategy !== 'last' ? matchStrategy : undefined,
     };
 
     try {
@@ -770,10 +784,11 @@
       renderResults(append);
       renderFacets();
 
-      // Display: cap total at MAX_RESULTS to avoid showing unrealistic counts
-      const displayTotal = state.total > MAX_RESULTS ? MAX_RESULTS : state.total;
+      // Display: cap total at MAX_RESULTS — when total equals the cap, assume it's truncated
+      const capped = state.total >= MAX_RESULTS;
+      const displayTotal = capped ? MAX_RESULTS : state.total;
       const totalLabel = displayTotal > 0
-        ? (state.total > MAX_RESULTS
+        ? (capped
             ? `Showing ${state.hits.length} of ${displayTotal.toLocaleString()}+ results`
             : `Showing ${state.hits.length} of ${displayTotal.toLocaleString()} results`)
         : `Showing ${state.hits.length} results`;
@@ -795,13 +810,6 @@
       setStatus(`Search failed: ${err.message}`, 'is-error');
     } finally {
       state.loading = false;
-      // Re-enable infinite scroll if more results may be available.
-      // When total is unknown (0), let the API return an empty page to
-      // signal completion.
-      const hasMore = state.total <= 0 || state.hits.length < state.total;
-      if (hasMore) {
-        setupInfiniteScroll();
-      }
     }
   }
 
@@ -901,9 +909,14 @@
       const allLoaded = state.total > 0 && state.hits.length >= state.total;
       els.load_more_btn.disabled = allLoaded;
       els.load_more_btn.textContent = allLoaded ? 'All results loaded' : 'Load more';
+      // Hide manual load-more when infinite scroll is active
+      if (_galleryToolbar && _galleryToolbar.getInfiniteScroll()) {
+        els.load_more_btn.style.display = 'none';
+      } else {
+        els.load_more_btn.style.display = '';
+      }
     } else {
       els.gallery_footer.classList.add('hidden');
-      teardownInfiniteScroll();
     }
   }
 

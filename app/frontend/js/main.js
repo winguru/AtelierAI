@@ -11001,23 +11001,20 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
     }, { capture: true });
-    galleryGrid.addEventListener('scroll', () => {
-        if (!state.infiniteEnabled || !state.hasMore || state.loadingPage) {
-            return;
-        }
-
-        const distanceToBottom = galleryGrid.scrollHeight - galleryGrid.scrollTop - galleryGrid.clientHeight;
-        // Trigger early (~3 viewport heights from bottom) so prefetched data is
-        // rendered into the DOM before the user scrolls far enough to see the gap.
-        const earlyTrigger = galleryGrid.clientHeight * 3;
-        if (distanceToBottom < Math.max(earlyTrigger, 240)) {
-            loadNextPage();
-        }
+    // Shared infinite scroll controller (replaces inline scroll listener)
+    const _infiniteScrollCtrl = InfiniteScroll.create({
+        scrollContainer: galleryGrid,
+        hasMore:  () => state.hasMore,
+        isLoading: () => state.loadingPage,
+        onLoadMore: () => loadNextPage(),
     });
+    // Ensure initial state matches the toggle
+    _infiniteScrollCtrl.setEnabled(state.infiniteEnabled);
     refreshBtn.addEventListener('click', resetAndLoadImages);
     loadMoreBtn.addEventListener('click', loadNextPage);
     infiniteScrollToggle.addEventListener('change', () => {
         state.infiniteEnabled = infiniteScrollToggle.checked;
+        _infiniteScrollCtrl.setEnabled(state.infiniteEnabled);
         writeStoredBool(STORAGE_KEYS.infinite, state.infiniteEnabled);
         updatePagingUi();
     });

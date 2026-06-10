@@ -2872,9 +2872,10 @@ def _save_civitai_api_responses(
     raw_generation_data: Optional[dict] = None,
     raw_infinite: Optional[dict] = None,
 ) -> dict[str, str]:
-    """Save raw CivitAI API responses to disk for debugging and audit.
+    """Return path references for CivitAI API responses.
 
-    Returns dict with keys like 'raw_basic_info_path', 'raw_generation_data_path', 'raw_infinite_path'.
+    File archiving is now handled exclusively by CivitaiAPI._archive_metadata_response.
+    This function only builds the path dict for metadata records.
     """
     saved_paths: dict[str, str] = {}
 
@@ -2882,80 +2883,33 @@ def _save_civitai_api_responses(
         return saved_paths
 
     try:
-        api_response_dir = Path(IMAGE_RESOURCES_PATH) / "civitai_api_responses"
-        api_response_dir.mkdir(parents=True, exist_ok=True)
-
         if isinstance(raw_basic_info, dict):
-            basic_info_path = (
-                api_response_dir / f"civitai_image_get_{civitai_uuid}.json"
-            )
-            with open(basic_info_path, "w", encoding="utf-8") as f:
-                json.dump(raw_basic_info, f, indent=2)
-            saved_paths["raw_basic_info_path"] = str(
-                basic_info_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            saved_paths["raw_basic_info_path"] = (
+                f"civitai_api_responses/civitai_image_get_{civitai_uuid}.json"
             )
 
         if isinstance(raw_generation_data, dict):
-            gen_data_path = (
-                api_response_dir
-                / f"civitai_image_getGenerationData_{civitai_uuid}.json"
-            )
-            with open(gen_data_path, "w", encoding="utf-8") as f:
-                json.dump(raw_generation_data, f, indent=2)
-            saved_paths["raw_generation_data_path"] = str(
-                gen_data_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            saved_paths["raw_generation_data_path"] = (
+                f"civitai_api_responses/civitai_image_getGenerationData_{civitai_uuid}.json"
             )
 
         if isinstance(raw_infinite, dict):
-            infinite_path = (
-                api_response_dir / f"civitai_image_getInfinite_{civitai_uuid}.json"
-            )
-            with open(infinite_path, "w", encoding="utf-8") as f:
-                json.dump(raw_infinite, f, indent=2)
-            saved_paths["raw_infinite_path"] = str(
-                infinite_path.relative_to(Path(IMAGE_RESOURCES_PATH))
+            saved_paths["raw_infinite_path"] = (
+                f"civitai_api_responses/civitai_image_getInfinite_{civitai_uuid}.json"
             )
     except Exception as exc:
-        # If saving fails, log but don't crash the import
         print(
-            f"[ERROR] Failed to save CivitAI API responses for UUID {civitai_uuid}: {exc}"
+            f"[ERROR] Failed to build CivitAI API response paths for UUID {civitai_uuid}: {exc}"
         )
 
     return saved_paths
 
 
 def _archive_civitai_collection_items(items: list[dict[str, Any]]) -> None:
-    """Persist get.Infinite item payloads for every scraped collection image."""
-    if not items:
-        return
+    """No-op: file archiving is now handled exclusively by CivitaiAPI._archive_metadata_response.
 
-    api_response_dir = Path(IMAGE_RESOURCES_PATH) / "civitai_api_responses"
-    api_response_dir.mkdir(parents=True, exist_ok=True)
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        raw_url = item.get("url")
-        uuid_value = _extract_civitai_uuid_from_url_hash(
-            raw_url if isinstance(raw_url, str) else None
-        )
-        key = uuid_value
-        if not key:
-            raw_id = item.get("id")
-            try:
-                key = f"imageid_{int(raw_id)}"
-            except (TypeError, ValueError):
-                key = None
-        if not key:
-            continue
-
-        out_path = api_response_dir / f"civitai_image_getInfinite_{key}.json"
-        try:
-            with open(out_path, "w", encoding="utf-8") as handle:
-                json.dump(item, handle, indent=2)
-        except Exception:
-            # Best-effort archival only.
-            continue
+    Kept as a stub to preserve call sites without breaking imports during collection scraping.
+    """
 
 
 def _resolve_civitai_image_target(

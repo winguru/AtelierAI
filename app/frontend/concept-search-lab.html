@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Concept Search Lab</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/concept-search-lab.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1 id="page-title">Concept Search Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">← Gallery</a>
+        <a class="btn ghost" href="/frontend/tag-maint.html">Tag Maint</a>
+        <a class="btn ghost" href="/frontend/sync-lab.html">Sync Lab</a>
+      </div>
+    </header>
+
+    <main class="concept-search-layout">
+
+      <!-- ── Pipeline Controls ── -->
+      <section class="step-card active" aria-label="Search controls">
+        <div class="step-header">
+          <div class="step-number"><span>1</span></div>
+          <div class="step-title-area">
+            <h2>Search Query</h2>
+            <p class="step-desc">Decompose a query into concept identity + context, then score candidate images with batch CLIP</p>
+          </div>
+          <div class="step-actions">
+            <form id="search-form" class="inline-form">
+              <input id="search-query" name="query" type="text"
+                     placeholder="e.g. Shion on a beach at sunset"
+                     required>
+              <button class="btn primary" type="submit">Search</button>
+              <button class="btn ghost" type="button" id="decompose-btn">Decompose only</button>
+            </form>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="control-grid">
+            <label class="control-label">
+              Result limit
+              <input id="result-limit" type="number" min="1" max="100" step="1" value="30">
+            </label>
+            <label class="control-label">
+              Pool multiplier
+              <input id="pool-multiplier" type="number" min="1" max="10" step="1" value="3">
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <div class="flow-indicator">
+        <span class="flow-arrow">↓</span>
+      </div>
+
+      <!-- ── Status Panel ── -->
+      <div id="status-panel" class="step-status info" aria-live="polite">
+        <strong id="status-title">Ready</strong>
+        <span id="status-message"> — Enter a query to test concept decomposition and visual search.</span>
+      </div>
+
+      <!-- ── Decomposition Results ── -->
+      <section id="decompose-section" class="step-card" style="display:none" aria-label="Decomposition">
+        <div class="step-header">
+          <div class="step-number"><span>2</span></div>
+          <div class="step-title-area">
+            <h2>Query Decomposition</h2>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="decompose-info">
+            <div class="info-chip" id="decompose-original"></div>
+            <div class="info-chip" id="decompose-context"></div>
+            <div class="info-chip" id="decompose-total-forms"></div>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="decompose-table">
+              <thead>
+                <tr>
+                  <th>Concept</th>
+                  <th>Surface Form</th>
+                  <th>Match Type</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <div class="flow-indicator" id="flow-to-results" style="display:none">
+        <span class="flow-arrow">↓</span>
+      </div>
+
+      <!-- ── Search Results ── -->
+      <section id="results-section" class="step-card" style="display:none" aria-label="Search results">
+        <div class="step-header">
+          <div class="step-number"><span>3</span></div>
+          <div class="step-title-area">
+            <h2>Scored Candidates</h2>
+            <span class="results-meta" id="results-meta"></span>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="results-stats" id="results-stats"></div>
+          <div class="results-grid" id="results-grid"></div>
+        </div>
+      </section>
+
+      <div class="flow-indicator">
+        <span class="flow-arrow">↓</span>
+      </div>
+
+      <!-- ── Concepts Index (Coverage Audit) ── -->
+      <section id="index-section" class="step-card" aria-label="Concepts index">
+        <div class="step-header">
+          <div class="step-number"><span>4</span></div>
+          <div class="step-title-area">
+            <h2>Concepts Coverage Index</h2>
+          </div>
+          <div class="step-actions">
+            <button class="btn primary" type="button" id="refresh-index-btn">Refresh Index</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="index-summary" id="index-summary"></div>
+          <div class="index-filter-row">
+            <input id="index-filter" type="text" placeholder="Filter concepts…">
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="index-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Canonical Name</th>
+                  <th>Type</th>
+                  <th>Aliases</th>
+                  <th>Prototype</th>
+                  <th>Obs.</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/frontend/js/concept-search-lab.js" defer></script>
+</body>
+</html>

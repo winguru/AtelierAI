@@ -53,7 +53,11 @@ from models import (
 )
 from schemas import (
     BuildPrototypeRequest,
+    ConceptIndexResponse,
     ConceptProfileResponse,
+    ConceptSearchRequest,
+    ConceptSearchResponse,
+    DecomposeResponse,
     ScoreImageRequest,
     ScoreImageResponse,
     TaxonomyAliasCreateRequest,
@@ -71,6 +75,7 @@ from schemas import (
     TaxonomyTagMaintUpdateRequest,
 )
 from services.concept_prototype_service import ConceptPrototypeService
+from services.concept_search_service import ConceptSearchService
 from services.gallery_tag_service import GalleryTagService
 from services.image_service import _active_image_filter
 from services.taxonomy_service import TaxonomyService
@@ -2198,6 +2203,122 @@ async def taxonomy_score_candidate(
             composite_score=None,
             clip_available=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Concept Search Pipeline (Phase 3A)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/concept-search", response_model=ConceptSearchResponse)
+async def concept_search(
+    payload: ConceptSearchRequest,
+    db: Session = Depends(get_db),
+):
+    """Full concept-based search: decompose → candidate retrieval → visual scoring.
+
+    Accepts a natural-language query, matches concepts from surface forms,
+    retrieves candidate images, and scores them with batch CLIP.
+    """
+    from services.clip_provider import get_clip_provider
+    provider = get_clip_provider()
+    clip_available = provider is not None
+
+    svc = ConceptSearchService(db)
+
+    # Stage 1: Decompose query
+    decomposed = svc.decompose_query(payload.query)
+
+    # Build decomposition response
+    decomp_resp = DecomposeResponse(
+        original_query=decomposed.original_query,
+        matched_concepts=decomposed.matched_concepts,
+        context_text=decomposed.context_text,
+        total_surface_forms=decomposed.total_surface_forms,
+    )
+
+    # Stage 2: Retrieve candidates (if concepts matched)
+    concept_ids = [mc["concept_id"] for mc in decomposed.matched_concepts]
+    candidates = svc.resolve_candidate_images(
+        concept_ids,
+        pool_multiplier=payload.pool_multiplier,
+        limit=payload.limit,
+    )
+    candidates_total = len(candidates)
+
+    # Stage 3: Visual scoring
+    if candidates and concept_ids and clip_available:
+        scored = await svc.visual_score_candidates(
+            candidates,
+            concept_ids,
+            context_text=decomposed.context_text,
+            limit=payload.limit,
+        )
+    else:
+        scored = candidates[:payload.limit]
+
+    results = [
+        {
+            "image_id": c.image_id,
+            "file_name": c.file_name,
+            "thumbnail_url": c.thumbnail_url,
+            "source_url": c.source_url,
+            "width": c.width,
+            "height": c.height,
+            "identity_score": c.identity_score,
+            "context_score": c.context_score,
+            "composite_score": c.composite_score,
+        }
+        for c in scored
+    ]
+
+    return ConceptSearchResponse(
+        query=payload.query,
+        decomposition=decomp_resp,
+        candidates_total=candidates_total,
+        clip_available=clip_available,
+        results=results,
+    )
+
+
+@router.post("/concept-search/decompose", response_model=DecomposeResponse)
+def concept_search_decompose(
+    payload: ConceptSearchRequest,
+    db: Session = Depends(get_db),
+):
+    """Debug endpoint: decompose a query without scoring.
+
+    Shows which concepts were matched and what context text remains.
+    """
+    svc = ConceptSearchService(db)
+    decomposed = svc.decompose_query(payload.query)
+
+    return DecomposeResponse(
+        original_query=decomposed.original_query,
+        matched_concepts=decomposed.matched_concepts,
+        context_text=decomposed.context_text,
+        total_surface_forms=decomposed.total_surface_forms,
+    )
+
+
+@router.get("/concept-search/concepts-index", response_model=ConceptIndexResponse)
+def concept_search_concepts_index(
+    db: Session = Depends(get_db),
+):
+    """Audit endpoint: list all concepts with coverage stats.
+
+    Returns prototype status, alias list, and observation counts for
+    every active concept — useful for debugging search coverage.
+    """
+    svc = ConceptSearchService(db)
+    concepts = svc.get_concepts_index()
+
+    return ConceptIndexResponse(
+        total_concepts=len(concepts),
+        concepts=concepts,
+    )
+
+
 def taxonomy_purge_root_concepts(
     payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)
 ):
@@ -3248,6 +3369,40 @@ def taxonomy_tag_maint_rescan_civitai_observations(
         db = SessionLocal()
         try:
             yield from _rescan_civitai_observations_inner(db, dry_run, _sse_event)
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/tag-maint/civitai/scan-missing")
+def taxonomy_tag_maint_scan_missing_civitai(
+    dry_run: bool = Query(True, description="Preview changes without committing"),
+    api_limit: int = Query(100, description="Max live API calls for Tier 3", ge=0),
+):
+    """SSE endpoint: scan for images with CivitAI IDs but no tag observations.
+
+    3-tier resolution:
+      Tier 1 — Sidecar JSON files (data.civitai.tags)
+      Tier 2 — Archived API response files (disk)
+      Tier 3 — Live CivitAI API (rate-limited)
+    """
+
+    def _sse_event(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    def event_stream():
+        from services.scan_missing_service import scan_missing_civitai
+
+        db = SessionLocal()
+        try:
+            yield from scan_missing_civitai(
+                db, dry_run=dry_run, api_limit=api_limit, emit=_sse_event
+            )
         finally:
             db.close()
 

@@ -45,10 +45,117 @@
 
     <main class="tag-maint-layout">
 
+      <!-- ── Find Missing Tags ── -->
+      <section class="step-card" id="scan-missing-card" aria-label="Find missing CivitAI tag observations">
+        <div class="step-header">
+          <div class="step-number">1</div>
+          <div class="step-title-area">
+            <h2>Find Missing Tags</h2>
+            <p class="step-desc">Scan images with CivitAI IDs but no tag observations using 3-tier resolution (sidecar → disk archive → live API)</p>
+          </div>
+          <div class="step-actions">
+            <label class="checkbox-row" for="scan-missing-dry-run">
+              <input id="scan-missing-dry-run" type="checkbox" checked>
+              <span>Dry run</span>
+            </label>
+            <label class="inline-field" for="scan-missing-api-limit">
+              <span>API limit <small>(0 = unlimited)</small></span>
+              <input id="scan-missing-api-limit" type="number" value="0" min="0" max="10000" step="10">
+            </label>
+            <button class="btn primary" id="scan-missing-btn" type="button">Scan Missing</button>
+          </div>
+        </div>
+        <div class="step-body" id="scan-missing-body">
+          <div class="step-status" id="scan-missing-status"></div>
+
+          <!-- Progress bar -->
+          <div class="rescan-progress-wrap" id="scan-missing-progress-wrap" hidden>
+            <div class="progress-bar-track">
+              <div class="progress-bar-fill" id="scan-missing-progress-bar"></div>
+            </div>
+            <div class="progress-label" id="scan-missing-progress-label">0 / 0 images</div>
+          </div>
+
+          <!-- Tier indicator -->
+          <div class="tier-indicator" id="scan-missing-tier-indicator" hidden>
+            <span class="tier-badge tier-1" id="scan-missing-tier-badge">Tier 1</span>
+            <span class="tier-desc" id="scan-missing-tier-desc">Sidecar JSON files</span>
+          </div>
+
+          <!-- Phase 1: Image-centric metrics -->
+          <div class="scan-missing-phase-label" id="sm-phase1-label" hidden>
+            <span class="phase-label-text">Phase 1 — Image Resolution</span>
+          </div>
+          <div class="rescan-metrics" id="scan-missing-phase1-metrics" hidden>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-processed">0</span>
+              <span class="metric-label">Processed</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-missing">0</span>
+              <span class="metric-label">Missing</span>
+            </div>
+            <div class="metric-card metric-tier1">
+              <span class="metric-value" id="sm-metric-tier1">0</span>
+              <span class="metric-label">Tier 1</span>
+            </div>
+            <div class="metric-card metric-tier2">
+              <span class="metric-value" id="sm-metric-tier2">0</span>
+              <span class="metric-label">Tier 2</span>
+            </div>
+            <div class="metric-card metric-tier3">
+              <span class="metric-value" id="sm-metric-tier3">0</span>
+              <span class="metric-label">Tier 3</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-errors">0</span>
+              <span class="metric-label">Errors</span>
+            </div>
+          </div>
+
+          <!-- Phase 2: Tag-centric metrics (same columns as Rescan Gallery) -->
+          <div class="scan-missing-phase-label" id="sm-phase2-label" hidden>
+            <span class="phase-label-text">Phase 2 — Tag Processing</span>
+          </div>
+          <div class="rescan-metrics" id="scan-missing-phase2-metrics" hidden>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-tags-processed">0</span>
+              <span class="metric-label">Tags Processed</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-unique-tags">0</span>
+              <span class="metric-label">Unique Tags</span>
+            </div>
+            <div class="metric-card metric-existing">
+              <span class="metric-value" id="sm-metric-preexisting">0</span>
+              <span class="metric-label">Pre-existing</span>
+            </div>
+            <div class="metric-card metric-new">
+              <span class="metric-value" id="sm-metric-new-tags">0</span>
+              <span class="metric-label">New Tags</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-obs-created">0</span>
+              <span class="metric-label">Observations Created</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-value" id="sm-metric-obs-skipped">0</span>
+              <span class="metric-label">Observations Skipped</span>
+            </div>
+          </div>
+
+          <pre class="step-results" id="scan-missing-results" hidden></pre>
+        </div>
+      </section>
+
+      <div class="flow-indicator">
+        <span class="flow-arrow">↓</span>
+      </div>
+
       <!-- ── Rescan Gallery ── -->
       <section class="step-card" id="rescan-card" aria-label="Rescan gallery sidecars">
         <div class="step-header">
-          <div class="step-number">1</div>
+          <div class="step-number">2</div>
           <div class="step-title-area">
             <h2>Rescan Gallery</h2>
             <p class="step-desc">Process sidecar JSON files to populate authority terms and observations from CivitAI tag data</p>
@@ -111,7 +218,7 @@
       <!-- ── Bootstrap Section ── -->
       <section class="step-card" aria-label="Bootstrap tools">
         <div class="step-header">
-          <div class="step-number">2</div>
+          <div class="step-number">3</div>
           <div class="step-title-area">
             <h2>Bootstrap</h2>
             <p class="step-desc">Import, export, or purge tag authority data</p>
@@ -155,7 +262,7 @@
       <!-- ── Table Section ── -->
       <section class="step-card" aria-label="Tag table">
         <div class="step-header">
-          <div class="step-number">3</div>
+          <div class="step-number">4</div>
           <div class="step-title-area">
             <h2>Tags</h2>
             <p class="step-desc">Browse, search, sort, edit, and bulk-delete authority terms</p>

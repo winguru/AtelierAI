@@ -426,6 +426,199 @@
     }
   });
 
+  // ── Scan Missing (SSE) ──
+  const scanMissingBtn = document.getElementById('scan-missing-btn');
+  const scanMissingDryRun = document.getElementById('scan-missing-dry-run');
+  const scanMissingApiLimit = document.getElementById('scan-missing-api-limit');
+  const scanMissingStatus = document.getElementById('scan-missing-status');
+  const scanMissingProgressWrap = document.getElementById('scan-missing-progress-wrap');
+  const scanMissingProgressBar = document.getElementById('scan-missing-progress-bar');
+  const scanMissingProgressLabel = document.getElementById('scan-missing-progress-label');
+  const scanMissingPhase1Metrics = document.getElementById('scan-missing-phase1-metrics');
+  const scanMissingPhase2Metrics = document.getElementById('scan-missing-phase2-metrics');
+  const scanMissingPhase1Label = document.getElementById('sm-phase1-label');
+  const scanMissingPhase2Label = document.getElementById('sm-phase2-label');
+  const scanMissingResults = document.getElementById('scan-missing-results');
+  const scanMissingCard = document.getElementById('scan-missing-card');
+  const scanMissingTierIndicator = document.getElementById('scan-missing-tier-indicator');
+  const scanMissingTierBadge = document.getElementById('scan-missing-tier-badge');
+  const scanMissingTierDesc = document.getElementById('scan-missing-tier-desc');
+  let scanMissingEventSource = null;
+
+  function setScanMissingStatus(text, type) {
+    if (scanMissingStatus) {
+      scanMissingStatus.textContent = text;
+      scanMissingStatus.className = `step-status ${type}`;
+    }
+  }
+
+  function updateScanMissingMetric(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function resetScanMissingUI() {
+    setScanMissingStatus('', '');
+    if (scanMissingProgressWrap) scanMissingProgressWrap.hidden = true;
+    if (scanMissingProgressBar) scanMissingProgressBar.style.width = '0%';
+    if (scanMissingProgressLabel) scanMissingProgressLabel.textContent = '0 / 0 images';
+    if (scanMissingPhase1Label) scanMissingPhase1Label.hidden = true;
+    if (scanMissingPhase1Metrics) scanMissingPhase1Metrics.hidden = true;
+    if (scanMissingPhase2Label) scanMissingPhase2Label.hidden = true;
+    if (scanMissingPhase2Metrics) scanMissingPhase2Metrics.hidden = true;
+    if (scanMissingResults) { scanMissingResults.hidden = true; scanMissingResults.textContent = ''; }
+    if (scanMissingTierIndicator) scanMissingTierIndicator.hidden = true;
+    // Phase 1 — Image resolution
+    updateScanMissingMetric('sm-metric-missing', '0');
+    updateScanMissingMetric('sm-metric-processed', '0');
+    updateScanMissingMetric('sm-metric-tier1', '0');
+    updateScanMissingMetric('sm-metric-tier2', '0');
+    updateScanMissingMetric('sm-metric-tier3', '0');
+    updateScanMissingMetric('sm-metric-errors', '0');
+    // Phase 2 — Tag processing (Rescan Gallery parity)
+    updateScanMissingMetric('sm-metric-tags-processed', '0');
+    updateScanMissingMetric('sm-metric-unique-tags', '0');
+    updateScanMissingMetric('sm-metric-preexisting', '0');
+    updateScanMissingMetric('sm-metric-new-tags', '0');
+    updateScanMissingMetric('sm-metric-obs-created', '0');
+    updateScanMissingMetric('sm-metric-obs-skipped', '0');
+  }
+
+  const tierDescriptions = {
+    1: 'Sidecar JSON files',
+    2: 'Archived API response files',
+    3: 'Live CivitAI API',
+  };
+
+  if (scanMissingBtn) {
+    scanMissingBtn.addEventListener('click', async () => {
+      if (scanMissingEventSource) {
+        scanMissingEventSource.close();
+        scanMissingEventSource = null;
+      }
+      resetScanMissingUI();
+
+      const dryRun = scanMissingDryRun ? scanMissingDryRun.checked : true;
+      const apiLimitParsed = scanMissingApiLimit ? parseInt(scanMissingApiLimit.value, 10) : NaN;
+      const apiLimit = Number.isNaN(apiLimitParsed) ? 100 : apiLimitParsed;
+      scanMissingBtn.disabled = true;
+      scanMissingCard.classList.add('active');
+      setScanMissingStatus(dryRun ? 'Dry run: scanning for missing tag observations…' : 'Scanning for missing tag observations…', 'info');
+      if (scanMissingProgressWrap) scanMissingProgressWrap.hidden = false;
+      if (scanMissingPhase1Label) scanMissingPhase1Label.hidden = false;
+      if (scanMissingPhase1Metrics) scanMissingPhase1Metrics.hidden = false;
+      if (scanMissingPhase2Label) scanMissingPhase2Label.hidden = false;
+      if (scanMissingPhase2Metrics) scanMissingPhase2Metrics.hidden = false;
+
+      const url = `/api/taxonomy/tag-maint/civitai/scan-missing?dry_run=${dryRun ? '1' : '0'}&api_limit=${apiLimit}`;
+      scanMissingEventSource = new EventSource(url);
+
+      scanMissingEventSource.addEventListener('tier_start', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (scanMissingTierIndicator) scanMissingTierIndicator.hidden = false;
+          if (scanMissingTierBadge) {
+            scanMissingTierBadge.textContent = `Tier ${d.tier}`;
+            scanMissingTierBadge.className = `tier-badge tier-${d.tier}`;
+          }
+          if (scanMissingTierDesc) scanMissingTierDesc.textContent = d.description || tierDescriptions[d.tier] || '';
+        } catch (_) { /* ignore */ }
+      });
+
+      scanMissingEventSource.addEventListener('progress', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          const totalImg = d.total_images ?? d.total_missing ?? 0;
+          const pct = totalImg > 0 ? Math.round((d.processed / totalImg) * 100) : 0;
+          if (scanMissingProgressBar) scanMissingProgressBar.style.width = `${pct}%`;
+          if (scanMissingProgressLabel) scanMissingProgressLabel.textContent = `${d.processed} / ${totalImg} images (${pct}%)`;
+          // Phase 1 — Image resolution
+          updateScanMissingMetric('sm-metric-processed', totalImg);
+          updateScanMissingMetric('sm-metric-missing', d.total_missing ?? 0);
+          updateScanMissingMetric('sm-metric-tier1', d.tier1_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-tier2', d.tier2_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-tier3', d.tier3_resolved ?? 0);
+          // Phase 2 — Tag processing
+          updateScanMissingMetric('sm-metric-tags-processed', d.tags_processed ?? 0);
+          updateScanMissingMetric('sm-metric-unique-tags', d.unique_tags ?? 0);
+          updateScanMissingMetric('sm-metric-preexisting', d.pre_existing_tags ?? 0);
+          updateScanMissingMetric('sm-metric-new-tags', d.new_tags ?? 0);
+          updateScanMissingMetric('sm-metric-obs-created', d.observations_created ?? 0);
+          updateScanMissingMetric('sm-metric-obs-skipped', d.observations_skipped ?? 0);
+        } catch (_) { /* ignore */ }
+      });
+
+      scanMissingEventSource.addEventListener('api_limit_warning', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (scanMissingResults) {
+            scanMissingResults.hidden = false;
+            scanMissingResults.textContent += `⚠ API limit reached: ${d.remaining} images remaining (limit: ${d.api_limit}, est. ${d.estimated_time_min} min for all)\n`;
+          }
+        } catch (_) { /* ignore */ }
+      });
+
+      scanMissingEventSource.addEventListener('error_event', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (scanMissingResults) {
+            scanMissingResults.hidden = false;
+            scanMissingResults.textContent += `Error (image ${d.image_id || '?'}): ${d.error}\n`;
+          }
+          const errEl = document.getElementById('sm-metric-errors');
+          if (errEl) errEl.textContent = parseInt(errEl.textContent || '0', 10) + 1;
+        } catch (_) { /* ignore */ }
+      });
+
+      scanMissingEventSource.addEventListener('complete', (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          const totalImg = d.total_images ?? d.total_missing ?? 0;
+          if (scanMissingProgressBar) scanMissingProgressBar.style.width = '100%';
+          if (scanMissingProgressLabel) scanMissingProgressLabel.textContent = `${totalImg} / ${totalImg} images (100%)`;
+          // Phase 1 — Image resolution
+          updateScanMissingMetric('sm-metric-processed', totalImg);
+          updateScanMissingMetric('sm-metric-missing', d.total_missing ?? 0);
+          updateScanMissingMetric('sm-metric-tier1', d.tier1_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-tier2', d.tier2_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-tier3', d.tier3_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-errors', d.errors ?? 0);
+          // Phase 2 — Tag processing
+          updateScanMissingMetric('sm-metric-tags-processed', d.tags_processed ?? 0);
+          updateScanMissingMetric('sm-metric-unique-tags', d.unique_tags ?? 0);
+          updateScanMissingMetric('sm-metric-preexisting', d.pre_existing_tags ?? 0);
+          updateScanMissingMetric('sm-metric-new-tags', d.new_tags ?? 0);
+          updateScanMissingMetric('sm-metric-obs-created', d.observations_created ?? 0);
+          updateScanMissingMetric('sm-metric-obs-skipped', d.observations_skipped ?? 0);
+
+          const prefix = d.dry_run ? '[DRY RUN] ' : '';
+          setScanMissingStatus(
+            `${prefix}Scan complete. ${d.total_missing} missing images: T1=${d.tier1_resolved}, T2=${d.tier2_resolved}, T3=${d.tier3_resolved}. ${d.observations_created} observations created.`,
+            d.errors > 0 ? 'warning' : 'success'
+          );
+          toast(`${prefix}Scan missing complete.`, d.errors > 0 ? 'warning' : 'success');
+        } catch (_) { /* ignore */ }
+
+        scanMissingEventSource.close();
+        scanMissingEventSource = null;
+        scanMissingBtn.disabled = false;
+        scanMissingCard.classList.remove('active');
+
+        if (!dryRun) loadTable();
+      });
+
+      scanMissingEventSource.onerror = () => {
+        setScanMissingStatus('Connection lost or server error.', 'error');
+        if (scanMissingEventSource) {
+          scanMissingEventSource.close();
+          scanMissingEventSource = null;
+        }
+        scanMissingBtn.disabled = false;
+        scanMissingCard.classList.remove('active');
+      };
+    });
+  }
+
   // ── Rescan (SSE) ──
   const rescanBtn = document.getElementById('rescan-btn');
   const rescanDryRun = document.getElementById('rescan-dry-run');

@@ -175,6 +175,7 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
             "exclude_minor": payload.exclude_minor,
             "username": payload.username,
             "extra_filters": payload.extra_filters,
+            "matching_strategy": payload.matching_strategy,
         },
     )
     cached = _search_cache_get(cache_key)
@@ -198,6 +199,7 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
             username=payload.username,
             facets=payload.facets,
             extra_filters=payload.extra_filters,
+            matching_strategy=payload.matching_strategy,
         )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)

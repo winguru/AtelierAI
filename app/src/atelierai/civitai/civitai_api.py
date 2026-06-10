@@ -533,6 +533,7 @@ class CivitaiAPI:
             "image.get",
             "image.getGenerationData",
             "image.getInfinite",
+            "tag.getVotableTags",
         }:
             return
 
@@ -592,6 +593,16 @@ class CivitaiAPI:
                             self._image_uuid_index[int(item_id)] = uuid_value
                         self._archive_json_file(
                             f"civitai_image_getInfinite_{key}.json", item
+                        )
+
+                if endpoint == "tag.getVotableTags" and isinstance(
+                    response_json, list
+                ):
+                    image_id = payload_data.get("id")
+                    if image_id is not None:
+                        self._archive_json_file(
+                            f"civitai_image_tag_getVotableTags_{int(image_id)}.json",
+                            response_json,
                         )
         except Exception:
             # Archival should never break API fetch behavior.
@@ -926,12 +937,22 @@ class CivitaiAPI:
                 db.close()
 
             if entry is not None:
+                accept = False
                 if max_age is None:
+                    accept = True
+                else:
+                    age = datetime.utcnow() - entry.fetched_at
+                    accept = age <= max_age
+
+                if accept:
                     self.http_client.record_cache_hit(endpoint)
-                    return entry.response_json
-                age = datetime.utcnow() - entry.fetched_at
-                if age <= max_age:
-                    self.http_client.record_cache_hit(endpoint)
+                    # Ensure the file archive has a copy even on DB cache hit
+                    if entry.response_json is not None:
+                        self._archive_metadata_response(
+                            endpoint=endpoint,
+                            payload_data=payload_data,
+                            response_json=entry.response_json,
+                        )
                     return entry.response_json
 
         if cache_only:
@@ -1115,12 +1136,21 @@ class CivitaiAPI:
             finally:
                 db.close()
             if entry is not None:
+                accept = False
                 if max_age is None:
+                    accept = True
+                else:
+                    age = datetime.utcnow() - entry.fetched_at
+                    accept = age <= max_age
+                if accept:
                     self.http_client.record_cache_hit(endpoint)
-                    return entry.response_json
-                age = datetime.utcnow() - entry.fetched_at
-                if age <= max_age:
-                    self.http_client.record_cache_hit(endpoint)
+                    # Ensure the file archive has a copy even on DB cache hit
+                    if entry.response_json is not None:
+                        self._archive_metadata_response(
+                            endpoint=endpoint,
+                            payload_data=payload,
+                            response_json=entry.response_json,
+                        )
                     return entry.response_json
             return None
 

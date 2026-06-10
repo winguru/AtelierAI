@@ -99,6 +99,15 @@
                     <option value="1,2,4,8,16,32">Explicit</option>
                   </select>
                 </div>
+                <div class="filter-row">
+                  <label for="filter-match">Match</label>
+                  <select id="filter-match">
+                    <option value="last">Last (default)</option>
+                    <option value="all">All (AND)</option>
+                    <option value="frequency">Frequency</option>
+                  </select>
+                  <span class="filter-hint">Term matching strategy</span>
+                </div>
               </div>
             </details>
           </form>
@@ -111,6 +120,8 @@
         <div id="search-status" class="search-status" aria-live="polite">
           <span id="search-status-text">Enter a search query to get started.</span>
         </div>
+
+        <div id="gallery-toolbar-mount"></div>
 
         <div id="gallery-grid" class="gallery-grid" aria-label="Search results grid">
           <!-- Tiles rendered here -->
@@ -188,6 +199,8 @@
 
   <script src="/frontend/js/shared/preferences.js"></script>
   <script src="/frontend/js/shared/ui-kit.js"></script>
+  <script src="/frontend/js/shared/infinite-scroll.js"></script>
+  <script src="/frontend/js/shared/gallery-toolbar.js"></script>
   <script src="/frontend/js/search-lab.js"></script>
 </body>
 </html>

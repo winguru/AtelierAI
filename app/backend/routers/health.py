@@ -69,6 +69,11 @@ async def read_comfyui_lab():
     return FileResponse("frontend/comfyui-lab.html")
 
 
+@router.get("/concept-search-lab")
+async def read_concept_search_lab():
+    return FileResponse("frontend/concept-search-lab.html")
+
+
 @router.get("/models")
 async def read_models_tree():
     return FileResponse("frontend/models.html")

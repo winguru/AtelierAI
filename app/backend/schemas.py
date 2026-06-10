@@ -172,6 +172,78 @@ class TaxonomyConceptTransferImportRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Concept Search Pipeline (Phase 3A)
+# ---------------------------------------------------------------------------
+
+
+class ConceptSearchRequest(BaseModel):
+    """Request body for POST /concept-search."""
+    query: str = Field(..., min_length=1, max_length=500, description="Natural language search query")
+    limit: int = Field(30, ge=1, le=100, description="Maximum results to return")
+    pool_multiplier: int = Field(
+        3, ge=1, le=10,
+        description="How many candidates to pre-filter per result slot",
+    )
+
+
+class ConceptSearchMatchedConcept(BaseModel):
+    """A concept matched during query decomposition."""
+    concept_id: int
+    surface_form: str
+    concept_name: str
+    match_type: str  # "canonical" | "alias"
+
+
+class DecomposeResponse(BaseModel):
+    """Result of query decomposition (lab debug endpoint)."""
+    original_query: str
+    matched_concepts: list[ConceptSearchMatchedConcept] = []
+    context_text: str = ""
+    total_surface_forms: int = 0
+
+
+class ConceptSearchResultItem(BaseModel):
+    """A single scored image result."""
+    image_id: int
+    file_name: str
+    thumbnail_url: Optional[str] = None
+    source_url: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    identity_score: Optional[float] = None
+    context_score: Optional[float] = None
+    composite_score: Optional[float] = None
+
+
+class ConceptSearchResponse(BaseModel):
+    """Full search result with decomposition and scored candidates."""
+    query: str
+    decomposition: DecomposeResponse
+    candidates_total: int
+    clip_available: bool
+    results: list[ConceptSearchResultItem]
+
+
+class ConceptIndexEntry(BaseModel):
+    """Single concept in the concepts index (lab audit endpoint)."""
+    concept_id: int
+    canonical_name: str
+    slug: str
+    concept_type: Optional[str] = None
+    aliases: list[str] = []
+    has_prototype: bool = False
+    prototype_source_count: Optional[int] = None
+    prototype_updated_at: Optional[str] = None
+    observation_count: int = 0
+
+
+class ConceptIndexResponse(BaseModel):
+    """Response for GET /concept-search/concepts-index."""
+    total_concepts: int
+    concepts: list[ConceptIndexEntry]
+
+
+# ---------------------------------------------------------------------------
 # Unified Gallery Filter
 # ---------------------------------------------------------------------------
 

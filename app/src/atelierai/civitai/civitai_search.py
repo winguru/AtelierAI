@@ -183,6 +183,7 @@ class CivitaiSearchClient:
         username: Optional[str] = None,
         facets: Optional[list[str]] = None,
         extra_filters: Optional[list[str]] = None,
+        matching_strategy: Optional[str] = None,
     ) -> dict[str, Any]:
         """Search for images using Meilisearch (preferred) or REST API fallback.
 
@@ -212,6 +213,7 @@ class CivitaiSearchClient:
                         username=username,
                         facets=facets,
                         extra_filters=extra_filters,
+                        matching_strategy=matching_strategy,
                     )
                     result["backend"] = "meilisearch"
                     return result
@@ -249,6 +251,7 @@ class CivitaiSearchClient:
                                 username=username,
                                 facets=facets,
                                 extra_filters=extra_filters,
+                                matching_strategy=matching_strategy,
                             )
                             result["backend"] = "meilisearch"
                             _log.info(
@@ -284,6 +287,7 @@ class CivitaiSearchClient:
                                     username=username,
                                     facets=facets,
                                     extra_filters=extra_filters,
+                                    matching_strategy=matching_strategy,
                                 )
                                 result["backend"] = "meilisearch"
                                 _log.info(
@@ -351,6 +355,7 @@ class CivitaiSearchClient:
         username: Optional[str],
         facets: Optional[list[str]],
         extra_filters: Optional[list[str]],
+        matching_strategy: Optional[str] = None,
     ) -> dict[str, Any]:
         """Execute a Meilisearch ``/multi-search`` request."""
         filters = _build_meili_filters(
@@ -377,6 +382,8 @@ class CivitaiSearchClient:
             "filter": filters,
             "sort": [sort_by],
         }
+        if matching_strategy in ("last", "all", "frequency"):
+            search_query["matchingStrategy"] = matching_strategy
 
         headers = {
             "Authorization": f"Bearer {key}",

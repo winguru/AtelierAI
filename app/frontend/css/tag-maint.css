@@ -401,6 +401,19 @@ body {
 
 /* ── Rescan metrics ── */
 
+.scan-missing-phase-label {
+  margin-bottom: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.phase-label-text {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+
 .rescan-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -638,4 +651,78 @@ td.editing input {
   .bootstrap-row {
     flex-direction: column;
   }
+}
+
+/* ── Scan Missing: tier indicator ── */
+
+.tier-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.82rem;
+}
+
+.tier-badge {
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.tier-badge.tier-1 {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.tier-badge.tier-2 {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.tier-badge.tier-3 {
+  background: #fce7f3;
+  color: #9d174d;
+}
+
+.tier-desc {
+  color: var(--text-secondary, #666);
+}
+
+/* ── Scan Missing: metric card tier colors ── */
+
+.metric-card.metric-tier1 .metric-value {
+  color: #2563eb;
+}
+
+.metric-card.metric-tier2 .metric-value {
+  color: #d97706;
+}
+
+.metric-card.metric-tier3 .metric-value {
+  color: #db2777;
+}
+
+/* ── Inline field (label + input) ── */
+
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #666);
+}
+
+.inline-field input[type="number"] {
+  width: 5rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--stroke);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  background: var(--surface);
+  color: inherit;
 }

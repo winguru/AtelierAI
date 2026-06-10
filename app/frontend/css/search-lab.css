@@ -438,6 +438,123 @@ body[data-theme="dark"] .facet-chip:hover {
     background: color-mix(in oklab, #c0392b 6%, var(--bg-0));
 }
 
+/* ── Shared gallery toolbar row (mirrors main page toolbar-row-secondary) ── */
+#gallery-toolbar-mount {
+    /* thin wrapper so the injected toolbar has no extra spacing */
+}
+
+.gallery-toolbar-shared {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding-top: 0.1rem;
+    gap: 0.45rem 0.65rem;
+    margin-bottom: 0.6rem;
+}
+
+.gallery-toolbar-shared .toolbar-secondary-leading,
+.gallery-toolbar-shared .toolbar-secondary-trailing {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+
+.gallery-toolbar-shared .toolbar-secondary-leading {
+    flex: 1 1 auto;
+}
+
+.gallery-toolbar-shared .toolbar-secondary-trailing {
+    margin-left: auto;
+    flex: 0 1 auto;
+}
+
+.gallery-toolbar-shared .slider-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.gallery-toolbar-shared #lab-thumb-size-slider {
+    width: 78px;
+}
+
+.gallery-toolbar-shared #lab-thumb-size-value {
+    min-width: 3rem;
+    text-align: right;
+}
+
+.gallery-toolbar-shared .preset-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-wrap: nowrap;
+}
+
+.gallery-toolbar-shared .btn-sm {
+    padding: 0.34rem 0.54rem;
+    font-size: 0.76rem;
+}
+
+.gallery-toolbar-shared .thumb-preset.active {
+    border-color: var(--accent);
+    color: var(--accent-dark);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent);
+    background: #fff4eb;
+}
+
+body[data-theme="dark"] .gallery-toolbar-shared .thumb-preset.active {
+    background: #2a1f14;
+}
+
+.gallery-toolbar-shared .toggle-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+}
+
+.gallery-toolbar-shared .toolbar-inline-toggle {
+    white-space: nowrap;
+    flex: 0 1 auto;
+    font-size: 0.8rem;
+    min-width: 0;
+}
+
+.gallery-toolbar-shared .sort-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+    white-space: nowrap;
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.gallery-toolbar-shared #lab-sort-order-select {
+    border: 1px solid var(--stroke);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+    font-size: 0.8rem;
+    padding: 0.35rem 0.45rem;
+}
+
+body[data-theme="dark"] .gallery-toolbar-shared #lab-sort-order-select {
+    background: #171b22;
+    border-color: #3d4451;
+    color: var(--ink);
+}
+
 /* ── Gallery grid (mirrors main page .gallery-grid) ── */
 .gallery-grid {
     display: grid;

@@ -154,6 +154,7 @@ For files that reference multiple memory docs:
 - **Tag imports never create concepts** — they create `authority_terms` with `concept_id=None` when no matching concept exists.
 - Memory docs should be concise: decisions, constraints, gotchas — not step-by-step change logs.
 - When a memory doc grows too large, split it by sub-domain.
+- Never kill port 8000 to test code changes — the auto-reload watcher handles this. Use an alternate port for manual testing if needed.
 
 ## Editing Guidelines
 - Keep changes localized and avoid unrelated refactors.

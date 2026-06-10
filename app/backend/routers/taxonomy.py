@@ -52,6 +52,10 @@ from models import (
     TagAuthority,
 )
 from schemas import (
+    BuildPrototypeRequest,
+    ConceptProfileResponse,
+    ScoreImageRequest,
+    ScoreImageResponse,
     TaxonomyAliasCreateRequest,
     TaxonomyBootstrapImportRequest,
     TaxonomyConceptTransferImportRequest,
@@ -66,6 +70,7 @@ from schemas import (
     TaxonomyTagMaintPurgeRequest,
     TaxonomyTagMaintUpdateRequest,
 )
+from services.concept_prototype_service import ConceptPrototypeService
 from services.gallery_tag_service import GalleryTagService
 from services.image_service import _active_image_filter
 from services.taxonomy_service import TaxonomyService
@@ -1522,6 +1527,8 @@ def taxonomy_update_concept(
         concept.canonical_name = normalized_name
     if payload.description is not None:
         concept.description = payload.description.strip() or None
+    if payload.concept_type is not None:
+        concept.concept_type = payload.concept_type.strip() or None
     concept.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(concept)
@@ -1531,6 +1538,7 @@ def taxonomy_update_concept(
             "id": concept.id,
             "canonical_name": concept.canonical_name,
             "description": concept.description,
+            "concept_type": concept.concept_type,
             "status": concept.status,
             "parent_concept_id": concept.parent_concept_id,
         },
@@ -2021,7 +2029,175 @@ def taxonomy_delete_concept_branch(concept_id: int, db: Session = Depends(get_db
     }
 
 
-@router.post("/utils/purge_root_concepts", response_model=dict)
+# =========================================================================
+# Phase 2 — Concept Prototype & Visual Similarity
+# =========================================================================
+
+
+@router.post("/concepts/{concept_id}/build-prototype", response_model=dict)
+async def taxonomy_build_prototype(
+    concept_id: int,
+    payload: BuildPrototypeRequest,
+    db: Session = Depends(get_db),
+):
+    """Build a visual prototype for a concept from reference images.
+
+    Computes the CLIP embedding centroid of the provided reference images
+    and stores it as the concept's prototype vector.
+    """
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    svc = ConceptPrototypeService(db)
+    prototype = await svc.build_prototype(concept_id, payload.image_urls)
+
+    if prototype is None:
+        from services.clip_provider import get_clip_provider
+        if get_clip_provider() is None:
+            raise HTTPException(
+                status_code=503,
+                detail="CLIP provider unavailable — cannot build prototype",
+            )
+        raise HTTPException(
+            status_code=422,
+            detail="No images could be encoded. Check that image URLs are accessible.",
+        )
+
+    db.refresh(concept)
+    return {
+        "message": "Prototype built.",
+        "concept_id": concept_id,
+        "prototype_source_count": concept.prototype_source_count,
+        "prototype_updated_at": (
+            concept.prototype_updated_at.isoformat()
+            if concept.prototype_updated_at
+            else None
+        ),
+    }
+
+
+@router.get("/concepts/{concept_id}/profile", response_model=ConceptProfileResponse)
+def taxonomy_concept_profile(
+    concept_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return a rich concept profile with prototype stats and linked authority terms."""
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    # Prototype stats
+    prototype_info = None
+    if concept.prototype_vector is not None:
+        prototype_info = {
+            "source_count": concept.prototype_source_count,
+            "updated_at": (
+                concept.prototype_updated_at.isoformat()
+                if concept.prototype_updated_at
+                else None
+            ),
+            "has_vector": True,
+        }
+
+    # Linked aliases
+    aliases = [
+        {"id": a.id, "alias": a.alias, "alias_type": a.alias_type}
+        for a in concept.aliases
+    ]
+
+    # Linked authority terms
+    authority_terms = [
+        {
+            "id": t.id,
+            "external_name": t.external_name,
+            "authority_id": t.authority_id,
+            "external_tag_id": t.external_tag_id,
+        }
+        for t in concept.authority_terms
+    ]
+
+    return ConceptProfileResponse(
+        id=concept.id,
+        canonical_name=concept.canonical_name,
+        slug=concept.slug,
+        description=concept.description,
+        status=concept.status,
+        concept_type=concept.concept_type,
+        parent_concept_id=concept.parent_concept_id,
+        prototype=prototype_info,
+        aliases=aliases,
+        authority_terms=authority_terms,
+    )
+
+
+@router.post("/concepts/{concept_id}/score", response_model=ScoreImageResponse)
+async def taxonomy_score_candidate(
+    concept_id: int,
+    payload: ScoreImageRequest,
+    db: Session = Depends(get_db),
+):
+    """Score a candidate image against a concept's visual prototype.
+
+    Returns identity score (cosine similarity to prototype), optional context
+    score (cosine to text query), and composite (identity × context).
+    """
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    if concept.prototype_vector is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Concept has no prototype — build one first via POST /concepts/{id}/build-prototype",
+        )
+
+    from services.clip_provider import get_clip_provider
+    provider = get_clip_provider()
+    if provider is None:
+        return ScoreImageResponse(
+            concept_id=concept_id,
+            image_url=payload.image_url,
+            identity_score=None,
+            context_score=None,
+            composite_score=None,
+            clip_available=False,
+        )
+
+    svc = ConceptPrototypeService(db)
+    prototype = svc.get_prototype_vector(concept_id)
+
+    if payload.context_text:
+        result = await svc.score_composite(
+            payload.image_url, prototype, payload.context_text
+        )
+        if result is None:
+            return ScoreImageResponse(
+                concept_id=concept_id,
+                image_url=payload.image_url,
+                identity_score=None,
+                context_score=None,
+                composite_score=None,
+                clip_available=True,
+            )
+        return ScoreImageResponse(
+            concept_id=concept_id,
+            image_url=payload.image_url,
+            identity_score=result["identity"],
+            context_score=result["context"],
+            composite_score=result["composite"],
+            clip_available=True,
+        )
+    else:
+        identity = await svc.score_identity(payload.image_url, prototype)
+        return ScoreImageResponse(
+            concept_id=concept_id,
+            image_url=payload.image_url,
+            identity_score=identity,
+            context_score=None,
+            composite_score=None,
+            clip_available=True,
+        )
 def taxonomy_purge_root_concepts(
     payload: TaxonomyPurgeRootsRequest, db: Session = Depends(get_db)
 ):

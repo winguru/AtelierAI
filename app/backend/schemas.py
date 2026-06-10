@@ -112,10 +112,56 @@ class TaxonomyPurgeRootsRequest(BaseModel):
 class TaxonomyConceptUpdateRequest(BaseModel):
     canonical_name: Optional[str] = None
     description: Optional[str] = None
+    concept_type: Optional[str] = None
 
 
 class TaxonomyBootstrapImportRequest(BaseModel):
     authority_name: str = "user"
+
+
+# ---------------------------------------------------------------------------
+# Concept Prototype & Visual Similarity (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class BuildPrototypeRequest(BaseModel):
+    """Request body for POST /concepts/{id}/build-prototype."""
+    image_urls: list[str] = Field(
+        ..., min_length=1, max_length=64,
+        description="Reference image URLs to build the prototype from",
+    )
+
+
+class ScoreImageRequest(BaseModel):
+    """Request body for GET /concepts/{id}/score (query-param alternative)."""
+    image_url: str = Field(..., description="URL of the candidate image to score")
+    context_text: Optional[str] = Field(
+        None, description="Optional context text for compositional scoring",
+    )
+
+
+class ConceptProfileResponse(BaseModel):
+    """Rich concept profile with prototype stats and linked authority terms."""
+    id: int
+    canonical_name: str
+    slug: str
+    description: Optional[str] = None
+    status: str
+    concept_type: Optional[str] = None
+    parent_concept_id: Optional[int] = None
+    prototype: Optional[dict] = None
+    aliases: list[dict] = []
+    authority_terms: list[dict] = []
+
+
+class ScoreImageResponse(BaseModel):
+    """Score result for a candidate image against a concept."""
+    concept_id: int
+    image_url: str
+    identity_score: Optional[float] = None
+    context_score: Optional[float] = None
+    composite_score: Optional[float] = None
+    clip_available: bool
 
 
 class TaxonomyConceptTransferImportRequest(BaseModel):
@@ -316,6 +362,7 @@ class CivitaiSearchRequest(BaseModel):
     username: Optional[str] = None
     facets: Optional[list[str]] = None
     extra_filters: Optional[list[str]] = None
+    matching_strategy: Optional[str] = None  # "last" | "all" | "frequency"
 
 
 class SyncLabAnalyzeRequest(BaseModel):

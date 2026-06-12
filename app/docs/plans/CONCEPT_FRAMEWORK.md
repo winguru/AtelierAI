@@ -41,38 +41,38 @@ A concept HAS:
 │  CONCEPT                                                        │
 │                                                                 │
 │  ┌───────────────────────┐                                      │
-│  │ SURFACE FORMS          │  "Shion", "Shion Tensura",           │
-│  │ (semantic aliases)     │  "シオン", "Shion (Tensei Shitara    │
-│  │                       │  Slime Datta Ken)"                    │
-│  │ Nearby in text         │                                      │
-│  │ embedding space        │                                      │
+│  │ SURFACE FORMS         │  "Shion", "Shion Tensura",           │
+│  │ (semantic aliases)    │  "シオン", "Shion (Tensei Shitara     │
+│  │                       │  Slime Datta Ken)"                   │
+│  │ Nearby in text        │                                      │
+│  │ embedding space       │                                      │
 │  └───────────┬───────────┘                                      │
-│              │                                                   │
+│              │                                                  │
 │  ┌───────────▼───────────┐                                      │
-│  │ ATTRIBUTES             │                                      │
-│  │ (decomposable          │  visual:  purple hair, oni horn,     │
-│  │  features)             │           purple eyes, tall build    │
-│  │                       │  semantic: anime character, female,   │
-│  │ Each attribute is a    │           demon/oni type             │
-│  │ cluster of synonyms:   │                                      │
+│  │ ATTRIBUTES            │                                      │
+│  │ (decomposable         │  visual:  purple hair, oni horn,     │
+│  │  features)            │           purple eyes, tall build    │
+│  │                       │  semantic: anime character, female,  │
+│  │ Each attribute is a   │           demon/oni type             │
+│  │ cluster of synonyms:  │                                      │
 │  │  "horn" ≈ "oni horn"  │  Invariant: horn, purple hair        │
-│  │            ≈ "demon    │  Variable:  beach, armor, cooking    │
-│  │               horn"    │                                      │
+│  │            ≈ "demon   │  Variable:  beach, armor, cooking    │
+│  │               horn"   │                                      │
 │  └───────────┬───────────┘                                      │
-│              │                                                   │
+│              │                                                  │
 │  ┌───────────▼───────────┐                                      │
-│  │ VISUAL PROTOTYPE       │  Aggregated CLIP embeddings from     │
-│  │ (what it LOOKS LIKE)   │  example images. Preserves invariant │
-│  │                       │  features, cancels variable ones.     │
-│  │ Independent of any     │                                      │
-│  │ particular instance    │                                      │
+│  │ VISUAL PROTOTYPE      │  Aggregated CLIP embeddings from     │
+│  │ (what it LOOKS LIKE)  │  example images. Preserves invariant │
+│  │                       │  features, cancels variable ones.    │
+│  │ Independent of any    │                                      │
+│  │ particular instance   │                                      │
 │  └───────────┬───────────┘                                      │
-│              │                                                   │
+│              │                                                  │
 │  ┌───────────▼───────────┐                                      │
-│  │ COMPOSITION INTERFACE  │  "Shion" × "beach"                  │
-│  │ (how concepts combine) │  "Shion" × "sword" × "armor"        │
-│  │                       │  identity × context → compositional   │
-│  │                       │  scoring                              │
+│  │ COMPOSITION INTERFACE │  "Shion" × "beach"                   │
+│  │ (how concepts combine)│  "Shion" × "sword" × "armor"         │
+│  │                       │  identity × context → compositional  │
+│  │                       │  scoring                             │
 │  └───────────────────────┘                                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -240,6 +240,11 @@ The `Concept` table in the DB already provides:
 | **Visual prototype** | CLIP embedding vector of the concept | **NEW** — column or sidecar |
 | **Concept type** | character / object / style / scene | **NEW** — column on `Concept` |
 | **Invariant vs. variable attributes** | Tags partitioned by consistency | **NEW** — metadata or tag groups |
+| **Attribute cardinality** | Expected count/range for an attribute | **NEW** — metadata on concept attributes |
+| **Attribute family semantics** | Boolean, countable, or mutually exclusive group behavior | **NEW** — metadata on concept attributes or groups |
+| **Authority weighting** | Relative trust assigned to each tag/evidence authority | **NEW** — evidence weighting metadata |
+| **Review evidence** | Explicit user-reviewed confirmations/contradictions | **NEW** — separate review evidence records |
+| **Observation weighting** | Per-image strength of support or contradiction for a concept/attribute | **NEW** — weighted observation metadata |
 | **Composition rules** | How this concept combines with others | **NEW** — metadata or relationship |
 
 ### Proposed Schema Extensions
@@ -260,9 +265,98 @@ CREATE TABLE concept_attribute_profiles (
     attribute_term_id INTEGER REFERENCES authority_terms(id),
     consistency_score REAL,  -- CTC: fraction of reference images with this attribute
     invariance VARCHAR DEFAULT 'variable',  -- 'invariant' or 'variable'
+    attribute_mode VARCHAR DEFAULT 'boolean',  -- 'boolean', 'countable', 'exclusive'
+    attribute_family VARCHAR NULL,  -- e.g. 'hair_color', 'eye_color', 'horn_count'
+    cardinality_min INTEGER NULL,  -- minimum expected count when countable
+    cardinality_max INTEGER NULL,  -- maximum expected count; NULL means unbounded
     PRIMARY KEY (concept_id, attribute_term_id)
 );
+
+CREATE TABLE concept_attribute_authority_weights (
+    concept_id INTEGER REFERENCES concepts(id),
+    attribute_term_id INTEGER REFERENCES authority_terms(id),
+    authority_id INTEGER REFERENCES tag_authorities(id),
+    base_weight REAL NOT NULL DEFAULT 1.0,
+    learned_weight REAL NULL,
+    updated_at DATETIME,
+    PRIMARY KEY (concept_id, attribute_term_id, authority_id)
+);
+
+CREATE TABLE concept_review_evidence (
+    id INTEGER PRIMARY KEY,
+    concept_id INTEGER REFERENCES concepts(id),
+    image_id INTEGER REFERENCES images(id),
+    attribute_term_id INTEGER NULL REFERENCES authority_terms(id),
+    evidence_kind VARCHAR NOT NULL,  -- 'identity', 'attribute', 'context', 'style', 'anomaly'
+    verdict VARCHAR NOT NULL,  -- 'supports', 'contradicts', 'unknown'
+    confidence REAL NULL,
+    notes TEXT,
+    reviewer TEXT NULL,
+    created_at DATETIME
+);
+
+-- Existing image-concept observations should support weighting semantics.
+-- This can extend the current table or be modeled as a richer sibling table.
+ALTER TABLE image_concept_observations
+    ADD COLUMN observation_weight REAL NULL;  -- how strongly this image supports the concept/attribute
+
+ALTER TABLE image_concept_observations
+    ADD COLUMN review_confidence REAL NULL;  -- curator confidence in the observation itself
+
+ALTER TABLE image_concept_observations
+    ADD COLUMN training_role VARCHAR NULL;  -- 'positive', 'negative', 'hard_negative', 'style_reference', 'context_reference', etc.
+
+ALTER TABLE image_concept_observations
+    ADD COLUMN concept_strength_weight REAL NULL;  -- how completely the target concept is supported by its attributes in this image
 ```
+
+Recommended observation semantics:
+
+- `observation_weight`: how strongly this image should influence the concept or attribute during training
+- `review_confidence`: how certain the reviewer is that the observation is correct
+- `training_role`: whether the image is a positive exemplar, hard negative, style reference, context reference, anomaly example, etc.
+- `concept_strength_weight`: how completely the target concept is supported by its attributes within this image
+
+This separates two ideas that often get conflated:
+
+- correctness: is the observation true?
+- usefulness: how much should this image influence training for that concept or attribute?
+
+Recommended authority roles:
+
+- `user` authority tags: curated but still tag-like, can be weighted and revised
+- `prompt` authority tags: useful but noisy due to prompt decoherence
+- `civitai` authority tags: useful metadata, often incomplete or weakly discriminative
+- `danbooru` authority tags: strong taxonomy backbone, but not always present in source metadata
+- `review` evidence: explicit human judgment, stored separately from tags and treated as the highest-quality signal
+
+Recommended initial authority weight ordering:
+
+- review evidence > user tags > danbooru mappings > prompt tags > civitai tags
+
+These are starting priors only. Review cycles should tune them per concept and per attribute.
+
+Recommended cardinality shorthands:
+
+- `*` or `0..*`: unconstrained or informational only
+- `1..1`: exactly one required instance
+- `1..*`: one or more required instances
+- `0..1`: optional singleton when count matters but absence is allowed
+
+Recommended attribute modes:
+
+- `boolean`: simple present / absent / unknown evidence
+- `countable`: attribute supports cardinality constraints such as `1..1` or `1..*`
+- `exclusive`: attribute belongs to a mutually exclusive family where one member should dominate
+
+Examples:
+
+- Shion -> `single horn`: `1..1`
+- Shuna -> `white horns`: `1..*` or exactly `2..2` if the system eventually supports stricter counts
+- "companion character": `0..*`
+- "greatsword": `0..1`
+- Shion -> `light purple hair`: family `hair_color`, mode `exclusive`
+- Shuna -> `pink eyes`: family `eye_color`, mode `exclusive`
 
 ---
 
@@ -335,6 +429,681 @@ User query: "Shion on a beach"
 
 ---
 
+## Concept Training And Feedback Cycle
+
+Concept quality should improve through repeated review, not one-shot labeling. The goal is not only to decide whether an image matches a concept, but to capture why it matches, why it fails, and what kind of failure occurred.
+
+### Review Dimensions
+
+Each reviewed image can contribute signal in several independent dimensions:
+
+1. **Identity**
+   - Is this the target concept at all?
+   - Example: "This is Shion", "This is Shuna", "This is neither"
+
+2. **Supporting attributes**
+   - Which identity-defining traits are present, missing, or contradicted?
+   - Example: single black horn, light purple hair, purple eyes, large breasts
+
+3. **Contextual attributes**
+   - What non-essential but informative context is present?
+   - Example: business suit, greatsword, shrine maiden outfit, beach, kitchen, battle scene
+
+4. **Style and rendering**
+   - What visual style or rendering mode is the image using?
+   - Example: anime screenshot, stylized fanart, painterly, chibi, sketch, 3D render
+
+5. **Anomalies and drift**
+   - What went wrong relative to the intended concept?
+   - Example: missing horn, wrong eye color, wrong outfit, identity bleed, merged characters, prompt decoherence
+
+### Review Rubric
+
+To make review actionable, the system should capture a small set of scored dimensions rather than only freeform notes.
+
+#### Concept Predominance
+
+How dominant is the target concept within the image composition?
+
+- **High predominance**: the concept is the main subject and occupies most of the semantic attention of the image
+- **Medium predominance**: the concept is clearly present but shares focus with other subjects or scene elements
+- **Low predominance**: the concept is present but peripheral, occluded, tiny, or compositionally secondary
+
+Use predominance to influence:
+
+- prototype contribution weight
+- whether the image should contribute to identity training
+- whether the image is a strong reference or only weak supporting evidence
+
+#### Concept Quality
+
+How technically suitable is this image for training? Does it have the visual clarity, sharpness, and absence of artifacts needed to be a useful exemplar?
+
+- **High quality**: clear, sharp, artifact-free image with good visual fidelity for training
+- **Medium quality**: mostly clear but with minor blur, compression, or rendering artifacts that don't obscure the concept
+- **Low quality**: blurry, heavily compressed, contains distracting artifacts, or has technical issues that would harm model training
+
+Quality is independent of the training task. The same image is either technically suitable or not.
+
+#### Concept Accuracy
+
+How accurately does the image represent the intended concept?
+
+- **High accuracy**: the concept is depicted correctly with no meaningful contradictions
+- **Medium accuracy**: the concept is mostly correct but has noticeable drift, omission, or stylization-induced ambiguity
+- **Low accuracy**: the concept is misrepresented or significantly contradicted
+
+Accuracy should influence:
+
+- whether the image is accepted as a positive exemplar
+- whether contradictions are recorded as anomalies
+- whether the image is downgraded to context/style-only use instead of identity use
+
+Quality should influence:
+
+- whether the image contributes to prototype construction
+- how much weight it receives during concept refinement
+- whether it should be filtered from training at all (if quality is too low)
+
+#### Concept Strength
+
+How strongly is the target concept supported by the presence or absence of its supporting attributes within this image?
+
+- **High strength**: most or all of the target concept's supporting attributes are present and visually coherent
+- **Medium strength**: some attributes are present, others are missing or ambiguous, but the concept is still recognizable
+- **Low strength**: few attributes are present, or many are contradicted or absent
+
+Concept Strength reflects how completely this image demonstrates the target concept through its attributes.
+
+Example for Shion:
+
+- High strength: horn, purple hair, purple eyes, business suit all present
+- Medium strength: horn and hair present, but in different outfit or partially visible
+- Low strength: some attributes missing, or contradictory attributes present (e.g., pink hair)
+
+This should influence both concept-level and attribute-level observation weight.
+
+#### Suggested Weight Mapping
+
+These review dimensions can be mapped into numeric weights for training:
+
+- high -> `1.0`
+- medium -> `0.6`
+- low -> `0.25`
+
+One practical composition for a reviewed identity-training example is:
+
+$$
+\omega_k = w_{\text{pred},k} \cdot w_{\text{qual},k} \cdot w_{\text{acc},k} \cdot w_{\text{conf},k}
+$$
+
+Where:
+
+- $w_{\text{pred},k}$ comes from concept predominance
+- $w_{\text{qual},k}$ comes from concept quality
+- $w_{\text{acc},k}$ comes from concept accuracy
+- $w_{\text{conf},k}$ comes from reviewer confidence
+
+For attribute-level training, concept strength can be included as an additional factor.
+
+#### Practical Interpretation
+
+- A canonical portrait of Shion with clear horn, hair, eyes, and outfit should score high on predominance, relevance, and accuracy.
+- A group shot where Shion appears in the background may still be accurate, but low predominance should reduce prototype influence.
+- A stylized image with correct identity but distorted details may remain relevant for style while receiving reduced accuracy for identity training.
+- A confusable image of Shuna may have high visual similarity but low concept accuracy for Shion, making it a useful hard negative rather than a positive reference.
+
+### Feedback Loop
+
+The concept-training loop should work like this:
+
+```
+Seed collection / search results
+  ↓
+User review pass
+  ↓
+Mark identity, attributes, context, style, anomalies
+  ↓
+Update concept profile
+  - strengthen invariant attributes
+  - add or demote variable attributes
+  - split style/context from identity
+  - record common failure modes
+  ↓
+Rebuild prototype / scoring rules
+  ↓
+Run search again and compare errors
+  ↓
+Repeat until the concept is stable
+```
+
+### Why This Matters
+
+- A false positive is not just "wrong"; it often reveals a missing discriminator.
+- A false negative is not just "missed"; it may reveal framing bias, style bias, or an over-strict attribute rule.
+- Style, outfit, and setting should not be conflated with identity unless the user explicitly wants that narrower concept.
+- Failure cases should be modeled as first-class concepts or annotations when they recur often enough to matter.
+
+### Practical Outcome
+
+Over time, a concept becomes more than a name:
+
+- **Identity layer**: who or what the concept is
+- **Attribute layer**: the traits that define or distinguish it
+- **Context layer**: outfits, settings, companions, roles, and scenes
+- **Style layer**: how the concept is rendered
+- **Anomaly layer**: how generation or classification commonly fails
+
+This makes concept training useful for both search quality and model understanding. Instead of only asking "did the model get Shion right?", the system can ask "did the model preserve Shion's identity, attributes, context, and style without introducing known failure modes?"
+
+---
+
+## Scoring Algorithm Specification
+
+This section defines the target scoring model for concept search and concept review. The aim is to separate identity from supporting evidence so the system can explain both strong matches and failure cases.
+
+### Inputs
+
+For a candidate image $x$ and a query containing one or more identity concepts $C = \{c_1, \dots, c_n\}$:
+
+- $e(x)$: CLIP image embedding for the candidate image
+- $p_i$: prototype embedding for concept $c_i$
+- $t$: optional context text embedding for the non-identity portion of the query
+- $A_i$: attribute set for concept $c_i$
+- $R_i$: optional style/render expectations for concept $c_i$
+- $D_i$: anomaly or contradiction signals for concept $c_i$
+- $H$: available evidence authorities (user, prompt, civitai, danbooru, review, detector, etc.)
+- $W_i$: weighted observation set for concept $c_i$
+
+All score components are normalized to $[0, 1]$ before combination.
+
+### 1. Identity Similarity
+
+For each concept $c_i$, start with raw cosine similarity:
+
+$$
+s_i(x) = \cos(e(x), p_i)
+$$
+
+Convert the raw cosine into a concept-local normalized identity score using learned floor and ceiling parameters:
+
+$$
+\hat{s}_i(x) = \operatorname{clamp}\left(\frac{s_i(x) - f_i}{u_i - f_i}, 0, 1\right)
+$$
+
+Where:
+
+- $f_i$ is the concept-specific floor, below which identity evidence is treated as non-discriminative
+- $u_i$ is the concept-specific upper anchor, above which identity evidence is treated as fully saturated
+
+Recommended initial defaults:
+
+- Use empirical per-concept thresholds when labeled data exists
+- Fall back to global defaults only when concept-specific data is missing
+
+#### Weighted Prototype Construction
+
+Concept prototypes should not assume every supporting image contributes equally.
+
+For reviewed or observed positive examples $x_k$ with embedding $e(x_k)$ and total training weight $\omega_k > 0$, define the prototype as a weighted centroid:
+
+$$
+p_i = \operatorname{normalize}\left(\sum_k \omega_k e(x_k)\right)
+$$
+
+Where $\omega_k$ can be derived from:
+
+- observation weight
+- review confidence
+- concept strength weight
+- training role
+
+One practical factorization is:
+
+$$
+\omega_k = w_{\text{obs},k} \cdot w_{\text{conf},k} \cdot w_{\text{str},k} \cdot w_{\text{role},k}
+$$
+
+Interpretation:
+
+- a canonical single-character reference image can carry more weight than a noisy group shot
+- a hard negative should not contribute positively to the prototype centroid
+- a style reference may contribute to style modeling but not to core identity prototype updates
+
+### 2. Attribute Evidence
+
+Each concept has attributes $a_{ij} \in A_i$ with:
+
+- weight $w_{ij}$
+- invariance flag: invariant or variable
+- mode: boolean, countable, or exclusive
+- optional family label $F_{ij}$
+- evidence score $m_{ij}(x) \in [0, 1]$
+- optional cardinality constraint $[\ell_{ij}, u_{ij}]$
+- per-authority evidence contributions $m_{ij}^{(h)}(x)$ for $h \in H$
+
+The evidence score is computed from tags, metadata, explicit review labels, or future visual attribute detectors.
+
+#### Evidence Provenance And Authority Weighting
+
+Attributes are concepts, but the system rarely observes them directly. It observes evidence from one or more authorities. Those authorities should not be treated equally.
+
+For each authority $h$, define:
+
+- $m_{ij}^{(h)}(x) \in [0, 1]$: the authority-local evidence for attribute $a_{ij}$ on image $x$
+- $\lambda_{ij}^{(h)} > 0$: the authority weight for concept $c_i$, attribute $a_{ij}$, and authority $h$
+
+Then aggregate authority-local evidence into a single attribute evidence score:
+
+$$
+m_{ij}(x) = \frac{\sum_{h \in H} \lambda_{ij}^{(h)} m_{ij}^{(h)}(x)}{\sum_{h \in H} \lambda_{ij}^{(h)}}
+$$
+
+Interpretation:
+
+- high-confidence review evidence should dominate weaker imported metadata
+- user tags can be strong but still revisable
+- prompt-derived evidence should start useful but lower-trust
+- missing authorities do not hurt the score; they simply contribute nothing
+
+Recommended initial semantics:
+
+- `review` evidence is not just another tag source; it is direct human judgment and should generally carry the highest baseline weight
+- `user` tags are curated authority-tag evidence and should start strong
+- `danbooru` mappings are structurally valuable and often more discriminative than raw source tags
+- `prompt` and `civitai` authorities should usually start lower because they are often incomplete or noisy
+
+#### Observation-Weighted Attribute Evidence
+
+When evidence comes from reviewed observations rather than only tags, the attribute score should also respect how important that observation is within the image.
+
+For observation-level evidence items $o \in O_{ij}(x)$ supporting or contradicting attribute $a_{ij}$, let each observation carry:
+
+- a local evidence value $v_o \in [0, 1]$
+- an observation weight $\omega_o > 0$
+
+Then the review-derived attribute evidence can be aggregated as:
+
+$$
+m_{ij}^{(\text{review})}(x) = \frac{\sum_{o \in O_{ij}(x)} \omega_o v_o}{\sum_{o \in O_{ij}(x)} \omega_o}
+$$
+
+This allows review to express not just "the horn exists" but also "the horn is central to why this image should train Shion strongly".
+
+Interpretation:
+
+- $m_{ij}(x) = 1.0$: attribute clearly present and supportive
+- $m_{ij}(x) = 0.5$: unknown or no usable evidence
+- $m_{ij}(x) = 0.0$: contradicted by evidence
+
+#### Attribute Modes
+
+Attributes are not all interpreted the same way. The scoring system should distinguish three common cases.
+
+##### Boolean attributes
+
+These are ordinary supportive traits where the main question is presence, absence, or contradiction.
+
+Examples:
+
+- business suit
+- greatsword
+- hair ribbon
+
+For boolean attributes, use the base evidence score $m_{ij}(x)$ directly.
+
+##### Countable attributes
+
+These are attributes where the number of observed instances matters.
+
+Examples:
+
+- single horn
+- white horns
+- companion characters
+- swords
+
+Countable attributes use the cardinality term $c_{ij}(x)$ defined below.
+
+##### Mutually Exclusive Attribute Families
+
+Some attributes belong to a family where one attribute being strongly present should weaken competing members of that same family.
+
+Examples:
+
+- hair color: pink hair, light purple hair, blonde hair
+- eye color: pink eyes, purple eyes, blue eyes
+- horn color: black horns, white horns
+
+Represent this with a family label such as `hair_color` or `eye_color`.
+
+For a family $F$, let the evidence scores for its members be $m_{F,1}(x), m_{F,2}(x), \dots$. The expected attribute for concept $c_i$ should receive a family agreement multiplier that rewards dominance over alternatives:
+
+$$
+e_{ij}(x) =
+\begin{cases}
+1 & \text{if family evidence is unavailable} \\
+\frac{m_{ij}(x)}{\max(\epsilon, \max_{k \in F_{ij}} m_{ik}(x))} & \text{if family evidence exists}
+\end{cases}
+$$
+
+Interpretation:
+
+- expected hair color is strongest in its family -> multiplier near $1$
+- competing color dominates -> multiplier drops toward $0$
+- no family evidence -> neutral
+
+This helps express the idea that "pink hair" is not merely missing support for Shion; it is positive support for a competing identity signal.
+
+Recommended default weights:
+
+- invariant attribute: $w_{ij} = 1.0$
+- variable attribute: $w_{ij} = 0.5$
+- user-promoted discriminator: $w_{ij} > 1.0$
+
+#### Attribute Cardinality
+
+Some attributes are not just boolean. They carry count semantics that matter for discrimination.
+
+Examples:
+
+- single horn: exactly one
+- twin tails: two
+- group shot: one or more companions
+- sword: zero or one in most character portraits
+
+Represent this as an allowed cardinality interval:
+
+$$
+[\ell_{ij}, u_{ij}]
+$$
+
+Where $u_{ij} = \infty$ means unbounded.
+
+If the system has an observed or estimated count $n_{ij}(x)$ for the attribute, compute a cardinality agreement score:
+
+$$
+c_{ij}(x) =
+\begin{cases}
+1 & \text{if } \ell_{ij} \le n_{ij}(x) \le u_{ij} \\
+\gamma & \text{if count evidence exists and violates the constraint} \\
+0.5 & \text{if count is unknown}
+\end{cases}
+$$
+
+Where $\gamma$ is a contradiction penalty such as $0.1$ to $0.3$ depending on how strict the attribute is.
+
+Then fold cardinality into the attribute evidence term:
+
+$$
+  ilde{m}_{ij}(x) = m_{ij}(x) \cdot c_{ij}(x) \cdot e_{ij}(x)
+$$
+
+Where:
+
+- for boolean attributes, use $c_{ij}(x)=1$ and $e_{ij}(x)=1$
+- for countable attributes, use the learned or configured cardinality score $c_{ij}(x)$
+- for exclusive-family attributes, use the family agreement score $e_{ij}(x)$
+
+Use $\tilde{m}_{ij}(x)$ instead of $m_{ij}(x)$ in the aggregate attribute score.
+
+Combine attribute evidence with a weighted geometric mean so one contradicted invariant attribute hurts, but unknown evidence remains near-neutral:
+
+$$
+g_i(x) = \exp\left(\frac{\sum_j w_{ij} \log(\max(\epsilon, \tilde{m}_{ij}(x)))}{\sum_j w_{ij}}\right)
+$$
+
+With $\epsilon$ as a small floor such as $0.05$ to avoid total collapse from a single zero.
+
+This gives a soft-discrimination behavior:
+
+- missing horn does not automatically eliminate Shion
+- two horns should score materially worse against Shion's `single horn` attribute
+- pink hair should count as positive competing evidence against Shion's `light purple hair`, not merely as absence
+- wrong hair color and wrong eye color together should strongly reduce confidence
+
+### 3. Context Score
+
+If the query contains a non-identity context phrase, compute text-image similarity and normalize it:
+
+$$
+k(x) = \operatorname{clamp}\left(\frac{\cos(e(x), t) - f_t}{u_t - f_t}, 0, 1\right)
+$$
+
+If no context text is provided, set:
+
+$$
+k(x) = 1
+$$
+
+Context should refine ranking, not override identity. A beach image of the wrong character should not outrank the right character in the wrong setting.
+
+### 4. Style Score
+
+Style and rendering are separate from identity. If the user or concept requests style-sensitive matching, compute an optional style score:
+
+$$
+r_i(x) \in [0, 1]
+$$
+
+Examples:
+
+- anime screenshot
+- stylized fanart
+- painterly
+- 3D render
+
+If style is not part of the query or no style evidence exists, set:
+
+$$
+r_i(x) = 1
+$$
+
+### 5. Anomaly Penalty
+
+Anomalies represent contradictions or failure modes rather than missing positive evidence. For anomaly indicators $d_{ik} \in D_i$, define penalties $q_{ik}(x) \in [0, 1]$ and combine them multiplicatively:
+
+$$
+q_i(x) = \prod_k q_{ik}(x)^{\beta_{ik}}
+$$
+
+Examples:
+
+- missing horn
+- wrong eye color
+- merged identities
+- outfit drift
+- prompt decoherence
+
+If no anomaly evidence exists, set:
+
+$$
+q_i(x) = 1
+$$
+
+### 6. Per-Concept Composite Score
+
+Combine identity, attributes, context, style, and anomaly signals with a weighted product:
+
+$$
+S_i(x) = \hat{s}_i(x)^{\alpha_s} \cdot g_i(x)^{\alpha_a} \cdot k(x)^{\alpha_k} \cdot r_i(x)^{\alpha_r} \cdot q_i(x)
+$$
+
+Recommended starting exponents:
+
+- $\alpha_s = 0.55$ identity prototype evidence
+- $\alpha_a = 0.25$ attribute evidence
+- $\alpha_k = 0.15$ context evidence
+- $\alpha_r = 0.05$ style evidence
+
+Rationale:
+
+- identity remains dominant
+- attributes provide discrimination among visually similar candidates
+- context improves rank order without overpowering identity
+- style is optional and low-weight by default
+- anomalies are penalties, not positive rewards
+
+### 7. Multi-Concept Queries
+
+For a multi-concept identity query such as "Shion and Shuna", compute one per-concept score for each requested identity concept and aggregate with a geometric mean:
+
+$$
+S_{\text{identity}}(x) = \left(\prod_{i=1}^{n} S_i(x)\right)^{1/n}
+$$
+
+This prevents one concept from dominating the result and requires all requested identities to be represented.
+
+### 8. Final Ranking Score
+
+The default final ranking score is:
+
+$$
+S_{\text{final}}(x) = S_{\text{identity}}(x)
+$$
+
+For implementation convenience, the system may also expose the component scores separately:
+
+- identity prototype score
+- attribute evidence score
+- context score
+- style score
+- anomaly penalty
+- final composite score
+
+This makes review and debugging possible without collapsing everything into a single opaque number.
+
+### Missing-Signal Fallback Rules
+
+When information is missing:
+
+- no prototype: concept cannot receive visual identity score; fall back to text/tag-only retrieval
+- no context: use $k(x)=1$
+- no style expectation: use $r_i(x)=1$
+- no anomaly evidence: use $q_i(x)=1$
+- no attribute evidence: use neutral attribute evidence, not contradiction
+- no count estimate for a countable attribute: use neutral cardinality evidence, not contradiction
+
+The system should fail open rather than silently over-penalize candidates with incomplete metadata.
+
+### Feedback-Driven Parameter Updates
+
+User review should update both concept metadata and scoring parameters.
+
+#### Observation weight updates
+
+Review should be able to change how much each image influences training, not just whether it is labeled positive or negative.
+
+Examples:
+
+- increase weight for a canonical, centered, high-confidence identity image
+- reduce weight for a stylized, ambiguous, or partially occluded example
+- assign a hard-negative role to confusable non-matches such as visually similar characters
+- assign style-reference or context-reference roles when an image is useful for one layer of the concept but not for core identity
+
+This means a review pass is doing two things at once:
+
+- deciding which elements of an image are significant
+- deciding how much the model should rely on that image or attribute during future training
+
+#### Attribute consistency
+
+For attribute $a_{ij}$ reviewed across accepted positives:
+
+$$
+\operatorname{consistency}(a_{ij}) = \frac{\#\text{accepted positives with attribute present}}{\#\text{accepted positives reviewed for that attribute}}
+$$
+
+This value should drive:
+
+- invariant vs. variable classification
+- default weight $w_{ij}$
+- explanatory confidence in UI
+
+#### Authority weight calibration
+
+Authority weights should begin with strong priors and then be updated by review outcomes.
+
+For an authority $h$ supporting attribute $a_{ij}$:
+
+- increase $\lambda_{ij}^{(h)}$ when that authority consistently aligns with accepted review outcomes
+- decrease $\lambda_{ij}^{(h)}$ when that authority frequently produces misleading support or contradictions
+
+This tuning can happen:
+
+- globally per authority
+- per concept
+- per concept-attribute pair
+
+Per concept-attribute tuning is the most expressive. For example:
+
+- prompt tags may be reasonably useful for character names but weak for eye color
+- user tags may be excellent for identity attributes but inconsistent for background/style descriptors
+- danbooru mappings may be especially strong for outfit or body-feature attributes
+
+#### Review evidence policy
+
+Explicit review evidence should be stored separately from weighted user tags.
+
+Rationale:
+
+- a user tag is still tag-shaped metadata and may be edited, imported, merged, or normalized
+- a review judgment is an auditable training event with a reviewer, timestamp, confidence, and outcome
+- keeping review evidence separate preserves provenance and allows the system to distinguish "the user tagged this image" from "the user explicitly confirmed or rejected this attribute during a review pass"
+
+In scoring, review evidence should usually override weaker authorities when it exists for the same image and concept/attribute.
+
+#### Prototype rebuild policy
+
+When rebuilding a concept prototype or related attribute/reference models:
+
+- use weighted positive observations for the core centroid
+- exclude hard negatives from positive prototype aggregation
+- optionally maintain separate weighted centroids for identity, style, context, or anomaly reference sets
+
+This keeps the training signal aligned with the actual purpose of each reviewed image.
+
+#### Attribute cardinality calibration
+
+For countable attributes, review can also refine the permitted range:
+
+- repeated accepted positives with exactly one observed instance suggest `1..1`
+- repeated accepted positives with one or more observed instances suggest `1..*`
+- attributes used only as descriptive metadata can remain `0..*`
+
+This matters for discriminators like horn count, eye count, visible weapons, or number of companion characters.
+
+#### Exclusive family calibration
+
+For mutually exclusive families, review can refine both the family definition and the contradiction strength:
+
+- accepted positives for Shion that repeatedly show `light purple hair` and reject `pink hair` strengthen the `hair_color` family as a discriminator
+- accepted positives with stylized or ambiguous coloring may weaken family penalties so stylization does not overrule stronger identity evidence
+
+This is especially useful for identity-adjacent traits like hair color, eye color, horn color, outfit role, or companion role.
+
+#### Concept threshold calibration
+
+For each concept, learn $f_i$ and optionally $u_i$ from labeled data:
+
+- optimize for target precision/recall depending on workflow
+- or optimize a simple objective such as F1 on reviewed positives and negatives
+
+#### Anomaly penalties
+
+If a recurrent anomaly strongly predicts false positives, increase its penalty weight $\beta_{ik}$.
+
+If an anomaly often appears in accepted positives due to model quirks or stylization, weaken the penalty or reclassify it as a context/style variation rather than an anomaly.
+
+### Design Constraints
+
+- Identity and context must remain separable.
+- Missing evidence is not the same as contradictory evidence.
+- Style and outfit cues help ranking, but should not redefine identity unless the user explicitly narrows the concept.
+- The scoring model must expose intermediate components so users can understand why a result ranked where it did.
+
+---
+
 ## Distributed Compute Architecture
 
 AtelierAI runs on a **Raspberry Pi 5** (ARM, no CUDA) — far too slow for interactive CLIP inference (~500ms+/image). Rather than a separate CLIP service, every AtelierAI instance has the **same codebase and same API endpoints**, adapting behavior based on available hardware.
@@ -351,7 +1120,7 @@ This is the **symmetric peer** pattern: each instance can be both a client (forw
 │  AtelierAI (FastAPI)      │                      │  AtelierAI (FastAPI)          │
 │  CLIPProvider → Remote    │  /api/clip/encode ─→ │  CLIPProvider → Local (CUDA)  │
 │  (forwards to workstation)│  /api/clip/text ───→ │  OpenCLIP ViT-B/32            │
-│  SQLite DB, Meilisearch   │  /api/clip/health ─→│  CUDA: ~5ms/image             │
+│  SQLite DB, Meilisearch   │  /api/clip/health ─→ │  CUDA: ~5ms/image             │
 │  Image files              │                      │  WSL2 (Ubuntu), 24GB VRAM     │
 └───────────────────────────┘                      └───────────────────────────────┘
 
@@ -557,15 +1326,18 @@ Peer A (Pi 5)                          Peer B (RTX 3090)
 - [ ] API: `GET /concepts/export` + `POST /concepts/import` → peer library sharing
 - [ ] UI: Concept editor — surface forms, attributes (invariant/variable), example images
 - [ ] UI: Concept gallery — browse concepts, see prototypes, manage reference images
+- [ ] UI: Review workflow — mark identity, attributes, context, style, and anomaly/failure labels during curation
 
 ### Phase 3: Concept-Based Search
 **Goal:** Use concepts to improve search quality.
 
 - [ ] Search decomposition: parse queries into concept + context
 - [ ] Tag pre-filter using attribute profile
+- [ ] Implement scoring algorithm: per-concept normalization, attribute evidence, context weighting, style weighting, anomaly penalties
 - [ ] Visual scoring pipeline (download → encode → score → rank)
 - [ ] Search results UI with identity/context score breakdown
 - [ ] Feedback loop: mark results to refine concept profile
+- [ ] Separate identity errors from style/context/anomaly errors in review results
 
 ### Phase 4: Concept Composition Analysis
 **Goal:** Understand how concepts combine and improve generation coherence.
@@ -573,6 +1345,7 @@ Peer A (Pi 5)                          Peer B (RTX 3090)
 - [ ] Analyze how "Shion" prototype varies across contexts (beach, armor, cooking)
 - [ ] Measure concept consistency: same prompt + different seed → how stable is the concept?
 - [ ] Detect concept drift: when does adding context break identity?
+- [ ] Track recurrent anomaly patterns (missing traits, wrong colors, merged identities, outfit drift)
 - [ ] Report: "Model X understands concept Y with Z% coherence"
 
 ### Phase 5: Generation Guidance (Long-term)

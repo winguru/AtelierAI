@@ -240,9 +240,12 @@ The `Concept` table in the DB already provides:
 | **Visual prototype** | CLIP embedding vector of the concept | **NEW** — column or sidecar |
 | **Concept type** | character / object / style / scene | **NEW** — column on `Concept` |
 | **Invariant vs. variable attributes** | Tags partitioned by consistency | **NEW** — metadata or tag groups |
+| **Expected style** | Preferred style archetype for a concept (e.g. anime, cartoon, watercolor) | **NEW** — concept attribute |
 | **Attribute cardinality** | Expected count/range for an attribute | **NEW** — metadata on concept attributes |
 | **Attribute family semantics** | Boolean, countable, or mutually exclusive group behavior | **NEW** — metadata on concept attributes or groups |
 | **Authority weighting** | Relative trust assigned to each tag/evidence authority | **NEW** — evidence weighting metadata |
+| **Review session** | Process-oriented review pass over a set of images | **NEW** — session table |
+| **Review assessment** | One structured grading record per image within a session | **NEW** — assessment table |
 | **Review evidence** | Explicit user-reviewed confirmations/contradictions | **NEW** — separate review evidence records |
 | **Observation weighting** | Per-image strength of support or contradiction for a concept/attribute | **NEW** — weighted observation metadata |
 | **Composition rules** | How this concept combines with others | **NEW** — metadata or relationship |
@@ -257,6 +260,10 @@ ALTER TABLE concepts ADD COLUMN concept_type VARCHAR DEFAULT 'object';
 ALTER TABLE concepts ADD COLUMN prototype_vector BLOB;  -- CLIP embedding (numpy → bytes)
 ALTER TABLE concepts ADD COLUMN prototype_source_count INTEGER DEFAULT 0;  -- how many images contributed
 ALTER TABLE concepts ADD COLUMN prototype_updated_at DATETIME;
+
+-- Concepts can declare an expected stylistic archetype.
+-- This is a preferred attribute, not a hard requirement.
+-- Example: Shion -> anime; a ball concept may have no expected style.
 
 -- Concept attributes with invariance classification
 -- (Could reuse existing authority_terms + add metadata, or new table)
@@ -295,6 +302,38 @@ CREATE TABLE concept_review_evidence (
     created_at DATETIME
 );
 
+  CREATE TABLE concept_review_sessions (
+    id INTEGER PRIMARY KEY,
+    concept_id INTEGER REFERENCES concepts(id),
+    status VARCHAR NOT NULL DEFAULT 'open',  -- open | completed | abandoned
+    notes TEXT,
+    created_at DATETIME,
+    updated_at DATETIME,
+    closed_at DATETIME
+  );
+
+  CREATE TABLE concept_review_assessments (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER REFERENCES concept_review_sessions(id),
+    concept_id INTEGER REFERENCES concepts(id),
+    image_id INTEGER REFERENCES images(id),
+    predominance_rating INTEGER NULL,  -- 1..5
+    quality_rating INTEGER NULL,  -- 1..5
+    accuracy_rating INTEGER NULL,  -- 1..5
+    attribute_support_rating INTEGER NULL,  -- 1..5
+    context_fit_rating INTEGER NULL,  -- 1..5
+    anomaly_present INTEGER NOT NULL DEFAULT 0,
+    anomaly_kind VARCHAR NULL,
+    anomaly_degree INTEGER NULL,  -- conditional 1..4 scale
+    image_style_concept_id INTEGER NULL REFERENCES concepts(id),
+    image_style_source VARCHAR NULL,  -- guessed | review | imported
+    image_style_confidence REAL NULL,
+    notes TEXT,
+    created_at DATETIME,
+    updated_at DATETIME,
+    UNIQUE(session_id, image_id)
+  );
+
 -- Existing image-concept observations should support weighting semantics.
 -- This can extend the current table or be modeled as a richer sibling table.
 ALTER TABLE image_concept_observations
@@ -316,6 +355,34 @@ Recommended observation semantics:
 - `review_confidence`: how certain the reviewer is that the observation is correct
 - `training_role`: whether the image is a positive exemplar, hard negative, style reference, context reference, anomaly example, etc.
 - `concept_strength_weight`: how completely the target concept is supported by its attributes within this image
+
+Recommended review workflow semantics:
+
+- `review_session`: the process container for grading a batch of images for one concept
+- `review_assessment`: one row per image in a session, capturing the simple questionnaire answers
+- `image_style_concept_id`: the best-known style archetype for an image, overrideable during review
+- expected style is modeled as a concept attribute on the reviewed concept, not as a separate style-only system
+
+Review Lab questionnaire (Phase 3) should stay deliberately plain-English:
+
+- How predominant is this concept?
+- Is this image good quality for training?
+- Is the concept depicted accurately?
+- How strongly do the visible attributes support the concept?
+- Are there contextual incongruencies depicted for this concept?
+  - If yes, classify kind(s):
+    - out of place in time (anachronistic)
+    - out of place in location (anatopismic)
+    - nonsensical or inconsistent
+    - out of expected form (anomalous)
+- Are there noticeable visual anomalies? If yes, classify the anomaly type and degree
+
+Style handling should be mostly computed:
+
+- concept-side expected style: preferred concept attribute for style archetypes
+- image-side actual style: best-guess image metadata, overrideable during review
+- style fit: computed from expected style vs actual image style
+- if style is not relevant to a concept, it should stay N/A instead of forcing a rating
 
 This separates two ideas that often get conflated:
 
@@ -367,53 +434,53 @@ This is the immediate application — improving search quality.
 ```
 User query: "Shion on a beach"
         ↓
-┌─────────────────────────────────────┐
-│ 1. PARSE                            │
+┌──────────────────────────────────────┐
+│ 1. PARSE                             │
 │    Decompose into:                   │
 │    identity_concept = "Shion"        │
 │    context = "on a beach"            │
-└──────────────┬──────────────────────┘
+└──────────────┬───────────────────────┘
                ↓
-┌─────────────────────────────────────┐
-│ 2. RESOLVE                          │
-│    Look up "Shion" in concept DB     │
-│    → surface forms for text search   │
-│    → prototype vector for matching   │
-│    → attribute profile for fast filter│
-└──────────────┬──────────────────────┘
+┌────────────────────────────────────────┐
+│ 2. RESOLVE                             │
+│    Look up "Shion" in concept DB       │
+│    → surface forms for text search     │
+│    → prototype vector for matching     │
+│    → attribute profile for fast filter │
+└──────────────┬─────────────────────────┘
                ↓
-┌─────────────────────────────────────┐
-│ 3. CANDIDATE RETRIEVAL              │
+┌──────────────────────────────────────┐
+│ 3. CANDIDATE RETRIEVAL               │
 │    Meilisearch: broad text match     │
 │    using surface forms               │
 │    → 158 candidates                  │
-└──────────────┬──────────────────────┘
+└──────────────┬───────────────────────┘
                ↓
-┌─────────────────────────────────────┐
-│ 4. FAST PRE-FILTER (tag-based)      │
+┌──────────────────────────────────────┐
+│ 4. FAST PRE-FILTER (tag-based)       │
 │    Attribute profile as filter:      │
 │    require: any(purple hair variants)│
 │    require: any(horn variants)       │
 │    → ~60 candidates                  │
-└──────────────┬──────────────────────┘
+└──────────────┬───────────────────────┘
                ↓
-┌─────────────────────────────────────┐
-│ 5. VISUAL SCORING (CLIP-based)      │
+┌──────────────────────────────────────┐
+│ 5. VISUAL SCORING (CLIP-based)       │
 │    Download thumbnails (~2-3s)       │
 │    CLIP encode each thumbnail        │
 │    identity = cos(img, prototype)    │
 │    context  = cos(img, text("beach"))│
 │    final    = identity × context     │
 │    → ranked results                  │
-└──────────────┬──────────────────────┘
+└──────────────┬───────────────────────┘
                ↓
-┌─────────────────────────────────────┐
-│ 6. PRESENT + LEARN                  │
+┌──────────────────────────────────────┐
+│ 6. PRESENT + LEARN                   │
 │    Show ranked results with scores   │
 │    User marks relevant/not relevant  │
 │    → refine attribute profile        │
 │    → optionally add to reference set │
-└─────────────────────────────────────┘
+└──────────────────────────────────────┘
 ```
 
 ### Compute Costs (Estimates)

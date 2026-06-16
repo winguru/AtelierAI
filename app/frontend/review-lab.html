@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Review Lab</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/review-lab.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1 id="page-title">Review Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">Gallery</a>
+        <a class="btn ghost" href="/frontend/search-lab.html">Search Lab</a>
+        <a class="btn ghost" href="/frontend/prototype-lab.html">Prototype Lab</a>
+        <a class="btn ghost" href="/frontend/concept-search-lab.html">Concept Search Lab</a>
+      </div>
+    </header>
+
+    <main class="review-layout">
+      <section class="step-card active" aria-label="Concept and scoring controls">
+        <div class="step-header">
+          <div class="step-number"><span>1</span></div>
+          <div class="step-title-area">
+            <h2>Load Concept</h2>
+            <p class="step-desc">Pick a concept, tune scoring weights, and inspect ranked evidence candidates for review.</p>
+          </div>
+          <div class="step-actions">
+            <button id="load-concept-btn" class="btn primary" type="button">Load</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div id="concept-lookup" class="concept-lookup-host"></div>
+          <div class="control-grid">
+            <label class="control-label">Result limit
+              <input id="score-limit" type="number" min="1" max="200" value="50">
+            </label>
+            <label class="control-label">Identity alpha
+              <input id="alpha-identity" type="number" min="0" max="1" step="0.05" value="0.55">
+            </label>
+            <label class="control-label">Attribute alpha
+              <input id="alpha-attribute" type="number" min="0" max="1" step="0.05" value="0.25">
+            </label>
+            <label class="control-label">Context alpha
+              <input id="alpha-context" type="number" min="0" max="1" step="0.05" value="0.15">
+            </label>
+            <label class="control-label">Style alpha
+              <input id="alpha-style" type="number" min="0" max="1" step="0.05" value="0.05">
+            </label>
+            <label class="control-label">Epsilon
+              <input id="score-epsilon" type="number" min="0.000001" max="0.5" step="0.01" value="0.05">
+            </label>
+          </div>
+          <div class="chips" id="summary-chips"></div>
+        </div>
+      </section>
+
+      <div id="status-panel" class="step-status info" aria-live="polite">
+        <strong id="status-title">Ready</strong>
+        <span id="status-message">Select a concept by name or ID, then load scored images.</span>
+      </div>
+
+      <section class="step-card" aria-label="Scored images">
+        <div class="step-header">
+          <div class="step-number"><span>2</span></div>
+          <div class="step-title-area">
+            <h2>Scored Images</h2>
+            <p class="step-desc">Ranking output from the concept scoring algorithm. Click a card to open review workspace.</p>
+          </div>
+          <div class="step-actions">
+            <button id="refresh-scores-btn" class="btn ghost" type="button">Refresh scores</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div id="scores-grid" class="scores-grid"></div>
+        </div>
+      </section>
+
+      <section class="step-card" aria-label="Review workspace">
+        <div class="step-header">
+          <div class="step-number"><span>3</span></div>
+          <div class="step-title-area">
+            <h2>Review Workspace</h2>
+            <p class="step-desc">Click a scored image to open the fullscreen review questionnaire.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <div id="review-empty" class="empty-note">Select a scored image to open fullscreen review.</div>
+        </div>
+      </section>
+
+      <div id="review-fullscreen" class="review-fullscreen hidden" aria-hidden="true">
+        <div class="review-fullscreen-backdrop"></div>
+        <div class="review-fullscreen-content">
+          <section class="review-image-stage" aria-label="Review image stage">
+            <img id="fs-review-image" class="fs-review-image" alt="Review target image">
+            <div class="fs-review-meta">
+              <strong id="fs-review-image-title">Image</strong>
+              <span id="fs-review-image-subtitle"></span>
+            </div>
+          </section>
+
+          <aside class="review-side-panel" aria-label="Concept review panel">
+            <div class="review-panel-header">
+              <h3 id="fs-concept-name">Concept</h3>
+              <button id="fs-close-btn" type="button" class="btn ghost">Close</button>
+            </div>
+
+            <form id="fs-assessment-form" class="assessment-form">
+              <!-- ── Concept info ─────────────────────────────────────────── -->
+              <section class="q-section" data-q-section>
+                <button type="button" class="q-section-toggle">
+                  <span class="q-section-chevron">▸</span>
+                  <span class="q-section-title">Concept info</span>
+                </button>
+                <div class="q-section-body">
+                  <div><strong class="muted-label">Aliases</strong><div id="fs-concept-aliases" class="chip-list"></div></div>
+                  <div><strong class="muted-label">Hierarchy</strong><div id="fs-concept-hierarchy" class="line-list"></div></div>
+                  <div><strong class="muted-label">Description</strong><div id="fs-concept-description" class="scroll-box"></div></div>
+                </div>
+              </section>
+
+              <!-- ── Core ratings ─────────────────────────────────────────── -->
+              <section class="q-section open" data-q-section>
+                <button type="button" class="q-section-toggle" type="button">
+                  <span class="q-section-chevron">▾</span>
+                  <span class="q-section-title">Core ratings</span>
+                </button>
+                <div class="q-section-body">
+                  <label class="control-label">How predominant is this concept?
+                    <select id="q-predominance" required>
+                      <option value="">Select</option>
+                      <option value="1">1 - Not at all</option>
+                      <option value="2">2 - Partially</option>
+                      <option value="3">3 - Generally</option>
+                      <option value="4">4 - Mostly</option>
+                      <option value="5">5 - Fully</option>
+                    </select>
+                  </label>
+
+                  <label class="control-label">Is the concept depicted accurately?
+                    <select id="q-accuracy" required>
+                      <option value="">Select</option>
+                      <option value="1">1 - Not at all</option>
+                      <option value="2">2 - Partially</option>
+                      <option value="3">3 - Generally</option>
+                      <option value="4">4 - Mostly</option>
+                      <option value="5">5 - Fully</option>
+                    </select>
+                  </label>
+
+                  <label class="control-label">How strongly do visible attributes support the concept?
+                    <select id="q-attribute-support" required>
+                      <option value="">Select</option>
+                      <option value="1">1 - Not at all</option>
+                      <option value="2">2 - Partially</option>
+                      <option value="3">3 - Generally</option>
+                      <option value="4">4 - Mostly</option>
+                      <option value="5">5 - Fully</option>
+                    </select>
+                  </label>
+
+                  <label class="control-label">Is this image good quality for training?
+                    <select id="q-quality" required>
+                      <option value="">Select</option>
+                      <option value="1">1 - Not at all</option>
+                      <option value="2">2 - Partially</option>
+                      <option value="3">3 - Generally</option>
+                      <option value="4">4 - Mostly</option>
+                      <option value="5">5 - Fully</option>
+                    </select>
+                  </label>
+                </div>
+              </section>
+
+              <!-- ── Attribute checklist ──────────────────────────────────── -->
+              <section class="q-section open" data-q-section>
+                <button type="button" class="q-section-toggle">
+                  <span class="q-section-chevron">▾</span>
+                  <span class="q-section-title">Attribute checklist</span>
+                </button>
+                <div class="q-section-body">
+                  <p class="q-hint">Mark each visual attribute as present, absent, or not visible.</p>
+                  <div id="q-attribute-list" class="attribute-checklist"></div>
+                </div>
+              </section>
+
+              <!-- ── Contextual incongruencies ────────────────────────────── -->
+              <section class="q-section" data-q-section>
+                <button type="button" class="q-section-toggle">
+                  <span class="q-section-chevron">▸</span>
+                  <span class="q-section-title">Contextual incongruencies</span>
+                </button>
+                <div class="q-section-body">
+                  <label class="yes-toggle">
+                    <input id="q-context-incongruent" type="checkbox"> Are there contextual incongruencies depicted for this concept?
+                  </label>
+                  <div id="q-context-kinds" class="conditional-group hidden">
+                    <label class="checkbox-line"><input id="q-context-anachronistic" type="checkbox"> Out of place in time (anachronistic)</label>
+                    <label class="checkbox-line"><input id="q-context-anatopismic" type="checkbox"> Out of place in location (anatopismic)</label>
+                    <label class="checkbox-line"><input id="q-context-nonsensical" type="checkbox"> Nonsensical or inconsistent</label>
+                    <label class="checkbox-line"><input id="q-context-anomalous-form" type="checkbox"> Anomalous form</label>
+                  </div>
+                </div>
+              </section>
+
+              <!-- ── Concept deviations ───────────────────────────────────── -->
+              <section class="q-section" data-q-section>
+                <button type="button" class="q-section-toggle">
+                  <span class="q-section-chevron">▸</span>
+                  <span class="q-section-title">Concept deviations</span>
+                </button>
+                <div class="q-section-body">
+                  <label class="yes-toggle">
+                    <input id="q-deviation-present" type="checkbox"> Are there intentional creative departures from canonical form?
+                  </label>
+                  <div id="q-deviation-fields" class="conditional-group hidden">
+                    <p class="q-hint">e.g. gender-swap, futanari, chibi, over-exaggerated proportions, extra non-canonical features, fusion with another concept.</p>
+                    <label class="checkbox-line"><input id="q-deviation-body-variant" type="checkbox"> Body variant (gender-swap, futanari, chibi)</label>
+                    <label class="checkbox-line"><input id="q-deviation-exaggerated" type="checkbox"> Over-exaggerated attributes</label>
+                    <label class="checkbox-line"><input id="q-deviation-extra-feature" type="checkbox"> Extra non-canonical features</label>
+                    <label class="checkbox-line"><input id="q-deviation-fusion" type="checkbox"> Fusion / crossover</label>
+                    <label class="control-label">Deviation kind
+                      <input id="q-deviation-kind" type="text" maxlength="100" placeholder="e.g. futanari, muscle growth, fusion with X">
+                    </label>
+                    <label class="control-label">Deviation degree
+                      <select id="q-deviation-degree">
+                        <option value="">Select</option>
+                        <option value="1">1 - Slight</option>
+                        <option value="2">2 - Moderate</option>
+                        <option value="3">3 - Strong</option>
+                        <option value="4">4 - Extreme</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <!-- ── Visual anomalies ─────────────────────────────────────── -->
+              <section class="q-section" data-q-section>
+                <button type="button" class="q-section-toggle">
+                  <span class="q-section-chevron">▸</span>
+                  <span class="q-section-title">Visual anomalies (generation defects)</span>
+                </button>
+                <div class="q-section-body">
+                  <label class="yes-toggle">
+                    <input id="q-anomaly-present" type="checkbox"> Are there noticeable visual anomalies (generation defects)?
+                  </label>
+                  <div id="q-anomaly-fields" class="conditional-group hidden">
+                    <label class="control-label">Anomaly kind
+                      <input id="q-anomaly-kind" type="text" maxlength="100" placeholder="e.g. identity bleed, extra fingers, merged limbs">
+                    </label>
+                    <label class="control-label">Anomaly degree
+                      <select id="q-anomaly-degree">
+                        <option value="">Select</option>
+                        <option value="1">1 - Slight</option>
+                        <option value="2">2 - Moderate</option>
+                        <option value="3">3 - Strong</option>
+                        <option value="4">4 - Severe</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <!-- ── Style & notes ────────────────────────────────────────── -->
+              <section class="q-section" data-q-section>
+                <button type="button" class="q-section-toggle">
+                  <span class="q-section-chevron">▸</span>
+                  <span class="q-section-title">Style & notes</span>
+                </button>
+                <div class="q-section-body">
+                  <label class="control-label">Style concept (best guess, overrideable)
+                    <select id="q-image-style"></select>
+                  </label>
+                  <label class="control-label">Style confidence
+                    <input id="q-image-style-confidence" type="number" min="0" max="1" step="0.05" placeholder="0.0 - 1.0">
+                  </label>
+                  <label class="control-label">Notes
+                    <textarea id="q-notes" rows="3" maxlength="2000" placeholder="Optional notes"></textarea>
+                  </label>
+                </div>
+              </section>
+
+              <div class="assessment-actions">
+                <button type="submit" class="btn primary">Save assessment</button>
+                <span id="fs-save-msg" class="save-msg" aria-live="polite"></span>
+              </div>
+            </form>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/frontend/js/concept-lookup-widget.js"></script>
+  <script type="module" src="/frontend/js/review-lab.js"></script>
+</body>
+</html>

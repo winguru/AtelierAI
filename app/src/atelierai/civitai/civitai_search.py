@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import threading
+import time
 from importlib import import_module
 from typing import Any, Optional
 
@@ -220,7 +221,10 @@ class CivitaiSearchClient:
                 except CivitaiRequestError as exc:
                     if backend == "meilisearch":
                         raise
-                    is_timeout = "timed out" in str(exc).lower()
+                    is_timeout = (
+                        "timed out" in str(exc).lower()
+                        or getattr(exc, "status_code", None) == 408
+                    )
                     _log.warning(
                         "Meilisearch request failed (offset=%d): %s.%s",
                         offset,
@@ -234,6 +238,10 @@ class CivitaiSearchClient:
                     # before trying key refresh or REST fallback.
                     if is_timeout:
                         saved_timeout = self._timeout
+                        # Brief pause so the upstream has a moment to
+                        # recover before we hit it with a longer-timeout
+                        # retry (helps with transient 408s).
+                        time.sleep(1.0)
                         try:
                             self._timeout = 120.0
                             result = self._meili_search(
@@ -301,7 +309,8 @@ class CivitaiSearchClient:
                                 )
                         else:
                             _log.warning(
-                                "No fresh Meilisearch key available for retry."
+                                "No fresh Meilisearch key available for retry; "
+                                "proceeding to REST fallback check."
                             )
 
                     # REST API does not support offset pagination — falling

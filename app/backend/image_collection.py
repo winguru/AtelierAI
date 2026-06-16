@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from models import (
     AuthorityTerm,
+    Concept,
+    ConceptAlias,
     ImageConceptObservation,
     ImageModel,
     ObservationCertainty,
@@ -124,6 +126,46 @@ class ImageCollection:
         self.db.add(authority)
         self.db.flush()
         return authority
+
+    # Concept-resolution LRU cache (normalized_name -> concept_id | None)
+    _concept_resolve_cache: dict[str, Optional[int]] = {}
+    _concept_resolve_loaded: bool = False
+
+    def _try_resolve_concept_id(self, normalized_name: str) -> Optional[int]:
+        """Look up a concept whose canonical name or alias matches *normalized_name*.
+
+        Populates an internal cache on first call.  Returns ``None`` when no
+        active concept matches.
+        """
+        if not self._concept_resolve_loaded:
+            self._concept_resolve_cache.clear()
+            # Canonical names
+            for row in (
+                self.db.query(Concept.id, Concept.canonical_name)
+                .filter(Concept.status == "active")
+                .all()
+            ):
+                key = self._normalize_text(row.canonical_name)
+                if key and key not in self._concept_resolve_cache:
+                    self._concept_resolve_cache[key] = row.id
+            # Aliases
+            for row in (
+                self.db.query(ConceptAlias.concept_id, ConceptAlias.normalized_alias)
+                .join(Concept, ConceptAlias.concept_id == Concept.id)
+                .filter(Concept.status == "active")
+                .all()
+            ):
+                key = row.normalized_alias.strip().lower()
+                if key and key not in self._concept_resolve_cache:
+                    self._concept_resolve_cache[key] = row.concept_id
+            self._concept_resolve_loaded = True
+
+        return self._concept_resolve_cache.get(normalized_name)
+
+    def invalidate_concept_cache(self):
+        """Clear the concept-resolution cache so it reloads on next use."""
+        self._concept_resolve_loaded = False
+        self._concept_resolve_cache.clear()
 
     def _upsert_authority_term(
         self,
@@ -248,13 +290,16 @@ class ImageCollection:
             row.updated_at = now
             return False
 
+        # Try to link to an existing concept by surface-form match.
+        resolved_concept_id = self._try_resolve_concept_id(normalized_external_name)
+
         self.db.add(
             AuthorityTerm(
                 authority_id=authority_id,
                 external_tag_id=external_tag_id,
                 external_name=str(external_name),
                 normalized_external_name=normalized_external_name,
-                concept_id=None,
+                concept_id=resolved_concept_id,
                 metadata_json=metadata or {},
                 created_at=now,
                 updated_at=now,
@@ -1708,6 +1753,104 @@ class ImageCollection:
             "skip_reason": None,
         }
 
+    def _hydrate_observations_from_tags(
+        self,
+        db_record: ImageModel,
+        sidecar_data: dict[str, Any],
+    ) -> dict[str, int]:
+        """Create image_concept_observations for tags that have no observation row yet.
+
+        Mirrors ``_hydrate_observations_from_payload`` in main.py but is safe
+        to call from the rescan path.  Creates observations for ALL
+        authority_terms, including those without a ``concept_id`` (orphan tags).
+        """
+        merged_payload = {
+            **ImageData.from_db_record(db_record).to_dict(),
+            **(sidecar_data if isinstance(sidecar_data, dict) else {}),
+        }
+
+        tax = TaxonomyService()
+        tags_by_source = self.gallery_tag_service.extract_image_scope_tag_names(
+            merged_payload,
+            normalize_taxonomy_text=tax.normalize_text,
+        )
+        if not any(tags_by_source.values()):
+            return {"observations_created": 0}
+
+        now = datetime.utcnow()
+        _seen: set[tuple[int, int, int]] = set()
+        observations_created = 0
+
+        try:
+            for source, tag_names in tags_by_source.items():
+                if not tag_names:
+                    continue
+
+                authority = tax.get_or_create_authority(self.db, source)
+                authority_id = int(authority.id)
+                normalized_names = {
+                    tax.normalize_text(n): n for n in tag_names if n
+                }
+                if not normalized_names:
+                    continue
+
+                # Batch-load authority_terms (including orphans without concept_id)
+                terms = (
+                    self.db.query(AuthorityTerm)
+                    .filter(
+                        AuthorityTerm.authority_id == authority_id,
+                        AuthorityTerm.normalized_external_name.in_(normalized_names),
+                    )
+                    .all()
+                )
+
+                for term in terms:
+                    concept_id = term.concept_id  # May be None for orphans
+
+                    # Dedup by authority_term_id — one observation per term
+                    obs_key = (int(db_record.id), int(term.id), authority_id)
+                    if obs_key in _seen:
+                        continue
+
+                    existing = (
+                        self.db.query(ImageConceptObservation.id)
+                        .filter(
+                            ImageConceptObservation.image_id == db_record.id,
+                            ImageConceptObservation.authority_term_id == term.id,
+                        )
+                        .first()
+                    )
+                    if existing is not None:
+                        _seen.add(obs_key)
+                        continue
+
+                    self.db.add(
+                        ImageConceptObservation(
+                            image_id=int(db_record.id),
+                            concept_id=concept_id,
+                            authority_id=authority_id,
+                            authority_term_id=int(term.id),
+                            source_type=ObservationSource.IMPORT,
+                            certainty_label=ObservationCertainty.LIKELY,
+                            is_present=True,
+                            is_curated=False,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    _seen.add(obs_key)
+                    observations_created += 1
+
+            self.db.flush()
+            self.db.commit()
+        except Exception as exc:
+            self.db.rollback()
+            print(
+                f"Warning: observation hydration failed for image {db_record.id}: {exc}"
+            )
+
+        return {"observations_created": observations_created}
+
     def rescan_existing_file(self, db_record: ImageModel) -> Dict[str, Any]:
         """Rescan and hydrate metadata/resources for one existing image record."""
         image_path = self.library_path / str(db_record.file_path)
@@ -1913,6 +2056,14 @@ class ImageCollection:
 
         self.db.refresh(db_record)
         self.db.commit()
+
+        # Hydrate observations from all tag sources (civitai, danbooru, prompt, user).
+        # This must happen after commit so authority_terms are persisted.
+        obs_stats = self._hydrate_observations_from_tags(db_record, sidecar_after)
+        if obs_stats.get("observations_created"):
+            actions_taken.append(
+                f"Created {obs_stats['observations_created']} new observation(s)."
+            )
 
         hydration_summary = {
             "exif_backfill_attempts": self.results.get("exif_backfill_attempts", 0),

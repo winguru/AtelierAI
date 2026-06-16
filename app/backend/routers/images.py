@@ -389,6 +389,82 @@ def get_image_video_thumbnail(
     return _impl(file_hash=file_hash, request=request, db=db)
 
 
+@router.get("/images/{file_hash}/thumb")
+def get_image_thumbnail(
+    file_hash: str, request: Request, db: Session = Depends(get_db)
+):
+    """Return a cached WebP thumbnail for any image.
+
+    For still images a 256×256 WebP is generated on first request and cached
+    under ``image_resources/thumbnails/``.  For video assets the request is
+    forwarded to the animated video-thumbnail handler.
+    """
+    from config import IMAGE_LIBRARY_PATH, IMAGE_RESOURCES_PATH  # noqa: PLC0415
+    from image_processor import (  # noqa: PLC0415
+        ensure_image_thumbnail,
+        ensure_video_thumbnail,
+        get_video_thumbnail_media_type,
+    )
+
+    image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
+
+    mimetype = (image.mimetype or "").lower()
+    is_video = mimetype.startswith("video/") or image_path.suffix.lower() in {
+        ".mp4",
+        ".webm",
+    }
+
+    if is_video:
+        thumb = ensure_video_thumbnail(image_path, IMAGE_RESOURCES_PATH)
+        if thumb is None or not thumb.exists():
+            raise HTTPException(status_code=404, detail="Video thumbnail unavailable")
+        media = get_video_thumbnail_media_type(thumb)
+    else:
+        thumb = ensure_image_thumbnail(image_path, IMAGE_RESOURCES_PATH)
+        if thumb is None or not thumb.exists():
+            raise HTTPException(status_code=404, detail="Thumbnail unavailable")
+        media = "image/webp"
+
+    from main import _build_media_cache_headers, _should_return_not_modified  # noqa: PLC0415
+
+    cache_headers = _build_media_cache_headers(thumb)
+    if _should_return_not_modified(request, thumb, cache_headers):
+        return Response(status_code=304, headers=cache_headers)
+
+    return FileResponse(str(thumb), media_type=media, headers=cache_headers)
+
+
+@router.get("/images/{file_hash}/original")
+def get_image_original(
+    file_hash: str, request: Request, db: Session = Depends(get_db)
+):
+    """Return the original image file by hash for full-resolution viewing."""
+    from config import IMAGE_LIBRARY_PATH  # noqa: PLC0415
+
+    image = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).first()
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    image_path = Path(IMAGE_LIBRARY_PATH) / str(image.file_path)
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
+
+    from main import _build_media_cache_headers, _should_return_not_modified  # noqa: PLC0415
+
+    cache_headers = _build_media_cache_headers(image_path)
+    if _should_return_not_modified(request, image_path, cache_headers):
+        return Response(status_code=304, headers=cache_headers)
+
+    media = image.mimetype or "application/octet-stream"
+    return FileResponse(str(image_path), media_type=media, headers=cache_headers)
+
+
 @router.get("/images/{file_hash}/video_mp4")
 async def get_transcoded_video(
     file_hash: str,

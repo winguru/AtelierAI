@@ -232,7 +232,12 @@
         restoreCell(td, originalValue);
         return;
       }
-      toast('Tag updated.', 'success');
+      const result = await resp.json().catch(() => ({}));
+      if (result.images_updated > 0) {
+        toast(`Tag updated — ${result.images_updated} image${result.images_updated === 1 ? '' : 's'} synced.`, 'success');
+      } else {
+        toast('Tag updated.', 'success');
+      }
       loadTable();
     } catch (e) {
       toast(`Network error: ${e.message}`, 'error');

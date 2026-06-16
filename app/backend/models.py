@@ -98,6 +98,11 @@ class ImageModel(Base):
     user_nsfw_rating = Column(String, nullable=True)       # pg | pg13 | r | x | xxx
     user_nsfw_safety_class = Column(String, nullable=True)  # safe | mature | explicit
 
+    # User-defined image style override (best-guess can be corrected by review UI)
+    user_image_style_concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=True)
+    user_image_style_source = Column(String, nullable=True)  # guessed | review | imported
+    user_image_style_confidence = Column(Float, nullable=True)
+
     # User-defined tags (persisted in both DB column and sidecar JSON)
     user_tags = Column(JSON, nullable=True)
 
@@ -139,6 +144,8 @@ class ImageModel(Base):
         cascade="all, delete-orphan",
         order_by="GenerationProcess.id",
     )
+    user_image_style_concept = relationship("Concept", foreign_keys=[user_image_style_concept_id])
+    review_assessments = relationship("ConceptReviewAssessment", back_populates="image")
 
     def to_dict(self) -> dict:
         """
@@ -214,6 +221,9 @@ class ImageModel(Base):
             "json_metadata": json_metadata,
             "user_nsfw_rating": self.user_nsfw_rating,
             "user_nsfw_safety_class": self.user_nsfw_safety_class,
+            "user_image_style_concept_id": self.user_image_style_concept_id,
+            "user_image_style_source": self.user_image_style_source,
+            "user_image_style_confidence": self.user_image_style_confidence,
             "user_tags": self.user_tags,
         }
 
@@ -272,7 +282,78 @@ class Concept(Base):
     aliases = relationship("ConceptAlias", back_populates="concept")
     authority_terms = relationship("AuthorityTerm", back_populates="concept")
     observations = relationship("ImageConceptObservation", back_populates="concept")
+    review_sessions = relationship("ConceptReviewSession", back_populates="concept")
+    review_assessments = relationship(
+        "ConceptReviewAssessment",
+        back_populates="concept",
+        foreign_keys="ConceptReviewAssessment.concept_id",
+    )
     group_memberships = relationship("ConceptGroupMembership", back_populates="concept")
+    # Attributes of this concept (e.g. "purple hair" is an attribute of "Shion")
+    attributes = relationship(
+        "ConceptAttributeProfile",
+        back_populates="concept",
+        foreign_keys="ConceptAttributeProfile.concept_id",
+        cascade="all, delete-orphan",
+    )
+    # Concepts this concept is an attribute of (reverse direction)
+    attribute_of = relationship(
+        "ConceptAttributeProfile",
+        back_populates="attribute_concept",
+        foreign_keys="ConceptAttributeProfile.attribute_concept_id",
+        cascade="all, delete-orphan",
+        overlaps="attributes,concept",
+    )
+
+
+class ConceptAttributeProfile(Base):
+    """Links a concept to one of its attributes (another concept).
+
+    For example, "Shion" has an attribute "purple hair" with:
+      - attribute_kind = 'visual'  (observable in the image)
+      - invariance = 'invariant'   (always present for Shion)
+      - consistency_score = 0.95   (seen in 95% of Shion images)
+
+    The attribute itself is a full Concept, so it can have its own aliases,
+    hierarchy, and even its own attributes.
+    """
+
+    __tablename__ = "concept_attribute_profiles"
+
+    concept_id = Column(
+        Integer, ForeignKey("concepts.id", ondelete="CASCADE"),
+        primary_key=True, index=True,
+        comment="The concept that HAS this attribute (e.g. Shion)",
+    )
+    attribute_concept_id = Column(
+        Integer, ForeignKey("concepts.id", ondelete="CASCADE"),
+        primary_key=True, index=True,
+        comment="The concept that IS the attribute (e.g. 'purple hair')",
+    )
+    attribute_kind = Column(
+        String, nullable=False, default="visual",
+        comment="How the attribute manifests: 'visual' (observable in image) or 'semantic' (abstract property)",
+    )
+    invariance = Column(
+        String, nullable=False, default="variable",
+        comment="Whether this attribute is always present: 'invariant' (defining) or 'variable' (contextual)",
+    )
+    consistency_score = Column(
+        Float, nullable=True, default=None,
+        comment="Fraction of reference images where this attribute is observed (0.0–1.0)",
+    )
+    notes = Column(Text, nullable=True)
+
+    concept = relationship(
+        "Concept", back_populates="attributes",
+        foreign_keys=[concept_id],
+        overlaps="attribute_of,concept",
+    )
+    attribute_concept = relationship(
+        "Concept", back_populates="attribute_of",
+        foreign_keys=[attribute_concept_id],
+        overlaps="attributes,attribute_concept",
+    )
 
 
 class ConceptAlias(Base):
@@ -362,6 +443,12 @@ class ImageConceptObservation(Base):
     confidence = Column(Float, nullable=True)
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
+
+    # Observation weighting fields (for concept training and prototype construction)
+    observation_weight = Column(Float, nullable=True, default=None, comment="Overall weight of this observation during training (0-1)")
+    review_confidence = Column(Float, nullable=True, default=None, comment="Reviewer confidence in this observation (0-1)")
+    training_role = Column(String, nullable=True, default=None, comment="Training role: positive_exemplar, hard_negative, style_ref, context_ref, anomaly")
+    concept_strength_weight = Column(Float, nullable=True, default=None, comment="How completely the target concept is supported by its attributes (0-1)")
 
     image = relationship("ImageModel")
     concept = relationship("Concept", back_populates="observations")
@@ -1292,4 +1379,419 @@ class CivitaiApiCacheEntry(Base):
         ),
         Index("ix_civitai_cache_latest", "endpoint", "is_latest"),
         Index("ix_civitai_cache_fetched_at", "fetched_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pending User Bindings (staging for snapshot import)
+# ---------------------------------------------------------------------------
+
+
+class PendingUserBinding(Base):
+    """User tag bindings imported from a snapshot that don't yet match an image.
+
+    The image ingestion pipeline checks this table when new images arrive and
+    auto-applies matching user tags, then sets ``applied_at``.
+    """
+    __tablename__ = "pending_user_bindings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_hash = Column(String, nullable=False, index=True)
+    file_path = Column(String, nullable=True)
+    user_tags = Column(JSON, nullable=True)
+    user_negative_tags = Column(JSON, nullable=True)
+    source_snapshot = Column(String, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_pending_bindings_file_hash", "file_hash"),
+    )
+
+
+
+
+# ---------------------------------------------------------------------------
+# Concept Review and Training Support Models
+# ---------------------------------------------------------------------------
+
+
+class ConceptAttributeTermProfile(Base):
+    """Defines attribute expectations for a concept based on authority terms.
+
+    This model captures what attributes a concept should have and how they should
+    appear when expressed via authority_term entries. It supports the attribute
+    discrimination model with modes (boolean, countable, exclusive), families
+    (mutually exclusive alternatives), and cardinality constraints.
+
+    This is separate from ConceptAttributeProfile which links concepts to other
+    concepts. This table links concepts to authority_terms for fine-grained
+    attribute tracking.
+
+    Attributes:
+        concept_id: The concept being profiled
+        attribute_term_id: The attribute authority_term this profile references
+        consistency_score: How consistently this attribute appears (0-1)
+        invariance: Whether this attribute is invariant (always present)
+        attribute_mode: "boolean", "countable", or "exclusive"
+        attribute_family: Family name for exclusive attributes (e.g., "hair_color")
+        cardinality_min: Minimum count for countable attributes
+        cardinality_max: Maximum count for countable attributes (NULL = unlimited)
+    """
+    __tablename__ = "concept_attribute_term_profiles"
+
+    concept_id = Column(
+        Integer, ForeignKey("concepts.id"), nullable=False, primary_key=True
+    )
+    attribute_term_id = Column(
+        Integer, ForeignKey("authority_terms.id"), nullable=False, primary_key=True
+    )
+    consistency_score = Column(
+        Float, nullable=True, default=None,
+        comment="Consistency of this attribute across instances (0-1)"
+    )
+    invariance = Column(
+        Boolean, nullable=False, default=False,
+        comment="Whether this attribute is invariant (always present)"
+    )
+    attribute_mode = Column(
+        String, nullable=False, default="boolean",
+        comment="Attribute mode: boolean, countable, or exclusive"
+    )
+    attribute_family = Column(
+        String, nullable=True, default=None,
+        comment="Family name for exclusive attributes (e.g., 'hair_color')"
+    )
+    cardinality_min = Column(
+        Integer, nullable=True, default=None,
+        comment="Minimum count for countable attributes"
+    )
+    cardinality_max = Column(
+        Integer, nullable=True, default=None,
+        comment="Maximum count for countable attributes (NULL = unlimited)"
+    )
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, onupdate=func.now())
+
+    concept = relationship("Concept")
+    attribute_term = relationship("AuthorityTerm")
+
+    __table_args__ = (
+        # Supports fast lookup: all attributes for a concept
+        Index("ix_attr_term_profile_concept", "concept_id"),
+        # Supports fast lookup: all concepts with a given attribute
+        Index("ix_attr_term_profile_term", "attribute_term_id"),
+    )
+
+
+class ConceptAttributeAuthorityWeight(Base):
+    """Authority trust weights for attribute evidence per concept.
+
+    Different tag authorities may be more or less reliable for different
+    concepts and attributes. This model stores both base weights (configured)
+    and learned weights (updated from review outcomes).
+
+    Attributes:
+        concept_id: The concept being evaluated
+        attribute_term_id: The attribute being evaluated
+        authority_id: The tag authority providing evidence
+        base_weight: Configured base trust weight (0-1, NULL = use global default)
+        learned_weight: Learned weight from review feedback (NULL = use base_weight)
+        updated_at: When learned_weight was last updated
+    """
+    __tablename__ = "concept_attribute_authority_weights"
+
+    concept_id = Column(
+        Integer, ForeignKey("concepts.id"), nullable=False, primary_key=True
+    )
+    attribute_term_id = Column(
+        Integer, ForeignKey("authority_terms.id"), nullable=False, primary_key=True
+    )
+    authority_id = Column(
+        Integer, ForeignKey("tag_authorities.id"), nullable=False, primary_key=True
+    )
+    base_weight = Column(
+        Float, nullable=True, default=None,
+        comment="Configured base trust weight (0-1, NULL = use global default)"
+    )
+    learned_weight = Column(
+        Float, nullable=True, default=None,
+        comment="Learned weight from review feedback (NULL = use base_weight)"
+    )
+    updated_at = Column(DateTime, nullable=True)
+
+    concept = relationship("Concept")
+    attribute_term = relationship("AuthorityTerm")
+    authority = relationship("TagAuthority")
+
+    __table_args__ = (
+        # Supports fast lookup: all authorities for a concept/attribute pair
+        Index("ix_auth_weight_concept_attr", "concept_id", "attribute_term_id"),
+        # Supports fast lookup: all attributes for a concept/authority pair
+        Index("ix_auth_weight_concept_auth", "concept_id", "authority_id"),
+    )
+
+
+class ConceptReviewEvidence(Base):
+    """Human review evidence for concept-image-attribute relationships.
+
+    This model captures structured human judgments used to:
+    1. Validate automated concept detection
+    2. Learn authority weights
+    3. Train the composite scoring algorithm
+    4. Build high-quality training corpuses
+
+    Evidence is categorized by kind (identity, attribute, context, style, anomaly)
+    and verdict (supports, contradicts, unknown). Each evidence point can reference
+    a specific attribute or apply to the overall concept presence.
+
+    Attributes:
+        concept_id: The concept being evaluated
+        image_id: The image being evaluated
+        attribute_term_id: Optional specific attribute being evaluated
+        evidence_kind: "identity", "attribute", "context", "style", or "anomaly"
+        verdict: "supports", "contradicts", or "unknown"
+        confidence: Reviewer confidence in this judgment (0-1)
+        notes: Free-text notes explaining the judgment
+        reviewer: Identifier of the reviewer (user or system)
+        created_at: When this evidence was recorded
+    """
+    __tablename__ = "concept_review_evidence"
+
+    id = Column(Integer, primary_key=True, index=True)
+    concept_id = Column(
+        Integer, ForeignKey("concepts.id"), nullable=False, index=True
+    )
+    image_id = Column(
+        Integer, ForeignKey("images.id"), nullable=False, index=True
+    )
+    attribute_term_id = Column(
+        Integer, ForeignKey("authority_terms.id"), nullable=True, index=True
+    )
+    evidence_kind = Column(
+        String, nullable=False, index=True,
+        comment="Evidence kind: identity, attribute, context, style, anomaly"
+    )
+    verdict = Column(
+        String, nullable=False, index=True,
+        comment="Verdict: supports, contradicts, unknown"
+    )
+    confidence = Column(
+        Float, nullable=True, default=None,
+        comment="Reviewer confidence in this judgment (0-1)"
+    )
+    notes = Column(Text, nullable=True)
+    reviewer = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    concept = relationship("Concept")
+    image = relationship("ImageModel")
+    attribute_term = relationship("AuthorityTerm")
+
+    __table_args__ = (
+        # Supports fast lookup: all review evidence for a concept-image pair
+        Index("ix_review_ev_concept_image", "concept_id", "image_id"),
+        # Supports fast lookup: all review evidence for an image-attribute pair
+        Index("ix_review_ev_image_attribute", "image_id", "attribute_term_id"),
+    )
+
+class ConceptReviewSession(Base):
+    """Process-oriented review pass for grading many images of one concept."""
+
+    __tablename__ = "concept_review_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=False, index=True)
+    status = Column(String, nullable=False, default="open")  # open | completed | abandoned
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+    updated_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+    concept = relationship("Concept", back_populates="review_sessions")
+    assessments = relationship(
+        "ConceptReviewAssessment",
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+
+
+class ConceptReviewAssessment(Base):
+    """Single structured grading record for one image within a review session."""
+
+    __tablename__ = "concept_review_assessments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("concept_review_sessions.id"), nullable=False, index=True)
+    concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=False, index=True)
+    image_id = Column(Integer, ForeignKey("images.id"), nullable=False, index=True)
+
+    predominance_rating = Column(Integer, nullable=True)
+    quality_rating = Column(Integer, nullable=True)
+    accuracy_rating = Column(Integer, nullable=True)
+    attribute_support_rating = Column(Integer, nullable=True)
+
+    context_incongruent = Column(Boolean, nullable=False, default=False)
+    context_anachronistic = Column(Boolean, nullable=False, default=False)
+    context_anatopismic = Column(Boolean, nullable=False, default=False)
+    context_nonsensical = Column(Boolean, nullable=False, default=False)
+    context_anomalous_form = Column(Boolean, nullable=False, default=False)
+
+    anomaly_present = Column(Boolean, nullable=False, default=False)
+    anomaly_kind = Column(String, nullable=True)
+    anomaly_degree = Column(Integer, nullable=True)
+
+    # Concept deviations: intentional creative departures from canonical form
+    # (as opposed to technical generation anomalies).
+    deviation_present = Column(Boolean, nullable=False, default=False)
+    deviation_body_variant = Column(Boolean, nullable=False, default=False)
+    deviation_exaggerated = Column(Boolean, nullable=False, default=False)
+    deviation_extra_feature = Column(Boolean, nullable=False, default=False)
+    deviation_fusion = Column(Boolean, nullable=False, default=False)
+    deviation_kind = Column(String, nullable=True)
+    deviation_degree = Column(Integer, nullable=True)
+
+    image_style_concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=True)
+    image_style_source = Column(String, nullable=True)  # guessed | review | imported
+    image_style_confidence = Column(Float, nullable=True)
+
+    # JSON dict: { attribute_concept_id: "present" | "absent" | "not_visible" }
+    attribute_checks = Column(JSON, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, nullable=True)
+
+    session = relationship("ConceptReviewSession", back_populates="assessments")
+    concept = relationship("Concept", back_populates="review_assessments", foreign_keys=[concept_id])
+    image = relationship("ImageModel", back_populates="review_assessments")
+    image_style_concept = relationship("Concept", foreign_keys=[image_style_concept_id])
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "image_id", name="uq_review_assessment_session_image"),
+        Index("ix_review_assessment_session", "session_id"),
+        Index("ix_review_assessment_concept_image", "concept_id", "image_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Search Lab — preference tracking
+# ---------------------------------------------------------------------------
+# These tables let the user mark images as keep/discard/skip from the search
+# lab, and then hide previously-discarded images from future search results.
+
+class CivitaiSearchImage(Base):
+    """A CivitAI image seen in a search-lab session.
+
+    Stores enough metadata to identify and display the image without requiring
+    a live API call.  Multiple search sessions may reference the same image.
+    """
+
+    __tablename__ = "civitai_search_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    civitai_image_id = Column(Integer, nullable=False, index=True)
+    post_id = Column(Integer, nullable=True)
+    artist_id = Column(Integer, nullable=True)
+    artist_name = Column(String, nullable=True)
+    file_name = Column(String, nullable=True)
+    blurhash = Column(String, nullable=True)
+    uuid = Column(String, nullable=True)
+    file_size = Column(Integer, nullable=True)
+    image_url = Column(Text, nullable=True)
+    tags = Column(JSON, nullable=True)
+    generation_prompt = Column(Text, nullable=True)
+    generation_models = Column(JSON, nullable=True)
+    reactions = Column(Integer, nullable=True)
+    likes = Column(Integer, nullable=True)
+
+    search_links = relationship(
+        "CivitaiSearchImageLink",
+        back_populates="image",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "civitai_image_id", name="uq_civitai_search_images_civitai_image_id"
+        ),
+    )
+
+
+class CivitaiSearchRecord(Base):
+    """A single search-lab query execution.
+
+    Records the query terms, filters, and how many results were returned so
+    the user can review their search history.
+    """
+
+    __tablename__ = "civitai_search_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    search_text = Column(Text, nullable=True)
+    search_terms = Column(JSON, nullable=True)  # structured: tags, base_models, etc.
+    search_rating = Column(String, nullable=True)  # free-form label
+    result_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    image_links = relationship(
+        "CivitaiSearchImageLink",
+        back_populates="search",
+        cascade="all, delete-orphan",
+    )
+
+
+class CivitaiSearchImageLink(Base):
+    """Join table: which images appeared in which search and the user's rating.
+
+    ``rating`` is one of ``keep``, ``discard``, or ``skip``.
+    """
+
+    __tablename__ = "civitai_search_image_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    search_id = Column(
+        Integer, ForeignKey("civitai_search_records.id"), nullable=False, index=True
+    )
+    image_id = Column(
+        Integer,
+        ForeignKey("civitai_search_images.id"),
+        nullable=False,
+        index=True,
+    )
+    position = Column(Integer, nullable=True)
+    rating = Column(String, nullable=True)  # "keep" | "discard" | "skip"
+    is_excluded = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    search = relationship("CivitaiSearchRecord", back_populates="image_links")
+    image = relationship("CivitaiSearchImage", back_populates="search_links")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "search_id", "image_id", name="uq_civitai_search_link_search_image"
+        ),
+    )
+
+
+class CivitaiArtistPreference(Base):
+    """Aggregated keep/discard counts per artist from search-lab sessions.
+
+    Populated incrementally as images are rated, enabling future artist-level
+    filtering (e.g. hide artists with high discard ratios).
+    """
+
+    __tablename__ = "civitai_artist_preferences"
+
+    id = Column(Integer, primary_key=True, index=True)
+    artist_id = Column(Integer, nullable=True, index=True)
+    artist_name = Column(String, nullable=False, index=True)
+    keeps = Column(Integer, nullable=False, default=0)
+    discards = Column(Integer, nullable=False, default=0)
+    is_blocked = Column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "artist_id", "artist_name", name="uq_civitai_artist_pref_artist"
+        ),
     )

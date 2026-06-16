@@ -113,6 +113,7 @@ class TaxonomyConceptUpdateRequest(BaseModel):
     canonical_name: Optional[str] = None
     description: Optional[str] = None
     concept_type: Optional[str] = None
+    status: Optional[str] = None
 
 
 class TaxonomyBootstrapImportRequest(BaseModel):
@@ -140,6 +141,34 @@ class ScoreImageRequest(BaseModel):
     )
 
 
+class ConceptAttributeEntry(BaseModel):
+    """A single attribute linked to a concept."""
+    concept_id: int
+    attribute_concept_id: int
+    attribute_concept_name: str
+    attribute_kind: str = "visual"
+    invariance: str = "variable"
+    consistency_score: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class ConceptAttributeAddRequest(BaseModel):
+    """Add an attribute to a concept."""
+    attribute_concept_id: int = Field(..., description="ID of the concept to use as an attribute")
+    attribute_kind: Literal["visual", "semantic"] = "visual"
+    invariance: Literal["invariant", "variable"] = "variable"
+    consistency_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    notes: Optional[str] = None
+
+
+class ConceptAttributeUpdateRequest(BaseModel):
+    """Update an existing attribute link."""
+    attribute_kind: Optional[Literal["visual", "semantic"]] = None
+    invariance: Optional[Literal["invariant", "variable"]] = None
+    consistency_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    notes: Optional[str] = None
+
+
 class ConceptProfileResponse(BaseModel):
     """Rich concept profile with prototype stats and linked authority terms."""
     id: int
@@ -152,6 +181,9 @@ class ConceptProfileResponse(BaseModel):
     prototype: Optional[dict] = None
     aliases: list[dict] = []
     authority_terms: list[dict] = []
+    attributes: list[ConceptAttributeEntry] = []
+    parent_concept: Optional[dict] = None
+    children: list[dict] = []
 
 
 class ScoreImageResponse(BaseModel):
@@ -164,11 +196,80 @@ class ScoreImageResponse(BaseModel):
     clip_available: bool
 
 
+# ---------------------------------------------------------------------------
+# Prototype Lab
+# ---------------------------------------------------------------------------
+
+
+class AutoBuildPrototypeResponse(BaseModel):
+    """Result of auto-building a prototype from observed images."""
+    concept_id: int
+    concept_name: Optional[str] = None
+    status: str  # "built" | "not_found" | "no_images" | "clip_failed"
+    source_count: int = 0
+    message: str = ""
+
+
+class BatchBuildRequest(BaseModel):
+    """Request body for POST /prototypes/batch-build."""
+    concept_ids: list[int] = Field(
+        ..., min_length=1, max_length=100,
+        description="Concept IDs to build prototypes for",
+    )
+    max_images: int = Field(
+        10, ge=1, le=64,
+        description="Max observed images to use per prototype",
+    )
+
+
+class BatchBuildResponse(BaseModel):
+    """Result of batch prototype building."""
+    total_requested: int
+    built: int
+    failed: int
+    results: list[AutoBuildPrototypeResponse]
+
+
+class StreamBuildRequest(BaseModel):
+    """Request body for POST /prototypes/stream-build (SSE)."""
+    concept_ids: list[int] = Field(
+        ..., min_length=1, max_length=5000,
+        description="Concept IDs to build prototypes for (results stream back via SSE)",
+    )
+    max_images: int = Field(
+        10, ge=1, le=64,
+        description="Max observed images to use per prototype",
+    )
+
+
+class PrototypeStatsResponse(BaseModel):
+    """Global prototype coverage statistics."""
+    total_concepts: int
+    with_observations: int
+    with_prototypes: int
+    observation_brackets: dict[str, int] = {}
+    prototype_brackets: dict[str, int] = {}
+
+
 class TaxonomyConceptTransferImportRequest(BaseModel):
     document: dict[str, Any]
     mode: Literal["graft"] = "graft"
     root_policy: Literal["strict", "permissive"] = "strict"
     dry_run: bool = True
+
+
+class TaxonomySnapshotImportResponse(BaseModel):
+    """Response from the snapshot import endpoint."""
+    status: str  # "completed" | "dry_run" | "aborted"
+    snapshot_format: str
+    snapshot_version: int
+    source_file: str
+    backup_path: Optional[str] = None
+    imported: dict[str, Any] = {}
+    conflicts: list[dict[str, Any]] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    stats: dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +307,7 @@ class ConceptSearchResultItem(BaseModel):
     """A single scored image result."""
     image_id: int
     file_name: str
+    file_hash: Optional[str] = None
     thumbnail_url: Optional[str] = None
     source_url: Optional[str] = None
     width: Optional[int] = None
@@ -213,6 +315,8 @@ class ConceptSearchResultItem(BaseModel):
     identity_score: Optional[float] = None
     context_score: Optional[float] = None
     composite_score: Optional[float] = None
+    # Per-concept similarity scores: {concept_id: cos_sim}
+    concept_scores: dict[int, float] = {}
 
 
 class ConceptSearchResponse(BaseModel):
@@ -493,3 +597,405 @@ class SyncSessionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# Concept Review and Training Support (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class ConceptAttributeTermProfileCreateRequest(BaseModel):
+    """Create or update a concept → authority_term attribute profile."""
+    concept_id: int = Field(..., description="Target concept ID")
+    attribute_term_id: int = Field(..., description="Authority term to track as an attribute")
+    consistency_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="How consistently this attribute appears (0-1)")
+    invariance: bool = Field(False, description="Whether this attribute is invariant (always present)")
+    attribute_mode: Literal["boolean", "countable", "exclusive"] = Field("boolean", description="How the attribute manifests")
+    attribute_family: Optional[str] = Field(None, description="Family for exclusive attributes (e.g., 'hair_color')")
+    cardinality_min: Optional[int] = Field(None, ge=0, description="Minimum count for countable attributes")
+    cardinality_max: Optional[int] = Field(None, ge=0, description="Maximum count for countable attributes (NULL = unlimited)")
+
+
+class ConceptAttributeTermProfileUpdateRequest(BaseModel):
+    """Update an existing attribute term profile."""
+    consistency_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    invariance: Optional[bool] = None
+    attribute_mode: Optional[Literal["boolean", "countable", "exclusive"]] = None
+    attribute_family: Optional[str] = None
+    cardinality_min: Optional[int] = Field(None, ge=0)
+    cardinality_max: Optional[int] = Field(None, ge=0)
+
+
+class ConceptAttributeTermProfileResponse(BaseModel):
+    """Response model for concept → authority_term attribute profile."""
+    concept_id: int
+    attribute_term_id: int
+    consistency_score: Optional[float] = None
+    invariance: bool
+    attribute_mode: str
+    attribute_family: Optional[str] = None
+    cardinality_min: Optional[int] = None
+    cardinality_max: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    concept_name: Optional[str] = None  # Joined from concepts table
+    attribute_term_name: Optional[str] = None  # Joined from authority_terms table
+    authority_name: Optional[str] = None  # Joined from tag_authorities table
+
+    class Config:
+        from_attributes = True
+
+
+class ConceptAttributeAuthorityWeightCreateRequest(BaseModel):
+    """Create or update authority-specific weights for an attribute."""
+    concept_id: int = Field(..., description="Target concept ID")
+    attribute_term_id: int = Field(..., description="Authority term ID")
+    authority_id: int = Field(..., description="Tag authority ID")
+    base_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="Configured trust weight (NULL = use global default)")
+    learned_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="Learned weight from review (NULL = use base_weight)")
+
+
+class ConceptAttributeAuthorityWeightUpdateRequest(BaseModel):
+    """Update authority-specific weights."""
+    base_weight: Optional[float] = Field(None, ge=0.0, le=1.0)
+    learned_weight: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class ConceptAttributeAuthorityWeightResponse(BaseModel):
+    """Response model for authority-specific attribute weights."""
+    concept_id: int
+    attribute_term_id: int
+    authority_id: int
+    base_weight: Optional[float] = None
+    learned_weight: Optional[float] = None
+    updated_at: Optional[str] = None
+    concept_name: Optional[str] = None
+    attribute_term_name: Optional[str] = None
+    authority_name: Optional[str] = None
+    effective_weight: Optional[float] = None  # learned_weight or base_weight
+
+    class Config:
+        from_attributes = True
+
+
+class ConceptReviewEvidenceCreateRequest(BaseModel):
+    """Create a new human review evidence record."""
+    concept_id: int = Field(..., description="Target concept ID")
+    image_id: int = Field(..., description="Image ID being reviewed")
+    attribute_term_id: Optional[int] = Field(None, description="Authority term ID (optional for concept-level reviews)")
+    evidence_kind: Literal["identity", "attribute", "context", "style", "anomaly"] = Field(..., description="Type of evidence")
+    verdict: Literal["supports", "contradicts", "unknown"] = Field(..., description="Reviewer judgment")
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Reviewer confidence (0-1)")
+    notes: Optional[str] = Field(None, max_length=1000, description="Additional notes from reviewer")
+    reviewer: Optional[str] = Field(None, max_length=100, description="Reviewer identifier")
+
+
+class ConceptReviewEvidenceUpdateRequest(BaseModel):
+    """Update an existing review evidence record."""
+    verdict: Optional[Literal["supports", "contradicts", "unknown"]] = None
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class ConceptReviewEvidenceResponse(BaseModel):
+    """Response model for review evidence records."""
+    id: int
+    concept_id: int
+    image_id: int
+    attribute_term_id: Optional[int] = None
+    evidence_kind: str
+    verdict: str
+    confidence: Optional[float] = None
+    notes: Optional[str] = None
+    reviewer: Optional[str] = None
+    created_at: Optional[str] = None
+    # Optional joined fields
+    concept_name: Optional[str] = None
+    image_file_name: Optional[str] = None
+    image_thumbnail_url: Optional[str] = None
+    attribute_term_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ConceptObservationUpdateRequest(BaseModel):
+    """Update observation weighting fields on an existing observation."""
+    observation_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="Overall weight for training (0-1)")
+    review_confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Reviewer confidence (0-1)")
+    training_role: Optional[Literal["positive_exemplar", "hard_negative", "style_ref", "context_ref", "anomaly"]] = Field(None)
+    concept_strength_weight: Optional[float] = Field(None, ge=0.0, le=1.0, description="How completely concept is supported by attributes (0-1)")
+
+
+class ConceptObservationResponse(BaseModel):
+    """Response model for observation with weighting fields."""
+    id: int
+    image_id: int
+    concept_id: int
+    authority_id: Optional[int] = None
+    authority_term_id: Optional[int] = None
+    tool_id: Optional[int] = None
+    analysis_data_id: Optional[int] = None
+    source_type: Optional[int] = None
+    certainty_label: Optional[int] = None
+    is_present: Optional[bool] = None
+    is_curated: Optional[bool] = None
+    confidence: Optional[float] = None
+    # Weighting fields
+    observation_weight: Optional[float] = None
+    review_confidence: Optional[float] = None
+    training_role: Optional[str] = None
+    concept_strength_weight: Optional[float] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    # Optional joined fields
+    concept_name: Optional[str] = None
+    image_file_name: Optional[str] = None
+    image_thumbnail_url: Optional[str] = None
+    authority_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ConceptProfileWeightingSummary(BaseModel):
+    """Aggregated weighting statistics for a concept's observations."""
+    concept_id: int
+    concept_name: Optional[str] = None
+    total_observations: int = 0
+    weighted_observations: int = 0
+    positive_exemplars: int = 0
+    hard_negatives: int = 0
+    style_refs: int = 0
+    context_refs: int = 0
+    anomalies: int = 0
+    avg_observation_weight: Optional[float] = None
+    avg_concept_strength: Optional[float] = None
+    avg_review_confidence: Optional[float] = None
+
+
+class ConceptScoringConfig(BaseModel):
+    """Scoring exponents and numeric stability settings."""
+    alpha_identity: float = Field(0.55, ge=0.0, le=1.0)
+    alpha_attribute: float = Field(0.25, ge=0.0, le=1.0)
+    alpha_context: float = Field(0.15, ge=0.0, le=1.0)
+    alpha_style: float = Field(0.05, ge=0.0, le=1.0)
+    epsilon: float = Field(0.05, ge=0.000001, le=0.5)
+
+
+class ConceptScoredImage(BaseModel):
+    """Per-image scoring breakdown for a concept."""
+    image_id: int
+    image_file_name: Optional[str] = None
+    image_file_hash: Optional[str] = None
+    image_thumbnail_url: Optional[str] = None
+    image_style_concept_id: Optional[int] = None
+    image_style_concept_name: Optional[str] = None
+    image_style_source: Optional[str] = None
+    image_style_confidence: Optional[float] = None
+    observation_count: int = 0
+    identity_score: float
+    attribute_score: float
+    context_score: float
+    style_score: float
+    anomaly_penalty: float
+    final_score: float
+
+
+class ConceptScoringResponse(BaseModel):
+    """Scored images and component breakdown for one concept."""
+    concept_id: int
+    concept_name: Optional[str] = None
+    total_images: int
+    scoring: ConceptScoringConfig
+    results: list[ConceptScoredImage]
+
+
+class ConceptReviewSessionCreateRequest(BaseModel):
+    """Create a new concept review session."""
+    notes: Optional[str] = Field(None, max_length=2000)
+
+
+class ConceptReviewSessionUpdateRequest(BaseModel):
+    """Update review session metadata/status."""
+    status: Optional[Literal["open", "completed", "abandoned"]] = None
+    notes: Optional[str] = Field(None, max_length=2000)
+
+
+class ConceptReviewSessionResponse(BaseModel):
+    """Response model for review sessions."""
+    id: int
+    concept_id: int
+    concept_name: Optional[str] = None
+    status: str
+    notes: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    closed_at: Optional[str] = None
+    assessment_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class ConceptReviewAssessmentUpsertRequest(BaseModel):
+    """Upsert one structured image assessment in a review session."""
+    image_id: int = Field(..., description="Image being assessed")
+    predominance_rating: Optional[int] = Field(None, ge=1, le=5)
+    quality_rating: Optional[int] = Field(None, ge=1, le=5)
+    accuracy_rating: Optional[int] = Field(None, ge=1, le=5)
+    attribute_support_rating: Optional[int] = Field(None, ge=1, le=5)
+
+    context_incongruent: bool = False
+    context_anachronistic: bool = False
+    context_anatopismic: bool = False
+    context_nonsensical: bool = False
+    context_anomalous_form: bool = False
+
+    anomaly_present: bool = False
+    anomaly_kind: Optional[str] = Field(None, max_length=100)
+    anomaly_degree: Optional[int] = Field(None, ge=1, le=4)
+
+    deviation_present: bool = False
+    deviation_body_variant: bool = False
+    deviation_exaggerated: bool = False
+    deviation_extra_feature: bool = False
+    deviation_fusion: bool = False
+    deviation_kind: Optional[str] = Field(None, max_length=100)
+    deviation_degree: Optional[int] = Field(None, ge=1, le=4)
+
+    image_style_concept_id: Optional[int] = None
+    image_style_source: Optional[Literal["guessed", "review", "imported"]] = None
+    image_style_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+    # { attribute_concept_id(str): "present" | "absent" | "not_visible" }
+    attribute_checks: Optional[dict[str, str]] = None
+    notes: Optional[str] = Field(None, max_length=2000)
+
+
+class ConceptReviewAssessmentResponse(BaseModel):
+    """Response model for one image assessment."""
+    id: int
+    session_id: int
+    concept_id: int
+    concept_name: Optional[str] = None
+    image_id: int
+    image_file_name: Optional[str] = None
+    image_thumbnail_url: Optional[str] = None
+
+    predominance_rating: Optional[int] = None
+    quality_rating: Optional[int] = None
+    accuracy_rating: Optional[int] = None
+    attribute_support_rating: Optional[int] = None
+
+    context_incongruent: bool = False
+    context_anachronistic: bool = False
+    context_anatopismic: bool = False
+    context_nonsensical: bool = False
+    context_anomalous_form: bool = False
+
+    anomaly_present: bool = False
+    anomaly_kind: Optional[str] = None
+    anomaly_degree: Optional[int] = None
+
+    deviation_present: bool = False
+    deviation_body_variant: bool = False
+    deviation_exaggerated: bool = False
+    deviation_extra_feature: bool = False
+    deviation_fusion: bool = False
+    deviation_kind: Optional[str] = None
+    deviation_degree: Optional[int] = None
+
+    image_style_concept_id: Optional[int] = None
+    image_style_concept_name: Optional[str] = None
+    image_style_source: Optional[str] = None
+    image_style_confidence: Optional[float] = None
+
+    attribute_checks: Optional[dict[str, str]] = None
+    notes: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BulkReviewEvidenceRequest(BaseModel):
+    """Bulk create review evidence records."""
+    evidence_records: list[ConceptReviewEvidenceCreateRequest] = Field(..., min_length=1, max_length=100, description="Evidence records to create")
+
+
+class BulkObservationWeightUpdateRequest(BaseModel):
+    """Bulk update observation weights."""
+    observation_updates: list[dict] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Updates: [{id, observation_weight, review_confidence, training_role, concept_strength_weight}]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Search Lab — image preference tracking
+# ---------------------------------------------------------------------------
+
+class CivitaiImageRatingRequest(BaseModel):
+    """Rate a CivitAI image seen in the search lab.
+
+    ``rating`` is one of ``keep``, ``discard``, or ``skip``.
+    The endpoint upserts the image record, records a search-image link, and
+    increments artist preference counters when applicable.
+    """
+    civitai_image_id: int
+    rating: Literal["keep", "discard", "skip"]
+    # Optional metadata so we can store a useful image record
+    post_id: Optional[int] = None
+    artist_id: Optional[int] = None
+    artist_name: Optional[str] = None
+    file_name: Optional[str] = None
+    blurhash: Optional[str] = None
+    uuid: Optional[str] = None
+    file_size: Optional[int] = None
+    image_url: Optional[str] = None
+    tags: Optional[list[str]] = None
+    generation_prompt: Optional[str] = None
+    generation_models: Optional[list[dict]] = None
+    reactions: Optional[int] = None
+    likes: Optional[int] = None
+    position: Optional[int] = None
+    search_id: Optional[int] = None
+
+
+class CivitaiSearchRecordRequest(BaseModel):
+    """Record that a search was performed."""
+    search_text: Optional[str] = None
+    search_terms: Optional[dict] = None
+    search_rating: Optional[str] = None
+    result_count: int = 0
+
+
+class CivitaiImageRatingResponse(BaseModel):
+    status: str
+    rating: str
+    is_excluded: bool
+
+
+# ---------------------------------------------------------------------------
+# CivitAI Search Lab — artist preference summary & blocking
+# ---------------------------------------------------------------------------
+
+class CivitaiArtistSummaryItem(BaseModel):
+    """One row in the artist score summary."""
+    artist_id: Optional[int] = None
+    artist_name: str
+    keeps: int = 0
+    discards: int = 0
+    score: int = 0
+    is_blocked: bool = False
+
+
+class CivitaiArtistBlockRequest(BaseModel):
+    """Toggle blocked status for one artist."""
+    artist_name: str
+    artist_id: Optional[int] = None
+    is_blocked: bool

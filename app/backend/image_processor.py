@@ -61,6 +61,9 @@ _FFMPEG_COMMAND: Optional[str] = None
 VIDEO_POSTER_SUFFIX = ".poster.jpg"
 VIDEO_POSTER_DIRNAME = "video_posters"
 VIDEO_THUMBNAIL_DIRNAME = "video_thumbnails"
+IMAGE_THUMBNAIL_DIRNAME = "thumbnails"
+IMAGE_THUMBNAIL_SUFFIX = ".thumb.webp"
+IMAGE_THUMBNAIL_SIZE = (256, 256)
 VIDEO_THUMBNAIL_VARIANTS = {
     "webp": {
         "suffix": ".thumb.v2.webp",
@@ -388,6 +391,66 @@ def ensure_video_thumbnail(image_path: Path, resources_root: str | Path) -> Opti
             return thumbnail_path
     except OSError:
         return thumbnail_path if thumbnail_path.exists() else None
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+    return thumbnail_path if thumbnail_path.exists() else None
+
+
+def get_image_thumbnail_path(image_path: Path, resources_root: str | Path) -> Path:
+    """Return the cached thumbnail path for a still image under image_resources."""
+    thumbnails_root = Path(resources_root) / IMAGE_THUMBNAIL_DIRNAME
+    return thumbnails_root / f"{image_path.stem}{IMAGE_THUMBNAIL_SUFFIX}"
+
+
+def _is_cached_image_thumbnail_current(image_path: Path, thumbnail_path: Path) -> bool:
+    """Check if a cached still-image thumbnail exists and is up to date."""
+    if not thumbnail_path.exists() or not thumbnail_path.is_file():
+        return False
+    try:
+        if thumbnail_path.stat().st_size <= 0:
+            return False
+        return thumbnail_path.stat().st_mtime >= image_path.stat().st_mtime
+    except OSError:
+        return False
+
+
+def ensure_image_thumbnail(image_path: Path, resources_root: str | Path) -> Optional[Path]:
+    """Generate and cache a WebP thumbnail for a still image.
+
+    Returns the path to the cached thumbnail, or ``None`` if generation fails.
+    """
+    if not image_path.exists() or not image_path.is_file():
+        return None
+
+    suffix = image_path.suffix.lower()
+    if suffix in {".mp4", ".webm"}:
+        return None  # Videos should use ensure_video_thumbnail instead
+
+    thumbnail_path = get_image_thumbnail_path(image_path, resources_root)
+    thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if _is_cached_image_thumbnail_current(image_path, thumbnail_path):
+        return thumbnail_path
+
+    temp_path = thumbnail_path.with_name(
+        f".{thumbnail_path.stem}.tmp{thumbnail_path.suffix}"
+    )
+    try:
+        if temp_path.exists():
+            temp_path.unlink()
+
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail(IMAGE_THUMBNAIL_SIZE, Image.LANCZOS)
+            img.save(str(temp_path), "WEBP", quality=80, method=4)
+
+        if temp_path.exists() and temp_path.stat().st_size > 0:
+            temp_path.replace(thumbnail_path)
+            return thumbnail_path
+    except Exception:
+        pass
     finally:
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)

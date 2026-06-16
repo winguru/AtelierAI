@@ -51,3 +51,21 @@ Storage uses the existing `confidence` float on `ImageConceptObservation`. Sourc
 - `AuthorityTerm.concept_id` is `nullable=True` — terms can exist without concepts
 - `_upsert_civitai_authority_terms()` already creates terms with `concept_id=None` (correct behavior)
 - `main.py` contains duplicate copies of the import functions — changes must be applied to both
+
+## Observation ↔ Concept Linkage
+
+### The concept_id gap
+`ImageConceptObservation` rows get `authority_term_id` during import but `concept_id` is not automatically populated from the authority_term's `concept_id`. This causes the concept search pipeline's `resolve_candidate_images` stage to find zero candidates for any concept.
+
+**Fix**: The `POST /api/taxonomy/concept-search/rescan` endpoint:
+1. Deletes null-concept observations that would violate the UNIQUE constraint on `(image_id, concept_id, authority_id)` 
+2. Deletes same-batch conflicts (two null obs for same image+authority that would get the same concept_id)
+3. Backfills `concept_id` from `authority_terms.concept_id`
+
+The "Rescan Associations" button in the Concept Search Lab triggers this endpoint and refreshes the coverage index.
+
+### Key files
+- `app/backend/services/concept_search_service.py` — search pipeline (decompose → resolve → CLIP score)
+- `app/backend/routers/taxonomy.py` — rescan endpoint + all search endpoints
+- `app/frontend/js/concept-search-lab.js` — rescan button handler
+- `app/frontend/concept-search-lab.html` — rescan button markup

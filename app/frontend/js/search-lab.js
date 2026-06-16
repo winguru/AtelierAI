@@ -7,8 +7,12 @@
   const API_SEARCH = '/api/civitai-search';
   const API_AUTH_STATUS = '/api/civitai-search/auth-status';
   const API_LIBRARY_STATUS = '/api/civitai-search/library-status';
+  const API_RATE_IMAGE = '/api/civitai-search/rate';
+  const API_SEARCH_RECORD = '/api/civitai-search/search-record';
   const API_BATCH_IMPORT = '/api/import_civitai/batch';
   const API_COLLECTIONS = '/api/collections/';
+  const API_ARTIST_SUMMARY = '/api/civitai-search/artist-summary';
+  const API_ARTIST_BLOCK = '/api/civitai-search/artist-block';
 
   // Fallback; overwritten once /api/config resolves.
   let CIVITAI_IMAGE_URL = 'https://civitai.red/images/';
@@ -181,6 +185,8 @@
     detailFolderWorkspace: null,
     importedIds: new Set(),     // civitai_image_ids already in library
     importTasks: new Map(),    // civitaiId → task_id (pending imports)
+    imageRatings: new Map(),   // civitaiId → "keep" | "discard" | "skip"
+    currentSearchId: null,     // DB id of the current search record
   };
 
   /* ── Initialise ── */
@@ -714,6 +720,236 @@
     document.addEventListener('keydown', handleKeyboard);
   }
 
+  /* ── Image preference (keep / discard / skip) ── */
+  async function rateImage(rating) {
+    const idx = state.selectedHitIndex;
+    if (idx < 0 || idx >= state.hits.length) return;
+
+    const hit = state.hits[idx];
+    const body = {
+      civitai_image_id: hit.id,
+      rating,
+      post_id: hit.postId ?? null,
+      artist_id: hit.user?.id ?? null,
+      artist_name: hit.user?.username ?? null,
+      file_name: hit.file_name ?? null,
+      blurhash: hit.blurhash ?? null,
+      uuid: hit.url ?? null,
+      image_url: hit.url ?? null,
+      tags: hit.tagNames ?? null,
+      generation_prompt: hit.prompt ?? null,
+      generation_models: hit.models ?? null,
+      reactions: hit.stats?.reactionCount ?? null,
+      likes: hit.stats?.likeCount ?? null,
+      position: idx,
+      search_id: state.currentSearchId,
+    };
+
+    // Optimistic update — reflect rating immediately in the UI.
+    state.imageRatings.set(hit.id, rating);
+    updateTileRatingIndicator(idx);
+
+    try {
+      const res = await fetch(API_RATE_IMAGE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        // Roll back optimistic state on failure.
+        state.imageRatings.delete(hit.id);
+        updateTileRatingIndicator(idx);
+        console.error('Failed to rate image:', await res.text());
+      } else {
+        // Refresh artist summary with the new rating data.
+        scheduleArtistSummaryRefresh();
+      }
+    } catch (err) {
+      state.imageRatings.delete(hit.id);
+      updateTileRatingIndicator(idx);
+      console.error('Failed to rate image:', err);
+    }
+  }
+
+  /** Advance to the next image (gallery or fullscreen). */
+  function advanceToNext() {
+    const fullscreenOpen = !els.fullscreen_preview.classList.contains('hidden');
+    if (fullscreenOpen) {
+      navigateFullscreen(1);
+    } else {
+      if (state.selectedHitIndex < state.hits.length - 1) {
+        selectTile(state.selectedHitIndex + 1);
+      }
+    }
+  }
+
+  /** Update the rating badge on a single tile after rating changes. */
+  function updateTileRatingIndicator(idx) {
+    const tile = els.gallery_grid.querySelector(`.tile[data-index="${idx}"]`);
+    if (!tile) return;
+    const hit = state.hits[idx];
+    const rating = state.imageRatings.get(hit.id);
+
+    // Remove old badge.
+    const old = tile.querySelector('.tile-rating-badge');
+    if (old) old.remove();
+
+    if (!rating) return;
+
+    const badge = document.createElement('span');
+    badge.className = `tile-rating-badge is-${rating}`;
+    if (rating === 'keep') badge.textContent = '★';
+    else if (rating === 'discard') badge.textContent = '✕';
+    else if (rating === 'skip') badge.textContent = '○';
+    badge.title = rating;
+    tile.appendChild(badge);
+  }
+
+  /** Re-apply rating badges to all currently rendered tiles. */
+  function refreshAllRatingIndicators() {
+    for (let i = 0; i < state.hits.length; i++) {
+      updateTileRatingIndicator(i);
+    }
+  }
+
+  /** Persist the search query so image ratings can be linked to it. */
+  async function recordSearch(query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy, resultCount) {
+    const body = {
+      search_text: query || null,
+      search_terms: {
+        tags: tags || null,
+        sort_by: sortBy || null,
+        base_model: baseModel || null,
+        username: username || null,
+        nsfw_levels: nsfwLevels || null,
+        match_strategy: matchStrategy || null,
+      },
+      result_count: resultCount,
+    };
+    try {
+      const res = await fetch(API_SEARCH_RECORD, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        state.currentSearchId = data.id;
+      }
+    } catch (err) {
+      // Non-critical — ratings still work without a search record.
+      console.warn('Could not record search:', err);
+    }
+  }
+
+  /* ── Artist score summary ── */
+  let _artistSummaryTimer = null;
+
+  /** Fetch the artist summary from the backend and render it. */
+  async function fetchArtistSummary() {
+    try {
+      const res = await fetch(API_ARTIST_SUMMARY);
+      if (!res.ok) return;
+      const data = await res.json();
+      // Backend returns a flat list of artist objects.
+      const artists = Array.isArray(data) ? data : [];
+      renderArtistSummary(artists);
+    } catch (err) {
+      console.warn('Artist summary fetch failed:', err);
+    }
+  }
+
+  /** Schedule an artist-summary refresh (debounced). */
+  function scheduleArtistSummaryRefresh() {
+    if (_artistSummaryTimer) clearTimeout(_artistSummaryTimer);
+    _artistSummaryTimer = setTimeout(() => fetchArtistSummary(), 600);
+  }
+
+  /** Render the artist summary panel. */
+  function renderArtistSummary(artists) {
+    const container = document.getElementById('artist-summary');
+    if (!container) return;
+    const body = container.querySelector('.artist-summary-body');
+    if (!body) return;
+
+    if (!artists || artists.length === 0) {
+      body.innerHTML = '<p class="artist-summary-empty">No artist data yet — rate some images to see scores.</p>';
+      return;
+    }
+
+    body.innerHTML = '';
+    for (const a of artists) {
+      const row = document.createElement('div');
+      row.className = 'artist-row' + (a.is_blocked ? ' is-blocked' : '');
+
+      const name = document.createElement('span');
+      name.className = 'artist-row-name';
+      name.textContent = a.artist_name;
+      row.appendChild(name);
+
+      const stats = document.createElement('span');
+      stats.className = 'artist-row-stats';
+
+      if (a.keeps > 0) {
+        const keep = document.createElement('span');
+        keep.className = 'artist-row-stat is-keep';
+        keep.textContent = `↑${a.keeps}`;
+        stats.appendChild(keep);
+      }
+      if (a.discards > 0) {
+        const discard = document.createElement('span');
+        discard.className = 'artist-row-stat is-discard';
+        discard.textContent = `↓${a.discards}`;
+        stats.appendChild(discard);
+      }
+      row.appendChild(stats);
+
+      const score = document.createElement('span');
+      const scoreClass = a.score > 0 ? 'is-positive' : a.score < 0 ? 'is-negative' : '';
+      score.className = 'artist-row-score ' + scoreClass;
+      score.textContent = (a.score > 0 ? '+' : '') + a.score;
+      row.appendChild(score);
+
+      const blockBtn = document.createElement('button');
+      blockBtn.type = 'button';
+      blockBtn.className = 'artist-block-btn' + (a.is_blocked ? ' is-blocked' : '');
+      blockBtn.textContent = a.is_blocked ? 'Blocked' : 'Block';
+      blockBtn.title = a.is_blocked ? 'Unblock this artist' : 'Block this artist from search results';
+      blockBtn.addEventListener('click', () => toggleArtistBlock(a.artist_name, a.artist_id, !a.is_blocked));
+      row.appendChild(blockBtn);
+
+      body.appendChild(row);
+    }
+  }
+
+  /** Toggle the blocked state of an artist. */
+  async function toggleArtistBlock(artistName, artistId, shouldBlock) {
+    try {
+      const res = await fetch(API_ARTIST_BLOCK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artist_name: artistName,
+          artist_id: artistId ?? null,
+          is_blocked: shouldBlock,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.detail || `HTTP ${res.status}`);
+      }
+      // Refresh the summary and re-run the current search
+      fetchArtistSummary();
+      // Re-search to apply/remove the block filter
+      state.offset = 0;
+      state.hits = [];
+      executeSearch();
+    } catch (err) {
+      console.error('Failed to toggle artist block:', err);
+      setStatus(`Failed to ${shouldBlock ? 'block' : 'unblock'} artist: ${err.message}`, 'is-error');
+    }
+  }
+
   /* ── Search ── */
   async function executeSearch(append = false) {
     if (state.loading) return;
@@ -783,6 +1019,7 @@
 
       renderResults(append);
       renderFacets();
+      refreshAllRatingIndicators();
 
       // Display: cap total at MAX_RESULTS — when total equals the cap, assume it's truncated
       const capped = state.total >= MAX_RESULTS;
@@ -804,6 +1041,14 @@
 
       // Fetch library status for current hits
       fetchLibraryStatus();
+
+      // Refresh artist summary panel
+      fetchArtistSummary();
+
+      // Record the search to the backend for history (fresh searches only)
+      if (!append) {
+        recordSearch(query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy, data.total || 0);
+      }
     } catch (err) {
       // Revert offset on failure so "Load More" can be retried.
       if (append) state.offset = savedOffset;
@@ -1344,7 +1589,10 @@
   function updateFullscreenCounter() {
     const idx = state.selectedHitIndex;
     const selected = state.selectedIndices.has(idx) ? ' ✓' : '';
-    els.fullscreen_counter.textContent = `${idx + 1} / ${state.hits.length}${selected}`;
+    const hit = state.hits[idx];
+    const rating = hit && state.imageRatings.get(hit.id);
+    const ratingLabel = rating ? ` [${rating}]` : '';
+    els.fullscreen_counter.textContent = `${idx + 1} / ${state.hits.length}${selected}${ratingLabel}`;
   }
 
   /* ── Fullscreen: toggle selection of current image via Space ── */
@@ -1408,6 +1656,26 @@
   function handleKeyboard(e) {
     // Fullscreen nav
     const fullscreenOpen = !els.fullscreen_preview.classList.contains('hidden');
+
+    // Preference shortcuts work in both gallery and fullscreen modes.
+    if (e.key === 'z' || e.key === 'Z') {
+      e.preventDefault();
+      rateImage('skip');
+      advanceToNext();
+      return;
+    }
+    if (e.key === 'x' || e.key === 'X') {
+      e.preventDefault();
+      rateImage('discard');
+      advanceToNext();
+      return;
+    }
+    if (e.key === 'c' || e.key === 'C') {
+      e.preventDefault();
+      rateImage('keep');
+      advanceToNext();
+      return;
+    }
 
     if (fullscreenOpen) {
       if (e.key === 'Escape') { closeFullscreen(); return; }

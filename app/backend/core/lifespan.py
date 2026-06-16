@@ -775,6 +775,28 @@ def _ensure_civitai_user_columns() -> None:
                     continue
 
 
+def _ensure_artist_preference_blocked_column() -> None:
+    """Add is_blocked column to civitai_artist_preferences if missing.
+
+    The table is created by ``Base.metadata.create_all`` for new databases,
+    but existing databases that pre-date this column need an ALTER TABLE.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_artist_preferences)")
+            ).fetchall()
+        }
+        if "is_blocked" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE civitai_artist_preferences "
+                    "ADD COLUMN is_blocked BOOLEAN DEFAULT 0 NOT NULL"
+                )
+            )
+
+
 def _ensure_observation_unique_constraint() -> None:
     """Add unique constraint to image_concept_observations if missing.
 
@@ -975,6 +997,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _ensure_civitai_user_columns()
     _ensure_observation_unique_constraint()
     _ensure_file_hash_nonunique()
+    _ensure_artist_preference_blocked_column()
 
     print("AtelierAI API is ready to go!")
 

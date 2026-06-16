@@ -17,8 +17,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import ImageModel
-from schemas import CivitaiSearchRequest
+from models import (
+    CivitaiArtistPreference,
+    CivitaiSearchImage,
+    CivitaiSearchImageLink,
+    CivitaiSearchRecord,
+    ImageModel,
+)
+from schemas import (
+    CivitaiArtistBlockRequest,
+    CivitaiArtistSummaryItem,
+    CivitaiImageRatingRequest,
+    CivitaiImageRatingResponse,
+    CivitaiSearchRecordRequest,
+    CivitaiSearchRequest,
+)
 from utils.cache import (
     _build_search_cache_key,
     _search_cache_get,
@@ -151,7 +164,7 @@ def _classify_civitai_upstream_error(exc: Any) -> HTTPException:
 
 
 @router.post("", response_model=dict)
-def civitai_search_proxy(payload: CivitaiSearchRequest):
+def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(get_db)):
     """Proxy a search request to the CivitAI Meilisearch host.
 
     Handles bearer-token acquisition automatically from the cached session
@@ -211,6 +224,21 @@ def civitai_search_proxy(payload: CivitaiSearchRequest):
     # Build normalized response with frontend-friendly field names.
     raw_hits = result.get("hits", [])
     normalized_hits = [_normalize_meili_hit(h) for h in raw_hits]
+
+    # Filter out images the user has discarded in previous sessions.
+    excluded_ids = _get_excluded_civitai_image_ids(db)
+    if excluded_ids:
+        normalized_hits = [
+            h for h in normalized_hits if h.get("id") not in excluded_ids
+        ]
+
+    # Filter out images from blocked artists.
+    blocked_names = _get_blocked_artist_names(db)
+    if blocked_names:
+        normalized_hits = [
+            h for h in normalized_hits
+            if h.get("user", {}).get("username") not in blocked_names
+        ]
 
     response = {
         "hits": normalized_hits,
@@ -301,3 +329,251 @@ def civitai_search_auth_status():
             else "No Meilisearch key. Search will use REST API fallback (slower, limited filters)."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Image preference tracking (keep / discard / skip)
+# ---------------------------------------------------------------------------
+
+
+def _get_excluded_civitai_image_ids(db: Session) -> set[int]:
+    """Return the set of CivitAI image IDs the user has discarded.
+
+    An image is considered excluded when *any* link record has
+    ``is_excluded = True``.  Once excluded the image stays hidden across all
+    future searches until the user changes the rating.
+    """
+    rows = (
+        db.query(CivitaiSearchImage.civitai_image_id)
+        .join(
+            CivitaiSearchImageLink,
+            CivitaiSearchImageLink.image_id == CivitaiSearchImage.id,
+        )
+        .filter(CivitaiSearchImageLink.is_excluded.is_(True))
+        .distinct()
+        .all()
+    )
+    return {r[0] for r in rows}
+
+
+def _upsert_search_image(db: Session, hit: CivitaiImageRatingRequest) -> CivitaiSearchImage:
+    """Insert or update a CivitaiSearchImage row from the request data."""
+    img = (
+        db.query(CivitaiSearchImage)
+        .filter(CivitaiSearchImage.civitai_image_id == hit.civitai_image_id)
+        .first()
+    )
+    if img is None:
+        img = CivitaiSearchImage(civitai_image_id=hit.civitai_image_id)
+        db.add(img)
+        db.flush()
+
+    # Update mutable metadata fields.
+    img.post_id = hit.post_id
+    img.artist_id = hit.artist_id
+    img.artist_name = hit.artist_name
+    img.file_name = hit.file_name
+    img.blurhash = hit.blurhash
+    img.uuid = hit.uuid
+    img.file_size = hit.file_size
+    img.image_url = hit.image_url
+    img.tags = hit.tags
+    img.generation_prompt = hit.generation_prompt
+    img.generation_models = hit.generation_models
+    img.reactions = hit.reactions
+    img.likes = hit.likes
+    db.flush()
+    return img
+
+
+def _update_artist_preference(
+    db: Session,
+    artist_id: int | None,
+    artist_name: str | None,
+    *,
+    is_keep: bool,
+) -> None:
+    """Increment keep/discard counter for the artist, if known."""
+    if not artist_name and artist_id is None:
+        return
+
+    pref = (
+        db.query(CivitaiArtistPreference)
+        .filter(
+            CivitaiArtistPreference.artist_id == artist_id,
+            CivitaiArtistPreference.artist_name == artist_name,
+        )
+        .first()
+    )
+    if pref is None:
+        pref = CivitaiArtistPreference(
+            artist_id=artist_id,
+            artist_name=artist_name or f"artist-{artist_id}",
+            keeps=0,
+            discards=0,
+        )
+        db.add(pref)
+
+    if is_keep:
+        pref.keeps = (pref.keeps or 0) + 1
+    else:
+        pref.discards = (pref.discards or 0) + 1
+
+
+@router.post("/rate", response_model=CivitaiImageRatingResponse)
+def rate_civitai_image(
+    payload: CivitaiImageRatingRequest, db: Session = Depends(get_db)
+):
+    """Record a keep / discard / skip rating for a CivitAI search image.
+
+    * **discard** marks the image as excluded — it will be hidden from all
+      future search results.
+    * **keep** clears any previous exclusion.
+    * **skip** advances without changing the exclusion state.
+    """
+    img = _upsert_search_image(db, payload)
+
+    is_excluded = payload.rating == "discard"
+
+    # Find or create the link row for this search+image pair.
+    link = None
+    if payload.search_id is not None:
+        link = (
+            db.query(CivitaiSearchImageLink)
+            .filter(
+                CivitaiSearchImageLink.search_id == payload.search_id,
+                CivitaiSearchImageLink.image_id == img.id,
+            )
+            .first()
+        )
+
+    if link is None:
+        link = CivitaiSearchImageLink(
+            image_id=img.id,
+            search_id=payload.search_id,
+            position=payload.position,
+        )
+        db.add(link)
+
+    link.rating = payload.rating
+    link.is_excluded = is_excluded
+    if payload.position is not None:
+        link.position = payload.position
+
+    # Update artist preference counters (only for keep/discard, not skip).
+    if payload.rating in ("keep", "discard"):
+        _update_artist_preference(
+            db,
+            artist_id=payload.artist_id,
+            artist_name=payload.artist_name,
+            is_keep=(payload.rating == "keep"),
+        )
+
+    db.commit()
+    return CivitaiImageRatingResponse(
+        status="ok", rating=payload.rating, is_excluded=is_excluded
+    )
+
+
+@router.get("/excluded-ids", response_model=dict)
+def get_excluded_image_ids(db: Session = Depends(get_db)):
+    """Return CivitAI image IDs the user has discarded (for client-side filtering)."""
+    return {"excluded_ids": sorted(_get_excluded_civitai_image_ids(db))}
+
+
+@router.post("/search-record", response_model=dict)
+def create_search_record(
+    payload: CivitaiSearchRecordRequest, db: Session = Depends(get_db)
+):
+    """Persist a search query for history/tracking.  Returns the new record ID."""
+    record = CivitaiSearchRecord(
+        search_text=payload.search_text,
+        search_terms=payload.search_terms,
+        search_rating=payload.search_rating,
+        result_count=payload.result_count,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"id": record.id}
+
+
+# ---------------------------------------------------------------------------
+# Artist preference summary & blocking
+# ---------------------------------------------------------------------------
+
+
+def _get_blocked_artist_names(db: Session) -> set[str]:
+    """Return the set of artist names the user has blocked."""
+    rows = (
+        db.query(CivitaiArtistPreference.artist_name)
+        .filter(CivitaiArtistPreference.is_blocked.is_(True))
+        .all()
+    )
+    return {r[0] for r in rows}
+
+
+@router.get("/artist-summary", response_model=list[CivitaiArtistSummaryItem])
+def get_artist_summary(db: Session = Depends(get_db)):
+    """Return aggregated keep/discard scores for all rated artists.
+
+    Sorted by score descending (score = keeps − discards).  Artists with a
+    positive score appear first; blocked artists are pushed to the bottom.
+    """
+    rows = (
+        db.query(CivitaiArtistPreference)
+        .order_by(CivitaiArtistPreference.is_blocked.asc())
+        .all()
+    )
+    result = []
+    for r in rows:
+        score = (r.keeps or 0) - (r.discards or 0)
+        result.append(
+            CivitaiArtistSummaryItem(
+                artist_id=r.artist_id,
+                artist_name=r.artist_name,
+                keeps=r.keeps or 0,
+                discards=r.discards or 0,
+                score=score,
+                is_blocked=r.is_blocked,
+            )
+        )
+    # Sort by score descending, then by artist name.
+    result.sort(key=lambda x: (-x.score, x.artist_name.lower()))
+    return result
+
+
+@router.post("/artist-block", response_model=CivitaiArtistSummaryItem)
+def toggle_artist_block(
+    payload: CivitaiArtistBlockRequest, db: Session = Depends(get_db)
+):
+    """Set the blocked status for a specific artist."""
+    pref = (
+        db.query(CivitaiArtistPreference)
+        .filter(
+            CivitaiArtistPreference.artist_id == payload.artist_id,
+            CivitaiArtistPreference.artist_name == payload.artist_name,
+        )
+        .first()
+    )
+    if pref is None:
+        pref = CivitaiArtistPreference(
+            artist_id=payload.artist_id,
+            artist_name=payload.artist_name,
+            keeps=0,
+            discards=0,
+        )
+        db.add(pref)
+
+    pref.is_blocked = payload.is_blocked
+    db.commit()
+    db.refresh(pref)
+
+    return CivitaiArtistSummaryItem(
+        artist_id=pref.artist_id,
+        artist_name=pref.artist_name,
+        keeps=pref.keeps or 0,
+        discards=pref.discards or 0,
+        score=(pref.keeps or 0) - (pref.discards or 0),
+        is_blocked=pref.is_blocked,
+    )

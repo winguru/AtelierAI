@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prototype Lab</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/prototype-lab.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1 id="page-title">Prototype Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">← Gallery</a>
+        <a class="btn ghost" href="/frontend/tag-maint.html">Tag Maint</a>
+        <a class="btn ghost" href="/frontend/sync-lab.html">Sync Lab</a>
+        <a class="btn ghost" href="/frontend/search-lab.html">Search Lab</a>
+        <a class="btn ghost" href="/frontend/review-lab.html">Review Lab</a>
+      </div>
+    </header>
+
+    <main class="prototype-lab-layout">
+
+      <!-- ── Stats Overview ── -->
+      <section class="step-card active" aria-label="Prototype coverage">
+        <div class="step-header">
+          <div class="step-number"><span>1</span></div>
+          <div class="step-title-area">
+            <h2>Coverage Dashboard</h2>
+            <p class="step-desc">Prototype vectors drive CLIP visual search scoring. Without prototypes, all search scores are <code>null</code>.</p>
+          </div>
+          <div class="step-actions">
+            <button class="btn ghost" id="refresh-stats-btn">↻ Refresh</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div id="stats-loading" class="stats-loading">Loading…</div>
+          <div id="stats-panel" class="stats-panel" style="display:none">
+            <div class="stat-cards">
+              <div class="stat-card">
+                <div class="stat-value" id="stat-total">—</div>
+                <div class="stat-label">Total Concepts</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" id="stat-observed">—</div>
+                <div class="stat-label">With Observations</div>
+              </div>
+              <div class="stat-card accent">
+                <div class="stat-value" id="stat-prototypes">—</div>
+                <div class="stat-label">With Prototypes</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value" id="stat-coverage">—</div>
+                <div class="stat-label">Coverage %</div>
+              </div>
+            </div>
+            <div class="brackets-grid" id="brackets-grid">
+              <h3>Observation Brackets</h3>
+              <table class="data-table brackets-table">
+                <thead>
+                  <tr>
+                    <th>Observations</th>
+                    <th>Concepts</th>
+                    <th>With Prototype</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="brackets-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="flow-indicator"><span class="flow-arrow">↓</span></div>
+
+      <!-- ── Status & Build Settings ── -->
+      <div id="status-panel" class="step-status info" aria-live="polite">
+        <div class="status-text">
+          <strong id="status-title">Ready</strong>
+          <span id="status-message"> — Select concepts below and build prototypes to enable CLIP scoring.</span>
+        </div>
+        <div class="build-settings-bar">
+          <label class="control-label inline-control" data-tip="Max images sampled per prototype. More = better centroid but slower. Applies to ALL build actions (Build, Build all, Build Selected).">
+            <span class="control-name">Source images</span>
+            <input id="max-images" type="number" min="1" max="64" value="10">
+          </label>
+        </div>
+      </div>
+
+      <div class="flow-indicator"><span class="flow-arrow">↓</span></div>
+
+      <!-- ── Concept Browser ── -->
+      <section class="step-card" aria-label="Concept browser">
+        <div class="step-header">
+          <div class="step-number"><span>2</span></div>
+          <div class="step-title-area">
+            <h2>Concept Browser</h2>
+            <p class="step-desc">Browse concepts by observation count. Select concepts to build prototypes from their observed images.</p>
+          </div>
+          <div class="step-actions">
+            <label class="control-label" data-tip="Filter concepts by how many observed images they have. Concepts with more observations produce better prototypes.">
+              Bracket
+              <select id="bracket-filter">
+                <option value="all">All with observations</option>
+                <option value="1_to_5">1–5 observations</option>
+                <option value="6_to_20">6–20 observations</option>
+                <option value="21_to_50">21–50 observations</option>
+                <option value="51_to_100">51–100 observations</option>
+                <option value="101_plus">101+ observations</option>
+                <option value="no_proto">Has observations, no prototype</option>
+              </select>
+            </label>
+            <label class="control-label" data-tip="Search by concept name or alias.">
+              <input id="name-search" type="text" placeholder="Filter by name…">
+            </label>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="browser-toolbar">
+            <button class="btn small" id="select-all-btn">Select All</button>
+            <button class="btn small" id="select-none-btn">Select None</button>
+            <button class="btn small" id="select-no-proto-btn">Select Missing</button>
+            <span class="toolbar-spacer"></span>
+            <span id="selection-count" class="selection-count">0 selected</span>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="concepts-table">
+              <thead>
+                <tr>
+                  <th class="col-check"><input type="checkbox" id="check-all"></th>
+                  <th data-tip="Concept ID">ID</th>
+                  <th data-tip="Canonical concept name">Name</th>
+                  <th data-tip="Concept type (character, object, style, etc.)">Type</th>
+                  <th data-tip="Number of images observed as containing this concept">Obs.</th>
+                  <th data-tip="Whether a CLIP prototype vector exists">Prototype</th>
+                  <th data-tip="Number of images used to build the prototype">Sources</th>
+                  <th data-tip="When the prototype was last built">Updated</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="concepts-body"></tbody>
+            </table>
+          </div>
+          <div class="table-footer" id="table-footer"></div>
+        </div>
+      </section>
+
+      <div class="flow-indicator"><span class="flow-arrow">↓</span></div>
+
+      <!-- ── Batch Build ── -->
+      <section class="step-card" aria-label="Batch build">
+        <div class="step-header">
+          <div class="step-number"><span>3</span></div>
+          <div class="step-title-area">
+            <h2>Build Prototypes</h2>
+            <p class="step-desc">Build CLIP prototypes from observed images. Each prototype is the L2-normalized centroid of CLIP embeddings from up to <em>N</em> sample images.</p>
+          </div>
+          <div class="step-actions">
+            <button class="btn primary" id="build-selected-btn" disabled>Build Selected</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <div id="build-progress" class="build-progress" style="display:none">
+            <div class="progress-bar">
+              <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <span id="progress-text" class="progress-text">0 / 0</span>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="build-results-table" style="display:none">
+              <thead>
+                <tr>
+                  <th>Concept</th>
+                  <th>Status</th>
+                  <th>Sources</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody id="build-results-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script type="module" src="/frontend/js/prototype-lab.js"></script>
+</body>
+</html>

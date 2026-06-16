@@ -8459,17 +8459,13 @@ def _hydrate_observations_from_payload(
 ) -> None:
     """Create observations for tags in *merged_payload* that have no observation row yet.
 
-    Only links to authority_terms with an existing ``concept_id``; tags
-    without a mapped concept are intentionally skipped.
+    Creates observations for ALL authority_terms, including those without
+    a ``concept_id`` (orphan tags).  Deduplication uses authority_term_id.
     """
-    # Fast bail-out: already has observations
-    if (
-        db.query(ImageConceptObservation.id)
-        .filter(ImageConceptObservation.image_id == image.id)
-        .limit(1)
-        .first()
-    ):
-        return
+    # NOTE: We intentionally do NOT bail out if the image already has
+    # observations from another source (e.g. CivitAI).  Prompt observations
+    # are added independently, and the per-observation existence check below
+    # prevents duplicates.
 
     gallery_tag_svc = GalleryTagService()
     tax = TaxonomyService()
@@ -8497,23 +8493,21 @@ def _hydrate_observations_from_payload(
             if not normalized_names:
                 continue
 
-            # Batch-load authority_terms that already have concept_id set
+            # Batch-load authority_terms (including orphans without concept_id)
             terms = (
                 db.query(AuthorityTerm)
                 .filter(
                     AuthorityTerm.authority_id == authority_id,
                     AuthorityTerm.normalized_external_name.in_(normalized_names),
-                    AuthorityTerm.concept_id.isnot(None),
                 )
                 .all()
             )
 
             for term in terms:
-                concept_id = term.concept_id
-                if concept_id is None:
-                    continue
+                concept_id = term.concept_id  # May be None for orphans
 
-                obs_key = (int(image.id), int(concept_id), authority_id)
+                # Dedup by authority_term_id — one observation per term
+                obs_key = (int(image.id), int(term.id), authority_id)
                 if obs_key in _seen:
                     continue
 
@@ -8521,8 +8515,7 @@ def _hydrate_observations_from_payload(
                     db.query(ImageConceptObservation.id)
                     .filter(
                         ImageConceptObservation.image_id == image.id,
-                        ImageConceptObservation.concept_id == concept_id,
-                        ImageConceptObservation.authority_id == authority_id,
+                        ImageConceptObservation.authority_term_id == term.id,
                     )
                     .first()
                 )
@@ -8533,7 +8526,7 @@ def _hydrate_observations_from_payload(
                 db.add(
                     ImageConceptObservation(
                         image_id=int(image.id),
-                        concept_id=int(concept_id),
+                        concept_id=concept_id,
                         authority_id=authority_id,
                         authority_term_id=int(term.id),
                         source_type=ObservationSource.IMPORT,
@@ -15174,6 +15167,7 @@ from routers import taxonomy as _taxonomy_router_mod  # noqa: E402, PLC0415
 from routers import images as _images_router_mod  # noqa: E402, PLC0415
 from routers import collections as _collections_router_mod  # noqa: E402, PLC0415
 from routers import generation as _generation_router_mod  # noqa: E402, PLC0415
+from routers import concept_review as _concept_review_router_mod  # noqa: E402, PLC0415
 from routers.civitai import router as _civitai_router  # noqa: E402, PLC0415
 from routers import models_tree as _models_tree_router_mod  # noqa: E402, PLC0415
 from routers import clip_router as _clip_router_mod  # noqa: E402, PLC0415
@@ -15183,6 +15177,7 @@ app.include_router(_taxonomy_router_mod.router, prefix="/api")
 app.include_router(_images_router_mod.router, prefix="/api")
 app.include_router(_collections_router_mod.router, prefix="/api")
 app.include_router(_generation_router_mod.router, prefix="/api")
+app.include_router(_concept_review_router_mod.router, prefix="/api")
 app.include_router(_civitai_router, prefix="/api")
 app.include_router(_models_tree_router_mod.router, prefix="/api")
 app.include_router(_clip_router_mod.router, prefix="/api")

@@ -41,6 +41,7 @@
         <a class="btn ghost" href="/">← Gallery</a>
         <a class="btn ghost" href="/sync-lab">Sync Lab</a>
         <a class="btn ghost" href="/frontend/generation-lab.html">Generation Lab</a>
+        <a class="btn ghost" href="/concept-search-lab">Concept Search</a>
       </div>
     </header>
 
@@ -132,6 +133,15 @@
           <span id="results-count"></span>
           <span id="selection-count" class="selection-count hidden"></span>
         </div>
+
+        <!-- Artist score summary -->
+        <details id="artist-summary" class="artist-summary">
+          <summary>Artist Scores</summary>
+          <p class="artist-summary-hint">Artists from your rated images. Click to block/unblock.</p>
+          <div id="artist-summary-body" class="artist-summary-body">
+            <p class="artist-summary-empty">Rate images to see artist scores here.</p>
+          </div>
+        </details>
       </section>
 
       <!-- Right: details pane -->

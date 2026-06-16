@@ -39,18 +39,17 @@
         </label>
         <a class="btn ghost" href="/">← Gallery</a>
         <a class="btn ghost" href="/frontend/search-lab.html">Search Lab</a>
-        <a class="btn ghost" href="/frontend/sync-lab.html">Sync Lab</a>
-      </div>
+        <a class="btn ghost" href="/frontend/sync-lab.html">Sync Lab</a>        <a class="btn ghost" href="/frontend/prototype-lab.html">Prototype Lab</a>      </div>
     </header>
 
     <main class="tag-maint-layout">
 
-      <!-- ── Find Missing Tags ── -->
-      <section class="step-card" id="scan-missing-card" aria-label="Find missing CivitAI tag observations">
+      <!-- ── Populate Missing Tags & Observations ── -->
+      <section class="step-card" id="scan-missing-card" aria-label="Populate missing CivitAI tag observations">
         <div class="step-header">
           <div class="step-number">1</div>
           <div class="step-title-area">
-            <h2>Find Missing Tags</h2>
+            <h2>Populate Missing Tags &amp; Observations</h2>
             <p class="step-desc">Scan images with CivitAI IDs but no tag observations using 3-tier resolution (sidecar → disk archive → live API)</p>
           </div>
           <div class="step-actions">
@@ -62,7 +61,7 @@
               <span>API limit <small>(0 = unlimited)</small></span>
               <input id="scan-missing-api-limit" type="number" value="0" min="0" max="10000" step="10">
             </label>
-            <button class="btn primary" id="scan-missing-btn" type="button">Scan Missing</button>
+            <button class="btn primary" id="scan-missing-btn" type="button">Start Scan</button>
           </div>
         </div>
         <div class="step-body" id="scan-missing-body">
@@ -291,7 +290,7 @@
                   <th class="sortable" data-col="name">Name <span class="sort-arrow"></span></th>
                   <th class="sortable" data-col="ext_id">Ext ID <span class="sort-arrow"></span></th>
                   <th data-col="scope">Scope</th>
-                  <th class="sortable" data-col="post_count">Post Count <span class="sort-arrow"></span></th>
+                  <th class="sortable" data-col="post_count">Observations <span class="sort-arrow"></span></th>
                   <th class="sortable" data-col="concept_id">Concept ID <span class="sort-arrow"></span></th>
                   <th data-col="mdtag_id">MDTag ID</th>
                   <th data-col="mdtag_name">MDTag Name</th>

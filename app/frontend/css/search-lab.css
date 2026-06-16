@@ -1190,6 +1190,43 @@ body[data-theme="dark"] .tile-in-library-badge {
     background: rgba(46, 160, 67, 0.72);
 }
 
+/* ── Rating badge on tiles (keep / discard / skip) ── */
+.tile-rating-badge {
+    position: absolute;
+    bottom: 0.42rem;
+    right: 0.42rem;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #fff;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    animation: badge-in 200ms ease;
+}
+
+.tile-rating-badge.is-keep {
+    background: rgba(46, 160, 67, 0.9);
+}
+
+.tile-rating-badge.is-discard {
+    background: rgba(205, 50, 50, 0.9);
+}
+
+.tile-rating-badge.is-skip {
+    background: rgba(120, 120, 120, 0.85);
+}
+
+body[data-theme="dark"] .tile-rating-badge.is-skip {
+    background: rgba(100, 100, 115, 0.8);
+}
+
 /* ── Import button in detail header ── */
 .import-btn {
     white-space: nowrap;
@@ -1359,4 +1396,172 @@ body[data-theme="dark"] .import-dialog-input {
 
 body[data-theme="dark"] .import-dialog-confirm-btn {
     background: #c76a30 !important;
+}
+
+/* ── Artist score summary panel ── */
+.artist-summary {
+    margin-top: 1rem;
+    border: 1px solid var(--stroke);
+    border-radius: 12px;
+    background: var(--panel);
+    overflow: hidden;
+}
+
+.artist-summary > summary {
+    cursor: pointer;
+    padding: 0.7rem 1rem;
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: var(--ink);
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.artist-summary > summary::before {
+    content: '▸';
+    font-size: 0.75rem;
+    transition: transform 180ms ease;
+}
+
+.artist-summary[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.artist-summary-hint {
+    padding: 0 1rem;
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    font-style: italic;
+}
+
+.artist-summary-body {
+    padding: 0.5rem 0.75rem 0.75rem;
+    max-height: 340px;
+    overflow-y: auto;
+}
+
+.artist-summary-empty {
+    text-align: center;
+    color: var(--ink-soft);
+    font-size: 0.82rem;
+    padding: 1rem 0;
+    margin: 0;
+}
+
+.artist-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    transition: background 120ms ease;
+}
+
+.artist-row:hover {
+    background: var(--panel-muted);
+}
+
+.artist-row.is-blocked {
+    opacity: 0.5;
+}
+
+.artist-row-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.artist-row-stats {
+    display: flex;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.artist-row-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+    font-weight: 700;
+}
+
+.artist-row-stat.is-keep {
+    background: rgba(46, 160, 67, 0.15);
+    color: #2ea03f;
+}
+
+.artist-row-stat.is-discard {
+    background: rgba(205, 50, 50, 0.15);
+    color: #cd3232;
+}
+
+body[data-theme="dark"] .artist-row-stat.is-keep {
+    color: #5fd470;
+}
+
+body[data-theme="dark"] .artist-row-stat.is-discard {
+    color: #e87878;
+}
+
+.artist-row-score {
+    font-weight: 800;
+    font-size: 0.78rem;
+    min-width: 2rem;
+    text-align: right;
+    color: var(--ink);
+}
+
+.artist-row-score.is-negative {
+    color: #cd3232;
+}
+
+.artist-row-score.is-positive {
+    color: #2ea03f;
+}
+
+body[data-theme="dark"] .artist-row-score.is-negative {
+    color: #e87878;
+}
+
+body[data-theme="dark"] .artist-row-score.is-positive {
+    color: #5fd470;
+}
+
+.artist-block-btn {
+    flex-shrink: 0;
+    padding: 0.2rem 0.55rem;
+    border: 1px solid var(--stroke);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 120ms ease;
+}
+
+.artist-block-btn:hover {
+    border-color: #cd3232;
+    color: #cd3232;
+}
+
+.artist-block-btn.is-blocked {
+    background: #cd3232;
+    border-color: #cd3232;
+    color: #fff;
+}
+
+.artist-block-btn.is-blocked:hover {
+    opacity: 0.85;
 }

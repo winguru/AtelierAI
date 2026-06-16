@@ -113,6 +113,15 @@ class CLIPProvider(Protocol):
         """
         ...
 
+    async def encode_image_paths(self, paths: list[str]) -> np.ndarray:
+        """Encode images from local file paths into L2-normalised embeddings.
+
+        Returns
+        -------
+        np.ndarray, shape ``(N, 512)``
+        """
+        ...
+
     async def encode_text(self, texts: list[str]) -> np.ndarray:
         """Encode text strings into L2-normalised embeddings.
 
@@ -181,6 +190,35 @@ class LocalCLIPProvider:
             img = await _download_image(url)
             if img is not None:
                 images.append(img)
+
+        if not images:
+            return np.empty((0, EMBEDDING_DIM), dtype=np.float32)
+
+        tensors = [self._preprocess(img) for img in images]
+        batch = torch.stack(tensors).to(self._device)
+
+        with torch.no_grad():
+            features = self._model.encode_image(batch)
+            features = features / features.norm(dim=-1, keepdim=True)
+
+        return features.cpu().numpy().astype(np.float32)
+
+    async def encode_image_paths(self, paths: list[str]) -> np.ndarray:
+        """Load images from local file paths and encode them in a single batch."""
+        import torch
+
+        _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+
+        images: list[Image.Image] = []
+        for path in paths:
+            if not path.lower().endswith(_IMAGE_EXTENSIONS):
+                logger.debug("Skipping non-image file: %s", path)
+                continue
+            try:
+                img = Image.open(path).convert("RGB")
+                images.append(img)
+            except Exception as exc:
+                logger.warning("Failed to load local image %s: %s", path, exc)
 
         if not images:
             return np.empty((0, EMBEDDING_DIM), dtype=np.float32)
@@ -292,10 +330,19 @@ async def _get_http_client() -> httpx.AsyncClient:
 
 
 async def _download_image(url: str) -> Optional[Image.Image]:
-    """Download an image from a URL and return a PIL Image, or None on failure."""
+    """Download an image from a URL and return a PIL Image, or None on failure.
+
+    Handles absolute HTTP/HTTPS URLs and local API paths (``/api/...``).
+    Local API paths are resolved against ``http://localhost:8000``.
+    """
+    # Resolve local API paths to full localhost URLs
+    fetch_url = url
+    if url.startswith("/api/"):
+        fetch_url = f"http://localhost:8000{url}"
+
     client = await _get_http_client()
     try:
-        resp = await client.get(url, follow_redirects=True)
+        resp = await client.get(fetch_url, follow_redirects=True)
         resp.raise_for_status()
         return Image.open(io.BytesIO(resp.content)).convert("RGB")
     except Exception as exc:

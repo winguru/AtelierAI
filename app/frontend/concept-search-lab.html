@@ -40,6 +40,9 @@
         <a class="btn ghost" href="/">← Gallery</a>
         <a class="btn ghost" href="/frontend/tag-maint.html">Tag Maint</a>
         <a class="btn ghost" href="/frontend/sync-lab.html">Sync Lab</a>
+        <a class="btn ghost" href="/frontend/search-lab.html">Search Lab</a>
+        <a class="btn ghost" href="/frontend/prototype-lab.html">Prototype Lab</a>
+        <a class="btn ghost" href="/frontend/review-lab.html">Review Lab</a>
       </div>
     </header>
 
@@ -51,7 +54,7 @@
           <div class="step-number"><span>1</span></div>
           <div class="step-title-area">
             <h2>Search Query</h2>
-            <p class="step-desc">Decompose a query into concept identity + context, then score candidate images with batch CLIP</p>
+            <p class="step-desc">Decompose a query into <span data-tip="A concept represents a visual entity — a character, style, object, or attribute that CLIP can recognize in images. Concepts are the 'things' the search engine knows how to look for.">concept</span> identity + context, then score candidate images with batch CLIP</p>
           </div>
           <div class="step-actions">
             <form id="search-form" class="inline-form">
@@ -59,17 +62,17 @@
                      placeholder="e.g. Shion on a beach at sunset"
                      required>
               <button class="btn primary" type="submit">Search</button>
-              <button class="btn ghost" type="button" id="decompose-btn">Decompose only</button>
+              <button class="btn ghost" type="button" id="decompose-btn" data-tip="Run only the first step (query → concept matching) without performing the CLIP visual search. Useful for debugging which concepts your query matches and what context text remains.">Decompose only</button>
             </form>
           </div>
         </div>
         <div class="step-body">
           <div class="control-grid">
-            <label class="control-label">
+            <label class="control-label" data-tip="Maximum number of scored image results to return. Higher values take longer but show more candidates.">
               Result limit
               <input id="result-limit" type="number" min="1" max="100" step="1" value="30">
             </label>
-            <label class="control-label">
+            <label class="control-label" data-tip="How many candidate images to pre-filter per result slot. A multiplier of 3× with limit 30 means 90 candidates are retrieved before CLIP scoring picks the best 30. Higher = better quality but slower.">
               Pool multiplier
               <input id="pool-multiplier" type="number" min="1" max="10" step="1" value="3">
             </label>
@@ -92,7 +95,7 @@
         <div class="step-header">
           <div class="step-number"><span>2</span></div>
           <div class="step-title-area">
-            <h2>Query Decomposition</h2>
+            <h2 data-tip="Query decomposition breaks your natural-language query into recognized concept(s) and leftover context text. Each recognized word/phrase is matched to a concept in the taxonomy.">Query Decomposition</h2>
           </div>
         </div>
         <div class="step-body">
@@ -105,9 +108,9 @@
             <table class="data-table" id="decompose-table">
               <thead>
                 <tr>
-                  <th>Concept</th>
-                  <th>Surface Form</th>
-                  <th>Match Type</th>
+                  <th data-tip="The concept that was matched from your query. Each concept is a named visual entity in the taxonomy (e.g. a character, art style, or object).">Concept</th>
+                  <th data-tip="The exact word or phrase from your query that triggered the match. The search engine looks for these surface forms across concept names and aliases.">Surface Form</th>
+                  <th data-tip="How the match was found. 'canonical' = matched the concept's primary name directly. 'alias' = matched one of the concept's alternative names or imported tags.">Match Type</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -125,7 +128,7 @@
         <div class="step-header">
           <div class="step-number"><span>3</span></div>
           <div class="step-title-area">
-            <h2>Scored Candidates</h2>
+            <h2 data-tip="Candidate images ranked by CLIP visual similarity. Each image is scored against the matched concept(s) and any remaining context text from your query.">Scored Candidates</h2>
             <span class="results-meta" id="results-meta"></span>
           </div>
         </div>
@@ -139,15 +142,203 @@
         <span class="flow-arrow">↓</span>
       </div>
 
+      <!-- ── Concept Editor ── -->
+      <section id="editor-section" class="step-card" style="display:none" aria-label="Concept editor">
+        <div class="step-header">
+          <div class="step-number"><span>E</span></div>
+          <div class="step-title-area">
+            <h2 id="editor-title" data-tip="Edit the selected concept's properties, aliases, and hierarchy. Click any concept name in search results or the coverage index to open it here.">Concept Editor</h2>
+            <span class="editor-subtitle" id="editor-subtitle"></span>
+            <button type="button" class="editor-close-btn" id="editor-close-btn" title="Close editor">✕</button>
+          </div>
+        </div>
+        <div class="step-body">
+          <!-- Tabs -->
+          <div class="editor-tabs" id="editor-tabs">
+            <button type="button" class="editor-tab active" data-tab="properties" data-tip="Edit the concept's core properties: name, type, status, and description.">Properties</button>
+            <button type="button" class="editor-tab" data-tab="aliases" data-tip="Manage alternative names for this concept. Aliases expand search matching — when a query contains an alias, it finds this concept.">Aliases</button>
+            <button type="button" class="editor-tab" data-tab="hierarchy" data-tip="View and change the concept's position in the taxonomy tree. See its parent, children, and reparent it to a different location.">Hierarchy</button>
+            <button type="button" class="editor-tab" data-tab="attributes" data-tip="Manage concept attributes — describe this concept's visual and semantic properties by linking other concepts as attributes (e.g. 'red hair', 'blue eyes').">Attributes</button>
+            <button type="button" class="editor-tab" data-tab="create" data-tip="Create a brand new concept as a child of the current one. This adds a new entry to the taxonomy.">Create Child</button>
+          </div>
+
+          <!-- Properties tab -->
+          <div class="editor-panel" id="editor-panel-properties">
+            <div class="editor-field">
+              <label for="ed-name" data-tip="The primary human-readable name for this concept. This is the name displayed everywhere — search results, the coverage index, and concept links. Changing it updates how the concept appears but does not affect matching (aliases handle that).">Canonical Name <span class="ed-help">?</span></label>
+              <input type="text" id="ed-name" placeholder="Canonical name">
+            </div>
+            <div class="editor-field">
+              <label for="ed-type" data-tip-id="ed-tip-type">Concept Type <span class="ed-help">?</span></label>
+              <select id="ed-type">
+                <option value="">— none —</option>
+                <option value="character">character</option>
+                <option value="object">object</option>
+                <option value="style">style</option>
+                <option value="scene">scene</option>
+                <option value="abstract">abstract</option>
+              </select>
+            </div>
+            <div class="editor-field">
+              <label for="ed-status" data-tip-id="ed-tip-status">Status <span class="ed-help">?</span></label>
+              <select id="ed-status">
+                <option value="">— none —</option>
+                <option value="active">active</option>
+                <option value="deprecated">deprecated</option>
+                <option value="draft">draft</option>
+              </select>
+            </div>
+            <div class="editor-field">
+              <label for="ed-desc" data-tip="A free-text description of this concept. Use it to explain what the concept means, when to use it, and any nuances. This is for human reference — it is NOT used by the search engine for matching.">Description <span class="ed-help">?</span></label>
+              <textarea id="ed-desc" rows="3" placeholder="Optional description of this concept"></textarea>
+            </div>
+            <div class="editor-field">
+              <label data-tip="Whether this concept has a CLIP visual prototype — a computed average embedding built from example images. Concepts with prototypes can be scored for visual similarity. This field is read-only; prototypes are generated by the system from image observations.">Prototype <span class="ed-help">?</span></label>
+              <span id="ed-prototype-status" class="ed-readonly">—</span>
+            </div>
+            <div class="editor-actions">
+              <button type="button" class="btn-primary" id="ed-save-props">Save Properties</button>
+              <span class="editor-feedback" id="ed-props-feedback"></span>
+            </div>
+          </div>
+
+          <!-- Aliases tab -->
+          <div class="editor-panel" id="editor-panel-aliases" style="display:none">
+            <table class="editor-aliases-table">
+              <thead>
+                <tr>
+                  <th data-tip="An alternative name for this concept. When a user's search query contains an alias, it will match this concept. Aliases expand the search engine's ability to find the right concept from different wordings.">Alias <span class="ed-help">?</span></th>
+                  <th data-tip-id="ed-tip-alias-type">Type <span class="ed-help">?</span></th>
+                  <th data-tip="If checked, this alias is preferred over other aliases. When multiple aliases match a query, the preferred one is shown to the user.">Preferred</th>
+                  <th data-tip="Where this alias came from. System-imported aliases show their source (e.g. 'civitai', 'danbooru'). Manually added aliases show 'manual'.">Authority <span class="ed-help">?</span></th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="ed-aliases-body"></tbody>
+            </table>
+            <div class="editor-add-row">
+              <input type="text" id="ed-new-alias" placeholder="New alias" data-tip="Enter the alternative name to add. This text will be matched against search queries, so use the most common spelling or wording.">
+              <select id="ed-new-alias-type" data-tip="Choose the alias type that best describes why this is an alternative name.">
+                <option value="synonym">synonym</option>
+                <option value="abbreviation">abbreviation</option>
+                <option value="alternate_form">alternate_form</option>
+              </select>
+              <label class="ed-check-label" data-tip="Mark this alias as preferred. When the search engine matches multiple aliases, preferred ones are shown first to the user."><input type="checkbox" id="ed-new-alias-pref"> Preferred</label>
+              <button type="button" class="btn-small" id="ed-add-alias">Add Alias</button>
+              <span class="editor-feedback" id="ed-alias-feedback"></span>
+            </div>
+          </div>
+
+          <!-- Hierarchy tab -->
+          <div class="editor-panel" id="editor-panel-hierarchy" style="display:none">
+            <div class="editor-field">
+              <label data-tip="The parent concept in the taxonomy hierarchy. A concept can only have one parent. The hierarchy is used to organize related concepts into groups (e.g. "emoji" → "!" or "clothing" → "dress"). Click the parent name to navigate to it.">Current Parent <span class="ed-help">?</span></label>
+              <span id="ed-parent-display" class="ed-readonly">—</span>
+            </div>
+            <div class="editor-field">
+              <label for="ed-new-parent-id" data-tip="Move this concept under a different parent. Search by name or enter the concept ID. This changes the concept's position in the hierarchy tree.">New Parent Concept <span class="ed-help">?</span></label>
+              <div class="editor-inline-row">
+                <div id="parent-lookup" class="concept-lookup"></div>
+                <button type="button" class="btn-small" id="ed-set-parent">Reparent</button>
+                <button type="button" class="btn-small btn-danger" id="ed-clear-parent">Clear Parent</button>
+              </div>
+            </div>
+            <div class="editor-field">
+              <label data-tip="Concepts that have this concept as their parent. These are the direct children in the hierarchy tree. Click any child to navigate to it in the editor.">Children <span class="ed-help">?</span></label>
+              <div id="ed-children-list" class="ed-children-list">—</div>
+            </div>
+            <span class="editor-feedback" id="ed-hierarchy-feedback"></span>
+          </div>
+          <!-- Attributes tab -->
+          <div class="editor-panel" id="editor-panel-attributes" style="display:none">
+            <p class="editor-hint" data-tip="Attributes describe what makes this concept distinctive. Each attribute links another concept (e.g. 'red hair', 'blue eyes') and classifies it as visual (appearance) or semantic (meaning), and whether it's invariant (always present) or variable (sometimes present).">Describe this concept by linking other concepts as attributes. <span class="ed-help">?</span></p>
+
+            <div id="ed-attributes-table-wrap">
+              <table class="data-table" id="ed-attributes-table" style="display:none">
+                <thead>
+                  <tr>
+                    <th>Attribute Concept</th>
+                    <th>Kind</th>
+                    <th>Invariance</th>
+                    <th>Score</th>
+                    <th>Notes</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <p class="editor-hint" id="ed-attributes-empty">No attributes defined yet.</p>
+            </div>
+
+            <div class="ed-attr-add-form">
+              <h4>Add Attribute</h4>
+              <div class="editor-field">
+                <label>Attribute Concept <span class="ed-help" data-tip="The concept to use as an attribute. Search by name or enter the concept ID.">?</span></label>
+                <div id="attr-lookup" class="concept-lookup"></div>
+              </div>
+              <div class="editor-field" style="display:flex;gap:12px">
+                <div style="flex:1">
+                  <label for="ed-attr-kind">Kind</label>
+                  <select id="ed-attr-kind">
+                    <option value="visual">Visual</option>
+                    <option value="semantic">Semantic</option>
+                  </select>
+                </div>
+                <div style="flex:1">
+                  <label for="ed-attr-invariance">Invariance</label>
+                  <select id="ed-attr-invariance">
+                    <option value="variable">Variable</option>
+                    <option value="invariant">Invariant</option>
+                  </select>
+                </div>
+                <div style="flex:1">
+                  <label for="ed-attr-score">Score <span class="ed-help" data-tip="Consistency score from 0 to 1 indicating how reliably this attribute appears.">?</span></label>
+                  <input type="number" id="ed-attr-score" step="0.01" min="0" max="1" placeholder="0–1">
+                </div>
+              </div>
+              <div class="editor-field">
+                <label for="ed-attr-notes">Notes</label>
+                <input type="text" id="ed-attr-notes" placeholder="Optional notes">
+              </div>
+              <div class="editor-actions">
+                <button type="button" class="btn-primary" id="ed-attr-add-btn">Add Attribute</button>
+                <span class="editor-feedback" id="ed-attr-feedback"></span>
+              </div>
+            </div>
+          </div>
+          <!-- Create Child tab -->
+          <div class="editor-panel" id="editor-panel-create" style="display:none">
+            <p class="editor-hint" data-tip="This creates a brand new concept in the taxonomy and automatically sets the current concept as its parent. Use this to build out the hierarchy — for example, adding a new "smirk" under the "expression" parent.">Create a new concept as a child of the current concept. The new concept will inherit the hierarchy relationship. <span class="ed-help">?</span></p>
+            <div class="editor-field">
+              <label for="ed-child-name" data-tip="The canonical name for the new child concept. Choose a name that is clear, concise, and unique within the taxonomy. This will be the primary way to refer to and search for this concept.">Child Concept Name <span class="ed-help">?</span></label>
+              <input type="text" id="ed-child-name" placeholder="Name for new child concept">
+            </div>
+            <div class="editor-field">
+              <label for="ed-child-desc" data-tip="An optional human-readable description for the new concept. Explain what it means, when to use it, or how it differs from similar concepts. This is for reference only — not used by the search engine.">Description (optional) <span class="ed-help">?</span></label>
+              <textarea id="ed-child-desc" rows="2" placeholder="Optional description"></textarea>
+            </div>
+            <div class="editor-actions">
+              <button type="button" class="btn-primary" id="ed-create-child">Create Child Concept</button>
+              <span class="editor-feedback" id="ed-create-feedback"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="flow-indicator" id="flow-to-index">
+        <span class="flow-arrow">↓</span>
+      </div>
+
       <!-- ── Concepts Index (Coverage Audit) ── -->
       <section id="index-section" class="step-card" aria-label="Concepts index">
         <div class="step-header">
           <div class="step-number"><span>4</span></div>
           <div class="step-title-area">
-            <h2>Concepts Coverage Index</h2>
+            <h2 data-tip="An audit view of all concepts in the taxonomy. Shows which concepts have visual prototypes (needed for CLIP search) and observation counts (how many images reference each concept). A concept is 'fully searchable' only when it has both a prototype AND observations.">Concepts Coverage Index</h2>
           </div>
           <div class="step-actions">
             <button class="btn primary" type="button" id="refresh-index-btn">Refresh Index</button>
+            <button class="btn ghost" type="button" id="rescan-btn" data-tip="Re-associate orphan observations with their concepts. Scans all observations where concept_id is NULL and copies the concept_id from their linked authority term. Run this after importing new tags or creating new concepts to make them searchable.">Rescan Associations</button>
           </div>
         </div>
         <div class="step-body">
@@ -159,12 +350,12 @@
             <table class="data-table" id="index-table">
               <thead>
                 <tr>
-                  <th>ID</th>
-                  <th>Canonical Name</th>
-                  <th>Type</th>
-                  <th>Aliases</th>
-                  <th>Prototype</th>
-                  <th>Obs.</th>
+                  <th data-tip="Unique database ID for this concept.">ID</th>
+                  <th data-tip="The primary human-readable name for this concept. This is the name used when displaying or searching for the concept.">Canonical Name</th>
+                  <th data-tip="The category or kind of concept (e.g. 'character', 'style', 'object', 'attribute'). Currently a free-text field — types are assigned manually.">Type</th>
+                  <th data-tip="Alternative names for this concept. Aliases can come from imported tags (CivitAI, Danbooru, etc.) or be added manually. They help the search engine match more query variations.">Aliases</th>
+                  <th data-tip="Whether this concept has a CLIP visual prototype — a computed 'average' embedding built from example images. Concepts with prototypes can be searched visually. The number in parentheses shows how many images were used to build it.">Prototype</th>
+                  <th data-tip="Number of image observations linked to this concept. Observations are records that a specific image depicts this concept, sourced from imported tags or manual curation.">Obs.</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -176,6 +367,7 @@
     </main>
   </div>
 
+  <script src="/frontend/js/concept-lookup-widget.js"></script>
   <script src="/frontend/js/concept-search-lab.js" defer></script>
 </body>
 </html>

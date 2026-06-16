@@ -2227,6 +2227,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const bySource = extractImageScopeTags(image);
         const negativeSet = new Set(getImageNegativeUserTags(image));
         const entries = [];
+        const seen = new Set();
 
         TAG_SOURCE_ORDER.forEach((source) => {
             const names = Array.isArray(bySource[source]) ? [...bySource[source]] : [];
@@ -2236,9 +2237,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!normalized) {
                     return;
                 }
+                if (seen.has(normalized)) {
+                    return;
+                }
                 if (source === 'civitai' && negativeSet.has(normalized)) {
                     return;
                 }
+                seen.add(normalized);
                 entries.push({
                     name: normalized,
                     source,

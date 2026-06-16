@@ -45,6 +45,7 @@ from models import (
     AuthorityTerm,
     Concept,
     ConceptAlias,
+    ConceptAttributeProfile,
     ImageConceptObservation,
     ImageModel,
     ObservationCertainty,
@@ -52,12 +53,20 @@ from models import (
     TagAuthority,
 )
 from schemas import (
+    AutoBuildPrototypeResponse,
+    BatchBuildRequest,
+    BatchBuildResponse,
+    StreamBuildRequest,
     BuildPrototypeRequest,
+    ConceptAttributeAddRequest,
+    ConceptAttributeEntry,
+    ConceptAttributeUpdateRequest,
     ConceptIndexResponse,
     ConceptProfileResponse,
     ConceptSearchRequest,
     ConceptSearchResponse,
     DecomposeResponse,
+    PrototypeStatsResponse,
     ScoreImageRequest,
     ScoreImageResponse,
     TaxonomyAliasCreateRequest,
@@ -68,6 +77,7 @@ from schemas import (
     TaxonomyMergeRequest,
     TaxonomyParentUpdateRequest,
     TaxonomyPurgeRootsRequest,
+    TaxonomySnapshotImportResponse,
     TaxonomyTagAssociationRequest,
     TaxonomyTagDetailsUpdateRequest,
     TaxonomyTagMaintBulkDeleteRequest,
@@ -79,6 +89,7 @@ from services.concept_search_service import ConceptSearchService
 from services.gallery_tag_service import GalleryTagService
 from services.image_service import _active_image_filter
 from services.taxonomy_service import TaxonomyService
+from services.taxonomy_snapshot_import import import_snapshot, validate_snapshot
 from utils.cache import (
     _FILTER_OPTIONS_CACHE_TTL_SECONDS,
     _build_json_cache_headers,
@@ -1534,6 +1545,8 @@ def taxonomy_update_concept(
         concept.description = payload.description.strip() or None
     if payload.concept_type is not None:
         concept.concept_type = payload.concept_type.strip() or None
+    if payload.status is not None:
+        concept.status = payload.status.strip() or None
     concept.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(concept)
@@ -1616,6 +1629,32 @@ def taxonomy_add_alias(
             "external_tag_id": alias.external_tag_id,
         },
     }
+
+
+@router.delete("/concepts/{concept_id}/aliases/{alias_id}", response_model=dict)
+def taxonomy_delete_alias(
+    concept_id: int,
+    alias_id: int,
+    db: Session = Depends(get_db),
+):
+    """Remove an alias from a concept."""
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    alias = (
+        db.query(ConceptAlias)
+        .filter(
+            ConceptAlias.id == alias_id,
+            ConceptAlias.concept_id == concept_id,
+        )
+        .first()
+    )
+    if alias is None:
+        raise HTTPException(status_code=404, detail="Alias not found for this concept")
+    db.delete(alias)
+    concept.updated_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Alias deleted.", "concept_id": concept_id, "alias_id": alias_id}
 
 
 @router.post("/review/merge_concepts", response_model=dict)
@@ -2082,6 +2121,83 @@ async def taxonomy_build_prototype(
     }
 
 
+# ---------------------------------------------------------------------------
+# Prototype Lab — auto-build, batch-build, stats
+# ---------------------------------------------------------------------------
+
+
+@router.get("/prototypes/stats", response_model=PrototypeStatsResponse)
+def taxonomy_prototype_stats(db: Session = Depends(get_db)):
+    """Return global prototype coverage statistics."""
+    svc = ConceptPrototypeService(db)
+    return svc.get_prototype_stats()
+
+
+@router.post(
+    "/concepts/{concept_id}/auto-build-prototype",
+    response_model=AutoBuildPrototypeResponse,
+)
+async def taxonomy_auto_build_prototype(
+    concept_id: int,
+    max_images: int = 10,
+    db: Session = Depends(get_db),
+):
+    """Auto-build a prototype for a concept from its observed images."""
+    svc = ConceptPrototypeService(db)
+    return await svc.auto_build_prototype(concept_id, max_images=max_images)
+
+
+@router.post("/prototypes/batch-build", response_model=BatchBuildResponse)
+async def taxonomy_batch_build_prototypes(
+    payload: BatchBuildRequest,
+    db: Session = Depends(get_db),
+):
+    """Build prototypes for multiple concepts in sequence."""
+    svc = ConceptPrototypeService(db)
+    results = await svc.batch_build_prototypes(
+        payload.concept_ids, max_images=payload.max_images
+    )
+    built = sum(1 for r in results if r["status"] == "built")
+    return BatchBuildResponse(
+        total_requested=len(payload.concept_ids),
+        built=built,
+        failed=len(payload.concept_ids) - built,
+        results=[AutoBuildPrototypeResponse(**r) for r in results],
+    )
+
+
+@router.post("/prototypes/stream-build")
+async def taxonomy_stream_build_prototypes(
+    payload: StreamBuildRequest,
+):
+    """SSE endpoint: build prototypes with real-time progress events.
+
+    Events:
+      - ``progress``: per-concept result (type=start|result|error) and running totals
+      - ``complete``: final summary with built/failed counts
+    """
+
+    def _sse_event(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    async def event_stream():
+        db = SessionLocal()
+        try:
+            svc = ConceptPrototypeService(db)
+            async for event_name, data in svc.stream_build_prototypes(
+                payload.concept_ids, max_images=payload.max_images
+            ):
+                yield _sse_event(event_name, data)
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/concepts/{concept_id}/profile", response_model=ConceptProfileResponse)
 def taxonomy_concept_profile(
     concept_id: int,
@@ -2122,6 +2238,36 @@ def taxonomy_concept_profile(
         for t in concept.authority_terms
     ]
 
+    # Parent concept
+    parent_concept = None
+    if concept.parent:
+        parent_concept = {
+            "id": concept.parent.id,
+            "canonical_name": concept.parent.canonical_name,
+        }
+
+    # Children
+    children = [
+        {"id": ch.id, "canonical_name": ch.canonical_name}
+        for ch in concept.children
+    ]
+
+    # Attributes (concept → its attribute concepts)
+    attributes = []
+    for attr in concept.attributes:
+        attr_concept = attr.attribute_concept
+        attributes.append(
+            ConceptAttributeEntry(
+                concept_id=concept.id,
+                attribute_concept_id=attr_concept.id,
+                attribute_concept_name=attr_concept.canonical_name,
+                attribute_kind=attr.attribute_kind,
+                invariance=attr.invariance,
+                consistency_score=attr.consistency_score,
+                notes=attr.notes,
+            )
+        )
+
     return ConceptProfileResponse(
         id=concept.id,
         canonical_name=concept.canonical_name,
@@ -2133,6 +2279,9 @@ def taxonomy_concept_profile(
         prototype=prototype_info,
         aliases=aliases,
         authority_terms=authority_terms,
+        attributes=attributes,
+        parent_concept=parent_concept,
+        children=children,
     )
 
 
@@ -2206,6 +2355,76 @@ async def taxonomy_score_candidate(
 
 
 # ---------------------------------------------------------------------------
+# Concept Lookup (lightweight autosuggest)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/concept-lookup")
+def concept_lookup(
+    q: str = "",
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    """Lightweight concept name lookup for autosuggest.
+
+    Returns concepts whose canonical_name or alias matches the query prefix.
+    Results are ``{id, canonical_name}`` sorted by exact-match first, then
+    prefix match, then alphabetical.
+    """
+    q_lower = q.strip().lower()
+    if not q_lower:
+        return {"results": []}
+
+    # Exact canonical match
+    exact = (
+        db.query(Concept.id, Concept.canonical_name)
+        .filter(func.lower(Concept.canonical_name) == q_lower)
+        .first()
+    )
+
+    # Prefix matches on canonical_name
+    prefix_q = (
+        db.query(Concept.id, Concept.canonical_name)
+        .filter(
+            func.lower(Concept.canonical_name).startswith(q_lower),
+            func.lower(Concept.canonical_name) != q_lower,
+        )
+        .order_by(Concept.canonical_name)
+        .limit(limit)
+        .all()
+    )
+
+    # Prefix matches on aliases
+    alias_q = (
+        db.query(Concept.id, Concept.canonical_name)
+        .join(ConceptAlias, ConceptAlias.concept_id == Concept.id)
+        .filter(
+            func.lower(ConceptAlias.normalized_alias).startswith(q_lower),
+        )
+        .order_by(Concept.canonical_name)
+        .limit(limit)
+        .all()
+    )
+
+    # Merge preserving order: exact, then prefixes (deduped)
+    seen_ids = set()
+    results = []
+
+    if exact:
+        results.append({"id": exact[0], "canonical_name": exact[1]})
+        seen_ids.add(exact[0])
+
+    for row in prefix_q + alias_q:
+        if row[0] not in seen_ids:
+            results.append({"id": row[0], "canonical_name": row[1]})
+            seen_ids.add(row[0])
+        if len(results) >= limit:
+            break
+
+    return {"results": results}
+
+
+# ---------------------------------------------------------------------------
 # Concept Search Pipeline (Phase 3A)
 # ---------------------------------------------------------------------------
 
@@ -2247,11 +2466,14 @@ async def concept_search(
     candidates_total = len(candidates)
 
     # Stage 3: Visual scoring
+    # Use the full original query as context text for CLIP (not the
+    # stripped stop-words), so the text embedding captures the entire
+    # semantic intent including matched concepts.
     if candidates and concept_ids and clip_available:
         scored = await svc.visual_score_candidates(
             candidates,
             concept_ids,
-            context_text=decomposed.context_text,
+            context_text=payload.query,
             limit=payload.limit,
         )
     else:
@@ -2261,6 +2483,7 @@ async def concept_search(
         {
             "image_id": c.image_id,
             "file_name": c.file_name,
+            "file_hash": c.file_hash,
             "thumbnail_url": c.thumbnail_url,
             "source_url": c.source_url,
             "width": c.width,
@@ -2268,6 +2491,7 @@ async def concept_search(
             "identity_score": c.identity_score,
             "context_score": c.context_score,
             "composite_score": c.composite_score,
+            "concept_scores": c.concept_scores,
         }
         for c in scored
     ]
@@ -2317,6 +2541,597 @@ def concept_search_concepts_index(
         total_concepts=len(concepts),
         concepts=concepts,
     )
+
+
+@router.post("/concept-search/rescan")
+def concept_search_rescan(db: Session = Depends(get_db)):
+    """Re-associate orphan observations with their concept via authority terms.
+
+    Step 0 links authority_terms to concepts by surface-form matching.
+    Steps 1-3 backfill concept_id on observations from authority_terms,
+    with deduplication.
+
+    Returns counts of terms linked, observations fixed, duplicates removed,
+    and remaining orphans.
+    """
+    from sqlalchemy import text as sql_text
+
+    # ── Step 0: Link authority terms to concepts by name ──────────────
+    # Build a lookup of normalized concept surface forms → concept_id.
+    surface_map: dict[str, int] = {}
+    for row in (
+        db.query(Concept.id, Concept.canonical_name)
+        .filter(Concept.status == "active")
+        .all()
+    ):
+        key = (row.canonical_name or "").strip().lower()
+        if key and key not in surface_map:
+            surface_map[key] = row.id
+    for row in (
+        db.query(ConceptAlias.concept_id, ConceptAlias.normalized_alias)
+        .join(Concept, ConceptAlias.concept_id == Concept.id)
+        .filter(Concept.status == "active")
+        .all()
+    ):
+        key = (row.normalized_alias or "").strip().lower()
+        if key and key not in surface_map:
+            surface_map[key] = row.concept_id
+
+    # Find all authority terms with concept_id IS NULL and try to match.
+    orphan_terms = (
+        db.query(AuthorityTerm.id, AuthorityTerm.normalized_external_name)
+        .filter(AuthorityTerm.concept_id.is_(None))
+        .all()
+    )
+    terms_linked = 0
+    for term in orphan_terms:
+        matched_id = surface_map.get(term.normalized_external_name)
+        if matched_id is not None:
+            db.query(AuthorityTerm).filter(AuthorityTerm.id == term.id).update(
+                {"concept_id": matched_id}, synchronize_session="fetch"
+            )
+            terms_linked += 1
+    if terms_linked:
+        db.flush()
+
+    # ── Step 1: Remove duplicate observations ────────────────────────
+    # Find and remove null-concept observations that would create
+    # duplicate (image_id, concept_id, authority_id) tuples after backfill.
+    dupes = db.execute(sql_text("""
+        SELECT o_null.id
+        FROM image_concept_observations o_null
+        JOIN authority_terms at1 ON o_null.authority_term_id = at1.id
+        WHERE o_null.concept_id IS NULL
+          AND at1.concept_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM image_concept_observations o_existing
+              WHERE o_existing.image_id = o_null.image_id
+                AND o_existing.concept_id = at1.concept_id
+                AND o_existing.authority_id = o_null.authority_id
+                AND o_existing.id != o_null.id
+          )
+    """)).fetchall()
+    dupe_ids = [r[0] for r in dupes]
+    duplicates_removed = len(dupe_ids)
+
+    if dupe_ids:
+        # Delete in chunks to avoid SQLite limits
+        chunk_size = 500
+        for i in range(0, len(dupe_ids), chunk_size):
+            chunk = dupe_ids[i:i + chunk_size]
+            db.query(ImageConceptObservation).filter(
+                ImageConceptObservation.id.in_(chunk)
+            ).delete(synchronize_session="fetch")
+
+    # Step 2: Find and remove same-batch conflicts (two null observations
+    # for the same image+authority that would get the same concept_id).
+    batch_dupes = db.execute(sql_text("""
+        SELECT o2.id
+        FROM image_concept_observations o1
+        JOIN authority_terms at1 ON o1.authority_term_id = at1.id
+        JOIN image_concept_observations o2
+            ON o1.image_id = o2.image_id
+            AND o1.authority_id = o2.authority_id
+            AND o1.id < o2.id
+        JOIN authority_terms at2 ON o2.authority_term_id = at2.id
+        WHERE o1.concept_id IS NULL
+          AND o2.concept_id IS NULL
+          AND at1.concept_id IS NOT NULL
+          AND at2.concept_id IS NOT NULL
+          AND at1.concept_id = at2.concept_id
+    """)).fetchall()
+    batch_dupe_ids = [r[0] for r in batch_dupes]
+    batch_duplicates_removed = len(batch_dupe_ids)
+
+    if batch_dupe_ids:
+        chunk_size = 500
+        for i in range(0, len(batch_dupe_ids), chunk_size):
+            chunk = batch_dupe_ids[i:i + chunk_size]
+            db.query(ImageConceptObservation).filter(
+                ImageConceptObservation.id.in_(chunk)
+            ).delete(synchronize_session="fetch")
+
+    # Step 3: Backfill concept_id from authority_terms
+    result = db.execute(sql_text("""
+        UPDATE image_concept_observations
+        SET concept_id = (
+            SELECT at.concept_id
+            FROM authority_terms at
+            WHERE at.id = image_concept_observations.authority_term_id
+        )
+        WHERE concept_id IS NULL
+          AND authority_term_id IN (
+              SELECT id FROM authority_terms WHERE concept_id IS NOT NULL
+          )
+    """))
+    observations_fixed = result.rowcount
+
+    db.commit()
+
+    # Count remaining orphans
+    remaining = db.execute(sql_text("""
+        SELECT COUNT(*) FROM image_concept_observations
+        WHERE concept_id IS NULL
+    """)).scalar()
+
+    return {
+        "terms_linked": terms_linked,
+        "observations_fixed": observations_fixed,
+        "duplicates_removed": duplicates_removed + batch_duplicates_removed,
+        "remaining_orphans": remaining,
+        "message": (
+            f"Linked {terms_linked} authority terms to concepts, "
+            f"fixed {observations_fixed} observations, "
+            f"removed {duplicates_removed + batch_duplicates_removed} duplicates, "
+            f"{remaining} orphans remain (authority terms with no concept)."
+        ),
+    }
+
+
+# -- Rebuild Observations SSE generator ----------------------------------------
+
+
+def _rebuild_observations_inner(
+    db: Session,
+    dry_run: bool,
+    emit: Callable[[str, dict], str],
+) -> Generator[str, None, None]:
+    """Rebuild all observations from sidecar JSON tag data.
+
+    For every image with a sidecar JSON file:
+      1. Extract tags from all sources (civitai, danbooru, prompt, user)
+      2. Upsert authority_terms (linking to concepts by surface-form match)
+      3. Create missing observations for image + authority_term pairs
+
+    This is more thorough than ``concept_search_rescan`` because it
+    re-extracts tags and creates missing authority_terms + observations,
+    not just backfilling concept_id on existing rows.
+    """
+    from atelierai.config import IMAGE_LIBRARY_PATH
+
+    library_path = Path(IMAGE_LIBRARY_PATH)
+    if not library_path.is_dir():
+        yield emit("error_event", {"error": "Image library path not found."})
+        yield emit("complete", {
+            "total_images": 0, "images_processed": 0,
+            "tags_extracted": 0, "terms_upserted": 0, "new_terms": 0,
+            "terms_linked_to_concepts": 0, "observations_created": 0,
+            "observations_skipped": 0, "errors": 1, "dry_run": dry_run,
+        })
+        return
+
+    sidecar_files = sorted(library_path.glob("*.json"))
+    total_images = len(sidecar_files)
+    images_processed = 0
+    tags_extracted = 0
+    terms_upserted = 0
+    new_terms = 0
+    terms_linked_to_concepts = 0
+    observations_created = 0
+    observations_skipped = 0
+    error_count = 0
+
+    # Pre-load concept surface-form map (same as rescan Step 0)
+    surface_map: dict[str, int] = {}
+    for row in (
+        db.query(Concept.id, Concept.canonical_name)
+        .filter(Concept.status == "active")
+        .all()
+    ):
+        key = (row.canonical_name or "").strip().lower()
+        if key and key not in surface_map:
+            surface_map[key] = row.id
+    for row in (
+        db.query(ConceptAlias.concept_id, ConceptAlias.normalized_alias)
+        .join(Concept, ConceptAlias.concept_id == Concept.id)
+        .filter(Concept.status == "active")
+        .all()
+    ):
+        key = (row.normalized_alias or "").strip().lower()
+        if key and key not in surface_map:
+            surface_map[key] = row.concept_id
+
+    # Pre-load authorities
+    authorities_cache: dict[str, int] = {}
+    for auth_row in db.query(TagAuthority).all():
+        authorities_cache[auth_row.name.lower()] = int(auth_row.id)
+
+    tax = _taxonomy_service
+    now = datetime.now(timezone.utc)
+    commit_interval = 50
+    pending_commits = 0
+
+    for idx, json_file in enumerate(sidecar_files, start=1):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            error_count += 1
+            yield emit("error_event", {
+                "current_image": idx, "file": json_file.name, "error": str(exc),
+            })
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "images_processed": images_processed,
+                "tags_extracted": tags_extracted,
+                "terms_upserted": terms_upserted,
+                "new_terms": new_terms,
+                "terms_linked_to_concepts": terms_linked_to_concepts,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        if not isinstance(data, dict):
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "images_processed": images_processed,
+                "tags_extracted": tags_extracted,
+                "terms_upserted": terms_upserted,
+                "new_terms": new_terms,
+                "terms_linked_to_concepts": terms_linked_to_concepts,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        # Resolve image_id from file stem
+        image_stem = json_file.stem
+        image_row = (
+            db.query(ImageModel.id)
+            .filter(ImageModel.file_path.like(f"{image_stem}.%"))
+            .first()
+        )
+        if image_row is None:
+            yield emit("progress", {
+                "current_image": idx, "total_images": total_images,
+                "images_processed": images_processed,
+                "tags_extracted": tags_extracted,
+                "terms_upserted": terms_upserted,
+                "new_terms": new_terms,
+                "terms_linked_to_concepts": terms_linked_to_concepts,
+                "observations_created": observations_created,
+                "observations_skipped": observations_skipped,
+            })
+            continue
+
+        image_id = int(image_row.id)
+
+        # Track unique constraint tuples for this image to prevent
+        # collisions between unflushed session objects and committed rows.
+        seen_unique_keys: set[tuple[int, int]] = set()
+
+        # Extract tags from all sources via GalleryTagService
+        tags_by_source = _gallery_tag_service.extract_image_scope_tag_names(
+            data,
+            normalize_taxonomy_text=tax.normalize_text,
+        )
+
+        for source, tag_names in tags_by_source.items():
+            if not tag_names:
+                continue
+
+            tags_extracted += len(tag_names)
+
+            # Get or create authority
+            authority_key = source.lower()
+            authority_id = authorities_cache.get(authority_key)
+            if authority_id is None:
+                auth = tax.get_or_create_authority(db, source)
+                authority_id = int(auth.id)
+                authorities_cache[authority_key] = authority_id
+
+            # Normalize tag names
+            normalized_map = {tax.normalize_text(n): n for n in tag_names if n}
+            if not normalized_map:
+                continue
+
+            # Batch-load existing terms for these names
+            existing_terms = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority_id,
+                    AuthorityTerm.normalized_external_name.in_(normalized_map.keys()),
+                )
+                .all()
+            )
+            existing_by_name = {
+                t.normalized_external_name: t for t in existing_terms
+            }
+
+            for norm_name, raw_name in normalized_map.items():
+                terms_upserted += 1
+                term = existing_by_name.get(norm_name)
+
+                if term is None:
+                    # Create new authority term with concept resolution
+                    resolved_concept_id = surface_map.get(norm_name)
+                    if resolved_concept_id is not None:
+                        terms_linked_to_concepts += 1
+
+                    term = AuthorityTerm(
+                        authority_id=authority_id,
+                        external_name=str(raw_name),
+                        normalized_external_name=norm_name,
+                        concept_id=resolved_concept_id,
+                        metadata_json={},
+                        created_at=now,
+                        updated_at=now,
+                        last_seen_at=now,
+                    )
+                    db.add(term)
+                    db.flush()  # get the id
+                    new_terms += 1
+                    existing_by_name[norm_name] = term
+                else:
+                    # Update last_seen_at and try concept resolution if still orphan
+                    term.last_seen_at = now
+                    term.updated_at = now
+                    if term.concept_id is None:
+                        resolved_concept_id = surface_map.get(norm_name)
+                        if resolved_concept_id is not None:
+                            term.concept_id = resolved_concept_id
+                            terms_linked_to_concepts += 1
+
+                # Check for existing observation by authority_term_id
+                existing_obs = (
+                    db.query(ImageConceptObservation.id)
+                    .filter(
+                        ImageConceptObservation.image_id == image_id,
+                        ImageConceptObservation.authority_term_id == term.id,
+                    )
+                    .first()
+                )
+                if existing_obs is not None:
+                    observations_skipped += 1
+                    continue
+
+                # Guard the UNIQUE constraint (image_id, concept_id, authority_id)
+                # using in-memory tracking to catch collisions with unflushed rows.
+                unique_key = (term.concept_id or 0, authority_id)
+                if term.concept_id is not None and unique_key in seen_unique_keys:
+                    observations_skipped += 1
+                    continue
+                # Also check committed rows in DB
+                if term.concept_id is not None:
+                    conflict = (
+                        db.query(ImageConceptObservation.id)
+                        .filter(
+                            ImageConceptObservation.image_id == image_id,
+                            ImageConceptObservation.concept_id == term.concept_id,
+                            ImageConceptObservation.authority_id == authority_id,
+                        )
+                        .first()
+                    )
+                    if conflict is not None:
+                        observations_skipped += 1
+                        continue
+
+                # Create observation
+                db.add(ImageConceptObservation(
+                    image_id=image_id,
+                    concept_id=term.concept_id,
+                    authority_id=authority_id,
+                    authority_term_id=int(term.id),
+                    source_type=ObservationSource.IMPORT,
+                    certainty_label=ObservationCertainty.LIKELY,
+                    is_present=True,
+                    is_curated=False,
+                    created_at=now,
+                    updated_at=now,
+                ))
+                observations_created += 1
+                pending_commits += 1
+                if term.concept_id is not None:
+                    seen_unique_keys.add(unique_key)
+
+        images_processed += 1
+
+        # Periodic commit
+        if not dry_run and pending_commits >= commit_interval:
+            try:
+                db.commit()
+                pending_commits = 0
+            except Exception as exc:
+                db.rollback()
+                error_count += 1
+                yield emit("error_event", {
+                    "current_image": idx, "file": json_file.name,
+                    "error": f"commit failed: {exc}",
+                })
+
+        yield emit("progress", {
+            "current_image": idx, "total_images": total_images,
+            "images_processed": images_processed,
+            "tags_extracted": tags_extracted,
+            "terms_upserted": terms_upserted,
+            "new_terms": new_terms,
+            "terms_linked_to_concepts": terms_linked_to_concepts,
+            "observations_created": observations_created,
+            "observations_skipped": observations_skipped,
+        })
+
+    # Final commit
+    if not dry_run and pending_commits > 0:
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            error_count += 1
+            yield emit("error_event", {
+                "current_image": total_images,
+                "error": f"final commit failed: {exc}",
+            })
+
+    yield emit("complete", {
+        "total_images": total_images,
+        "images_processed": images_processed,
+        "tags_extracted": tags_extracted,
+        "terms_upserted": terms_upserted,
+        "new_terms": new_terms,
+        "terms_linked_to_concepts": terms_linked_to_concepts,
+        "observations_created": observations_created,
+        "observations_skipped": observations_skipped,
+        "errors": error_count,
+        "dry_run": dry_run,
+    })
+
+
+@router.get("/concept-search/rebuild-observations")
+def concept_search_rebuild_observations(
+    dry_run: bool = Query(False, description="Preview changes without committing"),
+):
+    """SSE endpoint: rebuild all observations from sidecar JSON tag data.
+
+    More thorough than ``concept-search/rescan`` — re-extracts tags from
+    all sources (civitai, danbooru, prompt, user), upserts authority_terms
+    with concept linking, and creates missing observations.
+
+    Event types:
+      - ``progress``: emitted after each sidecar file is processed
+      - ``error_event``: emitted on per-file errors
+      - ``complete``: final event with full summary
+    """
+
+    def _sse_event(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    def event_stream():
+        db = SessionLocal()
+        try:
+            yield from _rebuild_observations_inner(db, dry_run, _sse_event)
+        finally:
+            db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/concept-search/similar-terms")
+def concept_search_similar_terms(
+    q: str,
+    limit: int = 20,
+    unlinked_only: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Find authority terms whose name is similar to *q*.
+
+    Uses token-overlap scoring to surface potential matches.  Useful in the
+    concept editor to discover tags that could be linked to a concept.
+
+    Set *unlinked_only*=true to only return terms with ``concept_id IS NULL``.
+    """
+    from sqlalchemy import func as sa_func
+
+    q_lower = q.strip().lower()
+    if not q_lower:
+        return {"query": q, "results": []}
+
+    q_tokens = set(
+        q_lower.replace("(", " ").replace(")", " ").replace("-", " ").split()
+    )
+
+    # Base query — optionally filter to unlinked only
+    base_q = (
+        db.query(
+            AuthorityTerm.id,
+            AuthorityTerm.normalized_external_name,
+            AuthorityTerm.concept_id,
+            AuthorityTerm.authority_id,
+            sa_func.count(ImageConceptObservation.id).label("observation_count"),
+        )
+        .outerjoin(
+            ImageConceptObservation,
+            ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+        )
+        .group_by(
+            AuthorityTerm.id,
+            AuthorityTerm.normalized_external_name,
+            AuthorityTerm.concept_id,
+            AuthorityTerm.authority_id,
+        )
+    )
+
+    # Filter: name must contain the query as a substring.
+    like_clause = f"%{q_lower}%"
+    base_q = base_q.filter(
+        AuthorityTerm.normalized_external_name.ilike(like_clause)
+    )
+    if unlinked_only:
+        base_q = base_q.filter(AuthorityTerm.concept_id.is_(None))
+
+    rows = base_q.order_by(AuthorityTerm.normalized_external_name).limit(500).all()
+
+    # Score by token overlap
+    def _score(name: str) -> float:
+        name_tokens = set(
+            name.replace("(", " ").replace(")", " ").replace("-", " ").split()
+        )
+        if not name_tokens:
+            return 0.0
+        overlap = len(q_tokens & name_tokens)
+        # Bonus for exact substring match
+        bonus = 0.5 if q_lower in name else 0.0
+        # Bonus for exact match
+        if name == q_lower:
+            bonus += 1.0
+        return (overlap / max(len(name_tokens), 1)) + bonus
+
+    scored = []
+    for row in rows:
+        s = _score(row.normalized_external_name)
+        if s > 0:
+            authority_name = None
+            if row.authority_id:
+                auth = (
+                    db.query(TagAuthority.name)
+                    .filter(TagAuthority.id == row.authority_id)
+                    .first()
+                )
+                authority_name = auth.name if auth else None
+            concept_name = None
+            if row.concept_id:
+                concept = (
+                    db.query(Concept.canonical_name)
+                    .filter(Concept.id == row.concept_id)
+                    .first()
+                )
+                concept_name = concept.canonical_name if concept else None
+            scored.append({
+                "authority_term_id": row.id,
+                "normalized_name": row.normalized_external_name,
+                "authority": authority_name,
+                "concept_id": row.concept_id,
+                "linked_concept": concept_name,
+                "observation_count": row.observation_count,
+                "score": round(s, 3),
+            })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return {"query": q, "results": scored[:limit]}
 
 
 def taxonomy_purge_root_concepts(
@@ -3187,7 +4002,18 @@ def taxonomy_tag_maint_list(
     if sort_direction not in {"asc", "desc"}:
         sort_direction = "asc"
     if sort_col == "post_count":
-        post_count_expr = func.json_extract(AuthorityTerm.metadata_json, "$.post_count")
+        # Sort by observation count (subquery) with fallback to metadata post_count
+        obs_count_subq = (
+            db.query(
+                ImageConceptObservation.authority_term_id,
+                func.count(ImageConceptObservation.id).label("cnt"),
+            )
+            .filter(ImageConceptObservation.is_present == True)  # noqa: E712
+            .group_by(ImageConceptObservation.authority_term_id)
+            .subquery()
+        )
+        post_count_expr = func.coalesce(obs_count_subq.c.cnt, 0)
+        q = q.outerjoin(obs_count_subq, AuthorityTerm.id == obs_count_subq.c.authority_term_id)
         sort_expr = (
             post_count_expr.desc() if sort_direction == "desc" else post_count_expr.asc()
         )
@@ -3197,6 +4023,21 @@ def taxonomy_tag_maint_list(
     term_rows = (
         q.order_by(sort_expr).offset((page - 1) * page_size).limit(page_size).all()
     )
+    # Batch-compute observation counts for this page of terms
+    term_ids_on_page = [t.id for t in term_rows]
+    obs_count_rows = (
+        db.query(
+            ImageConceptObservation.authority_term_id,
+            func.count(ImageConceptObservation.id),
+        )
+        .filter(
+            ImageConceptObservation.authority_term_id.in_(term_ids_on_page),
+            ImageConceptObservation.is_present == True,  # noqa: E712
+        )
+        .group_by(ImageConceptObservation.authority_term_id)
+        .all()
+    )
+    obs_counts: dict[int, int] = {row[0]: row[1] for row in obs_count_rows}
     gallery_names_cache_key = "_shared_gallery_tag_names_by_source"
     gallery_names_all = _search_cache_get(gallery_names_cache_key)
     if not isinstance(gallery_names_all, dict):
@@ -3219,7 +4060,12 @@ def taxonomy_tag_maint_list(
         )
         metadata = term.metadata_json if isinstance(term.metadata_json, dict) else {}
         post_count = None
-        if source_lower in {"danbooru", "civitai"}:
+        # Prefer observation count from our DB (images that have this tag)
+        obs_count = obs_counts.get(term.id)
+        if obs_count is not None and obs_count > 0:
+            post_count = obs_count
+        # Fall back to metadata post_count if available
+        if post_count is None and source_lower in {"danbooru", "civitai"}:
             raw_pc = (
                 metadata.get("post_count") if isinstance(metadata, dict) else None
             )
@@ -3249,6 +4095,95 @@ def taxonomy_tag_maint_list(
     }
 
 
+def _replace_tag_in_list(
+    tags: list, old_name_lower: str, new_name: str
+) -> tuple[list[str], bool]:
+    """Replace *old_name* with *new_name* in a tag list, preserving order.
+
+    Returns the rebuilt list and whether any change was made.
+    """
+    rebuilt: list[str] = []
+    changed = False
+    for tag in tags:
+        if isinstance(tag, str) and tag.strip().lower() == old_name_lower:
+            if new_name not in rebuilt:
+                rebuilt.append(new_name)
+            changed = True
+        else:
+            if tag not in rebuilt:
+                rebuilt.append(tag)
+    return rebuilt, changed
+
+
+def _cascade_user_tag_rename_sidecar(
+    sidecar_path: Path, old_name_lower: str, new_name: str
+) -> bool:
+    """Update a single sidecar JSON file's ``user_tags`` array.
+
+    Returns True if the file was modified.
+    """
+    if not sidecar_path.exists():
+        return False
+    try:
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            sidecar_data = json.load(f)
+    except (json.JSONDecodeError, IOError, OSError):
+        return False
+    sc_tags = sidecar_data.get("user_tags")
+    if not isinstance(sc_tags, list):
+        return False
+    sc_rebuilt, changed = _replace_tag_in_list(sc_tags, old_name_lower, new_name)
+    if not changed:
+        return False
+    sidecar_data["user_tags"] = sc_rebuilt
+    try:
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(sidecar_data, f, indent=2, ensure_ascii=False)
+    except (IOError, OSError):
+        return False
+    return True
+
+
+def _cascade_user_tag_rename(
+    db: Session, old_name: str, new_name: str
+) -> int:
+    """Propagate a user tag rename to images.user_tags JSON + sidecar files.
+
+    User tags live in *both* ``authority_terms`` (structured taxonomy) and the
+    raw ``images.user_tags`` JSON column.  When an ``external_name`` is edited
+    in the tag-maintenance page we must update every image whose ``user_tags``
+    array contains the old name so the gallery stays in sync.
+
+    Returns the number of images updated.
+    """
+    old_name_lower = old_name.strip().lower()
+    if not old_name_lower or old_name.strip().lower() == new_name.strip().lower():
+        return 0
+
+    from atelierai.config import IMAGE_LIBRARY_PATH
+
+    library_path = Path(IMAGE_LIBRARY_PATH)
+    affected_images = (
+        db.query(ImageModel)
+        .filter(_active_image_filter())
+        .filter(ImageModel.user_tags.isnot(None))
+        .all()
+    )
+    updated = 0
+    for img in affected_images:
+        current_tags = img.user_tags
+        if not isinstance(current_tags, list):
+            continue
+        rebuilt, changed = _replace_tag_in_list(current_tags, old_name_lower, new_name)
+        if not changed:
+            continue
+        img.user_tags = rebuilt
+        updated += 1
+        sidecar_path = (library_path / str(img.file_path)).with_suffix(".json")
+        _cascade_user_tag_rename_sidecar(sidecar_path, old_name_lower, new_name)
+    return updated
+
+
 @router.patch("/tag-maint/{source}/update", response_model=dict)
 def taxonomy_tag_maint_update(
     source: str,
@@ -3274,10 +4209,12 @@ def taxonomy_tag_maint_update(
             status_code=409,
             detail="Authority term does not belong to this source",
         )
+    old_external_name: Optional[str] = None
     if payload.field == "external_name":
         new_name = str(payload.value or "").strip()
         if not new_name:
             raise HTTPException(status_code=400, detail="external_name cannot be empty")
+        old_external_name = term.external_name
         term.external_name = new_name
         term.normalized_external_name = _normalize_taxonomy_text(new_name)
     elif payload.field == "external_tag_id":
@@ -3302,12 +4239,35 @@ def taxonomy_tag_maint_update(
     else:
         raise HTTPException(status_code=400, detail=f"Unknown field: {payload.field}")
     term.updated_at = datetime.now(timezone.utc)
+
+    # ── Cascade rename to images.user_tags JSON for user-sourced tags ──────
+    # User tags are stored in BOTH authority_terms and the raw images.user_tags
+    # JSON column.  The gallery reads user tags from both sources, so we must
+    # propagate the rename to keep them in sync.
+    updated_images_count = 0
+    if (
+        payload.field == "external_name"
+        and old_external_name is not None
+        and source_lower == "user"
+        and old_external_name != term.external_name
+    ):
+        updated_images_count = _cascade_user_tag_rename(
+            db, old_external_name, term.external_name
+        )
+
     db.commit()
+
+    # Invalidate caches so the gallery picks up the new name immediately.
+    from utils.cache import _invalidate_search_cache
+
+    _invalidate_search_cache("tags_update")
+
     return {
         "message": "Tag updated.",
         "authority_term_id": int(term.id),
         "field": payload.field,
         "value": payload.value,
+        "images_updated": updated_images_count,
     }
 
 
@@ -3501,3 +4461,211 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
         "resolved": missing_before - missing_after,
         "errors": errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# Snapshot Import
+# ---------------------------------------------------------------------------
+
+
+@router.post("/snapshot/import_file", response_model=TaxonomySnapshotImportResponse)
+async def taxonomy_snapshot_import_file(
+    dry_run: bool = Form(True),
+    backup_db: bool = Form(True),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Import a taxonomy snapshot file (``atelierai.taxonomy.snapshot`` v1).
+
+    The file is validated, then imported in phases (authorities → concepts →
+    aliases → authority_terms → user_bindings).  Non-ephemeral data
+    mismatches cause the import to abort with a conflict report.
+
+    Use ``dry_run=true`` (default) to validate and preview the import without
+    making changes.  Set ``backup_db=true`` to create a timestamped backup of
+    the SQLite database before a live import.
+    """
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded text")
+
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
+
+    source_name = file.filename or "snapshot.json"
+
+    # Pre-flight validation
+    validation_errors = validate_snapshot(data)
+    if validation_errors:
+        return TaxonomySnapshotImportResponse(
+            status="aborted",
+            snapshot_format=data.get("format", ""),
+            snapshot_version=data.get("version", 0),
+            source_file=source_name,
+            errors=validation_errors,
+        )
+
+    # Run import
+    result = import_snapshot(
+        db,
+        data=data,
+        dry_run=dry_run,
+        backup_db=backup_db,
+        source_file=source_name,
+        db_url=app_config.DATABASE_URL,
+    )
+
+    return TaxonomySnapshotImportResponse(**result)
+
+
+# ── Concept Attribute CRUD ──────────────────────────────────────────────────
+
+
+@router.get("/concepts/{concept_id}/attributes", response_model=list[ConceptAttributeEntry])
+async def taxonomy_list_attributes(
+    concept_id: int,
+    db: Session = Depends(get_db),
+):
+    """List all attributes for a concept."""
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    results = []
+    for attr in concept.attributes:
+        attr_concept = attr.attribute_concept
+        results.append(
+            ConceptAttributeEntry(
+                concept_id=concept_id,
+                attribute_concept_id=attr_concept.id,
+                attribute_concept_name=attr_concept.canonical_name,
+                attribute_kind=attr.attribute_kind,
+                invariance=attr.invariance,
+                consistency_score=attr.consistency_score,
+                notes=attr.notes,
+            )
+        )
+    return results
+
+
+@router.post("/concepts/{concept_id}/attributes", response_model=ConceptAttributeEntry)
+async def taxonomy_add_attribute(
+    concept_id: int,
+    payload: ConceptAttributeAddRequest,
+    db: Session = Depends(get_db),
+):
+    """Add an attribute (another concept) to a concept."""
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    attr_concept = db.query(Concept).filter(Concept.id == payload.attribute_concept_id).first()
+    if not attr_concept:
+        raise HTTPException(status_code=404, detail="Attribute concept not found")
+
+    if payload.attribute_concept_id == concept_id:
+        raise HTTPException(status_code=400, detail="A concept cannot be an attribute of itself")
+
+    # Check for duplicate
+    existing = (
+        db.query(ConceptAttributeProfile)
+        .filter(
+            ConceptAttributeProfile.concept_id == concept_id,
+            ConceptAttributeProfile.attribute_concept_id == payload.attribute_concept_id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Attribute already exists for this concept")
+
+    attr = ConceptAttributeProfile(
+        concept_id=concept_id,
+        attribute_concept_id=payload.attribute_concept_id,
+        attribute_kind=payload.attribute_kind,
+        invariance=payload.invariance,
+        consistency_score=payload.consistency_score,
+        notes=payload.notes,
+    )
+    db.add(attr)
+    db.commit()
+    db.refresh(attr)
+
+    return ConceptAttributeEntry(
+        concept_id=concept_id,
+        attribute_concept_id=attr_concept.id,
+        attribute_concept_name=attr_concept.canonical_name,
+        attribute_kind=attr.attribute_kind,
+        invariance=attr.invariance,
+        consistency_score=attr.consistency_score,
+        notes=attr.notes,
+    )
+
+
+@router.patch(
+    "/concepts/{concept_id}/attributes/{attribute_concept_id}",
+    response_model=ConceptAttributeEntry,
+)
+async def taxonomy_update_attribute(
+    concept_id: int,
+    attribute_concept_id: int,
+    payload: ConceptAttributeUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Update an existing attribute entry."""
+    attr = (
+        db.query(ConceptAttributeProfile)
+        .filter(
+            ConceptAttributeProfile.concept_id == concept_id,
+            ConceptAttributeProfile.attribute_concept_id == attribute_concept_id,
+        )
+        .first()
+    )
+    if not attr:
+        raise HTTPException(status_code=404, detail="Attribute not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(attr, field, value)
+
+    db.commit()
+    db.refresh(attr)
+
+    return ConceptAttributeEntry(
+        concept_id=concept_id,
+        attribute_concept_id=attribute_concept_id,
+        attribute_concept_name=attr.attribute_concept.canonical_name,
+        attribute_kind=attr.attribute_kind,
+        invariance=attr.invariance,
+        consistency_score=attr.consistency_score,
+        notes=attr.notes,
+    )
+
+
+@router.delete("/concepts/{concept_id}/attributes/{attribute_concept_id}")
+async def taxonomy_delete_attribute(
+    concept_id: int,
+    attribute_concept_id: int,
+    db: Session = Depends(get_db),
+):
+    """Remove an attribute from a concept."""
+    attr = (
+        db.query(ConceptAttributeProfile)
+        .filter(
+            ConceptAttributeProfile.concept_id == concept_id,
+            ConceptAttributeProfile.attribute_concept_id == attribute_concept_id,
+        )
+        .first()
+    )
+    if not attr:
+        raise HTTPException(status_code=404, detail="Attribute not found")
+
+    db.delete(attr)
+    db.commit()
+    return {"status": "deleted", "concept_id": concept_id, "attribute_concept_id": attribute_concept_id}

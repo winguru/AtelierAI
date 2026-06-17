@@ -1751,7 +1751,7 @@ class CivitaiSearchImageLink(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     search_id = Column(
-        Integer, ForeignKey("civitai_search_records.id"), nullable=False, index=True
+        Integer, ForeignKey("civitai_search_records.id"), nullable=True, index=True
     )
     image_id = Column(
         Integer,

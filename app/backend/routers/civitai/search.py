@@ -113,6 +113,114 @@ def _normalize_meili_hit(hit: dict) -> dict:
     return out
 
 
+def _build_hit_from_trpc(
+    basic_info: dict, generation_data: dict, tag_records: list[dict]
+) -> dict:
+    """Build a normalised hit dict from CivitAI tRPC endpoint responses.
+
+    Produces the same shape as ``_normalize_meili_hit`` so the frontend can
+    consume it without any changes.
+
+    Sources:
+        basic_info      → ``image.get``
+        generation_data → ``image.getGenerationData``
+        tag_records     → ``tag.getVotableTags``
+    """
+    meta = generation_data.get("meta") if generation_data else None
+    if not isinstance(meta, dict):
+        meta = {}
+
+    uuid = basic_info.get("url", "") or ""
+
+    # ── Image URLs (same construction as _normalize_meili_hit) ──
+    thumbnail_url = mid_res_url = full_url = uuid
+    if uuid and "/" not in uuid:
+        thumbnail_url = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=450/{uuid}"
+        mid_res_url = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=1260/{uuid}"
+        full_url = f"{_CIVITAI_IMAGE_CDN}/{uuid}/original=true/{uuid}"
+
+    # ── Tags ──
+    tag_names = [
+        t.get("name") for t in tag_records if isinstance(t, dict) and t.get("name")
+    ]
+    tag_ids = [
+        t.get("id")
+        for t in tag_records
+        if isinstance(t, dict) and t.get("id") is not None
+    ]
+
+    # ── Author ──
+    user = basic_info.get("user")
+    if not isinstance(user, dict):
+        user = None
+
+    # ── Build the hit ──
+    hit: dict[str, Any] = {
+        "id": basic_info.get("id", 0),
+        "url": full_url,
+        "thumbnail_url": thumbnail_url,
+        "mid_res_url": mid_res_url,
+        "name": basic_info.get("name", ""),
+        "mimeType": basic_info.get("mimeType", "image/jpeg"),
+        "nsfwLevel": basic_info.get("nsfwLevel"),
+        "createdAt": basic_info.get("createdAt"),
+        "publishedAt": basic_info.get("publishedAt"),
+        "postId": basic_info.get("postId"),
+        # Tags from tag.getVotableTags
+        "tagNames": tag_names,
+        "tagIds": tag_ids,
+        # Generation metadata from image.getGenerationData
+        "prompt": meta.get("prompt", ""),
+        "negativePrompt": meta.get("negativePrompt", ""),
+        "baseModel": meta.get("baseModel"),
+        "sampler": meta.get("sampler"),
+        "steps": meta.get("steps"),
+        "cfgScale": meta.get("cfgScale"),
+        "seed": meta.get("seed"),
+        "clipSkip": meta.get("clipSkip"),
+    }
+
+    # Dimensions: prefer generation_data meta, fall back to basic_info
+    hit["width"] = meta.get("width") or basic_info.get("width")
+    hit["height"] = meta.get("height") or basic_info.get("height")
+
+    # BlurHash
+    if basic_info.get("hash"):
+        hit["hash"] = basic_info["hash"]
+        hit["blurhash"] = basic_info["hash"]
+
+    # Author info in Meilisearch-like format
+    if user:
+        hit["user"] = {
+            "username": user.get("username", ""),
+            "image": user.get("image"),
+        }
+        hit["username"] = user.get("username", "")
+
+    # Stats: pass through if present (tRPC image.get may include them)
+    stats = basic_info.get("stats")
+    if isinstance(stats, dict):
+        normalised = {}
+        for key, value in stats.items():
+            short = key.replace("AllTime", "")
+            normalised[short] = value
+        hit["stats"] = normalised
+
+    # Resources (LoRAs, models, embeddings)
+    resources = generation_data.get("resources") if generation_data else None
+    if isinstance(resources, list) and resources:
+        hit["resources"] = resources
+        # Extract baseModel from meta if not already set
+        if not hit.get("baseModel") and meta.get("baseModel"):
+            hit["baseModel"] = meta["baseModel"]
+
+    # Meta dict for frontend fallbacks (tags, etc.)
+    if meta:
+        hit["meta"] = meta
+
+    return hit
+
+
 def _classify_civitai_upstream_error(exc: Any) -> HTTPException:
     """Map a CivitaiRequestError to a semantically correct HTTPException.
 
@@ -197,6 +305,15 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
 
     client = _get_civitai_search_client()
 
+    # Split comma-separated usernames into a list for multi-user search.
+    # Meilisearch accepts repeated ``users`` CGI params (e.g.
+    # ``users=alice&users=bob``) to scope results to any listed artist.
+    users_list: list[str] = []
+    if payload.username:
+        users_list = [
+            u.strip() for u in payload.username.split(",") if u.strip()
+        ]
+
     try:
         result = client.search_images(
             query=payload.query,
@@ -209,10 +326,11 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
             base_models=payload.base_models,
             exclude_poi=payload.exclude_poi,
             exclude_minor=payload.exclude_minor,
-            username=payload.username,
+            username=users_list[0] if len(users_list) == 1 else None,
             facets=payload.facets,
             extra_filters=payload.extra_filters,
             matching_strategy=payload.matching_strategy,
+            users=users_list if len(users_list) > 1 else None,
         )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)
@@ -257,6 +375,70 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     _search_cache_put(cache_key, response, ttl_seconds=60)
 
     return response
+
+
+@router.get("/image/{image_id}", response_model=dict)
+def civitai_search_single_image(image_id: int):
+    """Fetch fresh metadata for a single CivitAI image via tRPC endpoints.
+
+    Used by the frontend 'r' (reload) action to re-fetch tags, models,
+    prompt, and other metadata that may have been missing or stale in the
+    original search response.
+
+    Uses the CivitAI tRPC endpoints (``image.get``, ``image.getGenerationData``,
+    ``tag.getVotableTags``) instead of Meilisearch, because Meilisearch
+    returns null ``tagNames`` / ``tagIds`` for id-filtered queries.
+
+    Returns a normalised hit dict (same shape as ``_normalize_meili_hit``
+    output) or 404 if the image is not found.
+    """
+    from atelierai.civitai.civitai_api import CivitaiAPI
+    from atelierai.civitai.http_client import CivitaiRequestError
+
+    try:
+        api = CivitaiAPI.get_instance()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CivitAI API initialisation error: {exc}",
+        )
+
+    # ── Fetch from all three tRPC endpoints ──
+    basic_info: dict = {}
+    generation_data: dict = {}
+    tag_records: list[dict] = []
+
+    try:
+        basic_info = api.fetch_basic_info(image_id) or {}
+    except CivitaiRequestError as exc:
+        raise _classify_civitai_upstream_error(exc)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CivitAI image.get error: {exc}",
+        )
+
+    if not basic_info:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Image {image_id} not found on CivitAI.",
+        )
+
+    # Generation data and tags are best-effort (fail-open per AGENTS.md).
+    try:
+        generation_data = api.fetch_generation_data(image_id) or {}
+    except CivitaiRequestError as exc:
+        raise _classify_civitai_upstream_error(exc)
+    except Exception:
+        pass  # fail-open
+
+    try:
+        tag_records = api.fetch_image_tag_records(image_id) or []
+    except Exception:
+        pass  # fail-open
+
+    # ── Build normalised hit from tRPC responses ──
+    return {"hit": _build_hit_from_trpc(basic_info, generation_data, tag_records)}
 
 
 @router.get("/library-status", response_model=dict)
@@ -436,12 +618,22 @@ def rate_civitai_image(
     is_excluded = payload.rating == "discard"
 
     # Find or create the link row for this search+image pair.
-    link = None
+    # When search_id is None we look for a standalone link (search_id IS NULL)
+    # so we don't create duplicates on repeated ratings.
     if payload.search_id is not None:
         link = (
             db.query(CivitaiSearchImageLink)
             .filter(
                 CivitaiSearchImageLink.search_id == payload.search_id,
+                CivitaiSearchImageLink.image_id == img.id,
+            )
+            .first()
+        )
+    else:
+        link = (
+            db.query(CivitaiSearchImageLink)
+            .filter(
+                CivitaiSearchImageLink.search_id.is_(None),
                 CivitaiSearchImageLink.image_id == img.id,
             )
             .first()
@@ -479,6 +671,73 @@ def rate_civitai_image(
 def get_excluded_image_ids(db: Session = Depends(get_db)):
     """Return CivitAI image IDs the user has discarded (for client-side filtering)."""
     return {"excluded_ids": sorted(_get_excluded_civitai_image_ids(db))}
+
+
+@router.get("/ratings", response_model=dict)
+def get_image_ratings(
+    civitai_image_ids: str = Query("", description="Comma-separated CivitAI image IDs"),
+    db: Session = Depends(get_db),
+):
+    """Return the user's keep/discard/skip ratings for the given CivitAI image IDs.
+
+    Returns a dict mapping each rated CivitAI image ID (as string) to its
+    most recent rating (``"keep"``, ``"discard"``, or ``"skip"``).  IDs
+    with no rating are simply absent from the response.
+
+    When an image has multiple link rows (from different searches), the
+    most recently created link wins.
+    """
+    if not civitai_image_ids:
+        return {"ratings": {}}
+
+    try:
+        ids = [int(x.strip()) for x in civitai_image_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="civitai_image_ids must be comma-separated integers.",
+        )
+
+    if not ids:
+        return {"ratings": {}}
+
+    if len(ids) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many IDs ({len(ids)}). Maximum 200 per request.",
+        )
+
+    # Join CivitaiSearchImage → CivitaiSearchImageLink, pick the latest rating
+    # per civitai_image_id using a window function.
+    from sqlalchemy import func as sa_func
+
+    # Subquery: rank link rows per image by created_at DESC.
+    ranked = (
+        db.query(
+            CivitaiSearchImage.civitai_image_id.label("cid"),
+            CivitaiSearchImageLink.rating.label("rating"),
+            sa_func.row_number()
+            .over(
+                partition_by=CivitaiSearchImage.civitai_image_id,
+                order_by=CivitaiSearchImageLink.created_at.desc(),
+            )
+            .label("rn"),
+        )
+        .join(
+            CivitaiSearchImageLink,
+            CivitaiSearchImageLink.image_id == CivitaiSearchImage.id,
+        )
+        .filter(
+            CivitaiSearchImage.civitai_image_id.in_(ids),
+            CivitaiSearchImageLink.rating.isnot(None),
+        )
+        .subquery()
+    )
+
+    rows = db.query(ranked.c.cid, ranked.c.rating).filter(ranked.c.rn == 1).all()
+
+    ratings = {str(row.cid): row.rating for row in rows if row.cid is not None}
+    return {"ratings": ratings}
 
 
 @router.post("/search-record", response_model=dict)

@@ -821,6 +821,91 @@ def _ensure_observation_unique_constraint() -> None:
             )
 
 
+def _ensure_search_link_search_id_nullable() -> None:
+    """Make civitai_search_image_links.search_id nullable for existing databases.
+
+    SQLite cannot ALTER a column's NOT NULL constraint in place, so we recreate
+    the table via a temp copy when the column is still NOT NULL.
+    """
+    with engine.connect() as connection:
+        col_info = {
+            row[1]: row
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_search_image_links)")
+            ).fetchall()
+        }
+
+    search_id_col = col_info.get("search_id")
+    if search_id_col is None:
+        return  # table doesn't exist yet — create_all will handle it
+
+    # PRAGMA row: (cid, name, type, notnull, dflt_value, pk) — notnull=1 means NOT NULL.
+    if search_id_col[3] == 0:
+        return  # already nullable
+
+    print(
+        "  [migration] civitai_search_image_links.search_id is NOT NULL "
+        "— recreating table with nullable column..."
+    )
+
+    with engine.begin() as connection:
+        result = connection.execute(
+            text("SELECT COUNT(*) FROM civitai_search_image_links")
+        ).fetchone()
+        row_count = result[0] if result else 0
+
+        connection.execute(
+            text("ALTER TABLE civitai_search_image_links RENAME TO _csil_legacy")
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE civitai_search_image_links (\n"
+                "    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\n"
+                "    search_id INTEGER REFERENCES civitai_search_records(id),\n"
+                "    image_id INTEGER NOT NULL REFERENCES civitai_search_images(id),\n"
+                "    position INTEGER,\n"
+                "    rating VARCHAR,\n"
+                "    is_excluded BOOLEAN DEFAULT 0 NOT NULL,\n"
+                "    created_at DATETIME DEFAULT (CURRENT_TIMESTAMP) NOT NULL\n"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_civitai_search_image_links_search_id "
+                "ON civitai_search_image_links (search_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_civitai_search_image_links_image_id "
+                "ON civitai_search_image_links (image_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_civitai_search_link_search_image "
+                "ON civitai_search_image_links (search_id, image_id)\n"
+            )
+        )
+
+        # Copy existing rows (all will have non-null search_id from the old schema).
+        connection.execute(
+            text(
+                "INSERT INTO civitai_search_image_links "
+                "(id, search_id, image_id, position, rating, is_excluded, created_at)\n"
+                "SELECT id, search_id, image_id, position, rating, is_excluded, created_at\n"
+                "FROM _csil_legacy"
+            )
+        )
+        connection.execute(text("DROP TABLE _csil_legacy"))
+
+    print(
+        f"  [migration] Migrated {row_count} rows; "
+        "search_id is now nullable."
+    )
+
+
 def _attempt_schema_migration_1_3_to_1_4() -> bool:
     """Attempt in-place migration from schema 1.3 to 1.4."""
     print("   Attempting in-place schema upgrade 1.3 -> 1.4...")
@@ -998,6 +1083,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     _ensure_observation_unique_constraint()
     _ensure_file_hash_nonunique()
     _ensure_artist_preference_blocked_column()
+    _ensure_search_link_search_id_nullable()
 
     print("AtelierAI API is ready to go!")
 

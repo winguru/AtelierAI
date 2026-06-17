@@ -959,7 +959,10 @@ class CivitaiImageRatingRequest(BaseModel):
     image_url: Optional[str] = None
     tags: Optional[list[str]] = None
     generation_prompt: Optional[str] = None
-    generation_models: Optional[list[dict]] = None
+    # Meilisearch may return models as list[dict], list[str], null, or other
+    # shapes depending on the image.  Accept any JSON-serialisable value and
+    # normalise in the ORM layer.
+    generation_models: Optional[Any] = None
     reactions: Optional[int] = None
     likes: Optional[int] = None
     position: Optional[int] = None

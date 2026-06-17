@@ -8,6 +8,8 @@
   const API_AUTH_STATUS = '/api/civitai-search/auth-status';
   const API_LIBRARY_STATUS = '/api/civitai-search/library-status';
   const API_RATE_IMAGE = '/api/civitai-search/rate';
+  const API_RATINGS = '/api/civitai-search/ratings';
+  const API_SINGLE_IMAGE = (id) => `/api/civitai-search/image/${id}`;
   const API_SEARCH_RECORD = '/api/civitai-search/search-record';
   const API_BATCH_IMPORT = '/api/import_civitai/batch';
   const API_COLLECTIONS = '/api/collections/';
@@ -187,7 +189,115 @@
     importTasks: new Map(),    // civitaiId → task_id (pending imports)
     imageRatings: new Map(),   // civitaiId → "keep" | "discard" | "skip"
     currentSearchId: null,     // DB id of the current search record
+    imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
   };
+
+  /* ── Image load retry utilities ── */
+  const MAX_IMAGE_RETRIES = 3;
+  const RETRY_BASE_DELAY = 500; // ms — doubles each attempt
+
+  /**
+   * Attempt to load an image URL with exponential-backoff retries.
+   *
+   * Distinguishes permanent failures (HTTP 404/403/410 — image deleted
+   * or removed) from temporary ones (network errors, 5xx).  Only temporary
+   * failures are retried.
+   *
+   * @returns {Promise<boolean>} true if image loaded, false if permanently failed
+   */
+  function retryImageLoad(url, civitaiId, { maxRetries = MAX_IMAGE_RETRIES } = {}) {
+    return new Promise((resolve) => {
+      let attempt = 0;
+
+      function tryLoad() {
+        const probe = new Image();
+        probe.onload = () => {
+          state.imageLoadErrors.delete(civitaiId);
+          resolve(true);
+        };
+        probe.onerror = () => {
+          attempt++;
+          const errorInfo = state.imageLoadErrors.get(civitaiId) || { attempts: 0, permanent: false };
+          errorInfo.attempts = attempt;
+          state.imageLoadErrors.set(civitaiId, errorInfo);
+
+          if (attempt >= maxRetries) {
+            errorInfo.permanent = true;
+            resolve(false);
+            return;
+          }
+          // Exponential backoff: 500ms, 1s, 2s
+          const delay = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
+          setTimeout(tryLoad, delay);
+        };
+        probe.src = url;
+      }
+
+      tryLoad();
+    });
+  }
+
+  /**
+   * Reload metadata for the currently selected image from the backend.
+   *
+   * Fetches fresh data (tags, models, prompt, etc.) via the single-image
+   * endpoint and merges it into the hit in state.hits, then re-renders.
+   */
+  async function reloadCurrentImage() {
+    const idx = state.selectedHitIndex;
+    if (idx < 0 || !state.hits[idx]) return;
+
+    const hit = state.hits[idx];
+    const civitaiId = hit.id;
+
+    setStatus(`Reloading image #${civitaiId}…`, 'is-loading');
+
+    try {
+      const res = await fetch(API_SINGLE_IMAGE(civitaiId));
+
+      if (res.status === 404) {
+        setStatus(`Image #${civitaiId} no longer exists on CivitAI.`, 'is-error');
+        return;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const freshHit = data.hit;
+
+      if (!freshHit) {
+        setStatus(`No data returned for image #${civitaiId}.`, 'is-error');
+        return;
+      }
+
+      // Merge: preserve local-only fields, update everything else from fresh data
+      const merged = {
+        ...hit,          // keep existing fields as fallback
+        ...freshHit,     // overwrite with fresh metadata
+        // Preserve local UI state that isn't in the API response
+      };
+      state.hits[idx] = merged;
+
+      // Re-render everything that depends on this hit
+      const fullscreenOpen = !els.fullscreen_preview.classList.contains('hidden');
+      if (fullscreenOpen) {
+        _setFullscreenImage(merged);
+        renderFullscreenTags(merged);
+      } else {
+        renderResults(false);
+        showDetails(merged);
+      }
+
+      setStatus(`Reloaded image #${civitaiId}.`, '');
+    } catch (err) {
+      setStatus(`Reload failed: ${err.message}`, 'is-error', {
+        label: 'Retry',
+        onClick: () => reloadCurrentImage(),
+      });
+    }
+  }
 
   /* ── Initialise ── */
   function init() {
@@ -304,6 +414,45 @@
       // Update import button if details are showing
       if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
         updateImportButtonState(state.hits[state.selectedHitIndex]);
+      }
+    } catch {
+      // Silently fail — badges are non-essential
+    }
+  }
+
+  /**
+   * Fetch persisted keep/discard/skip ratings for the current result set.
+   * Merges them into state.imageRatings so badges survive across sessions.
+   */
+  async function fetchImageRatings() {
+    const ids = state.hits.map(h => h.id).filter(Boolean);
+    if (!ids.length) return;
+
+    const BATCH_SIZE = 200;
+    let merged = {};
+
+    try {
+      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+        const batch = ids.slice(i, i + BATCH_SIZE);
+        const res = await fetch(`${API_RATINGS}?civitai_image_ids=${batch.join(',')}`);
+        if (!res.ok) continue;
+        const data = await res.json();
+        Object.assign(merged, data.ratings || {});
+      }
+
+      let changed = false;
+      for (const [idStr, rating] of Object.entries(merged)) {
+        const id = Number(idStr);
+        // Don't overwrite a rating the user just made in this session
+        if (!state.imageRatings.has(id)) {
+          state.imageRatings.set(id, rating);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        refreshAllRatingIndicators();
+        updateFullscreenCounter();
       }
     } catch {
       // Silently fail — badges are non-essential
@@ -1042,6 +1191,9 @@
       // Fetch library status for current hits
       fetchLibraryStatus();
 
+      // Restore persisted ratings so badges survive across sessions
+      fetchImageRatings();
+
       // Refresh artist summary panel
       fetchArtistSummary();
 
@@ -1052,7 +1204,10 @@
     } catch (err) {
       // Revert offset on failure so "Load More" can be retried.
       if (append) state.offset = savedOffset;
-      setStatus(`Search failed: ${err.message}`, 'is-error');
+      setStatus(`Search failed: ${err.message}`, 'is-error', {
+        label: 'Retry search',
+        onClick: () => executeSearch(append),
+      });
     } finally {
       state.loading = false;
     }
@@ -1085,19 +1240,19 @@
       img.src = placeholderURL;
       img.style.filter = 'blur(8px)';
       img.style.transition = 'filter 300ms ease, opacity 300ms ease';
-      // Load real image in background, swap on ready.
-      // We use a hidden preloader instead of lazy loading so tiles that
-      // scroll into view *after* the preload finishes still swap instantly.
-      const realImg = new Image();
-      realImg.onload = () => {
-        img.src = thumbURL;
-        img.style.filter = '';
-      };
-      realImg.onerror = () => {
-        // Keep blurhash placeholder — real image failed.
-        img.style.filter = 'blur(4px)';
-      };
-      realImg.src = thumbURL;
+      // Load real image with automatic retry (exponential backoff).
+      // On success swap from blurhash placeholder to the real thumbnail.
+      // On permanent failure show a visual error indicator on the tile.
+      retryImageLoad(thumbURL, hit.id).then((ok) => {
+        if (ok) {
+          img.src = thumbURL;
+          img.style.filter = '';
+        } else {
+          img.style.filter = 'blur(4px) grayscale(0.6)';
+          img.style.opacity = '0.4';
+          btn.classList.add('tile-image-error');
+        }
+      });
     } else {
       img.loading = 'lazy';
       img.src = thumbURL;
@@ -1542,16 +1697,15 @@
       els.fullscreen_image.src = thumbUrl;
     }
 
-    // Upgrade to mid-res in background
+    // Upgrade to mid-res in background with automatic retry
     if (midUrl && midUrl !== thumbUrl) {
-      const upgrade = new Image();
-      upgrade.onload = () => {
+      retryImageLoad(midUrl, `mid_${hit.id}`).then((ok) => {
         // Only apply if user hasn't navigated away
-        if (state.hits[state.selectedHitIndex]?.id === hit.id) {
+        if (ok && state.hits[state.selectedHitIndex]?.id === hit.id) {
           els.fullscreen_image.src = midUrl;
+          _preloadCache.set(hit.id, 'loaded');
         }
-      };
-      upgrade.src = midUrl;
+      });
     }
   }
 
@@ -1676,6 +1830,11 @@
       advanceToNext();
       return;
     }
+    if (e.key === 'r' || e.key === 'R') {
+      e.preventDefault();
+      reloadCurrentImage();
+      return;
+    }
 
     if (fullscreenOpen) {
       if (e.key === 'Escape') { closeFullscreen(); return; }
@@ -1721,10 +1880,26 @@
   }
 
   /* ── Status bar ── */
-  function setStatus(text, cls) {
+  function setStatus(text, cls, action) {
     els.search_status_text.textContent = text;
     els.search_status.className = 'search-status';
     if (cls) els.search_status.classList.add(cls);
+
+    // Remove any previous action button
+    const oldBtn = els.search_status.querySelector('.status-action-btn');
+    if (oldBtn) oldBtn.remove();
+
+    // Optionally add an action button (e.g. "Retry")
+    if (action) {
+      const btn = document.createElement('button');
+      btn.className = 'status-action-btn';
+      btn.textContent = action.label;
+      btn.addEventListener('click', () => {
+        btn.remove();
+        action.onClick();
+      });
+      els.search_status.appendChild(btn);
+    }
   }
 
   /* ── Boot ── */

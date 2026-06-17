@@ -185,6 +185,7 @@ class CivitaiSearchClient:
         facets: Optional[list[str]] = None,
         extra_filters: Optional[list[str]] = None,
         matching_strategy: Optional[str] = None,
+        users: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Search for images using Meilisearch (preferred) or REST API fallback.
 
@@ -215,6 +216,7 @@ class CivitaiSearchClient:
                         facets=facets,
                         extra_filters=extra_filters,
                         matching_strategy=matching_strategy,
+                        users=users,
                     )
                     result["backend"] = "meilisearch"
                     return result
@@ -260,6 +262,7 @@ class CivitaiSearchClient:
                                 facets=facets,
                                 extra_filters=extra_filters,
                                 matching_strategy=matching_strategy,
+                                users=users,
                             )
                             result["backend"] = "meilisearch"
                             _log.info(
@@ -296,6 +299,7 @@ class CivitaiSearchClient:
                                     facets=facets,
                                     extra_filters=extra_filters,
                                     matching_strategy=matching_strategy,
+                                    users=users,
                                 )
                                 result["backend"] = "meilisearch"
                                 _log.info(
@@ -331,6 +335,13 @@ class CivitaiSearchClient:
                     )
 
         # REST API path (only reached for offset=0 after Meilisearch failure).
+        # REST API supports only a single username; use the first if provided.
+        rest_username = None
+        if username:
+            rest_username = username
+        elif users:
+            rest_username = users[0] if users else None
+
         result = self._rest_search(
             query=query,
             sort_by=sort_by,
@@ -338,7 +349,7 @@ class CivitaiSearchClient:
             offset=offset,
             nsfw_levels=nsfw_levels,
             base_models=base_models,
-            username=username,
+            username=rest_username,
         )
         result["backend"] = "rest"
         return result
@@ -365,8 +376,21 @@ class CivitaiSearchClient:
         facets: Optional[list[str]],
         extra_filters: Optional[list[str]],
         matching_strategy: Optional[str] = None,
+        users: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        """Execute a Meilisearch ``/multi-search`` request."""
+        """Execute a Meilisearch ``/multi-search`` request.
+
+        Multiple usernames are passed as repeated ``users`` CGI query params
+        on the request URL (e.g. ``?users=alice&users=bob``).  This lets
+        Meilisearch scope results to any of the listed artists.
+        """
+        # Build the combined user list from legacy ``username`` and ``users``.
+        all_users: list[str] = []
+        if username:
+            all_users.append(username)
+        if users:
+            all_users.extend(u for u in users if u)
+
         filters = _build_meili_filters(
             tags=tags,
             exclude_tags=exclude_tags,
@@ -376,6 +400,7 @@ class CivitaiSearchClient:
             exclude_minor=exclude_minor,
             username=username,
             extra_filters=extra_filters,
+            users=all_users or None,
         )
 
         search_query = {
@@ -406,6 +431,14 @@ class CivitaiSearchClient:
         }
 
         url = f"{_SEARCH_BASE_URL}/multi-search"
+
+        # Append multiple usernames as repeated ``users`` CGI params.
+        # Meilisearch scopes results to images by any of the listed artists.
+        if all_users:
+            encoded = "&".join(
+                f"users={requests.utils.quote(u)}" for u in all_users
+            )
+            url = f"{url}?{encoded}"
         payload = {"queries": [search_query]}
 
         try:
@@ -587,8 +620,15 @@ def _build_meili_filters(
     exclude_minor: bool = True,
     username: Optional[str] = None,
     extra_filters: Optional[list[str]] = None,
+    users: Optional[list[str]] = None,
 ) -> list[str]:
-    """Build Meilisearch filter expressions from simplified parameters."""
+    """Build Meilisearch filter expressions from simplified parameters.
+
+    Usernames are **not** added as filter expressions here — they are passed
+    as repeated ``users`` CGI params on the Meilisearch request URL (see
+    :meth:`CivitaiSearchClient._meili_search`).  The ``username`` and
+    ``users`` parameters are only used to adjust the POI exclusion logic.
+    """
     filters: list[str] = []
 
     # Tag inclusion filters.
@@ -609,12 +649,18 @@ def _build_meili_filters(
         model_expr = " OR ".join(f'baseModel="{m}"' for m in base_models)
         filters.append(f"({model_expr})")
 
+    # Determine if any username filtering is active (via CGI params or
+    # legacy single username).
+    has_username = bool(username or (users and any(users)))
+
     # POI / minor exclusion.
     poi_minor_parts: list[str] = []
-    if exclude_poi and not username:
+    if exclude_poi and not has_username:
         poi_minor_parts.append("poi != true")
-    elif exclude_poi and username:
-        poi_minor_parts.append(f"(poi != true OR user.username = {username})")
+    elif exclude_poi and has_username:
+        # When filtering by user, POI exclusion would hide their POI images.
+        # Omit the POI filter so the user's full gallery is visible.
+        pass
     if exclude_minor:
         poi_minor_parts.append("minor != true")
     if poi_minor_parts:

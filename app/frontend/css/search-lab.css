@@ -438,6 +438,22 @@ body[data-theme="dark"] .facet-chip:hover {
     background: color-mix(in oklab, #c0392b 6%, var(--bg-0));
 }
 
+.status-action-btn {
+    margin-left: 0.6rem;
+    padding: 0.2rem 0.7rem;
+    font-size: 0.78rem;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.status-action-btn:hover {
+    background: rgba(192, 57, 43, 0.1);
+}
+
 /* ── Shared gallery toolbar row (mirrors main page toolbar-row-secondary) ── */
 #gallery-toolbar-mount {
     /* thin wrapper so the injected toolbar has no extra spacing */
@@ -675,6 +691,23 @@ body[data-theme="dark"] .tile:hover {
 
 .tile:hover .tile-overlay {
     opacity: 1;
+}
+
+/* Visual indicator for tiles whose image failed to load after retries */
+.tile.tile-image-error::after {
+    content: '⚠ Broken image';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 3;
+    font-size: 0.7rem;
+    color: #fff;
+    background: rgba(180, 40, 40, 0.82);
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    pointer-events: none;
+    white-space: nowrap;
 }
 
 /* ── Gallery footer (mirrors main page) ── */

@@ -27,6 +27,25 @@
   const purgeDryRun = document.getElementById('purge-dry-run');
   const purgeBtn = document.getElementById('purge-btn');
   const purgeOutput = document.getElementById('purge-output');
+  const snapshotExportUserBindings = document.getElementById('snapshot-export-user-bindings');
+  const snapshotExportBtn = document.getElementById('snapshot-export-btn');
+  const snapshotExportOutput = document.getElementById('snapshot-export-output');
+  const snapshotImportFile = document.getElementById('snapshot-import-file');
+  const snapshotImportDryRun = document.getElementById('snapshot-import-dry-run');
+  const snapshotImportBtn = document.getElementById('snapshot-import-btn');
+  const snapshotImportOutput = document.getElementById('snapshot-import-output');
+  const snapshotRebuildObservations = document.getElementById('snapshot-rebuild-observations');
+  const snapshotObservationsMode = document.getElementById('snapshot-observations-mode');
+  const snapshotRebuildPromptTags = document.getElementById('snapshot-rebuild-prompt-tags');
+  const snapshotPromptMode = document.getElementById('snapshot-prompt-mode');
+  const snapshotRebuildDanbooruTags = document.getElementById('snapshot-rebuild-danbooru-tags');
+  const snapshotDanbooruMode = document.getElementById('snapshot-danbooru-mode');
+  const snapshotRebuildUserTags = document.getElementById('snapshot-rebuild-user-tags');
+  const snapshotUserMode = document.getElementById('snapshot-user-mode');
+  const snapshotBackfillCivitaiIds = document.getElementById('snapshot-backfill-civitai-ids');
+  const snapshotFetchCivitaiMetadata = document.getElementById('snapshot-fetch-civitai-metadata');
+  const snapshotCivitaiFetchLimit = document.getElementById('snapshot-civitai-fetch-limit');
+  const snapshotRestoreUserBindings = document.getElementById('snapshot-restore-user-bindings');
   const searchInput = document.getElementById('search-input');
   const selectAllBtn = document.getElementById('select-all-btn');
   const deselectAllBtn = document.getElementById('deselect-all-btn');
@@ -621,6 +640,111 @@
         scanMissingBtn.disabled = false;
         scanMissingCard.classList.remove('active');
       };
+
+  // ── Snapshot Export ──
+  if (snapshotExportBtn) {
+    snapshotExportBtn.addEventListener('click', async () => {
+      const includeUserBindings = snapshotExportUserBindings ? snapshotExportUserBindings.checked : true;
+      try {
+        const q = new URLSearchParams({ include_user_bindings: includeUserBindings ? '1' : '0' });
+        const resp = await fetch(`/api/taxonomy/snapshot/export?${q}`);
+        const data = await resp.json();
+        if (!resp.ok) {
+          toast(data.detail || 'Snapshot export failed', 'error');
+          showOutput(snapshotExportOutput, data);
+          return;
+        }
+        showOutput(snapshotExportOutput, {
+          message: 'Snapshot exported.',
+          exported_at: data.exported_at,
+          format: data.format,
+          version: data.version,
+          concepts: Array.isArray(data.concepts) ? data.concepts.length : 0,
+          authority_terms: Array.isArray(data.authority_terms) ? data.authority_terms.length : 0,
+          authorities: Array.isArray(data.authorities) ? data.authorities.length : 0,
+          aliases: Array.isArray(data.aliases) ? data.aliases.length : 0,
+          group_memberships: Array.isArray(data.group_memberships) ? data.group_memberships.length : 0,
+          user_bindings: Array.isArray(data.user_bindings) ? data.user_bindings.length : 0,
+        });
+
+        const fileDate = (new Date()).toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `taxonomy-snapshot-${fileDate}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        toast('Taxonomy snapshot exported.', 'success');
+      } catch (e) {
+        toast(`Network error: ${e.message}`, 'error');
+      }
+    });
+  }
+
+  function buildSnapshotPostImportOptions() {
+    const rawLimit = parseInt(snapshotCivitaiFetchLimit?.value || '100', 10);
+    const civitaiFetchLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 100;
+    return {
+      rebuild_observations: Boolean(snapshotRebuildObservations?.checked),
+      observations_mode: snapshotObservationsMode?.value || 'merge',
+      rebuild_prompt_tags: Boolean(snapshotRebuildPromptTags?.checked),
+      prompt_rebuild_mode: snapshotPromptMode?.value || 'merge',
+      rebuild_danbooru_tags: Boolean(snapshotRebuildDanbooruTags?.checked),
+      danbooru_rebuild_mode: snapshotDanbooruMode?.value || 'merge',
+      rebuild_user_tags: Boolean(snapshotRebuildUserTags?.checked),
+      user_rebuild_mode: snapshotUserMode?.value || 'merge',
+      backfill_missing_civitai_tag_ids: Boolean(snapshotBackfillCivitaiIds?.checked),
+      fetch_missing_civitai_tag_metadata: Boolean(snapshotFetchCivitaiMetadata?.checked),
+      civitai_fetch_limit: civitaiFetchLimit,
+      restore_user_bindings_by_hash: Boolean(snapshotRestoreUserBindings?.checked),
+    };
+  }
+
+  // ── Snapshot Import ──
+  if (snapshotImportBtn) {
+    snapshotImportBtn.addEventListener('click', async () => {
+      const file = snapshotImportFile?.files?.[0];
+      if (!file) {
+        toast('Select a snapshot file first.', 'error');
+        return;
+      }
+      const dryRun = snapshotImportDryRun ? snapshotImportDryRun.checked : true;
+      let snapshot;
+      try {
+        const text = await file.text();
+        snapshot = JSON.parse(text);
+      } catch (e) {
+        toast(`Invalid snapshot JSON: ${e.message}`, 'error');
+        return;
+      }
+
+      const payload = {
+        snapshot,
+        dry_run: dryRun,
+        post_import: buildSnapshotPostImportOptions(),
+      };
+
+      try {
+        const resp = await fetch('/api/taxonomy/snapshot/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        showOutput(snapshotImportOutput, data);
+        if (!resp.ok) {
+          toast(data.detail || 'Snapshot import failed', 'error');
+          return;
+        }
+        const conflictCount = Array.isArray(data.conflicts) ? data.conflicts.length : 0;
+        toast(`${dryRun ? '[DRY RUN] ' : ''}Snapshot import complete${conflictCount ? ` (${conflictCount} conflict notes)` : ''}.`, 'success');
+        if (!dryRun) {
+          loadTable();
+        }
+      } catch (e) {
+        toast(`Network error: ${e.message}`, 'error');
+      }
     });
   }
 

@@ -46,6 +46,8 @@ from models import (
     Concept,
     ConceptAlias,
     ConceptAttributeProfile,
+    ConceptGroup,
+    ConceptGroupMembership,
     ImageConceptObservation,
     ImageModel,
     ObservationCertainty,
@@ -77,6 +79,7 @@ from schemas import (
     TaxonomyMergeRequest,
     TaxonomyParentUpdateRequest,
     TaxonomyPurgeRootsRequest,
+    TaxonomySnapshotImportRequest,
     TaxonomySnapshotImportResponse,
     TaxonomyTagAssociationRequest,
     TaxonomyTagDetailsUpdateRequest,
@@ -4669,3 +4672,1166 @@ async def taxonomy_delete_attribute(
     db.delete(attr)
     db.commit()
     return {"status": "deleted", "concept_id": concept_id, "attribute_concept_id": attribute_concept_id}
+
+
+def _snapshot_iso(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text = str(value or "").strip()
+    return text or None
+
+
+def _snapshot_coerce_metadata(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _snapshot_merge_metadata(
+    existing: dict[str, Any], imported: dict[str, Any]
+) -> dict[str, Any]:
+    merged = dict(existing)
+    merged.update(imported)
+    return merged
+
+
+def _build_taxonomy_snapshot(
+    db: Session,
+    *,
+    include_user_bindings: bool,
+) -> dict[str, Any]:
+    authorities = db.query(TagAuthority).order_by(TagAuthority.name.asc()).all()
+    concepts = db.query(Concept).order_by(Concept.canonical_name.asc()).all()
+    concept_name_by_id: dict[int, str] = {
+        int(c.id): str(c.canonical_name) for c in concepts if c.id is not None
+    }
+
+    aliases = db.query(ConceptAlias).order_by(ConceptAlias.id.asc()).all()
+    groups = db.query(ConceptGroup).order_by(ConceptGroup.name.asc()).all()
+    memberships = (
+        db.query(ConceptGroupMembership)
+        .order_by(
+            ConceptGroupMembership.group_id.asc(),
+            ConceptGroupMembership.concept_id.asc(),
+        )
+        .all()
+    )
+    terms = (
+        db.query(AuthorityTerm, TagAuthority)
+        .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+        .order_by(TagAuthority.name.asc(), AuthorityTerm.external_name.asc())
+        .all()
+    )
+
+    snapshot: dict[str, Any] = {
+        "format": "atelierai.taxonomy.snapshot",
+        "version": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "authorities": [
+            {
+                "name": a.name,
+                "description": a.description,
+                "is_external": bool(a.is_external),
+                "base_url": a.base_url,
+            }
+            for a in authorities
+        ],
+        "concepts": [
+            {
+                "canonical_name": c.canonical_name,
+                "slug": c.slug,
+                "description": c.description,
+                "status": c.status,
+                "parent_canonical_name": (
+                    concept_name_by_id.get(int(c.parent_concept_id))
+                    if c.parent_concept_id is not None
+                    else None
+                ),
+                "created_at": _snapshot_iso(c.created_at),
+                "updated_at": _snapshot_iso(c.updated_at),
+            }
+            for c in concepts
+        ],
+        "aliases": [
+            {
+                "concept_canonical_name": concept_name_by_id.get(int(a.concept_id)),
+                "alias": a.alias,
+                "normalized_alias": a.normalized_alias,
+                "alias_type": a.alias_type,
+                "is_preferred": bool(a.is_preferred),
+                "authority_name": (
+                    str(a.authority.name)
+                    if getattr(a, "authority", None) is not None
+                    else None
+                ),
+                "external_tag_id": a.external_tag_id,
+                "notes": a.notes,
+            }
+            for a in aliases
+            if a.concept_id is not None and concept_name_by_id.get(int(a.concept_id))
+        ],
+        "concept_groups": [
+            {
+                "name": g.name,
+                "description": g.description,
+                "status": g.status,
+            }
+            for g in groups
+        ],
+        "group_memberships": [
+            {
+                "group_name": next(
+                    (
+                        str(g.name)
+                        for g in groups
+                        if int(g.id) == int(m.group_id)
+                    ),
+                    None,
+                ),
+                "concept_canonical_name": concept_name_by_id.get(int(m.concept_id)),
+                "role": m.role,
+                "confidence": m.confidence,
+            }
+            for m in memberships
+            if concept_name_by_id.get(int(m.concept_id)) is not None
+        ],
+        "authority_terms": [
+            {
+                "authority_name": str(authority.name),
+                "external_tag_id": term.external_tag_id,
+                "external_name": term.external_name,
+                "normalized_external_name": term.normalized_external_name,
+                "concept_canonical_name": (
+                    concept_name_by_id.get(int(term.concept_id))
+                    if term.concept_id is not None
+                    else None
+                ),
+                "metadata": _snapshot_coerce_metadata(term.metadata_json),
+                "created_at": _snapshot_iso(term.created_at),
+                "updated_at": _snapshot_iso(term.updated_at),
+                "last_seen_at": _snapshot_iso(term.last_seen_at),
+            }
+            for term, authority in terms
+        ],
+    }
+
+    if include_user_bindings:
+        user_bindings: list[dict[str, Any]] = []
+        rows = (
+            db.query(
+                ImageModel.file_hash,
+                ImageModel.file_path,
+                ImageModel.user_tags,
+                ImageModel.user_negative_tags,
+            )
+            .filter(
+                or_(
+                    ImageModel.user_tags.isnot(None),
+                    ImageModel.user_negative_tags.isnot(None),
+                )
+            )
+            .all()
+        )
+        for file_hash, file_path, user_tags, user_negative_tags in rows:
+            tags = user_tags if isinstance(user_tags, list) else []
+            negative_tags = (
+                user_negative_tags if isinstance(user_negative_tags, list) else []
+            )
+            user_bindings.append({
+                "file_hash": str(file_hash or "").strip(),
+                "file_path": str(file_path or "").strip(),
+                "user_tags": [str(tag) for tag in tags if str(tag).strip()],
+                "user_negative_tags": [
+                    str(tag) for tag in negative_tags if str(tag).strip()
+                ],
+            })
+        snapshot["user_bindings"] = user_bindings
+
+    return snapshot
+
+
+def _apply_snapshot_authorities(
+    db: Session,
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, TagAuthority], dict[str, int]]:
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+    }
+    out: dict[str, TagAuthority] = {}
+    for item in snapshot.get("authorities") or []:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        name = str(item.get("name") or "").strip().lower()
+        if not name:
+            stats["skipped"] += 1
+            continue
+        authority = _get_or_create_authority(db, name)
+        changed = False
+        if "description" in item and authority.description != item.get("description"):
+            authority.description = item.get("description")
+            changed = True
+        if "is_external" in item and bool(authority.is_external) != bool(
+            item.get("is_external")
+        ):
+            authority.is_external = bool(item.get("is_external"))
+            changed = True
+        if "base_url" in item and authority.base_url != item.get("base_url"):
+            authority.base_url = item.get("base_url")
+            changed = True
+        if changed:
+            stats["updated"] += 1
+        else:
+            if authority.id is not None and name not in out:
+                stats["created"] += 1
+        out[name] = authority
+    return out, stats
+
+
+def _is_safe_parent_link(db: Session, concept_id: int, parent_id: int) -> bool:
+    if concept_id == parent_id:
+        return False
+    return not _is_descendant(db, concept_id, parent_id)
+
+
+def _apply_snapshot_concepts(
+    db: Session,
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Concept], dict[str, int], list[dict[str, Any]]]:
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+    }
+    conflicts: list[dict[str, Any]] = []
+    concept_by_name: dict[str, Concept] = {}
+    concept_rows = snapshot.get("concepts") or []
+
+    for item in concept_rows:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        canonical_name = _normalize_taxonomy_text(str(item.get("canonical_name") or ""))
+        if not canonical_name:
+            stats["skipped"] += 1
+            continue
+
+        concept = (
+            db.query(Concept)
+            .filter(Concept.canonical_name == canonical_name)
+            .first()
+        )
+        created = False
+        if concept is None:
+            slug = str(item.get("slug") or "").strip() or _slugify_concept_name(
+                canonical_name
+            )
+            slug = _ensure_unique_concept_slug(db, slug)
+            concept = Concept(
+                canonical_name=canonical_name,
+                slug=slug,
+                status=str(item.get("status") or "active"),
+                description=item.get("description"),
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(concept)
+            db.flush()
+            created = True
+            stats["created"] += 1
+
+        changed = False
+        imported_slug = str(item.get("slug") or "").strip()
+        if imported_slug and concept.slug != imported_slug:
+            slug_conflict = (
+                db.query(Concept)
+                .filter(Concept.slug == imported_slug, Concept.id != concept.id)
+                .first()
+            )
+            if slug_conflict is None:
+                concept.slug = imported_slug
+                changed = True
+        if "description" in item and concept.description != item.get("description"):
+            concept.description = item.get("description")
+            changed = True
+        imported_status = str(item.get("status") or "").strip()
+        if imported_status and concept.status != imported_status:
+            concept.status = imported_status
+            changed = True
+        if changed and not created:
+            concept.updated_at = datetime.utcnow()
+            stats["updated"] += 1
+
+        concept_by_name[canonical_name] = concept
+
+    for item in concept_rows:
+        if not isinstance(item, dict):
+            continue
+        canonical_name = _normalize_taxonomy_text(str(item.get("canonical_name") or ""))
+        if not canonical_name:
+            continue
+        concept = concept_by_name.get(canonical_name)
+        if concept is None:
+            continue
+        parent_name = _normalize_taxonomy_text(
+            str(item.get("parent_canonical_name") or "")
+        )
+        if not parent_name:
+            if "parent_canonical_name" in item and concept.parent_concept_id is not None:
+                concept.parent_concept_id = None
+                concept.updated_at = datetime.utcnow()
+                stats["updated"] += 1
+            continue
+
+        parent = concept_by_name.get(parent_name)
+        if parent is None:
+            conflicts.append({
+                "type": "missing_parent",
+                "concept": canonical_name,
+                "requested_parent": parent_name,
+                "kept_parent_concept_id": concept.parent_concept_id,
+            })
+            continue
+        if not _is_safe_parent_link(db, int(concept.id), int(parent.id)):
+            conflicts.append({
+                "type": "parent_cycle",
+                "concept": canonical_name,
+                "requested_parent": parent_name,
+                "kept_parent_concept_id": concept.parent_concept_id,
+            })
+            continue
+        if (concept.parent_concept_id or 0) != int(parent.id):
+            concept.parent_concept_id = int(parent.id)
+            concept.updated_at = datetime.utcnow()
+            stats["updated"] += 1
+
+    return concept_by_name, stats, conflicts
+
+
+def _apply_snapshot_aliases(
+    db: Session,
+    snapshot: dict[str, Any],
+    concept_by_name: dict[str, Concept],
+    authority_by_name: dict[str, TagAuthority],
+) -> dict[str, int]:
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+    }
+    for item in snapshot.get("aliases") or []:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        concept_name = _normalize_taxonomy_text(
+            str(item.get("concept_canonical_name") or "")
+        )
+        alias_text = str(item.get("alias") or "").strip()
+        if not concept_name or not alias_text:
+            stats["skipped"] += 1
+            continue
+        concept = concept_by_name.get(concept_name)
+        if concept is None:
+            stats["skipped"] += 1
+            continue
+        normalized_alias = _normalize_taxonomy_text(
+            str(item.get("normalized_alias") or alias_text)
+        )
+        row = (
+            db.query(ConceptAlias)
+            .filter(
+                ConceptAlias.concept_id == concept.id,
+                ConceptAlias.normalized_alias == normalized_alias,
+            )
+            .first()
+        )
+        authority_name = str(item.get("authority_name") or "").strip().lower()
+        authority = authority_by_name.get(authority_name) if authority_name else None
+        imported_alias_type = str(item.get("alias_type") or "synonym").strip() or "synonym"
+        imported_preferred = bool(item.get("is_preferred"))
+        imported_external_tag_id = item.get("external_tag_id")
+        imported_notes = item.get("notes")
+
+        if row is None:
+            row = ConceptAlias(
+                concept_id=concept.id,
+                alias=alias_text,
+                normalized_alias=normalized_alias,
+                alias_type=imported_alias_type,
+                is_preferred=imported_preferred,
+                authority_id=int(authority.id) if authority is not None else None,
+                external_tag_id=imported_external_tag_id,
+                notes=imported_notes,
+            )
+            db.add(row)
+            stats["created"] += 1
+            continue
+
+        changed = False
+        if row.alias != alias_text:
+            row.alias = alias_text
+            changed = True
+        if row.alias_type != imported_alias_type:
+            row.alias_type = imported_alias_type
+            changed = True
+        if bool(row.is_preferred) != imported_preferred:
+            row.is_preferred = imported_preferred
+            changed = True
+        authority_id = int(authority.id) if authority is not None else None
+        if (row.authority_id or 0) != (authority_id or 0):
+            row.authority_id = authority_id
+            changed = True
+        if row.external_tag_id != imported_external_tag_id:
+            row.external_tag_id = imported_external_tag_id
+            changed = True
+        if row.notes != imported_notes:
+            row.notes = imported_notes
+            changed = True
+        if changed:
+            stats["updated"] += 1
+    return stats
+
+
+def _merge_authority_term_rows(
+    db: Session,
+    *,
+    keep: AuthorityTerm,
+    drop: AuthorityTerm,
+) -> int:
+    moved = 0
+    drop_observations = (
+        db.query(ImageConceptObservation)
+        .filter(ImageConceptObservation.authority_term_id == drop.id)
+        .all()
+    )
+    for obs in drop_observations:
+        exists = (
+            db.query(ImageConceptObservation.id)
+            .filter(
+                ImageConceptObservation.image_id == obs.image_id,
+                ImageConceptObservation.authority_term_id == keep.id,
+            )
+            .first()
+        )
+        if exists is not None:
+            db.delete(obs)
+            continue
+        obs.authority_term_id = keep.id
+        obs.authority_id = keep.authority_id
+        obs.concept_id = keep.concept_id
+        obs.updated_at = datetime.utcnow()
+        moved += 1
+    db.delete(drop)
+    return moved
+
+
+def _apply_snapshot_authority_terms(
+    db: Session,
+    snapshot: dict[str, Any],
+    concept_by_name: dict[str, Concept],
+    authority_by_name: dict[str, TagAuthority],
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    stats = {
+        "created": 0,
+        "updated": 0,
+        "merged_rows": 0,
+        "skipped": 0,
+    }
+    conflicts: list[dict[str, Any]] = []
+    for item in snapshot.get("authority_terms") or []:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        authority_name = str(item.get("authority_name") or "").strip().lower()
+        external_name = str(item.get("external_name") or "").strip()
+        if not authority_name or not external_name:
+            stats["skipped"] += 1
+            continue
+        authority = authority_by_name.get(authority_name)
+        if authority is None:
+            authority = _get_or_create_authority(db, authority_name)
+            authority_by_name[authority_name] = authority
+
+        normalized_external_name = _normalize_taxonomy_text(
+            str(item.get("normalized_external_name") or external_name)
+        )
+        if not normalized_external_name:
+            stats["skipped"] += 1
+            continue
+
+        raw_external_tag_id = item.get("external_tag_id")
+        try:
+            imported_external_tag_id = (
+                int(raw_external_tag_id)
+                if raw_external_tag_id not in (None, "")
+                else None
+            )
+        except (TypeError, ValueError):
+            imported_external_tag_id = None
+
+        concept_name = _normalize_taxonomy_text(
+            str(item.get("concept_canonical_name") or "")
+        )
+        concept = concept_by_name.get(concept_name) if concept_name else None
+        imported_concept_id = int(concept.id) if concept is not None else None
+
+        by_external = None
+        if imported_external_tag_id is not None:
+            by_external = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority.id,
+                    AuthorityTerm.external_tag_id == imported_external_tag_id,
+                )
+                .first()
+            )
+        by_name = (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority.id,
+                AuthorityTerm.normalized_external_name == normalized_external_name,
+            )
+            .first()
+        )
+
+        row = by_external or by_name
+        if by_external is not None and by_name is not None and by_external.id != by_name.id:
+            moved_count = _merge_authority_term_rows(db, keep=by_external, drop=by_name)
+            stats["merged_rows"] += 1
+            conflicts.append({
+                "type": "authority_term_collision",
+                "authority": authority_name,
+                "external_name": external_name,
+                "kept_id": int(by_external.id),
+                "dropped_id": int(by_name.id),
+                "observations_moved": moved_count,
+            })
+            row = by_external
+
+        imported_metadata = _snapshot_coerce_metadata(item.get("metadata"))
+        if row is None:
+            row = AuthorityTerm(
+                authority_id=authority.id,
+                external_tag_id=imported_external_tag_id,
+                external_name=external_name,
+                normalized_external_name=normalized_external_name,
+                concept_id=imported_concept_id,
+                metadata_json=imported_metadata or None,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                last_seen_at=datetime.utcnow(),
+            )
+            db.add(row)
+            stats["created"] += 1
+            continue
+
+        changed = False
+        if row.external_tag_id != imported_external_tag_id:
+            row.external_tag_id = imported_external_tag_id
+            changed = True
+        if row.external_name != external_name:
+            row.external_name = external_name
+            changed = True
+        if row.normalized_external_name != normalized_external_name:
+            row.normalized_external_name = normalized_external_name
+            changed = True
+        if (row.concept_id or 0) != (imported_concept_id or 0):
+            row.concept_id = imported_concept_id
+            changed = True
+        existing_metadata = _snapshot_coerce_metadata(row.metadata_json)
+        merged_metadata = _snapshot_merge_metadata(existing_metadata, imported_metadata)
+        if merged_metadata != existing_metadata:
+            row.metadata_json = merged_metadata
+            changed = True
+        row.last_seen_at = datetime.utcnow()
+        if changed:
+            row.updated_at = datetime.utcnow()
+            stats["updated"] += 1
+    return stats, conflicts
+
+
+def _apply_snapshot_groups(
+    db: Session,
+    snapshot: dict[str, Any],
+    concept_by_name: dict[str, Concept],
+) -> dict[str, int]:
+    stats = {
+        "groups_created": 0,
+        "groups_updated": 0,
+        "memberships_created": 0,
+        "memberships_updated": 0,
+        "skipped": 0,
+    }
+    group_by_name: dict[str, ConceptGroup] = {}
+    for item in snapshot.get("concept_groups") or []:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            stats["skipped"] += 1
+            continue
+        group = db.query(ConceptGroup).filter(ConceptGroup.name == name).first()
+        created = False
+        if group is None:
+            group = ConceptGroup(
+                name=name,
+                description=item.get("description"),
+                status=str(item.get("status") or "active"),
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            db.add(group)
+            db.flush()
+            created = True
+            stats["groups_created"] += 1
+        changed = False
+        if "description" in item and group.description != item.get("description"):
+            group.description = item.get("description")
+            changed = True
+        imported_status = str(item.get("status") or "").strip()
+        if imported_status and group.status != imported_status:
+            group.status = imported_status
+            changed = True
+        if changed and not created:
+            group.updated_at = datetime.utcnow()
+            stats["groups_updated"] += 1
+        group_by_name[name] = group
+
+    for item in snapshot.get("group_memberships") or []:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        group_name = str(item.get("group_name") or "").strip()
+        concept_name = _normalize_taxonomy_text(
+            str(item.get("concept_canonical_name") or "")
+        )
+        if not group_name or not concept_name:
+            stats["skipped"] += 1
+            continue
+        group = group_by_name.get(group_name)
+        concept = concept_by_name.get(concept_name)
+        if group is None or concept is None:
+            stats["skipped"] += 1
+            continue
+        membership = (
+            db.query(ConceptGroupMembership)
+            .filter(
+                ConceptGroupMembership.group_id == group.id,
+                ConceptGroupMembership.concept_id == concept.id,
+            )
+            .first()
+        )
+        role = str(item.get("role") or "member").strip() or "member"
+        confidence = item.get("confidence")
+        if membership is None:
+            membership = ConceptGroupMembership(
+                group_id=group.id,
+                concept_id=concept.id,
+                role=role,
+                confidence=confidence,
+            )
+            db.add(membership)
+            stats["memberships_created"] += 1
+            continue
+        changed = False
+        if membership.role != role:
+            membership.role = role
+            changed = True
+        if membership.confidence != confidence:
+            membership.confidence = confidence
+            changed = True
+        if changed:
+            stats["memberships_updated"] += 1
+    return stats
+
+
+def _upsert_simple_authority_term(
+    db: Session,
+    *,
+    authority_id: int,
+    external_name: str,
+    external_tag_id: int | None,
+    metadata: dict[str, Any] | None,
+) -> bool:
+    normalized = _normalize_taxonomy_text(external_name)
+    if not normalized:
+        return False
+    row = None
+    if external_tag_id is not None:
+        row = (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority_id,
+                AuthorityTerm.external_tag_id == external_tag_id,
+            )
+            .first()
+        )
+    if row is None:
+        row = (
+            db.query(AuthorityTerm)
+            .filter(
+                AuthorityTerm.authority_id == authority_id,
+                AuthorityTerm.normalized_external_name == normalized,
+            )
+            .first()
+        )
+    if row is None:
+        db.add(
+            AuthorityTerm(
+                authority_id=authority_id,
+                external_tag_id=external_tag_id,
+                external_name=external_name,
+                normalized_external_name=normalized,
+                concept_id=None,
+                metadata_json=metadata or None,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                last_seen_at=datetime.utcnow(),
+            )
+        )
+        return True
+    changed = False
+    if row.external_name != external_name:
+        row.external_name = external_name
+        changed = True
+    if row.normalized_external_name != normalized:
+        row.normalized_external_name = normalized
+        changed = True
+    if row.external_tag_id != external_tag_id:
+        row.external_tag_id = external_tag_id
+        changed = True
+    existing_meta = _snapshot_coerce_metadata(row.metadata_json)
+    imported_meta = metadata or {}
+    merged_meta = _snapshot_merge_metadata(existing_meta, imported_meta)
+    if merged_meta != existing_meta:
+        row.metadata_json = merged_meta
+        changed = True
+    row.last_seen_at = datetime.utcnow()
+    if changed:
+        row.updated_at = datetime.utcnow()
+    return False
+
+
+def _scan_image_payloads(db: Session) -> list[tuple[ImageModel, dict[str, Any]]]:
+    items: list[tuple[ImageModel, dict[str, Any]]] = []
+    images = db.query(ImageModel).all()
+    for image in images:
+        sidecar = _gallery_tag_service.load_image_sidecar_payload(
+            image_library_path=str(app_config.IMAGE_LIBRARY_PATH),
+            file_path=str(image.file_path),
+        )
+        payload: dict[str, Any] = {}
+        if isinstance(image.json_metadata, dict):
+            payload.update(image.json_metadata)
+        if isinstance(sidecar, dict):
+            payload.update(sidecar)
+        if image.user_tags and not payload.get("user_tags"):
+            payload["user_tags"] = image.user_tags
+        if isinstance(image.exif_data, dict) and not payload.get("exif_data"):
+            payload["exif_data"] = image.exif_data
+        items.append((image, payload))
+    return items
+
+
+def _rebuild_source_terms_from_images(
+    db: Session,
+    *,
+    source: str,
+    mode: str,
+) -> dict[str, int]:
+    stats = {
+        "images_scanned": 0,
+        "terms_created": 0,
+        "terms_updated": 0,
+        "observations_deleted": 0,
+        "terms_deleted": 0,
+    }
+    source_lower = _normalize_taxonomy_text(source)
+    authority = _get_or_create_authority(db, source_lower)
+
+    if mode == "overwrite":
+        stats["observations_deleted"] = (
+            db.query(ImageConceptObservation)
+            .filter(ImageConceptObservation.authority_id == authority.id)
+            .delete(synchronize_session=False)
+        )
+        stats["terms_deleted"] = (
+            db.query(AuthorityTerm)
+            .filter(AuthorityTerm.authority_id == authority.id)
+            .delete(synchronize_session=False)
+        )
+
+    for _, payload in _scan_image_payloads(db):
+        stats["images_scanned"] += 1
+        if source_lower == "civitai":
+            civitai_payload = payload.get("civitai") or payload.get("civitai_data")
+            if isinstance(civitai_payload, dict):
+                before_created = db.query(AuthorityTerm).filter(
+                    AuthorityTerm.authority_id == authority.id
+                ).count()
+                _upsert_civitai_authority_terms(db, civitai_payload)
+                after_created = db.query(AuthorityTerm).filter(
+                    AuthorityTerm.authority_id == authority.id
+                ).count()
+                if after_created > before_created:
+                    stats["terms_created"] += after_created - before_created
+            continue
+
+        by_source = _gallery_tag_service.extract_image_scope_tag_names(
+            payload,
+            normalize_taxonomy_text=_normalize_taxonomy_text,
+        )
+        names = by_source.get(source_lower, set())
+        for name in names:
+            created = _upsert_simple_authority_term(
+                db,
+                authority_id=int(authority.id),
+                external_name=str(name),
+                external_tag_id=None,
+                metadata={"origin": "snapshot_post_import_rebuild", "source": source_lower},
+            )
+            if created:
+                stats["terms_created"] += 1
+            else:
+                stats["terms_updated"] += 1
+    return stats
+
+
+def _rebuild_observations_from_images(db: Session, *, mode: str) -> dict[str, int]:
+    stats = {
+        "images_scanned": 0,
+        "created": 0,
+        "skipped_existing": 0,
+        "cleared_existing": 0,
+        "missing_terms": 0,
+    }
+    if mode == "overwrite":
+        stats["cleared_existing"] = db.query(ImageConceptObservation).delete(
+            synchronize_session=False
+        )
+
+    authorities = {
+        str(a.name).strip().lower(): int(a.id)
+        for a in db.query(TagAuthority).all()
+        if a.name
+    }
+
+    now = datetime.utcnow()
+    for image, payload in _scan_image_payloads(db):
+        stats["images_scanned"] += 1
+        by_source = _gallery_tag_service.extract_image_scope_tag_names(
+            payload,
+            normalize_taxonomy_text=_normalize_taxonomy_text,
+        )
+        for source_name, tag_names in by_source.items():
+            authority_id = authorities.get(source_name)
+            if authority_id is None or not tag_names:
+                continue
+            normalized_names = {
+                _normalize_taxonomy_text(str(name)): str(name)
+                for name in tag_names
+                if _normalize_taxonomy_text(str(name))
+            }
+            if not normalized_names:
+                continue
+            terms = (
+                db.query(AuthorityTerm)
+                .filter(
+                    AuthorityTerm.authority_id == authority_id,
+                    AuthorityTerm.normalized_external_name.in_(list(normalized_names)),
+                )
+                .all()
+            )
+            if not terms:
+                stats["missing_terms"] += len(normalized_names)
+                continue
+            for term in terms:
+                existing = (
+                    db.query(ImageConceptObservation.id)
+                    .filter(
+                        ImageConceptObservation.image_id == image.id,
+                        ImageConceptObservation.authority_term_id == term.id,
+                    )
+                    .first()
+                )
+                if existing is not None:
+                    stats["skipped_existing"] += 1
+                    continue
+                db.add(
+                    ImageConceptObservation(
+                        image_id=image.id,
+                        concept_id=term.concept_id,
+                        authority_id=authority_id,
+                        authority_term_id=term.id,
+                        source_type=ObservationSource.IMPORT,
+                        certainty_label=ObservationCertainty.LIKELY,
+                        is_present=True,
+                        is_curated=False,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                stats["created"] += 1
+    return stats
+
+
+def _backfill_missing_civitai_tag_ids_from_sidecars(db: Session) -> dict[str, int]:
+    stats = {
+        "sidecars_scanned": 0,
+        "sidecars_with_tags": 0,
+        "terms_created": 0,
+        "terms_updated": 0,
+        "terms_upserted": 0,
+        "errors": 0,
+    }
+    library_path = Path(str(app_config.IMAGE_LIBRARY_PATH))
+    if not library_path.is_dir():
+        return stats
+
+    for json_file in library_path.glob("*.json"):
+        stats["sidecars_scanned"] += 1
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            stats["errors"] += 1
+            continue
+        if not isinstance(payload, dict):
+            continue
+        civitai = payload.get("civitai")
+        if not isinstance(civitai, dict):
+            continue
+        tags = civitai.get("tags")
+        if not isinstance(tags, list) or not tags:
+            continue
+        stats["sidecars_with_tags"] += 1
+        try:
+            upsert_stats = _upsert_civitai_authority_terms(db, civitai)
+        except Exception:
+            stats["errors"] += 1
+            continue
+        for key in ("terms_created", "terms_updated", "terms_upserted"):
+            stats[key] += int(upsert_stats.get(key, 0) or 0)
+    return stats
+
+
+def _fetch_missing_civitai_metadata(
+    db: Session,
+    *,
+    limit: int,
+) -> dict[str, int]:
+    stats = {
+        "queried": 0,
+        "updated": 0,
+        "failed": 0,
+    }
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == "civitai")
+        .first()
+    )
+    if authority is None:
+        return stats
+
+    terms = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.external_tag_id.isnot(None),
+        )
+        .order_by(AuthorityTerm.id.asc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    try:
+        from atelierai.civitai.civitai_api import CivitaiAPI
+    except Exception:
+        stats["failed"] = len(terms)
+        return stats
+
+    api = CivitaiAPI.get_instance()
+    wanted_keys = (
+        "type",
+        "nsfwLevel",
+        "automated",
+        "concrete",
+        "score",
+        "modelCount",
+        "postCount",
+    )
+    for term in terms:
+        stats["queried"] += 1
+        ext_id = int(term.external_tag_id)
+        try:
+            response = api.get_cached_or_fetch(
+                "tag.getById",
+                {"id": ext_id, "authed": True},
+            )
+        except Exception:
+            stats["failed"] += 1
+            continue
+        if not isinstance(response, dict):
+            stats["failed"] += 1
+            continue
+        existing = _snapshot_coerce_metadata(term.metadata_json)
+        imported = {k: response.get(k) for k in wanted_keys if response.get(k) is not None}
+        if not imported:
+            continue
+        merged = _snapshot_merge_metadata(existing, imported)
+        if merged != existing:
+            term.metadata_json = merged
+            term.updated_at = datetime.utcnow()
+            stats["updated"] += 1
+    return stats
+
+
+def _restore_user_bindings_by_hash(db: Session, snapshot: dict[str, Any]) -> dict[str, int]:
+    stats = {
+        "bindings_seen": 0,
+        "images_matched": 0,
+        "images_updated": 0,
+        "skipped": 0,
+    }
+    for item in snapshot.get("user_bindings") or []:
+        if not isinstance(item, dict):
+            stats["skipped"] += 1
+            continue
+        file_hash = str(item.get("file_hash") or "").strip()
+        if not file_hash:
+            stats["skipped"] += 1
+            continue
+        stats["bindings_seen"] += 1
+        user_tags = item.get("user_tags") if isinstance(item.get("user_tags"), list) else []
+        user_negative_tags = (
+            item.get("user_negative_tags")
+            if isinstance(item.get("user_negative_tags"), list)
+            else []
+        )
+        images = db.query(ImageModel).filter(ImageModel.file_hash == file_hash).all()
+        if not images:
+            continue
+        stats["images_matched"] += len(images)
+        for image in images:
+            changed = False
+            if image.user_tags != user_tags:
+                image.user_tags = user_tags
+                changed = True
+            if image.user_negative_tags != user_negative_tags:
+                image.user_negative_tags = user_negative_tags
+                changed = True
+            if changed:
+                stats["images_updated"] += 1
+    return stats
+
+
+@router.get("/snapshot/export", response_model=dict)
+def taxonomy_snapshot_export(
+    include_user_bindings: bool = Query(
+        True,
+        description=(
+            "Include image-level user tag overrides keyed by file_hash for "
+            "catalog-portable restoration."
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
+    return _build_taxonomy_snapshot(
+        db,
+        include_user_bindings=bool(include_user_bindings),
+    )
+
+
+@router.post("/snapshot/import", response_model=dict)
+def taxonomy_snapshot_import(
+    payload: TaxonomySnapshotImportRequest,
+    db: Session = Depends(get_db),
+):
+    snapshot = payload.snapshot if isinstance(payload.snapshot, dict) else {}
+    if not snapshot:
+        raise HTTPException(status_code=400, detail="snapshot payload is required")
+
+    authority_by_name, authority_stats = _apply_snapshot_authorities(db, snapshot)
+    concept_by_name, concept_stats, concept_conflicts = _apply_snapshot_concepts(
+        db, snapshot
+    )
+    alias_stats = _apply_snapshot_aliases(
+        db,
+        snapshot,
+        concept_by_name,
+        authority_by_name,
+    )
+    term_stats, term_conflicts = _apply_snapshot_authority_terms(
+        db,
+        snapshot,
+        concept_by_name,
+        authority_by_name,
+    )
+    group_stats = _apply_snapshot_groups(db, snapshot, concept_by_name)
+
+    post_import_results: dict[str, Any] = {}
+    options = payload.post_import
+    if options.restore_user_bindings_by_hash:
+        post_import_results["restore_user_bindings_by_hash"] = _restore_user_bindings_by_hash(
+            db,
+            snapshot,
+        )
+    if options.rebuild_prompt_tags:
+        post_import_results["rebuild_prompt_tags"] = _rebuild_source_terms_from_images(
+            db,
+            source="prompt",
+            mode=options.prompt_rebuild_mode,
+        )
+    if options.rebuild_danbooru_tags:
+        post_import_results["rebuild_danbooru_tags"] = _rebuild_source_terms_from_images(
+            db,
+            source="danbooru",
+            mode=options.danbooru_rebuild_mode,
+        )
+    if options.rebuild_user_tags:
+        post_import_results["rebuild_user_tags"] = _rebuild_source_terms_from_images(
+            db,
+            source="user",
+            mode=options.user_rebuild_mode,
+        )
+    if options.backfill_missing_civitai_tag_ids:
+        post_import_results["backfill_missing_civitai_tag_ids"] = (
+            _backfill_missing_civitai_tag_ids_from_sidecars(db)
+        )
+    if options.fetch_missing_civitai_tag_metadata:
+        post_import_results["fetch_missing_civitai_tag_metadata"] = (
+            _fetch_missing_civitai_metadata(
+                db,
+                limit=options.civitai_fetch_limit,
+            )
+        )
+    if options.rebuild_observations:
+        post_import_results["rebuild_observations"] = _rebuild_observations_from_images(
+            db,
+            mode=options.observations_mode,
+        )
+
+    if payload.dry_run:
+        db.rollback()
+    else:
+        db.commit()
+
+    conflicts = [*concept_conflicts, *term_conflicts]
+    return {
+        "message": "Taxonomy snapshot import complete.",
+        "dry_run": payload.dry_run,
+        "stats": {
+            "authorities": authority_stats,
+            "concepts": concept_stats,
+            "aliases": alias_stats,
+            "authority_terms": term_stats,
+            "groups": group_stats,
+        },
+        "conflicts": conflicts,
+        "post_import": post_import_results,
+        "notes": [
+            "Imported values take precedence for direct field conflicts.",
+            "Metadata dictionaries are merged with imported keys overriding existing keys.",
+            "Relationship conflicts (cycles/missing parents/colliding authority terms) preserve existing links when needed.",
+        ],
+    }

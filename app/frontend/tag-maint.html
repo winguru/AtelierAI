@@ -258,6 +258,118 @@
         <span class="flow-arrow">↓</span>
       </div>
 
+      <!-- ── Taxonomy Snapshot Section ── -->
+      <section class="step-card" aria-label="Taxonomy snapshot tools">
+        <div class="step-header">
+          <div class="step-number">3</div>
+          <div class="step-title-area">
+            <h2>Taxonomy Snapshot</h2>
+            <p class="step-desc">Export/import full taxonomy (all authorities, concepts, aliases, groups, and optional user bindings)</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="snapshot-grid">
+            <div class="bootstrap-card">
+              <h3>Export Snapshot</h3>
+              <label class="checkbox-row" for="snapshot-export-user-bindings">
+                <input id="snapshot-export-user-bindings" type="checkbox" checked>
+                <span>Include user bindings (by file hash)</span>
+              </label>
+              <button class="btn primary" id="snapshot-export-btn" type="button">Export Full Snapshot</button>
+              <pre class="bootstrap-output" id="snapshot-export-output" hidden></pre>
+            </div>
+
+            <div class="bootstrap-card">
+              <h3>Import Snapshot</h3>
+              <input type="file" id="snapshot-import-file" accept=".json,.txt">
+
+              <label class="checkbox-row" for="snapshot-import-dry-run">
+                <input id="snapshot-import-dry-run" type="checkbox" checked>
+                <span>Dry run</span>
+              </label>
+
+              <div class="snapshot-options">
+                <h4>Post-import options</h4>
+
+                <label class="checkbox-row" for="snapshot-rebuild-observations">
+                  <input id="snapshot-rebuild-observations" type="checkbox">
+                  <span>Rebuild observations</span>
+                </label>
+                <label class="inline-field" for="snapshot-observations-mode">
+                  <span>Observations mode</span>
+                  <select id="snapshot-observations-mode">
+                    <option value="merge" selected>merge</option>
+                    <option value="overwrite">overwrite</option>
+                  </select>
+                </label>
+
+                <label class="checkbox-row" for="snapshot-rebuild-prompt-tags">
+                  <input id="snapshot-rebuild-prompt-tags" type="checkbox">
+                  <span>Rebuild prompt tags</span>
+                </label>
+                <label class="inline-field" for="snapshot-prompt-mode">
+                  <span>Prompt mode</span>
+                  <select id="snapshot-prompt-mode">
+                    <option value="merge" selected>merge</option>
+                    <option value="overwrite">overwrite</option>
+                  </select>
+                </label>
+
+                <label class="checkbox-row" for="snapshot-rebuild-danbooru-tags">
+                  <input id="snapshot-rebuild-danbooru-tags" type="checkbox">
+                  <span>Rebuild danbooru tags</span>
+                </label>
+                <label class="inline-field" for="snapshot-danbooru-mode">
+                  <span>Danbooru mode</span>
+                  <select id="snapshot-danbooru-mode">
+                    <option value="merge" selected>merge</option>
+                    <option value="overwrite">overwrite</option>
+                  </select>
+                </label>
+
+                <label class="checkbox-row" for="snapshot-rebuild-user-tags">
+                  <input id="snapshot-rebuild-user-tags" type="checkbox">
+                  <span>Rebuild user tags</span>
+                </label>
+                <label class="inline-field" for="snapshot-user-mode">
+                  <span>User mode</span>
+                  <select id="snapshot-user-mode">
+                    <option value="merge" selected>merge</option>
+                    <option value="overwrite">overwrite</option>
+                  </select>
+                </label>
+
+                <label class="checkbox-row" for="snapshot-backfill-civitai-ids">
+                  <input id="snapshot-backfill-civitai-ids" type="checkbox">
+                  <span>Backfill missing CivitAI tag IDs from sidecars</span>
+                </label>
+
+                <label class="checkbox-row" for="snapshot-fetch-civitai-metadata">
+                  <input id="snapshot-fetch-civitai-metadata" type="checkbox">
+                  <span>Fetch missing CivitAI metadata</span>
+                </label>
+                <label class="inline-field" for="snapshot-civitai-fetch-limit">
+                  <span>CivitAI fetch limit</span>
+                  <input id="snapshot-civitai-fetch-limit" type="number" min="1" max="5000" step="1" value="100">
+                </label>
+
+                <label class="checkbox-row" for="snapshot-restore-user-bindings">
+                  <input id="snapshot-restore-user-bindings" type="checkbox">
+                  <span>Restore user bindings by file hash</span>
+                </label>
+              </div>
+
+              <button class="btn primary" id="snapshot-import-btn" type="button">Import Snapshot</button>
+              <pre class="bootstrap-output" id="snapshot-import-output" hidden></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="flow-indicator">
+        <span class="flow-arrow">↓</span>
+      </div>
+
       <!-- ── Table Section ── -->
       <section class="step-card" aria-label="Tag table">
         <div class="step-header">

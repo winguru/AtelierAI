@@ -319,6 +319,12 @@ body {
   flex-wrap: wrap;
 }
 
+.snapshot-grid {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
 .bootstrap-card {
   flex: 1;
   min-width: 220px;
@@ -332,6 +338,50 @@ body {
   font-size: 0.9rem;
   margin: 0 0 0.75rem;
   color: var(--ink);
+}
+
+.snapshot-options {
+  margin: 0.75rem 0;
+  padding: 0.65rem;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.snapshot-options h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.inline-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.55rem;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.inline-field select,
+.inline-field input[type="number"] {
+  min-width: 120px;
+  padding: 0.32rem 0.45rem;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--panel-muted);
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
+.inline-field select:focus,
+.inline-field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(216, 91, 41, 0.12);
 }
 
 .bootstrap-card input[type="file"] {
@@ -649,6 +699,10 @@ td.editing input {
   }
 
   .bootstrap-row {
+    flex-direction: column;
+  }
+
+  .snapshot-grid {
     flex-direction: column;
   }
 }

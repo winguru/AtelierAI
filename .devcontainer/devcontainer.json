@@ -35,5 +35,12 @@
 
   "postCreateCommand": "pip install --no-cache-dir -e app/src",
 
-  "forwardPorts": [8000]
+  "forwardPorts": [
+    8000
+  ],
+  "portsAttributes": {
+    "8000": {
+      "label": ""
+    }
+  }
 }

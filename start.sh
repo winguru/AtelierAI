@@ -90,6 +90,15 @@ echo "Starting Uvicorn server for AtelierAI..."
 echo "  Repo root: $REPO_ROOT"
 echo "  App root:  $APP_ROOT"
 
+VSCODE_ENV_FILE="$REPO_ROOT/.vscode/.env"
+if [[ -f "$VSCODE_ENV_FILE" ]]; then
+	echo "Loading environment overrides from $VSCODE_ENV_FILE"
+	set -a
+	# shellcheck disable=SC1090
+	source "$VSCODE_ENV_FILE"
+	set +a
+fi
+
 export PYTHONPATH="$APP_ROOT:$APP_ROOT/src:$APP_ROOT/dev${PYTHONPATH:+:$PYTHONPATH}"
 
 if ! PYTHON_BIN="$(_pick_python)"; then

@@ -47,10 +47,19 @@ Storage uses the existing `confidence` float on `ImageConceptObservation`. Sourc
 - `app/backend/models.py` — `Concept`, `ConceptAlias`, `AuthorityTerm`, `ImageConceptObservation`
 - `app/frontend/js/tag-maint.js` — tag maintenance UI import handler
 
+## Snapshot Portability
+- Full taxonomy snapshot export: `GET /taxonomy/snapshot/export`
+- Full taxonomy snapshot import: `POST /taxonomy/snapshot/import`
+- Snapshot includes authorities, concepts, aliases, concept groups, memberships, authority terms, and optional `user_bindings` keyed by `file_hash`.
+- Import conflict policy: imported values win for direct field conflicts; metadata maps are merged with imported keys overriding existing keys.
+- Relationship safety: parent cycles and missing parent references keep existing parent links and report conflicts.
+- Post-import actions can rebuild source authority terms and observations, backfill missing CivitAI tag IDs from sidecars, fetch missing CivitAI metadata, and restore user bindings by hash.
+
 ## Gotchas
 - `AuthorityTerm.concept_id` is `nullable=True` — terms can exist without concepts
 - `_upsert_civitai_authority_terms()` already creates terms with `concept_id=None` (correct behavior)
 - `main.py` contains duplicate copies of the import functions — changes must be applied to both
+- Snapshot import can be expensive on large catalogs because post-import rebuild options scan all images/sidecars.
 
 ## Observation ↔ Concept Linkage
 

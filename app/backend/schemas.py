@@ -118,6 +118,32 @@ class TaxonomyConceptUpdateRequest(BaseModel):
 
 class TaxonomyBootstrapImportRequest(BaseModel):
     authority_name: str = "user"
+    format: str = "json"
+    raw_text: str
+    dry_run: bool = True
+
+
+class TaxonomySnapshotPostImportOptions(BaseModel):
+    rebuild_observations: bool = False
+    observations_mode: Literal["merge", "overwrite"] = "merge"
+    rebuild_prompt_tags: bool = False
+    prompt_rebuild_mode: Literal["merge", "overwrite"] = "merge"
+    rebuild_danbooru_tags: bool = False
+    danbooru_rebuild_mode: Literal["merge", "overwrite"] = "merge"
+    rebuild_user_tags: bool = False
+    user_rebuild_mode: Literal["merge", "overwrite"] = "merge"
+    backfill_missing_civitai_tag_ids: bool = False
+    fetch_missing_civitai_tag_metadata: bool = False
+    civitai_fetch_limit: int = Field(default=100, ge=1, le=5000)
+    restore_user_bindings_by_hash: bool = False
+
+
+class TaxonomySnapshotImportRequest(BaseModel):
+    snapshot: dict[str, Any]
+    dry_run: bool = True
+    post_import: TaxonomySnapshotPostImportOptions = Field(
+        default_factory=TaxonomySnapshotPostImportOptions
+    )
 
 
 # ---------------------------------------------------------------------------

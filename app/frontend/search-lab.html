@@ -49,6 +49,18 @@
       <!-- Left: gallery pane -->
       <section class="gallery-pane">
         <div class="search-toolbar">
+          <div id="mode-bar" class="mode-bar" role="tablist" aria-label="Lab mode">
+            <button type="button" class="mode-btn active" data-mode="search" role="tab" aria-selected="true">🔍 Search</button>
+            <button type="button" class="mode-btn" data-mode="review" role="tab" aria-selected="false">⭐ Review</button>
+          </div>
+
+          <div id="review-rating-bar" class="review-rating-bar hidden" role="tablist" aria-label="Review rating filter">
+            <button type="button" class="review-rating-btn active" data-rating="keep" role="tab" aria-selected="true">Keep</button>
+            <button type="button" class="review-rating-btn" data-rating="skip" role="tab" aria-selected="false">Skip</button>
+            <button type="button" class="review-rating-btn" data-rating="discard" role="tab" aria-selected="false">Discard</button>
+            <button type="button" class="review-rating-btn" data-rating="any" role="tab" aria-selected="false">All</button>
+          </div>
+
           <form id="search-form" class="search-form">
             <div class="search-input-row">
               <input id="search-query" type="search" placeholder="Search CivitAI images…" autocomplete="off">
@@ -122,6 +134,15 @@
           <span id="search-status-text">Enter a search query to get started.</span>
         </div>
 
+        <div id="hide-filter-bar" class="hide-filter-bar">
+          <span class="hide-filter-label">Hide:</span>
+          <label class="hide-filter-opt"><input type="checkbox" id="hide-seen" data-hide="seen"> Seen</label>
+          <label class="hide-filter-opt"><input type="checkbox" id="hide-saved" data-hide="saved"> Saved</label>
+          <label class="hide-filter-opt"><input type="checkbox" id="hide-keep" data-hide="keep"> Keep</label>
+          <label class="hide-filter-opt"><input type="checkbox" id="hide-skip" data-hide="skip"> Skip</label>
+          <label class="hide-filter-opt"><input type="checkbox" id="hide-discard" data-hide="discard" checked> Discard</label>
+        </div>
+
         <div id="gallery-toolbar-mount"></div>
 
         <div id="gallery-grid" class="gallery-grid" aria-label="Search results grid">
@@ -142,6 +163,18 @@
             <p class="artist-summary-empty">Rate images to see artist scores here.</p>
           </div>
         </details>
+
+        <!-- Artist facets (review mode only) -->
+        <details id="review-artist-facets" class="artist-summary review-only-panel" hidden>
+          <summary>Artist Facets <span id="review-facets-count" class="facet-count-badge"></span></summary>
+          <div class="review-facets-toolbar">
+            <input type="text" id="review-facets-filter" placeholder="Filter artists…" autocomplete="off">
+            <button id="review-facets-clear" type="button" class="review-facets-clear-btn">Clear</button>
+          </div>
+          <div id="review-artist-facets-body" class="artist-summary-body">
+            <p class="artist-summary-empty">Switch to review mode and load rated images to see artist facets.</p>
+          </div>
+        </details>
       </section>
 
       <!-- Right: details pane -->
@@ -155,6 +188,7 @@
           <div id="detail-media-frame" class="detail-media-frame">
             <div id="detail-media-preview" class="detail-media-preview">
               <img id="detail-image" class="detail-image" alt="Selected image preview">
+              <video id="detail-video" class="detail-image hidden" controls playsinline preload="metadata"></video>
             </div>
           </div>
 
@@ -193,12 +227,16 @@
       <div class="fullscreen-backdrop"></div>
       <div class="fullscreen-content">
         <img id="fullscreen-image" class="fullscreen-image" alt="">
+        <video id="fullscreen-video" class="fullscreen-image hidden" controls playsinline preload="metadata"></video>
         <aside id="fullscreen-tags-panel" class="fullscreen-tags-panel hidden" aria-label="Image tags">
           <h3>Tags</h3>
           <div id="fullscreen-tags-cloud" class="fullscreen-tags-cloud"></div>
         </aside>
         <div class="fullscreen-overlay-top">
-          <span id="fullscreen-counter" class="fullscreen-counter"></span>
+          <div class="fullscreen-info-group">
+            <div id="fullscreen-image-info" class="fullscreen-image-info"></div>
+            <span id="fullscreen-counter" class="fullscreen-counter"></span>
+          </div>
           <button id="fullscreen-close-btn" class="fullscreen-btn" type="button" title="Close (Escape)" aria-label="Close">✕</button>
         </div>
         <button id="fullscreen-prev" class="fullscreen-nav fullscreen-nav-prev" type="button" title="Previous (←)" aria-label="Previous">❮</button>

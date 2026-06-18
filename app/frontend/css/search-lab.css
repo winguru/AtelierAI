@@ -223,6 +223,97 @@ body[data-theme="dark"] .details-pane {
     margin-bottom: 0.8rem;
 }
 
+/* ── Mode toggle (Search / Review) ── */
+.mode-bar {
+    display: inline-flex;
+    gap: 0.15rem;
+    padding: 0.2rem;
+    background: var(--surface-2, #f5f3f0);
+    border: 1px solid var(--stroke, #e0ddd8);
+    border-radius: 10px;
+}
+
+.mode-btn {
+    padding: 0.35rem 0.9rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-soft, #888);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.mode-btn:hover {
+    color: var(--ink, #333);
+}
+
+.mode-btn.active {
+    background: var(--surface, #fff);
+    border-color: var(--stroke, #e0ddd8);
+    color: var(--ink, #333);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Review rating sub-tabs (Keep / Skip / Discard / All) ── */
+.review-rating-bar {
+    display: inline-flex;
+    gap: 0.15rem;
+    padding: 0.15rem;
+    background: var(--surface-2, #f5f3f0);
+    border: 1px solid var(--stroke, #e0ddd8);
+    border-radius: 10px;
+}
+
+.review-rating-btn {
+    padding: 0.3rem 0.75rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-soft, #888);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.review-rating-btn:hover {
+    color: var(--ink, #333);
+}
+
+.review-rating-btn.active {
+    background: var(--surface, #fff);
+    border-color: var(--stroke, #e0ddd8);
+    color: var(--ink, #333);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.review-rating-btn[data-rating="keep"].active {
+    color: #1a8a3b;
+    border-color: #1a8a3b;
+}
+
+.review-rating-btn[data-rating="discard"].active {
+    color: #c0392b;
+    border-color: #c0392b;
+}
+
+.review-rating-btn[data-rating="skip"].active {
+    color: #b8860b;
+    border-color: #b8860b;
+}
+
+/* When in review mode, the search form is optional — dim it */
+.search-toolbar.review-active .search-form {
+    opacity: 0.55;
+    transition: opacity 0.2s;
+}
+
+.search-toolbar.review-active .search-form:focus-within {
+    opacity: 1;
+}
+
 .search-form {
     display: flex;
     flex-direction: column;
@@ -454,6 +545,44 @@ body[data-theme="dark"] .facet-chip:hover {
     background: rgba(192, 57, 43, 0.1);
 }
 
+/* ── Hide filter bar ── */
+.hide-filter-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.75rem;
+    padding: 0.3rem 0.3rem;
+    margin-bottom: 0.2rem;
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+}
+
+.hide-filter-label {
+    font-weight: 600;
+    color: var(--ink);
+    margin-right: 0.1rem;
+}
+
+.hide-filter-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.hide-filter-opt input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--accent, #2563eb);
+}
+
+/* Tiles hidden by hide-filter */
+.tile.tile-hidden {
+    display: none !important;
+}
+
 /* ── Shared gallery toolbar row (mirrors main page toolbar-row-secondary) ── */
 #gallery-toolbar-mount {
     /* thin wrapper so the injected toolbar has no extra spacing */
@@ -660,6 +789,33 @@ body[data-theme="dark"] .gallery-toolbar-shared #lab-sort-order-select {
     height: 100%;
     object-fit: cover;
     display: block;
+    pointer-events: none;
+}
+
+.tile video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    pointer-events: none;
+}
+
+/* Video badge — small ▶ icon shown on video tiles */
+.tile-video-badge {
+    position: absolute;
+    top: 0.42rem;
+    right: 0.42rem;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1;
     pointer-events: none;
 }
 
@@ -967,12 +1123,19 @@ body[data-theme="dark"] .tag-chip {
 }
 
 .fullscreen-image {
+    width: 100%;
+    height: 100%;
     max-width: calc(100vw - 2.4rem);
     max-height: calc(100vh - 2.4rem);
     object-fit: contain;
     border-radius: 10px;
     box-shadow: 0 16px 30px rgba(0, 0, 0, 0.45);
     transition: box-shadow 0.25s ease;
+}
+
+/* Shared by both <img> and <video> in fullscreen */
+#fullscreen-video {
+    background: #000;
 }
 
 .fullscreen-select-flash {
@@ -989,6 +1152,23 @@ body[data-theme="dark"] .tag-chip {
     align-items: center;
     padding: 0.8rem;
     z-index: 2;
+}
+
+.fullscreen-info-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    align-items: flex-start;
+}
+
+.fullscreen-image-info {
+    font-size: 0.72rem;
+    color: rgba(255,255,255,0.55);
+    background: rgba(14,17,25,0.6);
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    font-family: var(--font-mono, monospace);
+    line-height: 1.3;
 }
 
 .fullscreen-counter {
@@ -1080,6 +1260,7 @@ body[data-theme="dark"] .tag-chip {
     overflow-y: auto;
     flex: 1;
     min-height: 0;
+    align-content: start;
 }
 
 .fullscreen-tags-cloud .tag-chip {
@@ -1597,4 +1778,112 @@ body[data-theme="dark"] .artist-row-score.is-positive {
 
 .artist-block-btn.is-blocked:hover {
     opacity: 0.85;
+}
+
+/* ── Review-mode artist facets panel ── */
+
+.facet-count-badge {
+    display: inline-block;
+    min-width: 1.2rem;
+    padding: 0.05rem 0.4rem;
+    margin-left: 0.35rem;
+    border-radius: 999px;
+    background: var(--panel-muted);
+    color: var(--ink-soft);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-align: center;
+    vertical-align: middle;
+}
+
+.review-facets-toolbar {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem 0;
+}
+
+.review-facets-toolbar input[type="text"] {
+    flex: 1;
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--stroke);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 0.8rem;
+}
+
+.review-facets-toolbar input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent, #4b8bf5);
+}
+
+.review-facets-clear-btn {
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--stroke);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 120ms ease;
+}
+
+.review-facets-clear-btn:hover {
+    border-color: var(--accent, #4b8bf5);
+    color: var(--accent, #4b8bf5);
+}
+
+.artist-facet-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.5rem;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 120ms ease;
+    user-select: none;
+}
+
+.artist-facet-row:hover {
+    background: var(--panel-muted);
+}
+
+.artist-facet-row.is-selected {
+    background: rgba(75, 139, 245, 0.12);
+}
+
+.artist-facet-row input[type="checkbox"] {
+    flex-shrink: 0;
+    margin: 0;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+}
+
+.artist-facet-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+    font-weight: 500;
+}
+
+.artist-facet-count {
+    flex-shrink: 0;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--panel-muted);
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.artist-facet-row.is-selected .artist-facet-count {
+    background: rgba(75, 139, 245, 0.2);
+    color: var(--accent, #4b8bf5);
 }

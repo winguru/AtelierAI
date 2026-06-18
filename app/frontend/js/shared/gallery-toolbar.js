@@ -29,6 +29,7 @@
  *   ctrl.setInfiniteScroll(b)  → void
  *   ctrl.getSortValue()        → string
  *   ctrl.setSortValue(v)       → void
+ *   ctrl.setSortOptions(opts, currentVal?) → void  (rebuild <option> list)
  *   ctrl.destroy()             → void (removes DOM + listeners)
  */
 window.GalleryToolbar = (function () {
@@ -274,6 +275,19 @@ window.GalleryToolbar = (function () {
         sortValue = v;
         if (select) select.value = v;
         writeStored(sortKey, v);
+      },
+      setSortOptions(opts, currentVal) {
+        if (!select || !Array.isArray(opts)) return;
+        select.innerHTML = '';
+        opts.forEach((opt) => {
+          const option = document.createElement('option');
+          option.value = opt.value;
+          option.textContent = opt.label;
+          select.appendChild(option);
+        });
+        sortValue = currentVal ?? (opts[0]?.value ?? '');
+        select.value = sortValue;
+        writeStored(sortKey, sortValue);
       },
       getElement() { return toolbar; },
       destroy() {

@@ -9,11 +9,13 @@ Routes:
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
 import atelierai.config as app_config
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import Text as sa_Text, func as sa_func, or_ as sa_or
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -38,6 +40,8 @@ from utils.cache import (
     _search_cache_put,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/civitai-search", tags=["civitai-search"])
 
 
@@ -54,6 +58,60 @@ _CIVITAI_IMAGE_CDN = getattr(
     "CIVITAI_CDN_BASE_URL",
     "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA",
 )
+
+# B2-backed direct-media endpoint used for video content.  The standard
+# image CDN serves the raw MP4 even when image URL patterns are used, so
+# videos must use this endpoint for playable URLs.
+_CIVITAI_B2_MEDIA = "https://image-b2.civitai.com/file/civitai-media-cache"
+
+
+def _build_cdn_urls(
+    uuid: str, *, orig_width: int | None = None
+) -> tuple[str | None, str | None, str | None]:
+    """Build (thumbnail, mid_res, original) URLs for a CivitAI CDN UUID.
+
+    The mid-res tier is intentionally set to the original image.  CivitAI's
+    CDN rounds requested widths UP to the nearest standard tier (450, 650,
+    800, 1000, 1260, 1600, 2000, ...), and typical AI-generated images are
+    512-1216px wide.  Requesting ``width=1260`` almost always causes the CDN
+    to serve a 1600px-tier image that has been upscaled from the original,
+    introducing interpolation artifacts (blockiness).  Serving the original
+    directly avoids this entirely while the thumbnail tier (450px) still
+    handles fast tile rendering.
+    """
+    if not uuid or "/" in uuid:
+        return None, None, None
+
+    thumb = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=450/{uuid}"
+    full = f"{_CIVITAI_IMAGE_CDN}/{uuid}/original=true/{uuid}"
+
+    return thumb, full, full
+
+
+def _build_video_url(uuid: str) -> str | None:
+    """Build a directly-playable URL for a CivitAI video asset.
+
+    Video content (``type: video``) cannot use the image CDN — that endpoint
+    serves the raw MP4 regardless of the width/quality parameters.  The B2
+    media cache serves the original file with correct ``video/mp4`` headers
+    that a ``<video>`` element can play.
+    """
+    if not uuid or "/" in uuid:
+        return None
+    return f"{_CIVITAI_B2_MEDIA}/{uuid}/original"
+
+
+def _is_video_hit(raw: dict) -> bool:
+    """Return True if a raw CivitAI hit represents video content.
+
+    Checks the ``type`` field (``'video'``) and the ``mimeType`` field
+    (``video/*``) for robustness across Meilisearch and tRPC payloads.
+    """
+    hit_type = str(raw.get("type", "") or "").strip().lower()
+    if hit_type == "video":
+        return True
+    mime = str(raw.get("mimeType", "") or raw.get("mime_type", "") or "").strip().lower()
+    return mime.startswith("video/")
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +133,178 @@ def _get_civitai_search_client():
         return _civitai_search_client
 
 
+def _maybe_lazy_fetch_missing_metadata(hits: list[dict]) -> None:
+    """Lazily fetch tags / generation data for hits missing them.
+
+    Runs in a background thread.  For each hit whose ``tagNames`` / ``prompt``
+    is still null/empty after the DB enrichment pass, this fires off the
+    batched tRPC call (``fetch_batch_for_image``) which checks the DB cache
+    first and only makes a live API call on a cache miss.  Fetched data is
+    persisted to ``civitai_search_images`` so it's available immediately on
+    the next search or page refresh.
+
+    This is best-effort and fail-open: any error is logged and swallowed.
+    """
+    missing_ids = [
+        h["id"]
+        for h in hits
+        if isinstance(h.get("id"), int)
+        and (
+            not h.get("tagNames")
+            or all(t is None for t in h.get("tagNames"))
+            or not h.get("prompt")
+        )
+    ]
+    if not missing_ids:
+        return
+
+    # Cap to avoid hammering the API on large result sets.
+    ids_to_fetch = missing_ids[:20]
+
+    def _worker() -> None:
+        try:
+            from atelierai.civitai.civitai_api import CivitaiAPI
+
+            api = CivitaiAPI.get_instance()
+        except Exception:
+            logger.debug("CivitAI API unavailable for lazy fetch", exc_info=True)
+            return
+
+        from database import SessionLocal
+
+        for image_id in ids_to_fetch:
+            try:
+                batch = api.fetch_batch_for_image(
+                    image_id,
+                    need_generation_data=True,
+                    need_tag_records=True,
+                )
+                tag_records = batch.get("tag_records") or []
+                gen_data = batch.get("generation_data") or {}
+                meta = gen_data.get("meta") if isinstance(gen_data, dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+
+                tag_names = [
+                    t.get("name")
+                    for t in tag_records
+                    if isinstance(t, dict) and t.get("name")
+                ] or None
+                prompt = meta.get("prompt") or None
+                resources = gen_data.get("resources") if isinstance(gen_data, dict) else None
+                models = resources if isinstance(resources, list) and resources else None
+
+                if not tag_names and not prompt and not models:
+                    continue
+
+                db = SessionLocal()
+                try:
+                    _persist_search_image(
+                        db,
+                        civitai_image_id=image_id,
+                        tags=tag_names,
+                        generation_prompt=prompt,
+                        generation_models=models,
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.debug(
+                        "Lazy persist failed for image %s", image_id, exc_info=True
+                    )
+                finally:
+                    db.close()
+            except Exception:
+                logger.debug(
+                    "Lazy fetch failed for image %s", image_id, exc_info=True
+                )
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+
+def _enrich_hits_from_db(db: Session, hits: list[dict]) -> list[dict]:
+    """Merge stored tags / generation data into hits that lack them.
+
+    Meilisearch frequently returns ``null`` for ``tagNames`` / ``tagIds``,
+    and may omit generation metadata entirely.  When a user has previously
+    refreshed an image (via the ``r`` key) or rated it, we already have the
+    full metadata stored in ``civitai_search_images``.  This function fills
+    in any missing fields from that stored copy so the user doesn't lose
+    their manually-refreshed data on page reload.
+
+    Only fills fields that are null / empty in the Meilisearch hit — it
+    never overwrites data already present from the live search.
+    """
+    if not hits:
+        return hits
+
+    # Collect the civitai image IDs present in this result set.
+    civitai_ids: list[int] = []
+    for h in hits:
+        cid = h.get("id")
+        if isinstance(cid, int):
+            civitai_ids.append(cid)
+
+    if not civitai_ids:
+        return hits
+
+    # Fetch stored metadata for any of these images we've seen before.
+    stored_rows = (
+        db.query(CivitaiSearchImage)
+        .filter(CivitaiSearchImage.civitai_image_id.in_(civitai_ids))
+        .all()
+    )
+    stored_by_id: dict[int, CivitaiSearchImage] = {
+        r.civitai_image_id: r for r in stored_rows
+    }
+
+    enriched_count = 0
+    for h in hits:
+        cid = h.get("id")
+        if not isinstance(cid, int):
+            continue
+        row = stored_by_id.get(cid)
+        if row is None:
+            continue
+
+        filled = False
+
+        # ── Tags ──
+        # Meilisearch sometimes returns ``tagNames: [None, None, ...]`` —
+        # a non-empty list filled entirely with nulls.  ``bool([None, ...])``
+        # is True, so a simple truthiness check skips enrichment.  We need
+        # to detect this "effectively empty" case explicitly.
+        existing_tags = h.get("tagNames")
+        tags_effectively_empty = not existing_tags or all(
+            t is None for t in existing_tags
+        )
+        if tags_effectively_empty and row.tags:
+            h["tagNames"] = list(row.tags)
+            filled = True
+
+        # ── Generation prompt ──
+        if (not h.get("prompt")) and row.generation_prompt:
+            h["prompt"] = row.generation_prompt
+            filled = True
+
+        # ── Generation models / resources ──
+        if (not h.get("models")) and row.generation_models:
+            h["models"] = row.generation_models
+            filled = True
+
+        if filled:
+            enriched_count += 1
+
+    logger.info(
+        "search-lab enrichment: %d/%d hits have stored metadata, %d enriched",
+        len(stored_rows),
+        len(hits),
+        enriched_count,
+    )
+    return hits
+
+
 def _normalize_meili_hit(hit: dict) -> dict:
     """Transform a raw Meilisearch hit into a frontend-friendly dict.
 
@@ -87,14 +317,41 @@ def _normalize_meili_hit(hit: dict) -> dict:
     """
     out = dict(hit)
 
+    # ── Sanitise tagNames ──
+    # Meilisearch sometimes returns ``tagNames: [None, None, ...]`` — a
+    # non-empty list filled entirely with nulls.  Strip those nulls here so
+    # that all downstream code (enrichment, lazy-fetch, frontend) sees an
+    # accurate picture of whether tags are actually present.
+    raw_tags = out.get("tagNames")
+    if isinstance(raw_tags, list):
+        out["tagNames"] = [t for t in raw_tags if t is not None]
+    elif raw_tags is not None:
+        out["tagNames"] = []
+
     # ── Image URLs ──
-    # Three tiers: thumbnail (tiles), mid-res (details/fullscreen), original
+    # Three tiers: thumbnail (tiles), mid-res (details/fullscreen), original.
+    # When the original is smaller than the mid-res tier, mid-res falls back
+    # to original to avoid CDN upscaling artifacts.
     uuid = hit.get("url", "")
-    if uuid and "/" not in uuid:
-        # Meilisearch stores just the UUID slug.
-        out["thumbnail_url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=450/{uuid}"
-        out["mid_res_url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=1260/{uuid}"
-        out["url"] = f"{_CIVITAI_IMAGE_CDN}/{uuid}/original=true/{uuid}"
+    orig_w = hit.get("width")
+
+    # Video content uses B2-backed URLs — the image CDN serves raw MP4.
+    if _is_video_hit(hit):
+        video_url = _build_video_url(uuid)
+        if video_url:
+            out["is_video"] = True
+            out["video_url"] = video_url
+            out["thumbnail_url"] = video_url
+            out["mid_res_url"] = video_url
+            out["url"] = video_url
+    else:
+        thumb, mid, full = _build_cdn_urls(
+            uuid, orig_width=orig_w if isinstance(orig_w, int) else None
+        )
+        if thumb:
+            out["thumbnail_url"] = thumb
+            out["mid_res_url"] = mid
+            out["url"] = full
 
     # Keep the BlurHash as ``blurhash`` for client-side decoding.
     if hit.get("hash"):
@@ -131,13 +388,21 @@ def _build_hit_from_trpc(
         meta = {}
 
     uuid = basic_info.get("url", "") or ""
+    orig_w = meta.get("width") or basic_info.get("width")
 
-    # ── Image URLs (same construction as _normalize_meili_hit) ──
-    thumbnail_url = mid_res_url = full_url = uuid
-    if uuid and "/" not in uuid:
-        thumbnail_url = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=450/{uuid}"
-        mid_res_url = f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=1260/{uuid}"
-        full_url = f"{_CIVITAI_IMAGE_CDN}/{uuid}/original=true/{uuid}"
+    # ── Image / video URLs ──
+    # Video content uses B2-backed URLs — the image CDN serves raw MP4.
+    is_video = _is_video_hit(basic_info)
+    if is_video:
+        video_url = _build_video_url(uuid) or uuid
+        thumbnail_url = mid_res_url = full_url = video_url
+    else:
+        thumbnail_url, mid_res_url, full_url = _build_cdn_urls(
+            uuid, orig_width=orig_w if isinstance(orig_w, int) else None
+        )
+        # Fall back to the raw uuid if CDN URL construction failed
+        if not thumbnail_url:
+            thumbnail_url = mid_res_url = full_url = uuid
 
     # ── Tags ──
     tag_names = [
@@ -162,6 +427,9 @@ def _build_hit_from_trpc(
         "mid_res_url": mid_res_url,
         "name": basic_info.get("name", ""),
         "mimeType": basic_info.get("mimeType", "image/jpeg"),
+        "type": basic_info.get("type", "image"),
+        "is_video": is_video,
+        "video_url": video_url if is_video else None,
         "nsfwLevel": basic_info.get("nsfwLevel"),
         "createdAt": basic_info.get("createdAt"),
         "publishedAt": basic_info.get("publishedAt"),
@@ -301,6 +569,19 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     )
     cached = _search_cache_get(cache_key)
     if cached is not None:
+        # Even on cache hit, merge stored tags / generation data from the
+        # DB — the user may have refreshed metadata since the cache was
+        # populated, and the cached hits may have null tagNames.
+        cached_hits = cached.get("hits", [])
+        if cached_hits:
+            ids = [h.get("id") for h in cached_hits if isinstance(h.get("id"), int)]
+            logger.info(
+                "search-lab CACHE HIT: %d hits, ids sample=%s",
+                len(cached_hits),
+                ids[:5],
+            )
+            cached["hits"] = _enrich_hits_from_db(db, cached_hits)
+            _maybe_lazy_fetch_missing_metadata(cached_hits)
         return cached
 
     client = _get_civitai_search_client()
@@ -343,6 +624,17 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     raw_hits = result.get("hits", [])
     normalized_hits = [_normalize_meili_hit(h) for h in raw_hits]
 
+    # Merge stored tags / generation data from images we've previously
+    # refreshed or rated, so the user doesn't lose manually-fetched tags
+    # on page reload (Meilisearch returns null tagNames for many images).
+    normalized_hits = _enrich_hits_from_db(db, normalized_hits)
+
+    # Lazily fetch missing tags / generation data for hits that still lack
+    # them after the DB merge.  This runs in a background thread so the
+    # search response is not delayed; results land in the DB cache and are
+    # available on the next search or page refresh.
+    _maybe_lazy_fetch_missing_metadata(normalized_hits)
+
     # Filter out images the user has discarded in previous sessions.
     excluded_ids = _get_excluded_civitai_image_ids(db)
     if excluded_ids:
@@ -378,7 +670,7 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
 
 
 @router.get("/image/{image_id}", response_model=dict)
-def civitai_search_single_image(image_id: int):
+def civitai_search_single_image(image_id: int, db: Session = Depends(get_db)):
     """Fetch fresh metadata for a single CivitAI image via tRPC endpoints.
 
     Used by the frontend 'r' (reload) action to re-fetch tags, models,
@@ -438,7 +730,29 @@ def civitai_search_single_image(image_id: int):
         pass  # fail-open
 
     # ── Build normalised hit from tRPC responses ──
-    return {"hit": _build_hit_from_trpc(basic_info, generation_data, tag_records)}
+    hit = _build_hit_from_trpc(basic_info, generation_data, tag_records)
+
+    # ── Persist fetched metadata so it survives page refreshes ──
+    try:
+        _persist_search_image(
+            db,
+            civitai_image_id=image_id,
+            post_id=hit.get("postId"),
+            artist_id=(hit.get("user") or {}).get("id") if isinstance(hit.get("user"), dict) else None,
+            artist_name=hit.get("username"),
+            blurhash=hit.get("blurhash"),
+            uuid=hit.get("url"),
+            image_url=hit.get("url"),
+            tags=hit.get("tagNames") or None,
+            generation_prompt=hit.get("prompt") or None,
+            generation_models=hit.get("resources") or None,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to persist search image %s", image_id, exc_info=True)
+
+    return {"hit": hit}
 
 
 @router.get("/library-status", response_model=dict)
@@ -568,6 +882,52 @@ def _upsert_search_image(db: Session, hit: CivitaiImageRatingRequest) -> Civitai
     return img
 
 
+def _persist_search_image(db: Session, civitai_image_id: int, **fields) -> None:
+    """Insert or update a CivitaiSearchImage row from keyword fields.
+
+    Unlike ``_upsert_search_image`` (which takes a ``CivitaiImageRatingRequest``),
+    this accepts individual keyword arguments so it can be used from the
+    single-image reload endpoint which works with a normalised hit dict.
+
+    Only updates fields that are explicitly provided (not None) — existing
+    values are preserved otherwise.
+    """
+    img = (
+        db.query(CivitaiSearchImage)
+        .filter(CivitaiSearchImage.civitai_image_id == civitai_image_id)
+        .first()
+    )
+    if img is None:
+        img = CivitaiSearchImage(civitai_image_id=civitai_image_id)
+        db.add(img)
+        db.flush()
+
+    if fields.get("post_id") is not None:
+        img.post_id = fields["post_id"]
+    if fields.get("artist_id") is not None:
+        img.artist_id = fields["artist_id"]
+    if fields.get("artist_name") is not None:
+        img.artist_name = fields["artist_name"]
+    if fields.get("blurhash") is not None:
+        img.blurhash = fields["blurhash"]
+    if fields.get("uuid") is not None:
+        img.uuid = fields["uuid"]
+    if fields.get("image_url") is not None:
+        img.image_url = fields["image_url"]
+    if fields.get("tags") is not None:
+        img.tags = fields["tags"]
+    if fields.get("generation_prompt") is not None:
+        img.generation_prompt = fields["generation_prompt"]
+    if fields.get("generation_models") is not None:
+        img.generation_models = fields["generation_models"]
+    if fields.get("reactions") is not None:
+        img.reactions = fields["reactions"]
+    if fields.get("likes") is not None:
+        img.likes = fields["likes"]
+
+    db.flush()
+
+
 def _update_artist_preference(
     db: Session,
     artist_id: int | None,
@@ -600,6 +960,34 @@ def _update_artist_preference(
         pref.keeps = (pref.keeps or 0) + 1
     else:
         pref.discards = (pref.discards or 0) + 1
+
+
+@router.get("/debug/{image_id}", response_model=dict)
+def civitai_search_debug_image(image_id: int, db: Session = Depends(get_db)):
+    """Debug endpoint showing what metadata is stored in the DB for an image.
+
+    Useful for verifying that tag / generation data persisted correctly
+    after a manual refresh or rating.
+    """
+    img = (
+        db.query(CivitaiSearchImage)
+        .filter(CivitaiSearchImage.civitai_image_id == image_id)
+        .first()
+    )
+    if img is None:
+        return {"image_id": image_id, "stored": False}
+
+    return {
+        "image_id": image_id,
+        "stored": True,
+        "tags": list(img.tags) if img.tags else None,
+        "generation_prompt": img.generation_prompt,
+        "generation_models": img.generation_models,
+        "post_id": img.post_id,
+        "artist_name": img.artist_name,
+        "blurhash": img.blurhash,
+        "image_url": img.image_url,
+    }
 
 
 @router.post("/rate", response_model=CivitaiImageRatingResponse)
@@ -709,7 +1097,6 @@ def get_image_ratings(
 
     # Join CivitaiSearchImage → CivitaiSearchImageLink, pick the latest rating
     # per civitai_image_id using a window function.
-    from sqlalchemy import func as sa_func
 
     # Subquery: rank link rows per image by created_at DESC.
     ranked = (
@@ -738,6 +1125,362 @@ def get_image_ratings(
 
     ratings = {str(row.cid): row.rating for row in rows if row.cid is not None}
     return {"ratings": ratings}
+
+
+# ---------------------------------------------------------------------------
+# Review mode: browse previously-rated images
+# ---------------------------------------------------------------------------
+
+
+def _build_hit_from_search_image(img: CivitaiSearchImage) -> dict[str, Any]:
+    """Build a normalised hit dict (same shape as ``_normalize_meili_hit``)
+    from a stored :class:`CivitaiSearchImage` row.
+
+    This lets review-mode results reuse the exact same frontend rendering
+    path (tiles, details pane, fullscreen) as live search results without
+    any client-side branching.
+    """
+    uuid = img.uuid or ""
+    is_video = (img.file_name or "").lower().endswith((".mp4", ".webm", ".mov"))
+
+    if is_video:
+        video_url = _build_video_url(uuid) or img.image_url or uuid
+        thumbnail_url = mid_res_url = full_url = video_url
+    else:
+        thumbnail_url, mid_res_url, full_url = _build_cdn_urls(uuid)
+        # Fall back to the stored image_url if CDN construction failed.
+        if not thumbnail_url:
+            thumbnail_url = mid_res_url = full_url = img.image_url or uuid
+
+    tags = img.tags if isinstance(img.tags, list) else []
+    # Stored tags may be raw strings or dicts with a "name" key — normalise
+    # to a flat list of names for the ``tagNames`` field the frontend expects.
+    tag_names: list[Any] = []
+    for t in tags:
+        if isinstance(t, str):
+            tag_names.append(t)
+        elif isinstance(t, dict) and t.get("name"):
+            tag_names.append(t["name"])
+
+    hit: dict[str, Any] = {
+        "id": img.civitai_image_id,
+        "url": full_url,
+        "thumbnail_url": thumbnail_url,
+        "mid_res_url": mid_res_url,
+        "name": img.file_name or "",
+        "is_video": is_video,
+        "video_url": video_url if is_video else None,
+        "postId": img.post_id,
+        "tagNames": tag_names,
+        "prompt": img.generation_prompt or "",
+        "resources": img.generation_models if isinstance(img.generation_models, list) else None,
+    }
+
+    if img.blurhash:
+        hit["hash"] = img.blurhash
+        hit["blurhash"] = img.blurhash
+
+    if img.artist_name:
+        hit["user"] = {"username": img.artist_name}
+        hit["username"] = img.artist_name
+
+    if img.reactions is not None or img.likes is not None:
+        stats: dict[str, Any] = {}
+        if img.reactions is not None:
+            stats["reactionCount"] = img.reactions
+        if img.likes is not None:
+            stats["collectedCount"] = img.likes
+        hit["stats"] = stats
+
+    return hit
+
+
+# Sortable columns for review mode (maps the API ``sort`` value to an
+# order-by expression).  Values are chosen to be human-friendly rather than
+# mirroring the raw column names so the frontend dropdowns stay simple.
+_RATED_SORT_MAP: dict[str, tuple[Any, Any]] = {
+    # rated_at comes from the link's created_at (aliased in the subquery)
+    "recent": ("rated_at", CivitaiSearchImageLink.created_at),
+    "reactions": ("reactions", CivitaiSearchImage.reactions),
+    "likes": ("likes", CivitaiSearchImage.likes),
+    "artist": ("artist", CivitaiSearchImage.artist_name),
+}
+
+
+@router.get("/rated", response_model=dict)
+def get_rated_images(
+    rating: str = Query(
+        ...,
+        description="Rating filter: 'keep', 'skip', 'discard', or 'any'.",
+    ),
+    q: str | None = Query(
+        None,
+        description=(
+            "Optional text filter — matches against tags, generation prompt, "
+            "and artist name.  Multiple terms are AND-ed."
+        ),
+    ),
+    sort: str = Query(
+        "recent",
+        description="Sort key: 'recent', 'reactions', 'likes', or 'artist'.",
+    ),
+    order: str = Query(
+        "desc",
+        description="Sort direction: 'asc' or 'desc'.",
+    ),
+    artists: str | None = Query(
+        None,
+        description=(
+            "Comma-separated artist names to filter by.  Only images "
+            "by at least one of the listed artists are returned."
+        ),
+    ),
+    limit: int = Query(51, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Return images the user has previously rated (review mode).
+
+    Queries stored :class:`CivitaiSearchImage` rows joined to their latest
+    :class:`CivitaiSearchImageLink` rating, filtered by the requested
+    rating value.  Supports optional text search (``q``) across tags /
+    prompt / artist, filtering by artist names (``artists``), and sorting
+    by recency, reactions, likes, or artist.
+
+    The response shape mirrors the live search endpoint so the frontend
+    can render results without mode-specific branching.
+    """
+    valid_ratings = {"keep", "skip", "discard", "any"}
+    if rating not in valid_ratings:
+        raise HTTPException(
+            status_code=400,
+            detail=f"rating must be one of {sorted(valid_ratings)}, got '{rating}'.",
+        )
+    if sort not in _RATED_SORT_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort must be one of {sorted(_RATED_SORT_MAP)}, got '{sort}'.",
+        )
+    if order not in ("asc", "desc"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"order must be 'asc' or 'desc', got '{order}'.",
+        )
+
+    # Rank link rows per image by created_at DESC so we only consider the
+    # most recent rating for each image (an image may have been rated in
+    # multiple sessions).
+    ranked = (
+        db.query(
+            CivitaiSearchImageLink.image_id.label("img_id"),
+            CivitaiSearchImageLink.rating.label("rating"),
+            CivitaiSearchImageLink.created_at.label("rated_at"),
+            sa_func.row_number()
+            .over(
+                partition_by=CivitaiSearchImageLink.image_id,
+                order_by=CivitaiSearchImageLink.created_at.desc(),
+            )
+            .label("rn"),
+        )
+        .filter(CivitaiSearchImageLink.rating.isnot(None))
+        .subquery()
+    )
+
+    # Apply rating filter on the ranked subquery (latest rating per image).
+    rating_filter = ranked.c.rating == rating if rating != "any" else None
+
+    # ── Text search (q): AND-match all whitespace-separated terms ──
+    # Each term is matched (case-insensitive) against the tags JSON,
+    # generation prompt, and artist name.  All terms must match for an
+    # image to be included (AND semantics).
+
+    terms = [t for t in (q or "").split() if t]
+    text_filters: list[Any] = []
+    for term in terms:
+        pattern = f"%{term.lower()}%"
+        tag_match = CivitaiSearchImage.tags.cast(sa_Text).like(f"%{term}%")
+        prompt_match = sa_func.lower(
+            sa_func.coalesce(CivitaiSearchImage.generation_prompt, "")
+        ).like(pattern)
+        artist_match = sa_func.lower(
+            sa_func.coalesce(CivitaiSearchImage.artist_name, "")
+        ).like(pattern)
+        text_filters.append(sa_or(tag_match, prompt_match, artist_match))
+
+    # ── Artist filter (comma-separated names) ──
+    # Exact (case-insensitive) match against artist_name.  When multiple
+    # names are supplied they are OR-ed — any matching artist is included.
+    selected_artists = [
+        a.strip()
+        for a in (artists or "").split(",")
+        if a.strip()
+    ]
+    artist_filter: Any | None = None
+    if selected_artists:
+        lowered = [a.lower() for a in selected_artists]
+        artist_filter = sa_func.lower(
+            sa_func.coalesce(CivitaiSearchImage.artist_name, "")
+        ).in_(lowered)
+
+    # ── Total count ──
+    count_q = db.query(ranked.c.img_id).filter(ranked.c.rn == 1)
+    if rating_filter is not None:
+        count_q = count_q.filter(rating_filter)
+
+    # For text/artist search on the count, we need the image join because
+    # the filter columns live on CivitaiSearchImage.
+    if text_filters or artist_filter is not None:
+        count_q = (
+            count_q.join(CivitaiSearchImage, CivitaiSearchImage.id == ranked.c.img_id)
+        )
+        for tf in text_filters:
+            count_q = count_q.filter(tf)
+        if artist_filter is not None:
+            count_q = count_q.filter(artist_filter)
+    total = count_q.distinct().count()
+
+    # ── Page query ──
+    page_q = (
+        db.query(
+            CivitaiSearchImage,
+            ranked.c.rating.label("rating"),
+            ranked.c.rated_at.label("rated_at"),
+        )
+        .join(ranked, ranked.c.img_id == CivitaiSearchImage.id)
+        .filter(ranked.c.rn == 1)
+    )
+    if rating_filter is not None:
+        page_q = page_q.filter(rating_filter)
+    for tf in text_filters:
+        page_q = page_q.filter(tf)
+    if artist_filter is not None:
+        page_q = page_q.filter(artist_filter)
+
+    # Determine sort column.  For "recent" we sort by rated_at (from the
+    # subquery); for the others we sort on the image table column.
+    _, sort_col = _RATED_SORT_MAP[sort]
+    sort_expr = sort_col if sort != "recent" else ranked.c.rated_at
+    page_q = page_q.order_by(
+        sort_expr.desc() if order == "desc" else sort_expr.asc(),
+        # Secondary tiebreaker so pagination is stable
+        CivitaiSearchImage.id.asc(),
+    )
+    page_q = page_q.offset(offset).limit(limit)
+
+    rows = page_q.all()
+
+    hits = []
+    ratings_map: dict[str, str] = {}
+    for img, r, rated_at in rows:
+        hit = _build_hit_from_search_image(img)
+        hit["_rating"] = r
+        hit["_rated_at"] = rated_at.isoformat() if rated_at else None
+        hits.append(hit)
+        ratings_map[str(img.civitai_image_id)] = r
+
+    return {
+        "hits": hits,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "rating": rating,
+        "ratings": ratings_map,
+        "facets": None,
+        "backend": "review",
+        "sort": sort,
+        "order": order,
+        "q": q,
+        "artists": selected_artists,
+    }
+
+
+@router.get("/rated/artists", response_model=list[dict])
+def get_rated_artist_facets(
+    rating: str = Query(
+        ...,
+        description="Rating filter: 'keep', 'skip', 'discard', or 'any'.",
+    ),
+    q: str | None = Query(
+        None,
+        description=(
+            "Optional text filter — must match the ``q`` parameter used in "
+            "the corresponding /rated request so facet counts stay in sync."
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
+    """Return per-artist counts of rated images for the artist facets panel.
+
+    Returns a list of ``{artist, count}`` objects sorted by count
+    descending.  The rating (and optional text-search ``q``) filters must
+    match those used in the corresponding :http:get:`/rated` request so
+    the facet counts stay consistent with the displayed gallery.
+
+    Artists with a NULL/empty name are grouped under ``"(Unknown)"``.
+    """
+    valid_ratings = {"keep", "skip", "discard", "any"}
+    if rating not in valid_ratings:
+        raise HTTPException(
+            status_code=400,
+            detail=f"rating must be one of {sorted(valid_ratings)}, got '{rating}'.",
+        )
+
+    # Reuse the same ranked-link subquery pattern as /rated so we only
+    # count each image's most recent rating.
+    ranked = (
+        db.query(
+            CivitaiSearchImageLink.image_id.label("img_id"),
+            CivitaiSearchImageLink.rating.label("rating"),
+            sa_func.row_number()
+            .over(
+                partition_by=CivitaiSearchImageLink.image_id,
+                order_by=CivitaiSearchImageLink.created_at.desc(),
+            )
+            .label("rn"),
+        )
+        .filter(CivitaiSearchImageLink.rating.isnot(None))
+        .subquery()
+    )
+
+    rating_filter = ranked.c.rating == rating if rating != "any" else None
+
+    terms = [t for t in (q or "").split() if t]
+    text_filters: list[Any] = []
+    for term in terms:
+        pattern = f"%{term.lower()}%"
+        tag_match = CivitaiSearchImage.tags.cast(sa_Text).like(f"%{term}%")
+        prompt_match = sa_func.lower(
+            sa_func.coalesce(CivitaiSearchImage.generation_prompt, "")
+        ).like(pattern)
+        artist_match = sa_func.lower(
+            sa_func.coalesce(CivitaiSearchImage.artist_name, "")
+        ).like(pattern)
+        text_filters.append(sa_or(tag_match, prompt_match, artist_match))
+
+    # Use COALESCE to give NULL/empty artists a label so they can be
+    # grouped and counted consistently.
+    artist_label = sa_func.coalesce(
+        sa_func.nullif(CivitaiSearchImage.artist_name, ""),
+        "(Unknown)",
+    ).label("artist")
+
+    facet_q = (
+        db.query(
+            artist_label,
+            sa_func.count(ranked.c.img_id).label("count"),
+        )
+        .join(ranked, ranked.c.img_id == CivitaiSearchImage.id)
+        .filter(ranked.c.rn == 1)
+    )
+    if rating_filter is not None:
+        facet_q = facet_q.filter(rating_filter)
+    for tf in text_filters:
+        facet_q = facet_q.filter(tf)
+    facet_q = facet_q.group_by(artist_label)
+    facet_q = facet_q.order_by(sa_func.count(ranked.c.img_id).desc(), artist_label.asc())
+
+    rows = facet_q.all()
+    return [{"artist": name, "count": cnt} for name, cnt in rows]
 
 
 @router.post("/search-record", response_model=dict)

@@ -7,14 +7,24 @@
   const API_SEARCH = '/api/civitai-search';
   const API_AUTH_STATUS = '/api/civitai-search/auth-status';
   const API_LIBRARY_STATUS = '/api/civitai-search/library-status';
+  const API_RATED = '/api/civitai-search/rated';
   const API_RATE_IMAGE = '/api/civitai-search/rate';
   const API_RATINGS = '/api/civitai-search/ratings';
   const API_SINGLE_IMAGE = (id) => `/api/civitai-search/image/${id}`;
   const API_SEARCH_RECORD = '/api/civitai-search/search-record';
   const API_BATCH_IMPORT = '/api/import_civitai/batch';
+
+  /* ── Sort options for review mode (value format: "key:order") ── */
+  const REVIEW_SORT_OPTIONS = [
+    { value: 'recent:desc', label: 'Most Recently Rated' },
+    { value: 'reactions:desc', label: 'Most Reactions' },
+    { value: 'likes:desc', label: 'Most Collected' },
+    { value: 'artist:asc', label: 'Artist Name A-Z' },
+  ];
   const API_COLLECTIONS = '/api/collections/';
   const API_ARTIST_SUMMARY = '/api/civitai-search/artist-summary';
   const API_ARTIST_BLOCK = '/api/civitai-search/artist-block';
+  const API_RATED_ARTISTS = '/api/civitai-search/rated/artists';
 
   // Fallback; overwritten once /api/config resolves.
   let CIVITAI_IMAGE_URL = 'https://civitai.red/images/';
@@ -154,19 +164,22 @@
   /* ── DOM refs ── */
   const els = {};
   const requiredIds = [
+    'mode-bar', 'review-rating-bar',
     'search-form', 'search-query', 'search-advanced',
     'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username', 'filter-nsfw', 'filter-match',
     'facet-bar', 'search-status', 'search-status-text',
     'gallery-grid', 'gallery-footer', 'load-more-btn', 'results-count',
     'selection-count',
+    'hide-filter-bar', 'hide-seen', 'hide-saved', 'hide-keep', 'hide-skip', 'hide-discard',
     'details-pane', 'details-empty', 'details-content',
-    'detail-media-frame', 'detail-image',
+    'detail-media-frame', 'detail-image', 'detail-video',
     'detail-title', 'detail-subtitle',
     'fullscreen-btn', 'open-civitai-link', 'send-to-gen-lab-link',
     'detail-folder-mount', 'detail-panel-stash',
     'detail-panel-info', 'detail-panel-tags', 'detail-panel-stats',
     'detail-meta', 'detail-tags-list', 'detail-stats',
-    'fullscreen-preview', 'fullscreen-image', 'fullscreen-counter',
+    'fullscreen-preview', 'fullscreen-image', 'fullscreen-video', 'fullscreen-counter',
+    'fullscreen-image-info',
     'fullscreen-close-btn', 'fullscreen-prev', 'fullscreen-next',
     'fullscreen-tags-panel', 'fullscreen-tags-cloud',
     'theme-toggle',
@@ -190,6 +203,18 @@
     imageRatings: new Map(),   // civitaiId → "keep" | "discard" | "skip"
     currentSearchId: null,     // DB id of the current search record
     imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
+    hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true },
+    autoLoading: false,         // guards against recursive auto-load
+    fullscreenAdvanceOnLoad: false, // when true, advance fullscreen to first new visible tile after search
+    fullscreenImageSource: null,   // 'thumbnail' | 'mid-res' | 'original' — currently displayed source
+    fullscreenImageWidth: null,    // natural width of currently displayed image (px)
+    mode: 'search',               // 'search' | 'review'
+    reviewRating: 'keep',         // active rating tab in review mode
+    reviewSort: 'recent',         // sort key for review mode
+    reviewOrder: 'desc',          // sort direction for review mode
+    reviewArtistFacets: [],       // [{artist, count}] from /rated/artists
+    reviewSelectedArtists: new Set(), // selected artist names (filter)
+    reviewFacetFilter: '',        // text filter within the facets panel
   };
 
   /* ── Image load retry utilities ── */
@@ -311,6 +336,7 @@
     }
 
     bindEvents();
+    updateModeUI();
     initFolderTabs();
     checkAuthStatus();
     createImportUI();
@@ -325,6 +351,7 @@
       els.filter_username.value = saved.username;
       els.filter_nsfw.value = saved.nsfw;
       els.filter_match.value = saved.match || 'last';
+      syncHideFiltersFromUrl(saved);
       executeSearch();
     }
 
@@ -373,11 +400,23 @@
           }
         },
         onSortChange(value) {
-          // Sync the advanced-filters sort dropdown and re-search
-          els.filter_sort.value = value;
-          state.offset = 0;
-          state.hits = [];
-          executeSearch();
+          if (state.mode === 'review') {
+            // Review-mode sort values are "key" or "key:order"
+            const [sort, ord] = value.includes(':')
+              ? value.split(':')
+              : [value, state.reviewOrder];
+            state.reviewSort = sort;
+            state.reviewOrder = ord || 'desc';
+            state.offset = 0;
+            state.hits = [];
+            executeSearch();
+          } else {
+            // Search-mode: sync the advanced-filters sort dropdown and re-search
+            els.filter_sort.value = value;
+            state.offset = 0;
+            state.hits = [];
+            executeSearch();
+          }
         },
       });
 
@@ -411,6 +450,10 @@
       state.importedIds = new Set(Object.keys(allImported).map(Number));
       // Re-render badges on existing tiles
       refreshLibraryBadges();
+      // Saved status affects hide-filter visibility
+      applyHideFilters();
+      ensureVisibleSelection();
+      checkAutoLoadIfAllHidden();
       // Update import button if details are showing
       if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
         updateImportButtonState(state.hits[state.selectedHitIndex]);
@@ -453,6 +496,9 @@
       if (changed) {
         refreshAllRatingIndicators();
         updateFullscreenCounter();
+        applyHideFilters();
+        ensureVisibleSelection();
+        checkAutoLoadIfAllHidden();
       }
     } catch {
       // Silently fail — badges are non-essential
@@ -700,6 +746,9 @@
             }
             refreshLibraryBadges();
             updateSelectionCounter();
+            applyHideFilters();
+            ensureVisibleSelection();
+            checkAutoLoadIfAllHidden();
             if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
               updateImportButtonState(state.hits[state.selectedHitIndex]);
             }
@@ -759,6 +808,15 @@
     if (match && match !== 'last') p.set('match', match);
     if (state.hits.length > 0) p.set('offset', String(state.hits.length));
 
+    // Persist hide filters (only non-default values to keep URL short)
+    const hf = state.hideFilters;
+    if (hf.seen) p.set('hideSeen', '1');
+    if (hf.saved) p.set('hideSaved', '1');
+    if (hf.keep) p.set('hideKeep', '1');
+    if (hf.skip) p.set('hideSkip', '1');
+    // discard defaults to true, so we persist the inverse
+    if (!hf.discard) p.set('hideDiscard', '0');
+
     const search = p.toString();
     const url = window.location.pathname + (search ? '?' + search : '');
     history.replaceState(null, '', url);
@@ -777,6 +835,11 @@
       nsfw: p.get('nsfw') || '',
       match: p.get('match') || 'last',
       offset: parseInt(p.get('offset') || '0', 10),
+      hideSeen: p.has('hideSeen') ? p.get('hideSeen') === '1' : null,
+      hideSaved: p.has('hideSaved') ? p.get('hideSaved') === '1' : null,
+      hideKeep: p.has('hideKeep') ? p.get('hideKeep') === '1' : null,
+      hideSkip: p.has('hideSkip') ? p.get('hideSkip') === '1' : null,
+      hideDiscard: p.has('hideDiscard') ? p.get('hideDiscard') === '1' : null,
     };
   }
 
@@ -802,6 +865,43 @@
 
   /* ── Events ── */
   function bindEvents() {
+    // Mode toggle (Search ↔ Review)
+    els.mode_bar.addEventListener('click', (e) => {
+      const btn = e.target.closest('.mode-btn');
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      if (mode === state.mode) return;
+      switchMode(mode);
+    });
+
+    // Review rating sub-tabs
+    els.review_rating_bar.addEventListener('click', (e) => {
+      const btn = e.target.closest('.review-rating-btn');
+      if (!btn) return;
+      const rating = btn.dataset.rating;
+      if (rating === state.reviewRating) return;
+      state.reviewRating = rating;
+      updateReviewRatingUI();
+      if (state.mode === 'review') {
+        state.offset = 0;
+        state.hits = [];
+        executeSearch();
+      }
+    });
+
+    // Review artist facet panel — text filter and clear button
+    const facetFilterInput = document.getElementById('review-facets-filter');
+    if (facetFilterInput) {
+      facetFilterInput.addEventListener('input', (e) => {
+        state.reviewFacetFilter = e.target.value;
+        renderReviewArtistFacets();
+      });
+    }
+    const facetClearBtn = document.getElementById('review-facets-clear');
+    if (facetClearBtn) {
+      facetClearBtn.addEventListener('click', () => clearReviewArtists());
+    }
+
     // Search form
     els.search_form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -836,6 +936,18 @@
       executeSearch();
     });
 
+    // Hide filter checkboxes
+    els.hide_filter_bar.addEventListener('change', (e) => {
+      if (e.target.matches('input[type="checkbox"][data-hide]')) {
+        const key = e.target.dataset.hide;
+        state.hideFilters[key] = e.target.checked;
+        applyHideFilters();
+        ensureVisibleSelection();
+        saveStateToUrl();
+        checkAutoLoadIfAllHidden();
+      }
+    });
+
     // Tile clicks (delegated) — shift-click range, ctrl/cmd-click toggle, plain click single
     els.gallery_grid.addEventListener('click', (e) => {
       const tile = e.target.closest('.tile');
@@ -860,6 +972,7 @@
     // Fullscreen
     els.fullscreen_btn.addEventListener('click', openFullscreen);
     els.detail_image.addEventListener('click', openFullscreen);
+    els.detail_video.addEventListener('click', openFullscreen);
     els.fullscreen_close_btn.addEventListener('click', closeFullscreen);
     els.fullscreen_prev.addEventListener('click', () => navigateFullscreen(-1));
     els.fullscreen_next.addEventListener('click', () => navigateFullscreen(1));
@@ -897,6 +1010,8 @@
     // Optimistic update — reflect rating immediately in the UI.
     state.imageRatings.set(hit.id, rating);
     updateTileRatingIndicator(idx);
+    applyHideFilters();
+    checkAutoLoadIfAllHidden();
 
     try {
       const res = await fetch(API_RATE_IMAGE, {
@@ -920,14 +1035,132 @@
     }
   }
 
+  /* ── Hide filters ── */
+
+  /** Restore hide-filter state from URL params and sync checkbox DOM. */
+  function syncHideFiltersFromUrl(saved) {
+    if (!saved) return;
+    const hf = state.hideFilters;
+    if (saved.hideSeen !== null) hf.seen = saved.hideSeen;
+    if (saved.hideSaved !== null) hf.saved = saved.hideSaved;
+    if (saved.hideKeep !== null) hf.keep = saved.hideKeep;
+    if (saved.hideSkip !== null) hf.skip = saved.hideSkip;
+    if (saved.hideDiscard !== null) hf.discard = saved.hideDiscard;
+
+    if (els.hide_seen) els.hide_seen.checked = hf.seen;
+    if (els.hide_saved) els.hide_saved.checked = hf.saved;
+    if (els.hide_keep) els.hide_keep.checked = hf.keep;
+    if (els.hide_skip) els.hide_skip.checked = hf.skip;
+    if (els.hide_discard) els.hide_discard.checked = hf.discard;
+  }
+
+  /**
+   * Determine whether a hit should be hidden by the active hide filters.
+   * A hit is hidden if it matches ANY checked filter category.
+   */
+  function isHiddenByFilter(hit) {
+    if (!hit || !hit.id) return false;
+    const f = state.hideFilters;
+    const id = hit.id;
+    const rating = state.imageRatings.get(id);
+    const isSaved = state.importedIds.has(id);
+
+    if (f.seen && (isSaved || rating)) return true;
+    if (f.saved && isSaved) return true;
+    if (f.keep && rating === 'keep') return true;
+    if (f.skip && rating === 'skip') return true;
+    if (f.discard && rating === 'discard') return true;
+    return false;
+  }
+
+  /** Find the next visible hit index from `from` (inclusive), stepping by ±1. */
+  function nextVisibleIndex(from, step = 1) {
+    for (let i = from; i >= 0 && i < state.hits.length; i += step) {
+      if (!isHiddenByFilter(state.hits[i])) return i;
+    }
+    return -1;
+  }
+
+  /** Count currently visible (non-hidden) tiles. */
+  function countVisibleTiles() {
+    return state.hits.filter((h) => !isHiddenByFilter(h)).length;
+  }
+
+  /** Apply / remove the `.tile-hidden` class on all tiles based on current filters. */
+  function applyHideFilters() {
+    const tiles = els.gallery_grid.querySelectorAll('.tile[data-index]');
+    tiles.forEach((tile) => {
+      const idx = parseInt(tile.dataset.index, 10);
+      const hidden = idx < state.hits.length && isHiddenByFilter(state.hits[idx]);
+      tile.classList.toggle('tile-hidden', hidden);
+    });
+  }
+
+  /**
+   * If the currently-selected tile is hidden by filters, move selection to
+   * the nearest visible neighbour.  Called by contexts that don't have a
+   * subsequent navigation step (e.g. async rating/library loads, checkbox
+   * toggles).  NOT called from rateImage() because advanceToNext() handles
+   * navigation immediately after.
+   */
+  function ensureVisibleSelection() {
+    if (state.selectedHitIndex >= 0 && state.selectedHitIndex < state.hits.length) {
+      if (isHiddenByFilter(state.hits[state.selectedHitIndex])) {
+        const next = nextVisibleIndex(state.selectedHitIndex + 1, 1);
+        const fallback = next < 0 ? nextVisibleIndex(state.selectedHitIndex - 1, -1) : next;
+        selectTile(fallback >= 0 ? fallback : state.selectedHitIndex);
+      }
+    }
+  }
+
+  /**
+   * If too few visible tiles remain, auto-load additional pages until at
+   * least one page worth (`state.limit`) of images are visible — or until
+   * there are no more pages to load.  Guarded by `state.autoLoading` to
+   * prevent infinite recursion while async ratings are fetched.
+   */
+  async function checkAutoLoadIfAllHidden() {
+    if (state.autoLoading) return;
+    if (state.hits.length === 0) return;
+
+    state.autoLoading = true;
+    try {
+      // Keep loading pages while:
+      //   • we haven't reached a full page of visible tiles, AND
+      //   • there are more pages available
+      while (countVisibleTiles() < state.limit && state.hits.length < state.total) {
+        const prevHitCount = state.hits.length;
+        state.offset += state.limit;
+        await executeSearch(true);
+
+        // Re-apply filters after the new hits are loaded so
+        // countVisibleTiles() reflects the updated state.
+        applyHideFilters();
+        ensureVisibleSelection();
+
+        // Safety valve: if the last fetch added zero hits (e.g. backend
+        // post-filtering removed all hits for this page), bail out to
+        // avoid an infinite loop even when state.total hasn't been capped.
+        if (state.hits.length === prevHitCount) break;
+      }
+    } finally {
+      state.autoLoading = false;
+    }
+  }
+
   /** Advance to the next image (gallery or fullscreen). */
   function advanceToNext() {
     const fullscreenOpen = !els.fullscreen_preview.classList.contains('hidden');
     if (fullscreenOpen) {
       navigateFullscreen(1);
     } else {
-      if (state.selectedHitIndex < state.hits.length - 1) {
-        selectTile(state.selectedHitIndex + 1);
+      const next = nextVisibleIndex(state.selectedHitIndex + 1, 1);
+      if (next >= 0) {
+        selectTile(next);
+      } else if (_hasMorePages() && !state.loading) {
+        // At the last visible tile in gallery mode — load next page.
+        state.offset += state.limit;
+        executeSearch(true);
       }
     }
   }
@@ -1099,12 +1332,292 @@
     }
   }
 
+  /* ── Review-mode artist facets ── */
+
+  /**
+   * Fetch artist facet counts from the backend and render the panel.
+   *
+   * The rating and text-search (``q``) params mirror the current review
+   * search so facet counts stay in sync with the displayed gallery.
+   */
+  async function fetchReviewArtistFacets() {
+    try {
+      const params = new URLSearchParams({ rating: state.reviewRating });
+      const q = els.search_query?.value.trim() || '';
+      if (q) params.set('q', q);
+
+      const res = await fetch(`${API_RATED_ARTISTS}?${params}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      state.reviewArtistFacets = Array.isArray(data) ? data : [];
+      renderReviewArtistFacets();
+    } catch (err) {
+      console.warn('Artist facets fetch failed:', err);
+    }
+  }
+
+  /**
+   * Render the artist facet rows inside the review-mode panel.
+   *
+   * Each row shows the artist name, image count, and a checkbox that
+   * toggles membership in ``state.reviewSelectedArtists``.  The panel
+   * also respects the in-panel text filter (``reviewFacetFilter``).
+   */
+  function renderReviewArtistFacets() {
+    const body = document.getElementById('review-artist-facets-body');
+    if (!body) return;
+    const countBadge = document.getElementById('review-facets-count');
+
+    const facets = state.reviewArtistFacets || [];
+    if (countBadge) {
+      countBadge.textContent = facets.length > 0 ? facets.length : '';
+    }
+
+    if (facets.length === 0) {
+      body.innerHTML = '<p class="artist-summary-empty">No artists found for this rating.</p>';
+      return;
+    }
+
+    const filterText = state.reviewFacetFilter.trim().toLowerCase();
+    const visible = filterText
+      ? facets.filter((f) => f.artist.toLowerCase().includes(filterText))
+      : facets;
+
+    body.innerHTML = '';
+    for (const f of visible) {
+      const row = document.createElement('label');
+      row.className = 'artist-facet-row'
+        + (state.reviewSelectedArtists.has(f.artist) ? ' is-selected' : '');
+
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.checked = state.reviewSelectedArtists.has(f.artist);
+      check.addEventListener('change', () => toggleReviewArtist(f.artist));
+
+      const name = document.createElement('span');
+      name.className = 'artist-facet-name';
+      name.textContent = f.artist;
+      name.title = f.artist;
+
+      const count = document.createElement('span');
+      count.className = 'artist-facet-count';
+      count.textContent = f.count;
+
+      row.append(check, name, count);
+      body.appendChild(row);
+    }
+
+    // Show a note when the filter excludes all rows
+    if (visible.length === 0 && facets.length > 0) {
+      const note = document.createElement('p');
+      note.className = 'artist-summary-empty';
+      note.textContent = 'No artists match your filter.';
+      body.appendChild(note);
+    }
+  }
+
+  /**
+   * Toggle an artist in the review selection set and re-run the search.
+   */
+  function toggleReviewArtist(artistName) {
+    if (state.reviewSelectedArtists.has(artistName)) {
+      state.reviewSelectedArtists.delete(artistName);
+    } else {
+      state.reviewSelectedArtists.add(artistName);
+    }
+    // Re-render checkboxes without re-fetching
+    renderReviewArtistFacets();
+    // Re-search with the updated artist filter
+    state.offset = 0;
+    state.hits = [];
+    executeSearch();
+  }
+
+  /** Clear all selected artists and re-search. */
+  function clearReviewArtists() {
+    if (state.reviewSelectedArtists.size === 0) return;
+    state.reviewSelectedArtists.clear();
+    renderReviewArtistFacets();
+    state.offset = 0;
+    state.hits = [];
+    executeSearch();
+  }
+
+  /* ── Mode switching (Search ↔ Review) ── */
+
+  function updateModeUI() {
+    // Mode bar active states
+    els.mode_bar.querySelectorAll('.mode-btn').forEach((b) => {
+      const active = b.dataset.mode === state.mode;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+
+    // Show/hide review rating sub-bar
+    els.review_rating_bar.classList.toggle('hidden', state.mode !== 'review');
+
+    // Show/hide the artist-facets panel (review mode only)
+    const facetPanel = document.getElementById('review-artist-facets');
+    if (facetPanel) {
+      facetPanel.hidden = state.mode !== 'review';
+      // Auto-open the panel when entering review mode
+      if (state.mode === 'review') facetPanel.open = true;
+    }
+
+    // Toggle CSS class on the toolbar to dim search form in review mode
+    els.mode_bar.closest('.search-toolbar').classList.toggle('review-active', state.mode === 'review');
+
+    // Swap sort options and search placeholder for the active mode
+    if (_galleryToolbar) {
+      if (state.mode === 'review') {
+        _galleryToolbar.setSortOptions(REVIEW_SORT_OPTIONS);
+        // Select the option matching current reviewSort/reviewOrder
+        const combined = `${state.reviewSort}:${state.reviewOrder}`;
+        _galleryToolbar.setSortValue(combined);
+      } else {
+        // Restore search-mode sort options
+        _galleryToolbar.setSortOptions([
+          { value: 'stats.reactionCountAllTime:desc', label: 'Most Reactions' },
+          { value: 'stats.commentCountAllTime:desc', label: 'Most Comments' },
+          { value: 'stats.collectedCountAllTime:desc', label: 'Most Collected' },
+          { value: 'createdAt:desc', label: 'Newest' },
+          { value: 'createdAtUnix:asc', label: 'Oldest' },
+        ]);
+        if (els.filter_sort.value) {
+          _galleryToolbar.setSortValue(els.filter_sort.value);
+        }
+      }
+    }
+
+    // Update search placeholder for review mode
+    if (els.search_query) {
+      els.search_query.placeholder = state.mode === 'review'
+        ? 'Filter rated images…'
+        : 'Search CivitAI images…';
+    }
+
+    updateReviewRatingUI();
+  }
+
+  function updateReviewRatingUI() {
+    els.review_rating_bar.querySelectorAll('.review-rating-btn').forEach((b) => {
+      const active = b.dataset.rating === state.reviewRating;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  }
+
+  function switchMode(mode) {
+    if (mode === state.mode) return;
+    state.mode = mode;
+    updateModeUI();
+
+    // Reset result state and re-search
+    state.offset = 0;
+    state.hits = [];
+    state.selectedHitIndex = -1;
+    state.selectedIndices.clear();
+    // Clear artist facet selection when switching modes
+    state.reviewSelectedArtists.clear();
+    state.reviewFacetFilter = '';
+
+    if (mode === 'review') {
+      setStatus('Loading rated images…', '');
+    } else {
+      setStatus('Enter a search query to get started.', '');
+    }
+    executeSearch();
+  }
+
+  /* ── Review mode search ── */
+  async function executeReviewSearch(append = false) {
+    state.loading = true;
+    const savedOffset = state.offset;
+    const rLabel = state.reviewRating === 'any' ? '' : state.reviewRating + ' ';
+    setStatus(`Loading ${rLabel}images…`, 'is-loading');
+
+    try {
+      const params = new URLSearchParams({
+        rating: state.reviewRating,
+        limit: String(state.limit),
+        offset: String(state.offset),
+        sort: state.reviewSort,
+        order: state.reviewOrder,
+      });
+
+      // Add text query if present — filters across tags, prompt, and artist
+      const q = els.search_query?.value.trim() || '';
+      if (q) params.set('q', q);
+
+      // Add selected artist filter (comma-separated names)
+      if (state.reviewSelectedArtists.size > 0) {
+        params.set('artists', [...state.reviewSelectedArtists].join(','));
+      }
+
+      const res = await fetch(`${API_RATED}?${params}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+
+      // Merge ratings from the backend response into our local map so
+      // badges render correctly on first paint.
+      if (data.ratings) {
+        for (const [cid, r] of Object.entries(data.ratings)) {
+          state.imageRatings.set(parseInt(cid, 10), r);
+        }
+      }
+
+      const newHitsCount = append ? (data.hits || []).length : 0;
+      if (append) {
+        state.hits = state.hits.concat(data.hits || []);
+      } else {
+        state.hits = data.hits || [];
+        state.selectedIndices.clear();
+        state.lastSelectionAnchor = -1;
+      }
+      state.total = data.total || 0;
+      if (append && newHitsCount === 0) {
+        state.total = state.hits.length;
+      }
+      state.facets = data.facets || null;
+
+      renderResults(append);
+      fetchLibraryStatus();
+      fetchReviewArtistFacets();
+
+      const count = data.hits?.length || 0;
+      if (count === 0 && !append) {
+        setStatus(`No ${state.reviewRating === 'any' ? '' : state.reviewRating + ' '}images found. Rate some images first!`, '');
+      } else if (append) {
+        setStatus(`Loaded ${state.hits.length} of ${state.total} rated images.`, '');
+      } else {
+        const rLabel = state.reviewRating === 'any' ? '' : state.reviewRating + ' ';
+        setStatus(`Showing ${state.hits.length} of ${state.total} ${rLabel}images.`, '');
+      }
+    } catch (err) {
+      if (append) state.offset = savedOffset;
+      setStatus(`Review load failed: ${err.message}`, 'is-error', {
+        label: 'Retry',
+        onClick: () => executeSearch(append),
+      });
+    } finally {
+      state.loading = false;
+    }
+  }
+
   /* ── Search ── */
   async function executeSearch(append = false) {
     if (state.loading) return;
 
     if (!append) _preloadCache.clear();
     const savedOffset = state.offset;
+
+    // ── Review mode: fetch rated images from DB ──
+    if (state.mode === 'review') {
+      return executeReviewSearch(append);
+    }
 
     const query = els.search_query.value.trim();
     const tags = els.filter_tags.value.trim();
@@ -1149,14 +1662,9 @@
 
       const data = await res.json();
 
+      const newHitsCount = append ? (data.hits || []).length : 0;
       if (append) {
-        const newHits = data.hits || [];
-        // If append returned zero new hits, we've exhausted all results.
-        // Set total to current count so UI knows we're done.
-        if (newHits.length === 0 && state.total <= 0) {
-          state.total = state.hits.length;
-        }
-        state.hits = state.hits.concat(newHits);
+        state.hits = state.hits.concat(data.hits || []);
       } else {
         state.hits = data.hits || [];
         // Reset multi-select on fresh search
@@ -1164,11 +1672,19 @@
         state.lastSelectionAnchor = -1;
       }
       state.total = data.total || 0;
+      // If append returned zero new hits, we've exhausted all results.
+      // Cap total to current hit count so pagination loops terminate.
+      // This must come AFTER the `state.total = data.total` assignment
+      // so the cap isn't immediately overwritten.
+      if (append && newHitsCount === 0) {
+        state.total = state.hits.length;
+      }
       state.facets = data.facets || null;
 
       renderResults(append);
       renderFacets();
       refreshAllRatingIndicators();
+      applyHideFilters();
 
       // Display: cap total at MAX_RESULTS — when total equals the cap, assume it's truncated
       const capped = state.total >= MAX_RESULTS;
@@ -1183,9 +1699,10 @@
       // Persist search state to URL
       saveStateToUrl();
 
-      // Select first tile on fresh search
+      // Select first visible tile on fresh search (respecting hide filters)
       if (!append && state.hits.length > 0) {
-        setSingleSelection(0);
+        const firstVisible = nextVisibleIndex(0, 1);
+        setSingleSelection(firstVisible >= 0 ? firstVisible : 0);
       }
 
       // Fetch library status for current hits
@@ -1201,9 +1718,36 @@
       if (!append) {
         recordSearch(query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy, data.total || 0);
       }
+
+      // If we loaded a new page because fullscreen was at the last visible
+      // tile, advance the fullscreen preview to the first new visible tile.
+      if (append && state.fullscreenAdvanceOnLoad) {
+        state.fullscreenAdvanceOnLoad = false;
+        const firstNew = nextVisibleIndex(savedOffset, 1);
+        if (firstNew >= 0) {
+          selectTile(firstNew);
+          const hit = state.hits[firstNew];
+          _setFullscreenImage(hit);
+          updateFullscreenCounter();
+          renderFullscreenTags(hit);
+        } else {
+          // New page had no visible tiles either — keep loading or close.
+          navigateFullscreen(1);
+        }
+      }
     } catch (err) {
       // Revert offset on failure so "Load More" can be retried.
       if (append) state.offset = savedOffset;
+      // If we were advancing fullscreen and the load failed, restore state.
+      if (state.fullscreenAdvanceOnLoad) {
+        state.fullscreenAdvanceOnLoad = false;
+        const idx = state.selectedHitIndex;
+        if (idx >= 0 && idx < state.hits.length) {
+          const hit = state.hits[idx];
+          _setFullscreenImage(hit);
+          updateFullscreenCounter();
+        }
+      }
       setStatus(`Search failed: ${err.message}`, 'is-error', {
         label: 'Retry search',
         onClick: () => executeSearch(append),
@@ -1214,6 +1758,14 @@
   }
 
   /* ── Render gallery tiles ── */
+  function isVideoHit(hit) {
+    return !!(
+      hit?.is_video ||
+      hit?.type === 'video' ||
+      (hit?.mimeType && String(hit.mimeType).startsWith('video/'))
+    );
+  }
+
   function renderTile(hit, idx) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -1226,36 +1778,74 @@
       btn.classList.add('selected');
     }
 
-    // BlurHash placeholder — decode instantly so the tile has colour
-    // before the real thumbnail loads over the network.
-    const placeholderURL = hit.blurhash ? blurHashToDataURL(hit.blurhash, 32, 32) : '';
+    const video = isVideoHit(hit);
+    const mediaURL = hit.thumbnail_url || hit.url || '';
 
-    const img = document.createElement('img');
-    img.alt = hit.prompt ? hit.prompt.substring(0, 80) : `Image ${hit.id}`;
-    img.classList.add('tile-real-img');
+    if (video) {
+      // ── Video tile ──
+      // Use the B2 playable URL directly.  No poster/thumbnail variants
+      // exist for CivitAI videos, so we show the first frame.
+      const vid = document.createElement('video');
+      vid.alt = hit.prompt ? hit.prompt.substring(0, 80) : `Video ${hit.id}`;
+      vid.className = 'tile-real-img';
+      vid.muted = true;
+      vid.loop = true;
+      vid.playsInline = true;
+      vid.preload = 'metadata';
+      vid.src = mediaURL;
 
-    // Start with blurhash placeholder, swap to real thumbnail on load.
-    const thumbURL = hit.thumbnail_url || hit.url || '';
-    if (placeholderURL) {
-      img.src = placeholderURL;
-      img.style.filter = 'blur(8px)';
-      img.style.transition = 'filter 300ms ease, opacity 300ms ease';
-      // Load real image with automatic retry (exponential backoff).
-      // On success swap from blurhash placeholder to the real thumbnail.
-      // On permanent failure show a visual error indicator on the tile.
-      retryImageLoad(thumbURL, hit.id).then((ok) => {
-        if (ok) {
-          img.src = thumbURL;
-          img.style.filter = '';
-        } else {
-          img.style.filter = 'blur(4px) grayscale(0.6)';
-          img.style.opacity = '0.4';
-          btn.classList.add('tile-image-error');
-        }
+      // Hover-to-play: start the video when the user's mouse enters the tile.
+      btn.addEventListener('mouseenter', () => {
+        const p = vid.play();
+        if (p) p.catch(() => {});
       });
+      btn.addEventListener('mouseleave', () => {
+        vid.pause();
+        vid.currentTime = 0;
+      });
+
+      btn.appendChild(vid);
+
+      // ▶ badge so video tiles are visually distinct
+      const vbadge = document.createElement('span');
+      vbadge.className = 'tile-video-badge';
+      vbadge.textContent = '▶';
+      btn.appendChild(vbadge);
     } else {
-      img.loading = 'lazy';
-      img.src = thumbURL;
+      // ── Image tile (existing flow) ──
+      // BlurHash placeholder — decode instantly so the tile has colour
+      // before the real thumbnail loads over the network.
+      const placeholderURL = hit.blurhash ? blurHashToDataURL(hit.blurhash, 32, 32) : '';
+
+      const img = document.createElement('img');
+      img.alt = hit.prompt ? hit.prompt.substring(0, 80) : `Image ${hit.id}`;
+      img.classList.add('tile-real-img');
+
+      // Start with blurhash placeholder, swap to real thumbnail on load.
+      const thumbURL = hit.thumbnail_url || hit.url || '';
+      if (placeholderURL) {
+        img.src = placeholderURL;
+        img.style.filter = 'blur(8px)';
+        img.style.transition = 'filter 300ms ease, opacity 300ms ease';
+        // Load real image with automatic retry (exponential backoff).
+        // On success swap from blurhash placeholder to the real thumbnail.
+        // On permanent failure show a visual error indicator on the tile.
+        retryImageLoad(thumbURL, hit.id).then((ok) => {
+          if (ok) {
+            img.src = thumbURL;
+            img.style.filter = '';
+          } else {
+            img.style.filter = 'blur(4px) grayscale(0.6)';
+            img.style.opacity = '0.4';
+            btn.classList.add('tile-image-error');
+          }
+        });
+      } else {
+        img.loading = 'lazy';
+        img.src = thumbURL;
+      }
+
+      btn.appendChild(img);
     }
 
     const overlay = document.createElement('div');
@@ -1263,8 +1853,6 @@
     const reactions = hit.stats?.reactionCount ?? '';
     const comments = hit.stats?.commentCount ?? '';
     overlay.innerHTML = `<span>♥ ${reactions}</span><span>💬 ${comments}</span>`;
-
-    btn.appendChild(img);
     btn.appendChild(overlay);
 
     // Selection indicator badge (inserted as first child for z-index layering)
@@ -1281,6 +1869,18 @@
       badge.className = 'tile-in-library-badge';
       badge.textContent = '✓ In Library';
       badge.title = 'This image is already in your library';
+      btn.appendChild(badge);
+    }
+
+    // Rating badge (★ keep, ✕ discard, ○ skip) for voted images
+    const rating = state.imageRatings.get(hit.id);
+    if (rating) {
+      const badge = document.createElement('span');
+      badge.className = `tile-rating-badge is-${rating}`;
+      if (rating === 'keep') badge.textContent = '★';
+      else if (rating === 'discard') badge.textContent = '✕';
+      else if (rating === 'skip') badge.textContent = '○';
+      badge.title = rating;
       btn.appendChild(badge);
     }
 
@@ -1483,9 +2083,21 @@
 
     // Image — use thumbnail (already cached from tiles) for instant display.
     // Full-res loading only happens in fullscreen mode.
-    const imageUrl = hit.thumbnail_url || hit.mid_res_url || hit.url || '';
-    els.detail_image.src = imageUrl;
-    els.detail_image.alt = hit.prompt ? hit.prompt.substring(0, 120) : `CivitAI image ${hit.id}`;
+    if (isVideoHit(hit)) {
+      els.detail_image.classList.add('hidden');
+      els.detail_image.src = '';
+      els.detail_video.classList.remove('hidden');
+      els.detail_video.src = hit.video_url || hit.url || '';
+    } else {
+      els.detail_video.classList.add('hidden');
+      els.detail_video.pause();
+      els.detail_video.removeAttribute('src');
+      els.detail_video.load();
+      els.detail_image.classList.remove('hidden');
+      const imageUrl = hit.thumbnail_url || hit.mid_res_url || hit.url || '';
+      els.detail_image.src = imageUrl;
+      els.detail_image.alt = hit.prompt ? hit.prompt.substring(0, 120) : `CivitAI image ${hit.id}`;
+    }
 
     // Title & subtitle
     els.detail_title.textContent = hit.prompt
@@ -1679,30 +2291,61 @@
   }
 
   function _setFullscreenImage(hit) {
+    const video = isVideoHit(hit);
+
+    if (video) {
+      // ── Video fullscreen ──
+      els.fullscreen_image.classList.add('hidden');
+      els.fullscreen_image.src = '';
+      els.fullscreen_video.classList.remove('hidden');
+      els.fullscreen_video.src = hit.video_url || hit.url || '';
+      state.fullscreenImageSource = 'original';
+      state.fullscreenImageWidth = null;
+      updateFullscreenCounter();
+      return;
+    }
+
+    // ── Image fullscreen (existing tiered loading) ──
+    els.fullscreen_video.classList.add('hidden');
+    els.fullscreen_video.pause();
+    els.fullscreen_video.removeAttribute('src');
+    els.fullscreen_video.load();
+    els.fullscreen_image.classList.remove('hidden');
+
     // Tiered loading strategy:
     //   1. Show thumbnail immediately (already cached from tiles)
-    //   2. Upgrade to mid-res (1260px) when loaded — sweet spot for fullscreen
-    //   3. Don't load original unless user explicitly requests it (future: "view original" button)
+    //   2. Upgrade to full-res original when loaded
+    // The backend now serves the original image as mid_res_url, because
+    // the CivitAI CDN's 1260px tier upscales typical AI images (512-1216px),
+    // causing interpolation artifacts.
     const thumbUrl = hit.thumbnail_url || '';
     const midUrl = hit.mid_res_url || hit.url || '';
 
-    // If the mid-res is already preloaded, use it directly
+    const _applySource = (sourceTier, url) => {
+      els.fullscreen_image.src = url;
+      state.fullscreenImageSource = sourceTier;
+      // naturalWidth is only available after load; set a fallback from the tier
+      state.fullscreenImageWidth = sourceTier === 'thumbnail' ? 450 : null;
+      updateFullscreenCounter();
+    };
+
+    // If the full-res is already preloaded, use it directly
     if (_preloadCache.get(hit.id) === 'loaded' && midUrl) {
-      els.fullscreen_image.src = midUrl;
+      _applySource('original', midUrl);
       return;
     }
 
     // Show thumbnail first (instant from browser cache)
     if (thumbUrl) {
-      els.fullscreen_image.src = thumbUrl;
+      _applySource('thumbnail', thumbUrl);
     }
 
-    // Upgrade to mid-res in background with automatic retry
+    // Upgrade to full-res original in background with automatic retry
     if (midUrl && midUrl !== thumbUrl) {
       retryImageLoad(midUrl, `mid_${hit.id}`).then((ok) => {
         // Only apply if user hasn't navigated away
         if (ok && state.hits[state.selectedHitIndex]?.id === hit.id) {
-          els.fullscreen_image.src = midUrl;
+          _applySource('original', midUrl);
           _preloadCache.set(hit.id, 'loaded');
         }
       });
@@ -1727,17 +2370,59 @@
     els.fullscreen_preview.classList.add('hidden');
     els.fullscreen_preview.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
+    // Pause and clear video if it was playing
+    els.fullscreen_video.pause();
+    els.fullscreen_video.removeAttribute('src');
+    els.fullscreen_video.load();
+    els.fullscreen_video.classList.add('hidden');
+  }
+
+  /** True if there are more result pages available to load. */
+  function _hasMorePages() {
+    return state.total <= 0 || state.hits.length < state.total;
+  }
+
+  /**
+   * Show a loading/blank state in the fullscreen preview while waiting for
+   * the next cursor page.  Clears the image, tags, and updates the counter.
+   */
+  function _setFullscreenLoading() {
+    els.fullscreen_image.src = '';
+    els.fullscreen_image.alt = '';
+    els.fullscreen_video.pause();
+    els.fullscreen_video.removeAttribute('src');
+    els.fullscreen_video.classList.add('hidden');
+    els.fullscreen_counter.textContent = 'Loading more…';
+    const cloud = els.fullscreen_tags_cloud;
+    if (cloud) cloud.innerHTML = '';
   }
 
   function navigateFullscreen(delta) {
-    const next = state.selectedHitIndex + delta;
-    if (next < 0 || next >= state.hits.length) return;
-    selectTile(next);
-    // Tiered loading: show thumbnail instantly, upgrade to mid-res.
-    const hit = state.hits[next];
-    _setFullscreenImage(hit);
-    updateFullscreenCounter();
-    renderFullscreenTags(hit);
+    const next = nextVisibleIndex(state.selectedHitIndex + delta, delta);
+    if (next >= 0 && next < state.hits.length) {
+      selectTile(next);
+      // Tiered loading: show thumbnail instantly, upgrade to mid-res.
+      const hit = state.hits[next];
+      _setFullscreenImage(hit);
+      updateFullscreenCounter();
+      renderFullscreenTags(hit);
+      return;
+    }
+
+    // No visible tile in the requested direction.
+    // Forward at the end: try to load the next cursor page.
+    if (delta > 0) {
+      if (_hasMorePages() && !state.loading) {
+        _setFullscreenLoading();
+        state.fullscreenAdvanceOnLoad = true;
+        state.offset += state.limit;
+        executeSearch(true);
+      } else {
+        // No more pages — exit fullscreen.
+        closeFullscreen();
+      }
+    }
+    // delta < 0 (going backwards past the first tile): do nothing.
   }
 
   function updateFullscreenCounter() {
@@ -1747,6 +2432,20 @@
     const rating = hit && state.imageRatings.get(hit.id);
     const ratingLabel = rating ? ` [${rating}]` : '';
     els.fullscreen_counter.textContent = `${idx + 1} / ${state.hits.length}${selected}${ratingLabel}`;
+
+    // Image source debug info (CivitAI ID + source tier + resolution)
+    if (els.fullscreen_image_info && hit) {
+      const civitaiId = hit.id ?? '—';
+      const source = state.fullscreenImageSource || '—';
+      // Use naturalWidth if the image has loaded, otherwise fall back to the
+      // tier-based estimate set by _applySource.
+      const natW = els.fullscreen_image.naturalWidth || state.fullscreenImageWidth;
+      const natH = els.fullscreen_image.naturalHeight || null;
+      const resStr = natW
+        ? (natH ? `${natW}×${natH}` : `${natW}px`)
+        : '—';
+      els.fullscreen_image_info.textContent = `#${civitaiId} · ${source} · ${resStr}`;
+    }
   }
 
   /* ── Fullscreen: toggle selection of current image via Space ── */
@@ -1808,63 +2507,75 @@
 
   /* ── Keyboard ── */
   function handleKeyboard(e) {
+    // Ignore all single-key shortcuts when the user is typing in an
+    // input, select, or textarea. Arrow-key gallery nav and other
+    // non-character shortcuts are fine inside inputs.
+    const tag = document.activeElement?.tagName;
+    const isTyping = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+
     // Fullscreen nav
     const fullscreenOpen = !els.fullscreen_preview.classList.contains('hidden');
 
-    // Preference shortcuts work in both gallery and fullscreen modes.
-    if (e.key === 'z' || e.key === 'Z') {
-      e.preventDefault();
-      rateImage('skip');
-      advanceToNext();
-      return;
-    }
-    if (e.key === 'x' || e.key === 'X') {
-      e.preventDefault();
-      rateImage('discard');
-      advanceToNext();
-      return;
-    }
-    if (e.key === 'c' || e.key === 'C') {
-      e.preventDefault();
-      rateImage('keep');
-      advanceToNext();
-      return;
-    }
-    if (e.key === 'r' || e.key === 'R') {
-      e.preventDefault();
-      reloadCurrentImage();
-      return;
+    // Preference shortcuts (z/x/c/r) only active when not typing and
+    // there are gallery hits to vote on.
+    if (!isTyping && state.hits.length > 0) {
+      if (e.key === 'z' || e.key === 'Z') {
+        e.preventDefault();
+        rateImage('skip');
+        advanceToNext();
+        return;
+      }
+      if (e.key === 'x' || e.key === 'X') {
+        e.preventDefault();
+        rateImage('discard');
+        advanceToNext();
+        return;
+      }
+      if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        rateImage('keep');
+        advanceToNext();
+        return;
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        reloadCurrentImage();
+        return;
+      }
     }
 
     if (fullscreenOpen) {
       if (e.key === 'Escape') { closeFullscreen(); return; }
       if (e.key === 'ArrowLeft') { navigateFullscreen(-1); return; }
       if (e.key === 'ArrowRight') { navigateFullscreen(1); return; }
-      if (e.key === 'Home') { selectTile(0); navigateFullscreenTo(0); return; }
-      if (e.key === 'End') { selectTile(state.hits.length - 1); navigateFullscreenTo(state.hits.length - 1); return; }
+      if (e.key === 'Home') { const fi = nextVisibleIndex(0, 1); if (fi >= 0) { selectTile(fi); navigateFullscreenTo(fi); } return; }
+      if (e.key === 'End') { const li = nextVisibleIndex(state.hits.length - 1, -1); if (li >= 0) { selectTile(li); navigateFullscreenTo(li); } return; }
       if (e.key === ' ') { e.preventDefault(); toggleFullscreenSelection(); return; }
       return;
     }
 
     // Gallery nav (when not in input/select)
-    const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (isTyping) return;
 
     if (e.key === 'ArrowLeft' && state.selectedHitIndex > 0) {
       e.preventDefault();
-      selectTile(state.selectedHitIndex - 1);
+      const prev = nextVisibleIndex(state.selectedHitIndex - 1, -1);
+      if (prev >= 0) selectTile(prev);
     }
     if (e.key === 'ArrowRight' && state.selectedHitIndex < state.hits.length - 1) {
       e.preventDefault();
-      selectTile(state.selectedHitIndex + 1);
+      const next = nextVisibleIndex(state.selectedHitIndex + 1, 1);
+      if (next >= 0) selectTile(next);
     }
     if (e.key === 'Home' && state.hits.length > 0) {
       e.preventDefault();
-      selectTile(0);
+      const fi = nextVisibleIndex(0, 1);
+      if (fi >= 0) selectTile(fi);
     }
     if (e.key === 'End' && state.hits.length > 0) {
       e.preventDefault();
-      selectTile(state.hits.length - 1);
+      const li = nextVisibleIndex(state.hits.length - 1, -1);
+      if (li >= 0) selectTile(li);
     }
     if (e.key === 'f' || e.key === 'F') {
       openFullscreen();

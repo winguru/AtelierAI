@@ -1,0 +1,5 @@
+- Run targeted tests relevant to touched code under app/tests.
+- Run lint checks (ruff and/or pylint/mypy as applicable).
+- Validate key imports resolve in project environment.
+- If runtime behavior changes, verify app starts via ./start.sh (do not kill long-running port-8000 start.sh process).
+- Keep docs/memory notes updated for non-obvious design decisions.

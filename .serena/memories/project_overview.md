@@ -1,0 +1,4 @@
+- AtelierAI: FastAPI app for curating multimodal/image datasets with taxonomy/concept normalization and metadata enrichment (incl. CivitAI).
+- Main areas: app/backend (API, DB, workflows), app/src/atelierai (shared package), app/frontend (static UI), app/tests/app/scripts/app/dev.
+- Runtime typically SQLite + image/resource directories configured via atelierai.config.
+- Important domain rule: root concepts must never be auto-created; tag imports should not auto-create concepts.

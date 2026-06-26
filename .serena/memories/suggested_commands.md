@@ -1,0 +1,10 @@
+- Start app (repo root): ./start.sh
+- Activate venv (host): source .venv/bin/activate
+- Editable install: pip install -e app/src
+- Local bootstrap: make bootstrap-local (or just bootstrap-local)
+- Lint: make lint (ruff + optional mypy)
+- Typecheck civitai strictly: make typecheck-civitai
+- Tests: make test / make test-all / make test-bridge
+- Direct pytest: python -m pytest -q app/tests
+- Docker dev: make compose-dev-up ; shell: make compose-dev-shell
+- Docker runtime: make compose-runtime-build ; make compose-runtime-up

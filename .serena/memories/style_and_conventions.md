@@ -1,0 +1,5 @@
+- Canonical Python imports use atelierai namespace (e.g., from atelierai.civitai import ...); avoid legacy src/civitai path hacks.
+- Keep changes localized and backward-compatible unless intentional.
+- Defensive handling for partial/null external payloads (especially CivitAI) and fail-open enrichment behavior.
+- For shell-based Python commands, ensure correct cwd/PYTHONPATH (often app/src:app/backend when running from app/).
+- Read and update app/docs/memories/* referenced by source-file memory headers when making design-level changes.

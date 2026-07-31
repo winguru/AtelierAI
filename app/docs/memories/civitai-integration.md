@@ -29,6 +29,16 @@ CivitAI modules live under `app/src/atelierai/civitai`.
 - CivitAI API rate limits apply — batch operations should include delays
 - Sync Lab collection listing (`/api/sync-lab/collections`) is cache-first (2-minute max age) to keep troubleshooting responsive; use `?force_refresh=true` to force a live CivitAI pull.
 
+### Search Lab pagination & filtering (no post-fetch image filtering)
+**Never filter per-image states (discard/seen/saved/keep/skip) on the backend search proxy.** Doing so shifts the Meilisearch offset on every page and causes the same images to reappear across pages (duplicate tiles).
+
+Architecture:
+- **Artist-level exclusions** (blocked artists) are pushed down to Meilisearch via `extra_filters` (`NOT (user.username = "a" OR ...)`) so they apply *before* pagination — offsets stay stable. `toggle_artist_block` calls `_invalidate_search_cache(reason="artist_block")` so the change is reflected immediately.
+- **Per-image states** (discard/seen/saved/keep/skip) are returned to the frontend and hidden client-side via the hide-filter bar (`isHiddenByFilter`). This avoids re-running the entire search when a hide-filter is toggled.
+- `_get_excluded_civitai_image_ids` is retained for the `/excluded` endpoint but is **not** used by the search proxy.
+
+The frontend already handles this: `fetchImageRatings()` fetches the rating for returned hits, then `applyHideFilters()` + `checkAutoLoadIfAllHidden()` hide matching tiles and auto-load more pages if a whole page is hidden.
+
 ### Collection ID mapping (CivitAI → local DB)
 `_ensure_image_in_collection()` resolves CivitAI collection IDs to local `collections.id` automatically. The `image_collections.collection_id` FK references `collections.id` (local PK), but callers throughout the codebase may pass either the CivitAI ID or the local ID. The resolution logic handles both transparently. Do NOT assume callers pass the local ID — always use the resolution function.
 

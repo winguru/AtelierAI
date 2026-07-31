@@ -170,7 +170,7 @@
     'facet-bar', 'search-status', 'search-status-text',
     'gallery-grid', 'gallery-footer', 'load-more-btn', 'results-count',
     'selection-count',
-    'hide-filter-bar', 'hide-seen', 'hide-saved', 'hide-keep', 'hide-skip', 'hide-discard',
+    'hide-filter-bar', 'hide-seen', 'hide-saved', 'hide-keep', 'hide-skip', 'hide-discard', 'hide-identical',
     'details-pane', 'details-empty', 'details-content',
     'detail-media-frame', 'detail-image', 'detail-video',
     'detail-title', 'detail-subtitle',
@@ -203,7 +203,8 @@
     imageRatings: new Map(),   // civitaiId → "keep" | "discard" | "skip"
     currentSearchId: null,     // DB id of the current search record
     imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
-    hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true },
+    dedupeHashes: new Set(),   // perceptual hashes seen so far (for visual-dup hiding)
+    hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true, identical: true },
     autoLoading: false,         // guards against recursive auto-load
     fullscreenAdvanceOnLoad: false, // when true, advance fullscreen to first new visible tile after search
     fullscreenImageSource: null,   // 'thumbnail' | 'mid-res' | 'original' — currently displayed source
@@ -816,6 +817,8 @@
     if (hf.skip) p.set('hideSkip', '1');
     // discard defaults to true, so we persist the inverse
     if (!hf.discard) p.set('hideDiscard', '0');
+    // identical defaults to true, so we persist the inverse
+    if (!hf.identical) p.set('hideIdentical', '0');
 
     const search = p.toString();
     const url = window.location.pathname + (search ? '?' + search : '');
@@ -840,6 +843,7 @@
       hideKeep: p.has('hideKeep') ? p.get('hideKeep') === '1' : null,
       hideSkip: p.has('hideSkip') ? p.get('hideSkip') === '1' : null,
       hideDiscard: p.has('hideDiscard') ? p.get('hideDiscard') === '1' : null,
+      hideIdentical: p.has('hideIdentical') ? p.get('hideIdentical') === '1' : null,
     };
   }
 
@@ -1046,21 +1050,64 @@
     if (saved.hideKeep !== null) hf.keep = saved.hideKeep;
     if (saved.hideSkip !== null) hf.skip = saved.hideSkip;
     if (saved.hideDiscard !== null) hf.discard = saved.hideDiscard;
+    if (saved.hideIdentical !== null) hf.identical = saved.hideIdentical;
 
     if (els.hide_seen) els.hide_seen.checked = hf.seen;
     if (els.hide_saved) els.hide_saved.checked = hf.saved;
     if (els.hide_keep) els.hide_keep.checked = hf.keep;
     if (els.hide_skip) els.hide_skip.checked = hf.skip;
     if (els.hide_discard) els.hide_discard.checked = hf.discard;
+    if (els.hide_identical) els.hide_identical.checked = hf.identical;
+  }
+
+  /**
+   * Rebuild the set of perceptual hashes that should be kept visible.
+   *
+   * CivitAI's Meilisearch index returns visually-identical images as
+   * separate documents — the same file reposted across different posts, or
+   * the same document repeated multiple times within one artist's catalog
+   * (~21% of a typical result set).  They share an identical `hash`
+   * (BlurHash-derived perceptual hash).  We keep only the *first* occurrence
+   * of each hash visible and hide the rest, exactly like a hide-filter.
+   *
+   * This runs client-side so pagination stays stable (backend offset never
+   * shifts) and integrates with the auto-load-on-all-hidden logic.  Hits
+   * without a `hash` are always kept.
+   */
+  function rebuildDedupeSet() {
+    const seen = new Set();
+    for (const hit of state.hits) {
+      if (!hit) continue;
+      const h = hit.hash;
+      if (!h || seen.has(h)) continue;
+      seen.add(h);
+    }
+    state.dedupeHashes = seen;
   }
 
   /**
    * Determine whether a hit should be hidden by the active hide filters.
-   * A hit is hidden if it matches ANY checked filter category.
+   * A hit is hidden if it matches ANY checked filter category, or if an
+   * earlier hit with the same perceptual `hash` is already visible.
    */
-  function isHiddenByFilter(hit) {
+  function isHiddenByFilter(hit, idx) {
     if (!hit || !hit.id) return false;
+
     const f = state.hideFilters;
+
+    // Visual-duplicate ("Identical") hiding: a hit is hidden when an earlier
+    // hit shares its perceptual `hash` (same file reposted, or a repeated
+    // index entry).  Only the first occurrence is kept.  Gated by the
+    // "Identical" hide-filter (on by default).  The dedupeHashes set is a
+    // fast pre-filter so we skip the linear scan for hashes that appear once.
+    const h = hit.hash;
+    if (f.identical && h && state.dedupeHashes.has(h)) {
+      const earlier = (idx != null && idx >= 0) ? idx : state.hits.indexOf(hit);
+      for (let i = 0; i < earlier; i++) {
+        if (state.hits[i] && state.hits[i].hash === h) return true;
+      }
+    }
+
     const id = hit.id;
     const rating = state.imageRatings.get(id);
     const isSaved = state.importedIds.has(id);
@@ -1076,14 +1123,18 @@
   /** Find the next visible hit index from `from` (inclusive), stepping by ±1. */
   function nextVisibleIndex(from, step = 1) {
     for (let i = from; i >= 0 && i < state.hits.length; i += step) {
-      if (!isHiddenByFilter(state.hits[i])) return i;
+      if (!isHiddenByFilter(state.hits[i], i)) return i;
     }
     return -1;
   }
 
   /** Count currently visible (non-hidden) tiles. */
   function countVisibleTiles() {
-    return state.hits.filter((h) => !isHiddenByFilter(h)).length;
+    let n = 0;
+    for (let i = 0; i < state.hits.length; i++) {
+      if (!isHiddenByFilter(state.hits[i], i)) n++;
+    }
+    return n;
   }
 
   /** Apply / remove the `.tile-hidden` class on all tiles based on current filters. */
@@ -1091,7 +1142,7 @@
     const tiles = els.gallery_grid.querySelectorAll('.tile[data-index]');
     tiles.forEach((tile) => {
       const idx = parseInt(tile.dataset.index, 10);
-      const hidden = idx < state.hits.length && isHiddenByFilter(state.hits[idx]);
+      const hidden = idx < state.hits.length && isHiddenByFilter(state.hits[idx], idx);
       tile.classList.toggle('tile-hidden', hidden);
     });
   }
@@ -1105,7 +1156,7 @@
    */
   function ensureVisibleSelection() {
     if (state.selectedHitIndex >= 0 && state.selectedHitIndex < state.hits.length) {
-      if (isHiddenByFilter(state.hits[state.selectedHitIndex])) {
+      if (isHiddenByFilter(state.hits[state.selectedHitIndex], state.selectedHitIndex)) {
         const next = nextVisibleIndex(state.selectedHitIndex + 1, 1);
         const fallback = next < 0 ? nextVisibleIndex(state.selectedHitIndex - 1, -1) : next;
         selectTile(fallback >= 0 ? fallback : state.selectedHitIndex);
@@ -1583,7 +1634,10 @@
       }
       state.facets = data.facets || null;
 
+      rebuildDedupeSet();
       renderResults(append);
+      applyHideFilters();
+      checkAutoLoadIfAllHidden();
       fetchLibraryStatus();
       fetchReviewArtistFacets();
 
@@ -1681,10 +1735,12 @@
       }
       state.facets = data.facets || null;
 
+      rebuildDedupeSet();
       renderResults(append);
       renderFacets();
       refreshAllRatingIndicators();
       applyHideFilters();
+      checkAutoLoadIfAllHidden();
 
       // Display: cap total at MAX_RESULTS — when total equals the cap, assume it's truncated
       const capped = state.total >= MAX_RESULTS;

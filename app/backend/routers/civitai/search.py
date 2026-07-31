@@ -36,6 +36,7 @@ from schemas import (
 )
 from utils.cache import (
     _build_search_cache_key,
+    _invalidate_search_cache,
     _search_cache_get,
     _search_cache_put,
 )
@@ -595,6 +596,23 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
             u.strip() for u in payload.username.split(",") if u.strip()
         ]
 
+    # ── Push server-side exclusions down to Meilisearch ──
+    # Filtering at the Meilisearch layer (BEFORE pagination) keeps offsets
+    # stable so paginating never revisits the same images.  Only artist-
+    # level exclusions belong here; per-image states (seen / saved / keep /
+    # skip / discard) are intentionally returned to the frontend, which
+    # hides matching tiles client-side.  This avoids re-running the entire
+    # search whenever one of those hide-filters is toggled.
+    meili_extra_filters: list[str] = list(payload.extra_filters or [])
+
+    blocked_names = _get_blocked_artist_names(db)
+    if blocked_names:
+        # NOT (user.username = "a" OR user.username = "b" ...)
+        or_expr = " OR ".join(
+            f'user.username = "{n}"' for n in blocked_names
+        )
+        meili_extra_filters.append(f"NOT ({or_expr})")
+
     try:
         result = client.search_images(
             query=payload.query,
@@ -609,7 +627,7 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
             exclude_minor=payload.exclude_minor,
             username=users_list[0] if len(users_list) == 1 else None,
             facets=payload.facets,
-            extra_filters=payload.extra_filters,
+            extra_filters=meili_extra_filters,
             matching_strategy=payload.matching_strategy,
             users=users_list if len(users_list) > 1 else None,
         )
@@ -635,20 +653,13 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     # available on the next search or page refresh.
     _maybe_lazy_fetch_missing_metadata(normalized_hits)
 
-    # Filter out images the user has discarded in previous sessions.
-    excluded_ids = _get_excluded_civitai_image_ids(db)
-    if excluded_ids:
-        normalized_hits = [
-            h for h in normalized_hits if h.get("id") not in excluded_ids
-        ]
-
-    # Filter out images from blocked artists.
-    blocked_names = _get_blocked_artist_names(db)
-    if blocked_names:
-        normalized_hits = [
-            h for h in normalized_hits
-            if h.get("user", {}).get("username") not in blocked_names
-        ]
+    # NOTE: per-image states (discard / seen / saved / keep / skip) are NOT
+    # filtered here.  Doing so would shift the Meilisearch offset on every
+    # page, causing the same images to reappear across pages (duplicates).
+    # Instead, all hits are returned and the frontend hides matching tiles
+    # client-side via the hide-filter bar.  Blocked artists are excluded at
+    # the Meilisearch layer (see ``meili_extra_filters`` above) because that
+    # is an artist-level concern and rarely changes.
 
     response = {
         "hits": normalized_hits,
@@ -939,18 +950,25 @@ def _update_artist_preference(
     if not artist_name and artist_id is None:
         return
 
+    # Resolve the effective name once and use it for both the lookup and the
+    # insert. Otherwise, when the caller omits ``artist_name``, the lookup
+    # filters by ``artist_name IS NULL`` (which can never match because the
+    # column is NOT NULL) while the insert uses the ``artist-<id>`` fallback,
+    # causing a UNIQUE constraint violation on the second rating.
+    effective_name = artist_name or f"artist-{artist_id}"
+
     pref = (
         db.query(CivitaiArtistPreference)
         .filter(
             CivitaiArtistPreference.artist_id == artist_id,
-            CivitaiArtistPreference.artist_name == artist_name,
+            CivitaiArtistPreference.artist_name == effective_name,
         )
         .first()
     )
     if pref is None:
         pref = CivitaiArtistPreference(
             artist_id=artist_id,
-            artist_name=artist_name or f"artist-{artist_id}",
+            artist_name=effective_name,
             keeps=0,
             discards=0,
         )
@@ -1570,6 +1588,12 @@ def toggle_artist_block(
     pref.is_blocked = payload.is_blocked
     db.commit()
     db.refresh(pref)
+
+    # Blocked-artist filtering is applied at the Meilisearch layer inside
+    # the search proxy, so cached search envelopes may still contain the
+    # artist's images.  Invalidate the search cache so the next search
+    # reflects the new block/unblock immediately.
+    _invalidate_search_cache(reason="artist_block")
 
     return CivitaiArtistSummaryItem(
         artist_id=pref.artist_id,

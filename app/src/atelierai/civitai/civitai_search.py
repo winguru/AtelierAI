@@ -380,17 +380,9 @@ class CivitaiSearchClient:
     ) -> dict[str, Any]:
         """Execute a Meilisearch ``/multi-search`` request.
 
-        Multiple usernames are passed as repeated ``users`` CGI query params
-        on the request URL (e.g. ``?users=alice&users=bob``).  This lets
-        Meilisearch scope results to any of the listed artists.
+        Usernames are added as ``user.username`` filter expressions inside
+        the request body (see :func:`_build_meili_filters`).
         """
-        # Build the combined user list from legacy ``username`` and ``users``.
-        all_users: list[str] = []
-        if username:
-            all_users.append(username)
-        if users:
-            all_users.extend(u for u in users if u)
-
         filters = _build_meili_filters(
             tags=tags,
             exclude_tags=exclude_tags,
@@ -400,7 +392,7 @@ class CivitaiSearchClient:
             exclude_minor=exclude_minor,
             username=username,
             extra_filters=extra_filters,
-            users=all_users or None,
+            users=users,
         )
 
         search_query = {
@@ -431,14 +423,6 @@ class CivitaiSearchClient:
         }
 
         url = f"{_SEARCH_BASE_URL}/multi-search"
-
-        # Append multiple usernames as repeated ``users`` CGI params.
-        # Meilisearch scopes results to images by any of the listed artists.
-        if all_users:
-            encoded = "&".join(
-                f"users={requests.utils.quote(u)}" for u in all_users
-            )
-            url = f"{url}?{encoded}"
         payload = {"queries": [search_query]}
 
         try:
@@ -624,12 +608,19 @@ def _build_meili_filters(
 ) -> list[str]:
     """Build Meilisearch filter expressions from simplified parameters.
 
-    Usernames are **not** added as filter expressions here — they are passed
-    as repeated ``users`` CGI params on the Meilisearch request URL (see
-    :meth:`CivitaiSearchClient._meili_search`).  The ``username`` and
-    ``users`` parameters are only used to adjust the POI exclusion logic.
+    Usernames are added as ``user.username`` filter expressions.  A single
+    username produces ``user.username = "alice"``; multiple usernames
+    produce ``(user.username = "alice" OR user.username = "bob")`` so
+    Meilisearch scopes results to images by any of the listed artists.
     """
     filters: list[str] = []
+
+    # Build the combined user list from legacy ``username`` and ``users``.
+    all_users: list[str] = []
+    if username:
+        all_users.append(username)
+    if users:
+        all_users.extend(u for u in users if u)
 
     # Tag inclusion filters.
     for tag in tags or []:
@@ -649,9 +640,19 @@ def _build_meili_filters(
         model_expr = " OR ".join(f'baseModel="{m}"' for m in base_models)
         filters.append(f"({model_expr})")
 
-    # Determine if any username filtering is active (via CGI params or
-    # legacy single username).
-    has_username = bool(username or (users and any(users)))
+    # Username filter — scope results to images by the listed artist(s).
+    # ``user.username`` is the nested field in Meilisearch hits.
+    if all_users:
+        if len(all_users) == 1:
+            filters.append(f'user.username = "{all_users[0]}"')
+        else:
+            or_expr = " OR ".join(
+                f'user.username = "{u}"' for u in all_users
+            )
+            filters.append(f"({or_expr})")
+
+    # Determine if any username filtering is active.
+    has_username = bool(all_users)
 
     # POI / minor exclusion.
     poi_minor_parts: list[str] = []

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Style Prefill Lab</title>
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/style-prefill-lab.css">
+</head>
+<body>
+  <main class="style-lab-page">
+    <header class="style-lab-header">
+      <div>
+        <p class="style-kicker">Prototype</p>
+        <h1>Single Image Style Prefill Lab</h1>
+        <p class="style-subtitle">Send one image through a LiteLLM/OpenAI-compatible vision endpoint, review structured style output, and iterate on instructions quickly.</p>
+      </div>
+      <nav class="style-links" aria-label="Related pages">
+        <a href="/frontend/generation-lab.html">Generation Lab</a>
+        <a href="/frontend/concept-studio.html">Concept Studio</a>
+      </nav>
+    </header>
+
+    <section class="style-layout">
+      <article class="style-card">
+        <h2>Analysis Input</h2>
+        <form id="style-prefill-form" class="style-form">
+          <label for="api-mode">API mode</label>
+          <select id="api-mode" name="api_mode">
+            <option value="chat-completions" selected>Chat Completions</option>
+            <option value="responses-mcp">Responses + MCP</option>
+          </select>
+
+          <label for="image">Image file</label>
+          <input id="image" name="image" type="file" accept="image/*" required>
+
+          <label for="model">Model</label>
+          <input id="model" name="model" type="text" value="z-ai/glm-4.5v" placeholder="z-ai/glm-4.5v">
+
+          <label for="endpoint-url">Endpoint URL (optional)</label>
+          <input id="endpoint-url" name="endpoint_url" type="url" placeholder="http://localhost:4000/v1/chat/completions">
+
+          <label for="api-key">API key (optional)</label>
+          <input id="api-key" name="api_key" type="password" placeholder="Bearer key if required">
+
+          <label class="style-checkbox" for="auto-fallback-on-safety">
+            <input id="auto-fallback-on-safety" name="auto_fallback_on_safety" type="checkbox">
+            <span>Auto fallback on safety rejection</span>
+          </label>
+
+          <label for="fallback-model">Fallback model (optional)</label>
+          <input id="fallback-model" name="fallback_model" type="text" placeholder="local/vision-model-name">
+
+          <label for="fallback-endpoint-url">Fallback endpoint URL (optional)</label>
+          <input id="fallback-endpoint-url" name="fallback_endpoint_url" type="url" placeholder="http://localhost:1234/v1/chat/completions">
+
+          <label for="fallback-api-key">Fallback API key (optional)</label>
+          <input id="fallback-api-key" name="fallback_api_key" type="password" placeholder="Fallback bearer key if required">
+
+          <div class="style-inline-grid">
+            <div>
+              <label for="max-tokens">Max tokens</label>
+              <input id="max-tokens" name="max_tokens" type="number" min="64" max="4000" value="1400">
+            </div>
+            <div>
+              <label for="temperature">Temperature</label>
+              <input id="temperature" name="temperature" type="number" min="0" max="2" step="0.1" value="0.2">
+            </div>
+          </div>
+
+          <label for="system-prompt">System instruction</label>
+          <textarea id="system-prompt" name="system_prompt" rows="8">You are an image style analysis assistant. Return strict JSON only with keys: summary, style_axes, quality_signals, defect_signals, candidate_styles, confidence. Use numeric 0-1 values for axis/quality/defect entries. style_axes should include abstraction, line_dominance, shading_complexity, texture_realism, material_response, geometry_fidelity, scene_detail_density, color_behavior. quality_signals should include global_coherence and intent_fit. defect_signals should include anatomy_distortion and artifact_burden. candidate_styles should be an array of objects with name and weight (0-1). confidence should include overall and safety_restriction_risk (0-1).</textarea>
+
+          <label for="user-prompt">User instruction</label>
+          <textarea id="user-prompt" name="user_prompt" rows="3">Analyze this image for style prefill prototyping. Keep the response concise, strict JSON, and avoid extra commentary.</textarea>
+
+          <label class="style-checkbox" for="attach-image-to-messages">
+            <input id="attach-image-to-messages" name="attach_image_to_messages" type="checkbox" checked>
+            <span>Attach image in message content (disable for text-only coding models + MCP tools)</span>
+          </label>
+
+          <label for="request-overrides-json">Request overrides JSON (optional)</label>
+          <textarea id="request-overrides-json" name="request_overrides_json" rows="6" placeholder='{"tools":[{"type":"mcp","server_name":"zai_vision_mcp","tool_name":"analyze_image","arguments":{"image":"{{IMAGE_DATA_URL}}"}}]}'></textarea>
+          <p class="style-help">Placeholders supported in overrides JSON: <code>{{IMAGE_DATA_URL}}</code>, <code>{{IMAGE_MIME_TYPE}}</code>, <code>{{IMAGE_FILENAME}}</code>.</p>
+
+          <label for="mcp-server-url">MCP server URL (Responses+MCP mode)</label>
+          <input id="mcp-server-url" name="mcp_server_url" type="url" value="https://litellm.thewinguru.com/mcp/">
+
+          <label for="mcp-target-mode">MCP target mode</label>
+          <select id="mcp-target-mode" name="mcp_target_mode">
+            <option value="server" selected>Individual MCP server URL</option>
+            <option value="toolset">Toolset MCP URL</option>
+          </select>
+
+          <label for="mcp-server-label">MCP server label</label>
+          <input id="mcp-server-label" name="mcp_server_label" type="text" value="litellm">
+
+          <label for="mcp-servers-header">x-mcp-servers header (optional)</label>
+          <input id="mcp-servers-header" name="mcp_servers_header" type="text" placeholder="zai_vision_mcp">
+
+          <label for="mcp-image-source-url">MCP image source URL (optional)</label>
+          <input id="mcp-image-source-url" name="mcp_image_source_url" type="url" placeholder="https://.../image.png">
+          <p class="style-help">If set, MCP calls use this URL directly. If blank, backend hosts your uploaded image temporarily and sends that URL to MCP.</p>
+
+          <label for="mcp-public-base-url">MCP public base URL (optional)</label>
+          <input id="mcp-public-base-url" name="mcp_public_base_url" type="url" placeholder="https://your-public-host">
+          <p class="style-help">Used when backend auto-hosts uploaded images for MCP. Set this when MCP cannot reach localhost/private URLs.</p>
+
+          <label class="style-checkbox" for="mcp-allow-private-image-source">
+            <input id="mcp-allow-private-image-source" name="mcp_allow_private_image_source" type="checkbox">
+            <span>Allow private/LAN image-source URLs (advanced)</span>
+          </label>
+          <p class="style-help">Enable only if your MCP deployment can route to private addresses (e.g. 192.168.x.x) behind its public endpoint.</p>
+
+          <label for="mcp-toolset-select">MCP toolset discovery</label>
+          <div class="style-inline-grid">
+            <button id="mcp-toolset-refresh-btn" type="button">Load MCP Toolsets</button>
+            <select id="mcp-toolset-select" name="mcp_toolset_select">
+              <option value="">Select discovered toolset</option>
+            </select>
+          </div>
+          <p id="mcp-toolset-details" class="style-help">Load toolsets to populate this list from LiteLLM /mcp/toolset.</p>
+
+          <label for="mcp-probe-prompt">MCP probe prompt</label>
+          <input id="mcp-probe-prompt" name="mcp_probe_prompt" type="text" value="Briefly confirm this image URL is readable.">
+
+          <button id="probe-mcp-image-url-btn" type="button">Test MCP image URL reachability</button>
+          <p class="style-help">Uploads the selected image to a temporary URL and runs direct MCP tools/call. Checks whether MCP actually fetched the URL.</p>
+
+          <button id="analyze-btn" type="submit">Analyze Image</button>
+        </form>
+      </article>
+
+      <article class="style-card">
+        <h2>Preview</h2>
+        <div class="style-preview-wrap">
+          <img id="preview-image" class="style-preview" alt="Selected preview" hidden>
+          <p id="preview-empty" class="style-empty">No image selected yet.</p>
+        </div>
+
+        <h3>Status</h3>
+        <div id="status" class="style-status is-idle">Ready</div>
+      </article>
+    </section>
+
+    <section class="style-card">
+      <h2>Structured Result</h2>
+      <pre id="structured-output" class="style-json">{}</pre>
+    </section>
+
+    <section class="style-card">
+      <h2>Raw Model Text</h2>
+      <pre id="raw-output" class="style-json"></pre>
+    </section>
+
+    <section class="style-card">
+      <h2>MCP URL Probe Output</h2>
+      <pre id="mcp-probe-output" class="style-json"></pre>
+    </section>
+  </main>
+
+  <script src="/frontend/js/style-prefill-lab.js"></script>
+</body>
+</html>

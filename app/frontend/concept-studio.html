@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Concept Studio</title>
+  <link rel="icon" type="image/svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <link rel="stylesheet" href="/frontend/css/concept-studio.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <div class="brand-mark">
+          <svg class="brand-icon" viewBox="0 0 46 46" aria-hidden="true">
+            <defs>
+              <linearGradient id="hi-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e06830"/><stop offset="100%" stop-color="#a83f19"/></linearGradient>
+              <linearGradient id="hi-wood" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffdf9"/><stop offset="100%" stop-color="#f0e0d0"/></linearGradient>
+            </defs>
+            <rect x="0.5" y="0.5" width="45" height="45" rx="8" fill="url(#hi-grad)"/>
+            <rect x="2.5" y="2.5" width="40" height="16.5" rx="6.5" fill="#fff" opacity="0.06"/>
+            <line x1="23.3" y1="15.2" x2="24.3" y2="35.8" stroke="url(#hi-wood)" stroke-width="3" stroke-linecap="round" opacity="0.26"/>
+            <rect x="16" y="11" width="14" height="3.5" rx="1.6" fill="url(#hi-wood)"/>
+            <path d="M23.8 12.5 L18.5 12.5 L11.5 39 H16 Z" fill="url(#hi-wood)"/>
+            <path d="M22.2 12.5 L27.5 12.5 L34 39 H29.5 Z" fill="url(#hi-wood)"/>
+            <rect x="10" y="26.5" width="26" height="4.5" rx="2" fill="url(#hi-wood)"/>
+            <path d="M37,7 L37.9,9.5 L40,10.5 L37.9,11.5 L37,14 L36.1,11.5 L34,10.5 L36.1,9.5 Z" fill="#fffdf9" opacity="0.92"/>
+            <path d="M33,4 L33.4,5.2 L34.5,5.7 L33.4,6.2 L33,7.4 L32.6,6.2 L31.5,5.7 L32.6,5.2 Z" fill="#fffdf9" opacity="0.5"/>
+          </svg>
+          <span class="brand-text">Atelier<span class="brand-accent">AI</span></span>
+        </div>
+        <h1 id="page-title">Concept Studio</h1>
+      </div>
+      <div class="header-actions">
+        <label class="toggle-wrap header-toggle-wrap" for="theme-toggle">
+          <input id="theme-toggle" type="checkbox">
+          <span>Dark mode</span>
+        </label>
+        <a class="btn ghost" href="/">← Gallery</a>
+        <a class="btn ghost" href="/frontend/search-lab.html">Search Lab</a>
+        <a class="btn ghost" href="/frontend/prototype-lab.html">Prototype Lab</a>
+        <a class="btn ghost" href="/frontend/concept-search-lab.html">Concept Search</a>
+        <a class="btn ghost" href="/frontend/review-lab.html">Review Lab</a>
+      </div>
+    </header>
+
+    <!-- ── Status bar ── -->
+    <div id="status-bar" class="cs-status-bar" aria-live="polite">
+      <span id="status-text">Enter a file hash or pick a random image to begin.</span>
+    </div>
+
+    <!-- ── Three-pane workspace ── -->
+    <main class="cs-workspace">
+
+      <!-- ══════════════ LEFT PANE: Exemplar viewer ══════════════ -->
+      <section class="cs-pane cs-pane-exemplar" aria-label="Exemplar image viewer">
+        <div class="cs-pane-header">
+          <h2>Exemplar</h2>
+          <div class="cs-image-nav">
+            <button class="btn ghost btn-sm" id="prev-image-btn" data-tip="Previous image in queue">◀</button>
+            <span class="cs-queue-pos" id="queue-pos">— / —</span>
+            <button class="btn ghost btn-sm" id="next-image-btn" data-tip="Next image in queue">▶</button>
+          </div>
+        </div>
+        <div class="cs-pane-body">
+          <div class="cs-image-toolbar">
+            <input id="file-hash-input" type="text"
+                   placeholder="file_hash or image ID…"
+                   class="cs-hash-input">
+            <button class="btn solid btn-sm" id="load-hash-btn">Load</button>
+            <button class="btn ghost btn-sm" id="random-image-btn" data-tip="Load a random image without VISUAL_CLIP observations">🎲 Random</button>
+          </div>
+          <div class="cs-exemplar-frame" id="exemplar-frame">
+            <div class="cs-exemplar-placeholder" id="exemplar-placeholder">
+              <span class="cs-placeholder-icon">🖼️</span>
+              <p>No image loaded</p>
+              <p class="cs-placeholder-hint">Load by hash or get a random image</p>
+            </div>
+            <img id="exemplar-image" class="cs-exemplar-image" style="display:none" alt="Exemplar image">
+          </div>
+          <div class="cs-exemplar-meta" id="exemplar-meta" style="display:none">
+            <div class="cs-meta-row">
+              <span class="cs-meta-label">file_hash</span>
+              <code id="meta-file-hash">—</code>
+            </div>
+            <div class="cs-meta-row">
+              <span class="cs-meta-label">image_id</span>
+              <code id="meta-image-id">—</code>
+            </div>
+            <div class="cs-meta-row">
+              <span class="cs-meta-label">embedding</span>
+              <span id="meta-has-embedding" class="cs-badge">—</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ CENTER PANE: Concept association ══════════════ -->
+      <section class="cs-pane cs-pane-center" aria-label="Concept association panel">
+        <div class="cs-pane-header">
+          <h2>Associate Concepts</h2>
+          <button class="btn ghost btn-sm" id="refresh-lookup-btn" data-tip="Re-fetch visual neighbours and concept suggestions">↻ Refresh</button>
+        </div>
+        <div class="cs-pane-body">
+
+          <!-- Similar images strip -->
+          <div class="cs-section">
+            <h3 class="cs-section-title">
+              Similar Images
+              <span class="cs-count-badge" id="neighbour-count">0</span>
+            </h3>
+            <div class="cs-neighbour-strip" id="neighbour-strip">
+              <p class="cs-empty-hint">Load an image to see visual neighbours</p>
+            </div>
+          </div>
+
+          <!-- Suggested concepts -->
+          <div class="cs-section">
+            <h3 class="cs-section-title">
+              Suggested Concepts
+              <span class="cs-count-badge" id="suggestion-count">0</span>
+            </h3>
+            <div class="cs-suggestion-list" id="suggestion-list">
+              <p class="cs-empty-hint">Concept suggestions will appear here</p>
+            </div>
+          </div>
+
+          <!-- Create new concept -->
+          <div class="cs-section cs-create-section">
+            <h3 class="cs-section-title">Create New Concept</h3>
+            <div class="cs-create-form">
+              <input id="new-concept-name" type="text"
+                     placeholder="Concept name (e.g. 'golden hour lighting')"
+                     class="cs-input">
+              <input id="new-concept-prompt" type="text"
+                     placeholder="Optional CLIP text prompt for prototype (e.g. 'warm golden sunlight, long shadows')"
+                     class="cs-input">
+              <div class="cs-create-row">
+                <input id="new-concept-search" type="text"
+                       placeholder="Search existing concepts to avoid duplicates…"
+                       class="cs-input cs-input-search">
+                <div class="cs-similar-terms" id="similar-terms-hint"></div>
+              </div>
+              <button class="btn solid" id="create-concept-btn">Create & Build Prototype</button>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ══════════════ RIGHT PANE: Confirmed concepts ══════════════ -->
+      <section class="cs-pane cs-pane-confirmed" aria-label="Confirmed concepts">
+        <div class="cs-pane-header">
+          <h2>Confirmed Concepts</h2>
+          <span class="cs-count-badge" id="confirmed-count">0</span>
+        </div>
+        <div class="cs-pane-body">
+          <div class="cs-confirmed-list" id="confirmed-list">
+            <p class="cs-empty-hint">Associate concepts from the center panel</p>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/frontend/js/concept-studio.js"></script>
+</body>
+</html>

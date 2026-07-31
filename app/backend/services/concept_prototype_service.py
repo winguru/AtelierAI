@@ -161,6 +161,72 @@ class ConceptPrototypeService:
         )
         return centroid
 
+    async def build_prototype_from_text(
+        self,
+        concept_id: int,
+        prompts: list[str],
+    ) -> Optional[np.ndarray]:
+        """Build a visual prototype for a concept from text prompts.
+
+        Uses CLIP's shared text-image embedding space: encodes one or more
+        descriptive prompts via ``encode_text`` and averages them into a
+        centroid.  This is the key enabler for *ground-zero* images that have
+        no existing tag observations — the prototype is seeded purely from
+        text, and visual kNN lookup can then find matching images.
+
+        Parameters
+        ----------
+        concept_id : int
+            The concept to update.
+        prompts : list[str]
+            Descriptive text phrases (e.g. ["sketch", "pencil drawing", "line art"]).
+
+        Returns
+        -------
+        np.ndarray or None
+            The prototype vector (also persisted to DB), or None if CLIP is
+            unavailable or no prompts could be encoded.
+        """
+        provider = get_clip_provider()
+        if provider is None:
+            logger.warning("build_prototype_from_text: CLIP unavailable — skipping concept %d", concept_id)
+            return None
+
+        if not prompts:
+            logger.warning("build_prototype_from_text: no prompts provided for concept %d", concept_id)
+            return None
+
+        # Encode all text prompts (batch)
+        embeddings = await provider.encode_text(prompts)
+        if embeddings.shape[0] == 0:
+            logger.warning("build_prototype_from_text: no prompts encoded for concept %d", concept_id)
+            return None
+
+        # Compute centroid of the text embeddings
+        centroid = embeddings.mean(axis=0)
+        # L2-normalise
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+
+        # Persist to DB — source_count = -1 marks this as text-seeded
+        concept = self._db.query(Concept).filter(Concept.id == concept_id).first()
+        if concept is None:
+            logger.error("build_prototype_from_text: concept %d not found in DB", concept_id)
+            return None
+
+        concept.prototype_vector = encode_prototype_to_blob(centroid)
+        concept.prototype_source_count = -1  # sentinel: text-seeded prototype
+        concept.prototype_updated_at = datetime.now(timezone.utc)
+        self._db.commit()
+
+        logger.info(
+            "build_prototype_from_text: concept %d — %d prompts encoded, prototype stored",
+            concept_id,
+            embeddings.shape[0],
+        )
+        return centroid
+
     # =======================================================================
     # Scoring
     # =======================================================================
@@ -545,3 +611,67 @@ class ConceptPrototypeService:
             "observation_brackets": brackets,
             "prototype_brackets": proto_brackets,
         }
+
+    # =======================================================================
+    # Image embedding backfill
+    # =======================================================================
+
+    async def backfill_image_embedding(
+        self,
+        image_id: int,
+        model_tag: str = "ViT-B-32::openai",
+    ) -> Optional[np.ndarray]:
+        """Compute and persist the CLIP embedding for a single image.
+
+        Reads the image from disk via the image-library path, encodes it with
+        CLIP, and stores the 512-D vector in ``ImageModel.clip_embedding``.
+
+        Parameters
+        ----------
+        image_id : int
+            The image row to embed.
+        model_tag : str
+            Identifier recorded in ``clip_embedding_model`` for provenance.
+
+        Returns
+        -------
+        np.ndarray or None
+            The embedding vector, or None if the image is missing, CLIP is
+            unavailable, or encoding failed.
+        """
+        import os
+        import struct
+
+        provider = get_clip_provider()
+        if provider is None:
+            return None
+
+        image = self._db.query(ImageModel).filter(ImageModel.id == image_id).first()
+        if image is None or not image.file_path:
+            return None
+
+        # Resolve the local file path
+        image_lib = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "image_library",
+        )
+        full_path = os.path.join(image_lib, image.file_path)
+
+        if not os.path.isfile(full_path):
+            logger.warning("backfill_image_embedding: file not found for image %d: %s", image_id, full_path)
+            return None
+
+        embeddings = await provider.encode_image_paths([full_path])
+        if embeddings.shape[0] == 0:
+            logger.warning("backfill_image_embedding: encoding failed for image %d", image_id)
+            return None
+
+        vector = embeddings[0]
+        # Persist as BLOB (same encoding as prototype vectors)
+        image.clip_embedding = struct.pack(f"{len(vector)}f", *vector.astype(np.float32))
+        image.clip_embedding_model = model_tag
+        image.clip_embedding_at = datetime.now(timezone.utc)
+        self._db.commit()
+
+        logger.info("backfill_image_embedding: image %d embedded", image_id)
+        return vector

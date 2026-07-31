@@ -32,7 +32,10 @@ from database import Base
 class ObservationSource(enum.IntEnum):
     """Origin of a tag observation on an image."""
     IMPORT = 1       # tag imported during scan/ingestion/backfill
-    # Future: RESCAN = 2, USER = 3, ANALYSIS = 4
+    RESCAN = 2       # tag discovered during a re-scan of image metadata
+    USER = 3         # tag manually added by the user in the UI
+    ANALYSIS = 4     # tag from automated image-analysis pipeline
+    VISUAL_CLIP = 5  # concept derived from CLIP visual similarity (kNN lookup)
 
 
 class ObservationCertainty(enum.IntEnum):
@@ -102,6 +105,12 @@ class ImageModel(Base):
     user_image_style_concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=True)
     user_image_style_source = Column(String, nullable=True)  # guessed | review | imported
     user_image_style_confidence = Column(Float, nullable=True)
+
+    # CLIP embedding (512-D float32 vector stored as BLOB)
+    # Enables kNN visual lookup without re-encoding on every query.
+    clip_embedding = Column(LargeBinary, nullable=True, comment="L2-normalised CLIP (ViT-B/32) embedding, 512 float32 values as raw bytes")
+    clip_embedding_model = Column(String, nullable=True, comment="Model identifier used to produce clip_embedding (e.g. 'ViT-B-32::openai')")
+    clip_embedding_at = Column(DateTime, nullable=True, comment="Timestamp when clip_embedding was computed")
 
     # User-defined tags (persisted in both DB column and sidecar JSON)
     user_tags = Column(JSON, nullable=True)

@@ -146,6 +146,7 @@ from services.db_migrations import (
     _ensure_collection_sync_columns as _ensure_collection_sync_columns,
     ensure_collection_civitai_mappings_table as _ensure_collection_civitai_mappings_table,
     _ensure_concept_prototype_columns as _ensure_concept_prototype_columns,
+    _ensure_clip_embedding_columns as _ensure_clip_embedding_columns,
     _ensure_expected_file_size_column as _ensure_expected_file_size_column,
     _ensure_file_hash_nonunique as _ensure_file_hash_nonunique,
     _ensure_image_lifecycle_columns as _ensure_image_lifecycle_columns,
@@ -12548,30 +12549,30 @@ def _load_display_image_items(
         db_user_neg_tags = getattr(image, "user_negative_tags", None)
         if isinstance(db_user_neg_tags, list) and db_user_neg_tags:
             merged["user_negative_tags"] = db_user_neg_tags
-        
-            # Query CivitAI tags from image_concept_observations (post-backfill data)
-            civitai_tag_rows = (
-                db.query(AuthorityTerm.external_name)
-                .join(
-                    ImageConceptObservation,
-                    ImageConceptObservation.authority_term_id == AuthorityTerm.id,
-                )
-                .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
-                .filter(
-                    ImageConceptObservation.image_id == image.id,
-                    TagAuthority.name == "civitai",
-                )
-                .order_by(AuthorityTerm.external_name.asc())
-                .all()
+
+        # Query CivitAI tags from image_concept_observations (post-backfill data)
+        civitai_tag_rows = (
+            db.query(AuthorityTerm.external_name)
+            .join(
+                ImageConceptObservation,
+                ImageConceptObservation.authority_term_id == AuthorityTerm.id,
             )
-            merged["civitai_tags"] = [row[0] for row in civitai_tag_rows if row[0]]
-        
-            display_items.extend(
-                _build_display_items_for_image(
-                    image, merged, group_variants=group_variants,
-                    variant_group_id=image_to_variant_group.get(image.id),
-                )
+            .join(TagAuthority, TagAuthority.id == AuthorityTerm.authority_id)
+            .filter(
+                ImageConceptObservation.image_id == image.id,
+                TagAuthority.name == "civitai",
             )
+            .order_by(AuthorityTerm.external_name.asc())
+            .all()
+        )
+        merged["civitai_tags"] = [row[0] for row in civitai_tag_rows if row[0]]
+
+        display_items.extend(
+            _build_display_items_for_image(
+                image, merged, group_variants=group_variants,
+                variant_group_id=image_to_variant_group.get(image.id),
+            )
+        )
 
     # Merge display items that share the same gallery_item_key (duplicate
     # assets with the same file_hash but different CivitAI IDs).  When
@@ -15060,6 +15061,7 @@ async def lifespan(app: FastAPI):
     _ensure_is_corrupt_column()
     _ensure_expected_file_size_column()
     _ensure_concept_prototype_columns()
+    _ensure_clip_embedding_columns()
 
     # --- CLIP provider auto-detection ---
     from services.clip_provider import (
@@ -15171,6 +15173,7 @@ from routers import concept_review as _concept_review_router_mod  # noqa: E402, 
 from routers.civitai import router as _civitai_router  # noqa: E402, PLC0415
 from routers import models_tree as _models_tree_router_mod  # noqa: E402, PLC0415
 from routers import clip_router as _clip_router_mod  # noqa: E402, PLC0415
+from routers import visual_lookup as _visual_lookup_router_mod  # noqa: E402, PLC0415
 
 app.include_router(_health_router_mod.router)
 app.include_router(_taxonomy_router_mod.router, prefix="/api")
@@ -15181,6 +15184,7 @@ app.include_router(_concept_review_router_mod.router, prefix="/api")
 app.include_router(_civitai_router, prefix="/api")
 app.include_router(_models_tree_router_mod.router, prefix="/api")
 app.include_router(_clip_router_mod.router, prefix="/api")
+app.include_router(_visual_lookup_router_mod.router, prefix="/api")
 
 
 # Define a root endpoint to serve the main index.html file

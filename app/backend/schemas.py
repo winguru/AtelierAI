@@ -159,6 +159,14 @@ class BuildPrototypeRequest(BaseModel):
     )
 
 
+class BuildPrototypeFromTextRequest(BaseModel):
+    """Request body for POST /concepts/{id}/build-prototype-from-text."""
+    prompts: list[str] = Field(
+        ..., min_length=1, max_length=64,
+        description="Descriptive text prompts to seed the prototype from",
+    )
+
+
 class ScoreImageRequest(BaseModel):
     """Request body for GET /concepts/{id}/score (query-param alternative)."""
     image_url: str = Field(..., description="URL of the candidate image to score")

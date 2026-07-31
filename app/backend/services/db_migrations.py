@@ -1183,3 +1183,29 @@ def _ensure_concept_prototype_columns() -> None:
             connection.execute(
                 text("ALTER TABLE concepts ADD COLUMN prototype_updated_at DATETIME")
             )
+
+
+def _ensure_clip_embedding_columns() -> None:
+    """Add clip_embedding, clip_embedding_model, clip_embedding_at to images.
+
+    Stores pre-computed CLIP vectors per image so that kNN visual lookup can
+    be performed without re-encoding on every query.  All nullable so existing
+    images continue to work without embeddings.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(images)")).fetchall()
+        }
+        if "clip_embedding" not in existing:
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN clip_embedding BLOB")
+            )
+        if "clip_embedding_model" not in existing:
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN clip_embedding_model VARCHAR")
+            )
+        if "clip_embedding_at" not in existing:
+            connection.execute(
+                text("ALTER TABLE images ADD COLUMN clip_embedding_at DATETIME")
+            )

@@ -74,6 +74,11 @@ async def read_concept_search_lab():
     return FileResponse("frontend/concept-search-lab.html")
 
 
+@router.get("/concept-studio")
+async def read_concept_studio():
+    return FileResponse("frontend/concept-studio.html")
+
+
 @router.get("/models")
 async def read_models_tree():
     return FileResponse("frontend/models.html")

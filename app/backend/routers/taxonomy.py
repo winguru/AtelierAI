@@ -60,6 +60,7 @@ from schemas import (
     BatchBuildResponse,
     StreamBuildRequest,
     BuildPrototypeRequest,
+    BuildPrototypeFromTextRequest,
     ConceptAttributeAddRequest,
     ConceptAttributeEntry,
     ConceptAttributeUpdateRequest,
@@ -2114,6 +2115,50 @@ async def taxonomy_build_prototype(
     db.refresh(concept)
     return {
         "message": "Prototype built.",
+        "concept_id": concept_id,
+        "prototype_source_count": concept.prototype_source_count,
+        "prototype_updated_at": (
+            concept.prototype_updated_at.isoformat()
+            if concept.prototype_updated_at
+            else None
+        ),
+    }
+
+
+@router.post("/concepts/{concept_id}/build-prototype-from-text", response_model=dict)
+async def taxonomy_build_prototype_from_text(
+    concept_id: int,
+    payload: BuildPrototypeFromTextRequest,
+    db: Session = Depends(get_db),
+):
+    """Build a visual prototype for a concept from text prompts.
+
+    Uses CLIP's shared text-image embedding space to seed a prototype purely
+    from descriptive text.  This is the key enabler for *ground-zero* images
+    that have no existing tag observations.
+    """
+    concept = db.query(Concept).filter(Concept.id == concept_id).first()
+    if concept is None:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    svc = ConceptPrototypeService(db)
+    prototype = await svc.build_prototype_from_text(concept_id, payload.prompts)
+
+    if prototype is None:
+        from services.clip_provider import get_clip_provider
+        if get_clip_provider() is None:
+            raise HTTPException(
+                status_code=503,
+                detail="CLIP provider unavailable — cannot build prototype",
+            )
+        raise HTTPException(
+            status_code=422,
+            detail="No prompts could be encoded. Check that CLIP is functioning.",
+        )
+
+    db.refresh(concept)
+    return {
+        "message": "Prototype built from text.",
         "concept_id": concept_id,
         "prototype_source_count": concept.prototype_source_count,
         "prototype_updated_at": (

@@ -1,0 +1,699 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Concept Studio — three-pane concept-association workspace
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Design tokens (light) ──────────────────────────────────────── */
+:root {
+  --bg-0: #f7f2ea; --bg-1: #ffe3bd; --bg-2: #d6e4ff;
+  --panel: #fffdf9; --panel-muted: #f7f1e8;
+  --ink: #2a1d12; --ink-soft: #6f5645;
+  --accent: #d85b29; --accent-dark: #a83f19;
+  --stroke: #e7d7c6;
+  --green: #2e9e5a; --green-bg: #e6f7ec;
+  --yellow: #b8860b; --yellow-bg: #fff8e6;
+  --red: #c93c37; --red-bg: #fce8e7;
+  --blue: #2b6cb0; --blue-bg: #e8f0fa;
+  --radius: 10px;
+  --shadow-sm: 0 1px 3px rgba(66,33,13,0.06);
+  --shadow-md: 0 3px 12px rgba(66,33,13,0.08);
+  --shadow: 0 18px 34px rgba(66,33,13,0.12);
+}
+
+/* ── Design tokens (dark) ───────────────────────────────────────── */
+body[data-theme="dark"] {
+  --bg-0: #14161c; --bg-1: #2d1e17; --bg-2: #182437;
+  --panel: #20242c; --panel-muted: #1b1f26;
+  --ink: #f2f4f8; --ink-soft: #b8bfcc;
+  --accent: #ff8a4c; --accent-dark: #d2652d;
+  --stroke: #353c48;
+  --green: #4ade80; --green-bg: #14301e;
+  --yellow: #f0c040; --yellow-bg: #2e2810;
+  --red: #f87171; --red-bg: #301414;
+  --blue: #60a5fa; --blue-bg: #142040;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 3px 12px rgba(0,0,0,0.3);
+  --shadow: 0 18px 34px rgba(0,0,0,0.4);
+  color-scheme: dark;
+}
+
+/* ── Base ── */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Avenir Next", "Nunito Sans", "Trebuchet MS", sans-serif;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 540px at -10% -20%, var(--bg-1) 0%, transparent 55%),
+    radial-gradient(700px 420px at 110% 0%, var(--bg-2) 0%, transparent 50%),
+    var(--bg-0);
+  min-height: 100vh;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── App shell ── */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+/* ── App header ── */
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 1.5rem 1.5rem 0;
+  animation: rise 420ms ease-out;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.app-header > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ── Brand ── */
+
+.brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.brand-icon {
+  width: 30px;
+  height: 30px;
+}
+
+.brand-text {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.brand-accent {
+  color: var(--accent);
+}
+
+/* ── Toggle ── */
+
+.toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-wrap input { cursor: pointer; }
+
+/* ── Buttons ── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 120ms;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.btn:hover { background: var(--panel-muted); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent-dark);
+}
+.btn.primary:hover:not(:disabled) { background: var(--accent-dark); }
+
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent);
+}
+.btn.ghost:hover { background: var(--panel-muted); }
+
+.btn.solid {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent-dark);
+}
+.btn.solid:hover:not(:disabled) { background: var(--accent-dark); }
+
+/* ── Status bar ──────────────────────────────────────────────────── */
+.cs-status-bar {
+  padding: 0.55rem 1.2rem;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  background: color-mix(in oklab, var(--panel) 90%, var(--accent) 4%);
+  border-bottom: 1px solid var(--stroke);
+  border-radius: 0 0 14px 14px;
+  margin: 0 0.5rem 0.5rem;
+}
+
+/* ── Three-pane layout ───────────────────────────────────────────── */
+.cs-workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(380px, 1.3fr) minmax(300px, 1fr);
+  gap: 0.75rem;
+  padding: 0 0.5rem 1rem;
+  height: calc(100vh - 140px);
+  min-height: 520px;
+}
+
+.cs-pane {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--stroke);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+/* ── Pane headers ────────────────────────────────────────────────── */
+.cs-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--stroke);
+  background: color-mix(in oklab, var(--panel) 92%, var(--accent) 3%);
+  flex-shrink: 0;
+}
+
+.cs-pane-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.cs-pane-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.85rem;
+}
+
+/* ── Small buttons ───────────────────────────────────────────────── */
+.btn-sm {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.82rem;
+  border-radius: 8px;
+}
+
+/* ── Image nav (prev/next/queue) ─────────────────────────────────── */
+.cs-image-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.cs-queue-pos {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  min-width: 3.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── LEFT PANE: Exemplar viewer ──────────────────────────────────── */
+.cs-image-toolbar {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.8rem;
+}
+
+.cs-hash-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.cs-exemplar-frame {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--panel-muted) 60%, black 3%);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  min-height: 280px;
+  overflow: hidden;
+  position: relative;
+}
+
+.cs-exemplar-placeholder {
+  text-align: center;
+  color: var(--ink-soft);
+  padding: 2rem;
+}
+
+.cs-placeholder-icon {
+  font-size: 2.5rem;
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.cs-placeholder-hint {
+  font-size: 0.78rem;
+  opacity: 0.7;
+  margin-top: 0.2rem;
+}
+
+.cs-exemplar-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.cs-exemplar-meta {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--stroke);
+}
+
+.cs-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.82rem;
+}
+
+.cs-meta-label {
+  color: var(--ink-soft);
+  min-width: 5rem;
+  font-weight: 600;
+}
+
+.cs-meta-row code {
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.cs-badge {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: color-mix(in oklab, var(--accent) 12%, var(--panel));
+  color: var(--accent-dark);
+}
+
+.cs-badge.is-yes {
+  background: color-mix(in oklab, #4caf50 18%, var(--panel));
+  color: #2e7d32;
+}
+
+.cs-badge.is-no {
+  background: color-mix(in oklab, #f44336 12%, var(--panel));
+  color: #c62828;
+}
+
+/* ── CENTER PANE: Association ────────────────────────────────────── */
+.cs-section {
+  margin-bottom: 1rem;
+}
+
+.cs-section-title {
+  font-size: 0.88rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ink-soft);
+  margin: 0 0 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.cs-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: color-mix(in oklab, var(--accent) 15%, var(--panel));
+  color: var(--accent-dark);
+  padding: 0 0.35rem;
+}
+
+.cs-empty-hint {
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  font-style: italic;
+  opacity: 0.7;
+  margin: 0.3rem 0;
+}
+
+/* ── Neighbour strip ─────────────────────────────────────────────── */
+.cs-neighbour-strip {
+  display: flex;
+  gap: 0.4rem;
+  overflow-x: auto;
+  padding-bottom: 0.35rem;
+  min-height: 90px;
+}
+
+.cs-neighbour-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 76px;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  transition: border-color 150ms, transform 150ms;
+}
+
+.cs-neighbour-thumb:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.cs-neighbour-thumb img {
+  width: 76px;
+  height: 76px;
+  object-fit: cover;
+  display: block;
+}
+
+.cs-neighbour-sim {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 0.65rem;
+  text-align: center;
+  padding: 1px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Suggestion list ─────────────────────────────────────────────── */
+.cs-suggestion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.cs-suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--panel) 96%, var(--accent) 2%);
+  transition: border-color 150ms;
+}
+
+.cs-suggestion-item:hover {
+  border-color: var(--accent);
+}
+
+.cs-suggestion-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.cs-suggestion-name {
+  font-weight: 600;
+  font-size: 0.86rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cs-suggestion-detail {
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+}
+
+.cs-suggestion-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.cs-sim-score {
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-dark);
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+/* ── Create concept form ─────────────────────────────────────────── */
+.cs-create-section {
+  border-top: 1px solid var(--stroke);
+  padding-top: 0.8rem;
+}
+
+.cs-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.cs-input {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-family: inherit;
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.cs-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 20%, transparent);
+}
+
+.cs-input-search { /* alias — same as cs-input */
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-family: inherit;
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.cs-input-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 20%, transparent);
+}
+
+.cs-create-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.cs-similar-terms {
+  font-size: 0.76rem;
+  color: var(--ink-soft);
+  min-height: 1.2rem;
+}
+
+.cs-similar-terms .cs-term-chip {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  margin: 0 0.2rem 0.2rem 0;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  background: color-mix(in oklab, var(--accent) 10%, var(--panel));
+  color: var(--accent-dark);
+  cursor: pointer;
+  border: 1px solid color-mix(in oklab, var(--accent) 25%, transparent);
+}
+
+.cs-similar-terms .cs-term-chip:hover {
+  background: color-mix(in oklab, var(--accent) 20%, var(--panel));
+}
+
+.cs-similar-terms .cs-term-existing {
+  background: color-mix(in oklab, #4caf50 12%, var(--panel));
+  color: #2e7d32;
+  border-color: color-mix(in oklab, #4caf50 30%, transparent);
+}
+
+.cs-similar-terms .cs-term-existing:hover {
+  background: color-mix(in oklab, #4caf50 20%, var(--panel));
+}
+
+/* ── RIGHT PANE: Confirmed concepts ──────────────────────────────── */
+.cs-confirmed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.cs-confirmed-item {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--panel) 94%, #4caf50 3%);
+}
+
+.cs-confirmed-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.cs-confirmed-name {
+  font-weight: 600;
+  font-size: 0.86rem;
+  color: var(--ink);
+}
+
+.cs-confirmed-source {
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.cs-confirmed-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.cs-confirmed-controls label {
+  font-size: 0.76rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.cs-strength-slider {
+  flex: 1;
+  min-width: 50px;
+}
+
+.cs-role-select {
+  font-size: 0.76rem;
+  padding: 0.2rem 0.35rem;
+}
+
+.cs-confirm-btn {
+  flex-shrink: 0;
+}
+
+.cs-remove-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.1rem 0.25rem;
+  border-radius: 6px;
+  opacity: 0.6;
+  transition: opacity 150ms, color 150ms;
+}
+
+.cs-remove-btn:hover {
+  opacity: 1;
+  color: #c62828;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  .cs-workspace {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: unset;
+  }
+
+  .cs-pane {
+    max-height: 600px;
+  }
+}
+
+/* ── Dark mode tweaks ────────────────────────────────────────────── */
+body[data-theme="dark"] .cs-status-bar,
+body[data-theme="dark"] .cs-pane-header {
+  background: color-mix(in oklab, var(--panel) 88%, black 6%);
+}
+
+body[data-theme="dark"] .cs-exemplar-frame {
+  background: color-mix(in oklab, var(--panel-muted) 50%, black 10%);
+}
+
+body[data-theme="dark"] .cs-input {
+  background: #171b22;
+  border-color: #3d4451;
+  color: var(--ink);
+}
+
+body[data-theme="dark"] .cs-suggestion-item {
+  background: color-mix(in oklab, var(--panel) 94%, black 4%);
+}
+
+body[data-theme="dark"] .cs-confirmed-item {
+  background: color-mix(in oklab, var(--panel) 92%, black 4%);
+}

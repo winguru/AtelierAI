@@ -13,6 +13,17 @@
   const API_SINGLE_IMAGE = (id) => `/api/civitai-search/image/${id}`;
   const API_SEARCH_RECORD = '/api/civitai-search/search-record';
   const API_BATCH_IMPORT = '/api/import_civitai/batch';
+  const API_CHECK_BLOCKED = '/api/civitai-search/check-blocked';
+
+  // CivitAI NSFW level definitions for the facet pills.
+  // Each entry maps a numeric nsfwLevel to its rating label.
+  const NSFW_LEVELS = [
+    { level: 1,  label: 'PG' },
+    { level: 2,  label: 'PG-13' },
+    { level: 4,  label: 'R' },
+    { level: 8,  label: 'X' },
+    { level: 16, label: 'XXX' },
+  ];
 
   /* ── Sort options for review mode (value format: "key:order") ── */
   const REVIEW_SORT_OPTIONS = [
@@ -167,7 +178,7 @@
     'mode-bar', 'review-rating-bar',
     'search-form', 'search-query', 'search-advanced',
     'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username', 'filter-nsfw', 'filter-match',
-    'facet-bar', 'search-status', 'search-status-text',
+    'facet-bar', 'nsfw-level-bar', 'search-status', 'search-status-text',
     'gallery-grid', 'gallery-footer', 'load-more-btn', 'results-count',
     'selection-count',
     'hide-filter-bar', 'hide-seen', 'hide-saved', 'hide-keep', 'hide-skip', 'hide-discard', 'hide-identical',
@@ -205,6 +216,12 @@
     imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
     dedupeHashes: new Set(),   // perceptual hashes seen so far (for visual-dup hiding)
     hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true, identical: true },
+    // NSFW level facet pills.  These supplement the NSFW dropdown: the
+    // dropdown sets the baseline allowed levels, and the pills let the user
+    // further narrow the visible tiles per individual level.
+    // Pill counts come from the Meilisearch facet distribution and stay
+    // stable when toggling pills (only other filter changes refresh them).
+    nsfwLevelVisible: new Set([1, 2, 4, 8, 16, 32]),  // levels currently shown
     autoLoading: false,         // guards against recursive auto-load
     fullscreenAdvanceOnLoad: false, // when true, advance fullscreen to first new visible tile after search
     fullscreenImageSource: null,   // 'thumbnail' | 'mid-res' | 'original' — currently displayed source
@@ -429,6 +446,26 @@
       if (filterSortValue) {
         _galleryToolbar.setSortValue(filterSortValue);
       }
+    }
+  }
+
+  /**
+   * Check whether the searched-for artist is blocked, and if so, show an
+   * actionable message telling the user how to unblock them.
+   */
+  async function checkBlockedUsername(name) {
+    try {
+      const res = await fetch(`${API_CHECK_BLOCKED}?username=${encodeURIComponent(name)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.is_blocked) {
+        setStatus(
+          `No results — "${name}" is in your blocked artists list. Unblock them from the Artist Scores panel below to see their images.`,
+          'is-error',
+        );
+      }
+    } catch {
+      // Best-effort — silently ignore.
     }
   }
 
@@ -998,9 +1035,9 @@
       post_id: hit.postId ?? null,
       artist_id: hit.user?.id ?? null,
       artist_name: hit.user?.username ?? null,
-      file_name: hit.file_name ?? null,
+      file_name: hit.name ?? hit.file_name ?? null,
       blurhash: hit.blurhash ?? null,
-      uuid: hit.url ?? null,
+      uuid: hit.uuid ?? null,
       image_url: hit.url ?? null,
       tags: hit.tagNames ?? null,
       generation_prompt: hit.prompt ?? null,
@@ -1094,6 +1131,12 @@
     if (!hit || !hit.id) return false;
 
     const f = state.hideFilters;
+
+    // NSFW level pill filter: hide hits whose nsfwLevel isn't toggled on.
+    const nsfwLevel = hit.nsfwLevel;
+    if (typeof nsfwLevel === 'number' && !state.nsfwLevelVisible.has(nsfwLevel)) {
+      return true;
+    }
 
     // Visual-duplicate ("Identical") hiding: a hit is hidden when an earlier
     // hit shares its perceptual `hash` (same file reposted, or a repeated
@@ -1665,7 +1708,10 @@
   async function executeSearch(append = false) {
     if (state.loading) return;
 
-    if (!append) _preloadCache.clear();
+    if (!append) {
+      _preloadCache.clear();
+      resetNsfwLevelVisible();
+    }
     const savedOffset = state.offset;
 
     // ── Review mode: fetch rated images from DB ──
@@ -1738,6 +1784,7 @@
       rebuildDedupeSet();
       renderResults(append);
       renderFacets();
+      renderNsfwPills();
       refreshAllRatingIndicators();
       applyHideFilters();
       checkAutoLoadIfAllHidden();
@@ -1751,6 +1798,13 @@
             : `Showing ${state.hits.length} of ${displayTotal.toLocaleString()} results`)
         : `Showing ${state.hits.length} results`;
       setStatus(totalLabel, '');
+
+      // When 0 results and a username filter is active, check whether the
+      // artist is blocked so we can show an actionable message instead of a
+      // silent empty state.
+      if (!append && state.hits.length === 0 && username) {
+        checkBlockedUsername(username);
+      }
 
       // Persist search state to URL
       saveStateToUrl();
@@ -1839,8 +1893,8 @@
 
     if (video) {
       // ── Video tile ──
-      // Use the B2 playable URL directly.  No poster/thumbnail variants
-      // exist for CivitAI videos, so we show the first frame.
+      // Use the B2 playable URL directly.  CivitAI has no poster/thumbnail
+      // variants for videos, so we decode the first frame client-side.
       const vid = document.createElement('video');
       vid.alt = hit.prompt ? hit.prompt.substring(0, 80) : `Video ${hit.id}`;
       vid.className = 'tile-real-img';
@@ -1850,6 +1904,16 @@
       vid.preload = 'metadata';
       vid.src = mediaURL;
 
+      // Decode the first frame once metadata is available.  Many browsers
+      // only paint a <video> frame after an explicit seek to 0 following
+      // the ``loadeddata`` event; without this the tile stays blank.
+      vid.addEventListener('loadedmetadata', () => {
+        try { vid.currentTime = 0.1; } catch (_) { /* not seekable yet */ }
+      });
+      vid.addEventListener('loadeddata', () => {
+        try { vid.currentTime = 0; } catch (_) { /* ignore */ }
+      });
+
       // Hover-to-play: start the video when the user's mouse enters the tile.
       btn.addEventListener('mouseenter', () => {
         const p = vid.play();
@@ -1857,10 +1921,12 @@
       });
       btn.addEventListener('mouseleave', () => {
         vid.pause();
-        vid.currentTime = 0;
+        try { vid.currentTime = 0; } catch (_) { /* ignore */ }
       });
 
       btn.appendChild(vid);
+      // Explicitly trigger loading now that the element is in the DOM.
+      try { vid.load(); } catch (_) { /* ignore */ }
 
       // ▶ badge so video tiles are visually distinct
       const vbadge = document.createElement('span');
@@ -1998,6 +2064,62 @@
         chip.innerHTML = `<span class="facet-chip-label">${tag}</span> ${count}`;
         bar.appendChild(chip);
       }
+    }
+  }
+
+  /**
+   * Reset the NSFW level visibility set to match the dropdown's current
+   * selection.  Called on every fresh search so pill toggles don't persist
+   * across unrelated query changes.
+   */
+  function resetNsfwLevelVisible() {
+    const raw = (els.filter_nsfw?.value || '').split(',').map(Number).filter(Boolean);
+    state.nsfwLevelVisible = new Set(raw.length ? raw : [1, 2, 4, 8, 16, 32]);
+  }
+
+  /**
+   * Render NSFW level pills with facet counts from the Meilisearch response.
+   *
+   * Pills act as client-side display filters: clicking a pill toggles
+   * whether that level's tiles are shown.  The counts come from the facet
+   * distribution and are NOT recalculated when pills are toggled — they
+   * only refresh when other filters (query, tags, username, dropdown)
+   * trigger a new search.
+   */
+  function renderNsfwPills() {
+    const bar = els.nsfw_level_bar;
+    if (!bar) return;
+    bar.innerHTML = '';
+
+    const distribution = state.facets?.distribution?.nsfwLevel;
+    if (!distribution) return;
+
+    for (const { level, label } of NSFW_LEVELS) {
+      const count = distribution[String(level)] || 0;
+      if (count === 0) continue;
+
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'nsfw-pill';
+      if (state.nsfwLevelVisible.has(level)) pill.classList.add('active');
+      pill.dataset.level = String(level);
+      pill.innerHTML = `<span class="nsfw-pill-label">${label}</span> <span class="nsfw-pill-count">${count.toLocaleString()}</span>`;
+      pill.title = state.nsfwLevelVisible.has(level)
+        ? `Showing ${count.toLocaleString()} images rated ${label} (click to hide)`
+        : `Hiding ${count.toLocaleString()} images rated ${label} (click to show)`;
+
+      pill.addEventListener('click', () => {
+        if (state.nsfwLevelVisible.has(level)) {
+          state.nsfwLevelVisible.delete(level);
+        } else {
+          state.nsfwLevelVisible.add(level);
+        }
+        renderNsfwPills();
+        applyHideFilters();
+        checkAutoLoadIfAllHidden();
+      });
+
+      bar.appendChild(pill);
     }
   }
 

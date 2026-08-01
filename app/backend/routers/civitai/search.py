@@ -10,6 +10,7 @@ Routes:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Any
 
@@ -113,6 +114,31 @@ def _is_video_hit(raw: dict) -> bool:
         return True
     mime = str(raw.get("mimeType", "") or raw.get("mime_type", "") or "").strip().lower()
     return mime.startswith("video/")
+
+
+# Bare CivitAI UUID: 8-4-4-4-12 hex (the last segment may have any hex digit
+# in position 3, not just 1-5, because CivitAI does not follow RFC 4122).
+_CIVITAI_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _extract_civitai_uuid(value: str | None) -> str | None:
+    """Extract a bare CivitAI UUID from a value that may be a bare UUID or a
+    full CDN URL.
+
+    Older rating payloads stored the full CDN URL (e.g.
+    ``https://image.civitai.com/.../<uuid>/original=true/<uuid>``) in the
+    ``uuid`` column instead of the bare UUID.  This helper recovers the bare
+    UUID so CDN thumbnail/original URLs can be reconstructed correctly.
+    """
+    if not value:
+        return None
+    v = value.strip()
+    if "/" not in v:
+        return v  # already bare
+    m = _CIVITAI_UUID_RE.search(v)
+    return m.group(0) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +360,8 @@ def _normalize_meili_hit(hit: dict) -> dict:
     # When the original is smaller than the mid-res tier, mid-res falls back
     # to original to avoid CDN upscaling artifacts.
     uuid = hit.get("url", "")
+    if uuid:
+        out["uuid"] = uuid
     orig_w = hit.get("width")
 
     # Video content uses B2-backed URLs — the image CDN serves raw MP4.
@@ -605,13 +633,19 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     # search whenever one of those hide-filters is toggled.
     meili_extra_filters: list[str] = list(payload.extra_filters or [])
 
-    blocked_names = _get_blocked_artist_names(db)
-    if blocked_names:
-        # NOT (user.username = "a" OR user.username = "b" ...)
-        or_expr = " OR ".join(
-            f'user.username = "{n}"' for n in blocked_names
-        )
-        meili_extra_filters.append(f"NOT ({or_expr})")
+    # Blocked-artist exclusion only applies to general browsing (no username
+    # filter).  When the user explicitly searches for one or more usernames,
+    # the ``user.username = "..."`` filter already restricts results to only
+    # those artists — the NOT-exclusion is redundant and would only add
+    # noise (or wrongly hide a deliberately-searched blocked artist).
+    if not users_list:
+        blocked_names = _get_blocked_artist_names(db)
+        if blocked_names:
+            # NOT (user.username = "a" OR user.username = "b" ...)
+            or_expr = " OR ".join(
+                f'user.username = "{n}"' for n in blocked_names
+            )
+            meili_extra_filters.append(f"NOT ({or_expr})")
 
     try:
         result = client.search_images(
@@ -1079,6 +1113,21 @@ def get_excluded_image_ids(db: Session = Depends(get_db)):
     return {"excluded_ids": sorted(_get_excluded_civitai_image_ids(db))}
 
 
+@router.get("/check-blocked", response_model=dict)
+def check_blocked_username(
+    username: str = Query(..., description="Username to check"),
+    db: Session = Depends(get_db),
+):
+    """Return whether the given artist username is blocked by the user.
+
+    Used by the frontend to show a helpful message when a search scoped to
+    a specific username returns 0 results because that artist is blocked.
+    """
+    blocked = _get_blocked_artist_names(db)
+    is_blocked = (username or "").strip() in blocked
+    return {"username": username, "is_blocked": is_blocked}
+
+
 @router.get("/ratings", response_model=dict)
 def get_image_ratings(
     civitai_image_ids: str = Query("", description="Comma-separated CivitAI image IDs"),
@@ -1158,17 +1207,29 @@ def _build_hit_from_search_image(img: CivitaiSearchImage) -> dict[str, Any]:
     path (tiles, details pane, fullscreen) as live search results without
     any client-side branching.
     """
-    uuid = img.uuid or ""
-    is_video = (img.file_name or "").lower().endswith((".mp4", ".webm", ".mov"))
+    # Older rating payloads stored a full CDN URL in the ``uuid`` column.
+    # Recover the bare UUID so CDN URLs reconstruct correctly.
+    raw_uuid = img.uuid or ""
+    uuid = _extract_civitai_uuid(raw_uuid) or raw_uuid
+    file_name_lc = (img.file_name or "").lower()
+    image_url_lc = (img.image_url or "").lower()
+    uuid_lc = uuid.lower()
+    is_video = (
+        file_name_lc.endswith((".mp4", ".webm", ".mov", ".mkv"))
+        or image_url_lc.endswith((".mp4", ".webm", ".mov", ".mkv"))
+        or "/file/civitai-media-cache/" in image_url_lc
+        or uuid_lc.endswith((".mp4", ".webm", ".mov", ".mkv"))
+        or "/file/civitai-media-cache/" in uuid_lc
+    )
 
     if is_video:
-        video_url = _build_video_url(uuid) or img.image_url or uuid
+        video_url = _build_video_url(uuid) or img.image_url or raw_uuid
         thumbnail_url = mid_res_url = full_url = video_url
     else:
         thumbnail_url, mid_res_url, full_url = _build_cdn_urls(uuid)
         # Fall back to the stored image_url if CDN construction failed.
         if not thumbnail_url:
-            thumbnail_url = mid_res_url = full_url = img.image_url or uuid
+            thumbnail_url = mid_res_url = full_url = img.image_url or raw_uuid
 
     tags = img.tags if isinstance(img.tags, list) else []
     # Stored tags may be raw strings or dicts with a "name" key — normalise
@@ -1186,7 +1247,10 @@ def _build_hit_from_search_image(img: CivitaiSearchImage) -> dict[str, Any]:
         "thumbnail_url": thumbnail_url,
         "mid_res_url": mid_res_url,
         "name": img.file_name or "",
+        "uuid": uuid or None,
         "is_video": is_video,
+        "type": "video" if is_video else "image",
+        "mimeType": "video/mp4" if is_video else "image/jpeg",
         "video_url": video_url if is_video else None,
         "postId": img.post_id,
         "tagNames": tag_names,

@@ -512,6 +512,75 @@ body[data-theme="dark"] .facet-chip:hover {
     opacity: 1;
 }
 
+/* ── NSFW level pills ── */
+.nsfw-pill-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.35rem 0 0;
+    min-height: 0;
+}
+
+.nsfw-pill-bar:empty {
+    display: none;
+}
+
+/* Active pill: identical look to .facet-chip (rounded, bold label, count) */
+.nsfw-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.28rem 0.62rem;
+    border: 1px solid #d8c2ac;
+    border-radius: 999px;
+    background: #fffaf2;
+    color: #6b4b37;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
+.nsfw-pill:hover {
+    border-color: #996945;
+    background: #efd9c2;
+}
+
+/* Inactive (filtered-out) pill: dimmed + dashed border to signal exclusion */
+.nsfw-pill:not(.active) {
+    opacity: 0.45;
+    border-style: dashed;
+}
+
+.nsfw-pill:not(.active):hover {
+    opacity: 0.7;
+}
+
+.nsfw-pill-label {
+    font-weight: 600;
+    color: var(--ink-soft);
+}
+
+.nsfw-pill-count {
+    font-variant-numeric: tabular-nums;
+    font-size: 0.72rem;
+    opacity: 0.7;
+}
+
+body[data-theme="dark"] .nsfw-pill {
+    background: #262c35;
+    border-color: #414957;
+    color: var(--ink);
+}
+
+body[data-theme="dark"] .nsfw-pill:hover {
+    border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 8%, var(--panel));
+}
+
+body[data-theme="dark"] .nsfw-pill-label {
+    color: var(--ink);
+}
+
 /* ── Search status ── */
 .search-status {
     padding: 0.38rem 0.3rem;

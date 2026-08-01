@@ -63,6 +63,7 @@ _DEFAULT_FACETS = [
     "aspectRatio",
     "baseModel",
     "createdAtUnix",
+    "nsfwLevel",
     "tagNames",
     "techniqueNames",
     "toolNames",

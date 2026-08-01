@@ -64,9 +64,46 @@ _editable_src_missing() {
 	! "$PYTHON_BIN" -m pip show atelierai >/dev/null 2>&1
 }
 
+_pick_torch_requirements_file() {
+	local os arch variant
+	os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+	arch="$(uname -m)"
+	variant="${ATELIER_PYTORCH_VARIANT:-auto}"
+
+	case "$os" in
+		linux)
+			if [[ "$variant" == "cuda" ]]; then
+				printf '%s\n' "$APP_ROOT/requirements.torch.linux-cuda.txt"
+			elif [[ "$variant" == "rocm" ]]; then
+				printf '%s\n' "$APP_ROOT/requirements.torch.linux-rocm.txt"
+			elif [[ "$variant" == "cpu" ]]; then
+				printf '%s\n' "$APP_ROOT/requirements.torch.linux-cpu.txt"
+			elif [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
+				printf '%s\n' "$APP_ROOT/requirements.torch.raspberrypi.txt"
+			else
+				printf '%s\n' "$APP_ROOT/requirements.torch.linux-cpu.txt"
+			fi
+			;;
+		darwin)
+			printf '%s\n' "$APP_ROOT/requirements.torch.macos.txt"
+			;;
+		mingw*|msys*|cygwin*)
+			printf '%s\n' "$APP_ROOT/requirements.torch.windows.txt"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 _install_runtime_deps() {
+	local torch_requirements
 	echo "Installing Python runtime dependencies from $APP_ROOT/requirements.txt..."
 	"$PYTHON_BIN" -m pip install --upgrade pip
+	if torch_requirements="$(_pick_torch_requirements_file)" && [[ -f "$torch_requirements" ]]; then
+		echo "Installing platform PyTorch dependencies from $torch_requirements..."
+		"$PYTHON_BIN" -m pip install -r "$torch_requirements"
+	fi
 	"$PYTHON_BIN" -m pip install -r "$APP_ROOT/requirements.txt"
 }
 

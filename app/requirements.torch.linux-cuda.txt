@@ -1,0 +1,4 @@
+# Linux NVIDIA CUDA wheels for GPU-enabled hosts/containers.
+--index-url https://download.pytorch.org/whl/cu126
+torch
+torchvision

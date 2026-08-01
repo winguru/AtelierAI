@@ -1,0 +1,3 @@
+# macOS wheels do not use CUDA.
+torch
+torchvision

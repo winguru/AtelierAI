@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+ARG PYTORCH_VARIANT=auto
+
 WORKDIR /workspace
 
 RUN apt-get update && apt-get install -y \
@@ -11,17 +13,28 @@ RUN apt-get update && apt-get install -y \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-COPY app/requirements.txt /tmp/atelier-deps/requirements.txt
+COPY app/requirements.txt \
+     app/requirements.torch.linux-cpu.txt \
+     app/requirements.torch.linux-cuda.txt \
+  app/requirements.torch.linux-rocm.txt \
+     app/requirements.torch.raspberrypi.txt \
+     /tmp/atelier-deps/
 RUN pip install --no-cache-dir --upgrade pip && \
     ARCH=$(uname -m) && \
-    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
-      echo "Detected ARM64 — installing CPU-only PyTorch" && \
-      pip install --no-cache-dir torch torchvision \
-        --index-url https://download.pytorch.org/whl/cpu; \
+    PT_VARIANT=${PYTORCH_VARIANT} && \
+    if [ "$PT_VARIANT" = "cuda" ]; then \
+      TORCH_FILE=/tmp/atelier-deps/requirements.torch.linux-cuda.txt; \
+    elif [ "$PT_VARIANT" = "rocm" ]; then \
+      TORCH_FILE=/tmp/atelier-deps/requirements.torch.linux-rocm.txt; \
+    elif [ "$PT_VARIANT" = "cpu" ]; then \
+      TORCH_FILE=/tmp/atelier-deps/requirements.torch.linux-cpu.txt; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+      TORCH_FILE=/tmp/atelier-deps/requirements.torch.raspberrypi.txt; \
     else \
-      echo "Detected $ARCH — default PyTorch (may include CUDA)" && \
-      pip install --no-cache-dir torch torchvision; \
+      TORCH_FILE=/tmp/atelier-deps/requirements.torch.linux-cpu.txt; \
     fi && \
+    echo "Installing PyTorch from: $TORCH_FILE (arch=$ARCH variant=$PT_VARIANT)" && \
+    pip install --no-cache-dir -r "$TORCH_FILE" && \
     pip install --no-cache-dir -r /tmp/atelier-deps/requirements.txt
 
 COPY . /workspace

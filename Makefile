@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help run bootstrap bootstrap-local smoke lint typecheck-civitai doctor build-images test test-all test-bridge compose-dev-up compose-dev-shell compose-dev-run compose-runtime-up compose-runtime-build docker-clean
+.PHONY: help run bootstrap bootstrap-local torch-detect torch-install smoke lint typecheck-civitai doctor build-images test test-all test-bridge compose-dev-up compose-dev-shell compose-dev-run compose-runtime-up compose-runtime-build docker-clean
 
 help:
 	@echo "AtelierAI task runner"
@@ -9,6 +9,8 @@ help:
 	@echo "  make run               Start the app locally from repo root"
 	@echo "  make bootstrap         Install editable app package"
 	@echo "  make bootstrap-local   Create .venv and install local host dependencies"
+	@echo "  make torch-detect      Detect accelerator and print torch env variables"
+	@echo "  make torch-install     Detect accelerator and install matching torch wheels"
 	@echo "  make smoke             Run launcher and compose validation checks"
 	@echo "  make lint              Run available Python quality checks"
 	@echo "  make typecheck-civitai Run stricter mypy checks for atelierai.civitai"
@@ -32,7 +34,13 @@ bootstrap:
 
 bootstrap-local:
 	python3 -m venv .venv
-	. .venv/bin/activate && python -m pip install --upgrade pip && python -m pip install -r app/requirements.txt && python -m pip install -e app/src
+	. .venv/bin/activate && python -m pip install --upgrade pip && ./app/scripts/setup_torch_platform.sh --install && python -m pip install -r app/requirements.txt && python -m pip install -e app/src
+
+torch-detect:
+	./app/scripts/setup_torch_platform.sh --print-env
+
+torch-install:
+	./app/scripts/setup_torch_platform.sh --install
 
 smoke:
 	bash -n start.sh app/entrypoint.sh

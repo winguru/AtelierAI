@@ -1,0 +1,4 @@
+# Linux CPU-only PyTorch wheels (no CUDA runtime).
+--index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision

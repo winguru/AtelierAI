@@ -1,0 +1,4 @@
+# Windows CPU-only wheels by default. Use a CUDA-specific index only if needed.
+--index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision

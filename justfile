@@ -14,7 +14,13 @@ bootstrap:
 
 bootstrap-local:
 	python3 -m venv .venv
-	. .venv/bin/activate && python -m pip install --upgrade pip && python -m pip install -r app/requirements.txt && python -m pip install -e app/src
+	. .venv/bin/activate && python -m pip install --upgrade pip && ./app/scripts/setup_torch_platform.sh --install && python -m pip install -r app/requirements.txt && python -m pip install -e app/src
+
+torch-detect:
+	./app/scripts/setup_torch_platform.sh --print-env
+
+torch-install:
+	./app/scripts/setup_torch_platform.sh --install
 
 smoke:
 	bash -n start.sh app/entrypoint.sh

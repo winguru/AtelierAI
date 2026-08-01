@@ -1,0 +1,4 @@
+# Raspberry Pi (ARM64) uses CPU-only wheels.
+--index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision

@@ -57,9 +57,11 @@ Useful startup variables:
 - `ATELIER_APP_ROOT`
 	Overrides the application root path if needed. Default: `<repo>/app`.
 - `ATELIER_AUTO_INSTALL_DEPS`
-	When truthy, installs `app/requirements.txt` automatically if core runtime dependencies are missing. Default: `1`.
+	When truthy, installs core dependencies automatically if missing. It now installs a platform-specific torch requirements file first, then `app/requirements.txt`. Default: `1`.
 - `ATELIER_ENSURE_EDITABLE_SRC`
 	When truthy, installs `app/src` in editable mode if the `atelierai` package is not already available from there. Default: `1`.
+- `ATELIER_PYTORCH_VARIANT`
+	Optional torch selector used by `./start.sh` on Linux. Values: `auto` (default), `cpu`, `cuda`, `rocm`.
 
 ## Docker and dev containers
 
@@ -103,6 +105,46 @@ docker compose --profile runtime up --build atelier-runtime
 The runtime service stores the SQLite database, image library, and generated resources under a persistent Docker volume mounted at `/var/lib/atelierai`.
 
 These can also be provided through your `.env` if that is how you manage local runtime settings.
+
+### Platform-specific PyTorch dependencies
+
+PyTorch wheels are now split by platform so CPU-only platforms do not pull CUDA builds.
+
+- Linux CPU-only: `app/requirements.torch.linux-cpu.txt`
+- Linux NVIDIA CUDA: `app/requirements.torch.linux-cuda.txt`
+- Raspberry Pi (ARM64): `app/requirements.torch.raspberrypi.txt`
+- macOS: `app/requirements.torch.macos.txt`
+- Windows: `app/requirements.torch.windows.txt`
+
+Both Dockerfiles automatically install the appropriate Linux torch file during image build.
+
+For local host installs, use the helper script to detect accelerator backend and set environment variables:
+
+```bash
+./app/scripts/setup_torch_platform.sh --print-env
+eval "$(./app/scripts/setup_torch_platform.sh --export)"
+./app/scripts/setup_torch_platform.sh --install
+```
+
+Detection behavior:
+
+- NVIDIA GPU on Linux/Windows shell: selects `cuda`
+- AMD GPU on Linux: selects `rocm`
+- macOS: selects `metal` and sets `PYTORCH_ENABLE_MPS_FALLBACK=1`
+- ARM64 Linux (Raspberry Pi): selects CPU-only wheels
+- No supported GPU detected: selects CPU-only wheels
+
+To force a Linux CUDA build instead of the default CPU-safe behavior:
+
+```bash
+PYTORCH_VARIANT=cuda docker compose --profile runtime build atelier-runtime
+```
+
+To force CPU wheels explicitly:
+
+```bash
+PYTORCH_VARIANT=cpu docker compose --profile runtime build atelier-runtime
+```
 
 ## Makefile and justfile
 

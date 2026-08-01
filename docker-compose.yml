@@ -4,6 +4,8 @@ services:
     build:
       context: .
       dockerfile: .devcontainer/Dockerfile
+      args:
+        PYTORCH_VARIANT: ${PYTORCH_VARIANT:-auto}
     working_dir: /workspace
     command: ["tail", "-f", "/dev/null"]
     init: true
@@ -26,6 +28,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        PYTORCH_VARIANT: ${PYTORCH_VARIANT:-auto}
     init: true
     ports:
       - "8000:8000"

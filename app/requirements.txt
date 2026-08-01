@@ -19,20 +19,33 @@ playwright-stealth
 # CLIP visual similarity
 # ─────────────────────────────────────────────────────────────────────────────
 # torch and torchvision are NOT pinned here because the correct wheel depends
-# on the target hardware:
+# on the target OS/hardware.
 #
-#   ARM64 / CPU-only (Raspberry Pi 5, dev containers):
-#     pip install torch torchvision \
-#       --index-url https://download.pytorch.org/whl/cpu
+# Install one of the platform-specific torch files before this requirements
+# file:
 #
-#   NVIDIA GPU (workstation, cloud):
-#     pip install torch torchvision \
-#       --index-url https://download.pytorch.org/whl/cu126
+#   Linux CPU-only:
+#     pip install -r app/requirements.torch.linux-cpu.txt
+#
+#   Linux + NVIDIA CUDA:
+#     pip install -r app/requirements.torch.linux-cuda.txt
+#
+#   Linux + AMD ROCm:
+#     pip install -r app/requirements.torch.linux-rocm.txt
+#
+#   Raspberry Pi (ARM64):
+#     pip install -r app/requirements.torch.raspberrypi.txt
+#
+#   macOS:
+#     pip install -r app/requirements.torch.macos.txt
+#
+#   Windows:
+#     pip install -r app/requirements.torch.windows.txt
 #
 #   Mixed environments: install torch FIRST from the correct index, then:
 #     pip install -r requirements.txt
 #
-# The Dockerfile handles this automatically (see --find-links logic below).
+# The Dockerfile and dev container now handle this selection automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 open_clip_torch
 numpy

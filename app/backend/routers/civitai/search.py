@@ -9,18 +9,26 @@ Routes:
 
 from __future__ import annotations
 
+import base64
+from datetime import datetime, timezone
+import io
 import logging
 import re
 import threading
 from typing import Any
+from urllib.parse import quote, urljoin, urlparse
 
 import atelierai.config as app_config
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
+from PIL import Image, ImageOps
 from sqlalchemy import Text as sa_Text, func as sa_func, or_ as sa_or
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import SessionLocal, get_db
 from models import (
+    CivitaiArtistProfile,
     CivitaiArtistPreference,
     CivitaiSearchImage,
     CivitaiSearchImageLink,
@@ -65,6 +73,135 @@ _CIVITAI_IMAGE_CDN = getattr(
 # image CDN serves the raw MP4 even when image URL patterns are used, so
 # videos must use this endpoint for playable URLs.
 _CIVITAI_B2_MEDIA = "https://image-b2.civitai.com/file/civitai-media-cache"
+
+_ARTIST_AVATAR_MAX_BYTES = 2 * 1024 * 1024
+_ARTIST_AVATAR_INLINE_MAX_BYTES = 16 * 1024
+_ARTIST_AVATAR_SIZE = (96, 96)
+_ARTIST_AVATAR_MIME_TYPES = {
+    "image/avif",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+_ARTIST_AVATAR_HOSTS = {
+    "civitai.com",
+    "civitai.red",
+    "image-b2.civitai.com",
+    "image.civitai.com",
+    "image.civitai.red",
+}
+
+
+def _artist_profile_key(artist_id: Any, artist_name: Any) -> str | None:
+    """Return a stable cache key for a CivitAI artist."""
+    if artist_id is not None and str(artist_id).strip():
+        return f"id:{str(artist_id).strip()}"
+    name = str(artist_name or "").strip().casefold()
+    return f"username:{name}" if name else None
+
+
+def _is_allowed_artist_avatar_url(url: str) -> bool:
+    """Restrict avatar downloads to HTTPS CivitAI-owned image hosts."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and host in _ARTIST_AVATAR_HOSTS
+    )
+
+
+def _download_artist_avatar(url: str) -> tuple[bytes, str]:
+    """Download a bounded profile image from an approved CivitAI host."""
+    current_url = url
+    for _redirect_count in range(4):
+        if not _is_allowed_artist_avatar_url(current_url):
+            raise ValueError("Artist avatar URL is not an approved CivitAI image URL")
+
+        with requests.get(
+            current_url,
+            stream=True,
+            timeout=(5, 15),
+            allow_redirects=False,
+        ) as upstream:
+            if upstream.is_redirect:
+                location = upstream.headers.get("location")
+                if not location:
+                    raise ValueError("Artist avatar redirect has no destination")
+                current_url = urljoin(current_url, location)
+                continue
+
+            upstream.raise_for_status()
+            mime_type = upstream.headers.get("content-type", "").split(";", 1)[0].lower()
+            if mime_type not in _ARTIST_AVATAR_MIME_TYPES:
+                raise ValueError(f"Unsupported artist avatar content type: {mime_type or 'missing'}")
+
+            content_length = upstream.headers.get("content-length")
+            if content_length and int(content_length) > _ARTIST_AVATAR_MAX_BYTES:
+                raise ValueError("Artist avatar exceeds the size limit")
+
+            data = bytearray()
+            for chunk in upstream.iter_content(chunk_size=64 * 1024):
+                data.extend(chunk)
+                if len(data) > _ARTIST_AVATAR_MAX_BYTES:
+                    raise ValueError("Artist avatar exceeds the size limit")
+            if not data:
+                raise ValueError("Artist avatar response was empty")
+            return bytes(data), mime_type
+
+    raise ValueError("Artist avatar exceeded the redirect limit")
+
+
+def _compact_artist_avatar(data: bytes) -> tuple[bytes, str]:
+    """Normalize an avatar to a compact square WebP suitable for JSON."""
+    with Image.open(io.BytesIO(data)) as source:
+        source = ImageOps.exif_transpose(source).convert("RGB")
+        avatar = ImageOps.fit(source, _ARTIST_AVATAR_SIZE, Image.Resampling.LANCZOS)
+        for quality in (82, 72, 62, 52):
+            output = io.BytesIO()
+            avatar.save(output, format="WEBP", quality=quality, method=6)
+            compact = output.getvalue()
+            if len(compact) <= _ARTIST_AVATAR_INLINE_MAX_BYTES:
+                return compact, "image/webp"
+    raise ValueError("Artist avatar could not be compacted below the inline size limit")
+
+
+def _artist_avatar_data_uri(data: bytes, mime_type: str) -> str:
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _attach_cached_artist_avatars(
+    db: Session,
+    hits: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Attach artist keys to hits and return cached avatars once per artist."""
+    artist_keys: set[str] = set()
+    for hit in hits:
+        user = hit.get("user") if isinstance(hit.get("user"), dict) else {}
+        artist_key = _artist_profile_key(user.get("id"), user.get("username"))
+        if artist_key:
+            hit["artistAvatarKey"] = artist_key
+            artist_keys.add(artist_key)
+    if not artist_keys:
+        return {}
+
+    profiles = (
+        db.query(CivitaiArtistProfile)
+        .filter(CivitaiArtistProfile.artist_key.in_(artist_keys))
+        .all()
+    )
+    return {
+        profile.artist_key: _artist_avatar_data_uri(
+            profile.avatar_data,
+            profile.avatar_mime_type,
+        )
+        for profile in profiles
+        if profile.avatar_data
+        and len(profile.avatar_data) <= _ARTIST_AVATAR_INLINE_MAX_BYTES
+    }
 
 
 def _build_cdn_urls(
@@ -139,6 +276,153 @@ def _extract_civitai_uuid(value: str | None) -> str | None:
         return v  # already bare
     m = _CIVITAI_UUID_RE.search(v)
     return m.group(0) if m else None
+
+
+def _profile_picture_avatar_url(user_profile: dict[str, Any]) -> str | None:
+    """Build a compact CDN URL from a user.getById profilePicture object."""
+    picture = user_profile.get("profilePicture")
+    if not isinstance(picture, dict):
+        return None
+    uuid = _extract_civitai_uuid(str(picture.get("url") or ""))
+    if not uuid:
+        return None
+    filename = str(picture.get("name") or uuid).rsplit("/", 1)[-1]
+    return f"{_CIVITAI_IMAGE_CDN}/{uuid}/width=256/{quote(filename, safe='')}"
+
+
+def _store_artist_avatar(
+    artist_key: str,
+    artist_id: Any,
+    artist_name: str,
+    avatar_data: bytes,
+    mime_type: str,
+    source_url: str,
+) -> None:
+    """Persist a compact avatar in a short-lived session."""
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        profile = (
+            db.query(CivitaiArtistProfile)
+            .filter(CivitaiArtistProfile.artist_key == artist_key)
+            .first()
+        )
+        if profile is None:
+            profile = CivitaiArtistProfile(
+                artist_key=artist_key,
+                artist_id=artist_id,
+                artist_name=artist_name or f"artist-{artist_id}",
+                avatar_data=avatar_data,
+                avatar_mime_type=mime_type,
+                avatar_source_url=source_url,
+                fetched_at=now,
+            )
+            db.add(profile)
+        else:
+            profile.artist_id = artist_id
+            profile.artist_name = artist_name or profile.artist_name
+            profile.avatar_data = avatar_data
+            profile.avatar_mime_type = mime_type
+            profile.avatar_source_url = source_url
+            profile.fetched_at = now
+        db.commit()
+
+
+def _resolve_artist_avatar_source(
+    api: Any,
+    artist_id: Any,
+    artist_name: str,
+    source_url: str,
+) -> tuple[str, str]:
+    if source_url or artist_id is None:
+        return source_url, artist_name
+    try:
+        user_profile = api.fetch_user_by_id(int(artist_id)) or {}
+        source_url = str(user_profile.get("image") or "").strip()
+        source_url = source_url or _profile_picture_avatar_url(user_profile) or ""
+        artist_name = str(user_profile.get("username") or artist_name).strip()
+    except Exception:
+        logger.warning("Failed to fetch CivitAI profile for artist %s", artist_id, exc_info=True)
+    return source_url, artist_name
+
+
+def _prepare_artist_avatar(
+    cached: tuple[bytes, str, str] | None,
+    source_url: str,
+) -> tuple[bytes, str, str] | None:
+    if cached is not None and not source_url:
+        avatar_data, mime_type = _compact_artist_avatar(cached[0])
+        return avatar_data, mime_type, cached[2]
+    if not source_url:
+        return None
+    downloaded, _downloaded_mime = _download_artist_avatar(source_url)
+    avatar_data, mime_type = _compact_artist_avatar(downloaded)
+    return avatar_data, mime_type, source_url
+
+
+def _resolve_inline_artist_avatar(
+    api: Any,
+    basic_info: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Resolve one compact avatar with no DB session held during network I/O."""
+    user = basic_info.get("user")
+    if not isinstance(user, dict):
+        return None, None
+
+    artist_id = user.get("id")
+    artist_name = str(user.get("username") or "").strip()
+    artist_key = _artist_profile_key(artist_id, artist_name)
+    if artist_key is None:
+        return None, None
+
+    cached: tuple[bytes, str, str] | None = None
+    with SessionLocal() as db:
+        profile = (
+            db.query(CivitaiArtistProfile)
+            .filter(CivitaiArtistProfile.artist_key == artist_key)
+            .first()
+        )
+        if profile is not None:
+            cached = (
+                bytes(profile.avatar_data),
+                profile.avatar_mime_type,
+                profile.avatar_source_url,
+            )
+
+    if cached is not None and len(cached[0]) <= _ARTIST_AVATAR_INLINE_MAX_BYTES:
+        return artist_key, _artist_avatar_data_uri(cached[0], cached[1])
+
+    source_url = str(user.get("image") or "").strip()
+    source_url, artist_name = _resolve_artist_avatar_source(
+        api,
+        artist_id,
+        artist_name,
+        source_url,
+    )
+
+    try:
+        prepared = _prepare_artist_avatar(cached, source_url)
+        if prepared is None:
+            return artist_key, None
+        avatar_data, mime_type, source_url = prepared
+    except Exception:
+        logger.warning("Failed to prepare CivitAI artist avatar for %s", artist_key, exc_info=True)
+        if cached is not None:
+            return artist_key, _artist_avatar_data_uri(cached[0], cached[1])
+        return artist_key, None
+
+    try:
+        _store_artist_avatar(
+            artist_key,
+            artist_id,
+            artist_name,
+            avatar_data,
+            mime_type,
+            source_url,
+        )
+    except IntegrityError:
+        logger.debug("Artist avatar was cached concurrently for %s", artist_key)
+
+    return artist_key, _artist_avatar_data_uri(avatar_data, mime_type)
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +773,7 @@ def _build_hit_from_trpc(
     # Author info in Meilisearch-like format
     if user:
         hit["user"] = {
+            "id": user.get("id"),
             "username": user.get("username", ""),
             "image": user.get("image"),
         }
@@ -598,10 +883,11 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     )
     cached = _search_cache_get(cache_key)
     if cached is not None:
+        response = dict(cached)
         # Even on cache hit, merge stored tags / generation data from the
         # DB — the user may have refreshed metadata since the cache was
         # populated, and the cached hits may have null tagNames.
-        cached_hits = cached.get("hits", [])
+        cached_hits = [dict(hit) for hit in cached.get("hits", [])]
         if cached_hits:
             ids = [h.get("id") for h in cached_hits if isinstance(h.get("id"), int)]
             logger.info(
@@ -609,9 +895,13 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
                 len(cached_hits),
                 ids[:5],
             )
-            cached["hits"] = _enrich_hits_from_db(db, cached_hits)
+            response["hits"] = _enrich_hits_from_db(db, cached_hits)
             _maybe_lazy_fetch_missing_metadata(cached_hits)
-        return cached
+        response["artist_avatars"] = _attach_cached_artist_avatars(
+            db,
+            response.get("hits", []),
+        )
+        return response
 
     client = _get_civitai_search_client()
 
@@ -708,14 +998,16 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
         "backend": result.get("backend", "unknown"),
     }
 
-    # Cache with a shorter TTL for search results.
-    _search_cache_put(cache_key, response, ttl_seconds=60)
+    # Cache the search payload without base64 avatar data. Avatar state is
+    # read fresh from SQLite for every response and deduplicated by artist.
+    _search_cache_put(cache_key, dict(response), ttl_seconds=60)
+    response["artist_avatars"] = _attach_cached_artist_avatars(db, normalized_hits)
 
     return response
 
 
 @router.get("/image/{image_id}", response_model=dict)
-def civitai_search_single_image(image_id: int, db: Session = Depends(get_db)):
+def civitai_search_single_image(image_id: int):
     """Fetch fresh metadata for a single CivitAI image via tRPC endpoints.
 
     Used by the frontend 'r' (reload) action to re-fetch tags, models,
@@ -776,28 +1068,33 @@ def civitai_search_single_image(image_id: int, db: Session = Depends(get_db)):
 
     # ── Build normalised hit from tRPC responses ──
     hit = _build_hit_from_trpc(basic_info, generation_data, tag_records)
+    artist_key, avatar_data_uri = _resolve_inline_artist_avatar(api, basic_info)
+    if artist_key:
+        hit["artistAvatarKey"] = artist_key
 
     # ── Persist fetched metadata so it survives page refreshes ──
-    try:
-        _persist_search_image(
-            db,
-            civitai_image_id=image_id,
-            post_id=hit.get("postId"),
-            artist_id=(hit.get("user") or {}).get("id") if isinstance(hit.get("user"), dict) else None,
-            artist_name=hit.get("username"),
-            blurhash=hit.get("blurhash"),
-            uuid=hit.get("url"),
-            image_url=hit.get("url"),
-            tags=hit.get("tagNames") or None,
-            generation_prompt=hit.get("prompt") or None,
-            generation_models=hit.get("resources") or None,
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        logger.warning("Failed to persist search image %s", image_id, exc_info=True)
+    with SessionLocal() as db:
+        try:
+            _persist_search_image(
+                db,
+                civitai_image_id=image_id,
+                post_id=hit.get("postId"),
+                artist_id=(hit.get("user") or {}).get("id") if isinstance(hit.get("user"), dict) else None,
+                artist_name=hit.get("username"),
+                blurhash=hit.get("blurhash"),
+                uuid=hit.get("url"),
+                image_url=hit.get("url"),
+                tags=hit.get("tagNames") or None,
+                generation_prompt=hit.get("prompt") or None,
+                generation_models=hit.get("resources") or None,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.warning("Failed to persist search image %s", image_id, exc_info=True)
 
-    return {"hit": hit}
+    artist_avatars = {artist_key: avatar_data_uri} if artist_key and avatar_data_uri else {}
+    return {"hit": hit, "artist_avatars": artist_avatars}
 
 
 @router.get("/library-status", response_model=dict)

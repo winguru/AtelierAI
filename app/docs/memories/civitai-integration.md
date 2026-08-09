@@ -39,6 +39,32 @@ Architecture:
 
 The frontend already handles this: `fetchImageRatings()` fetches the rating for returned hits, then `applyHideFilters()` + `checkAutoLoadIfAllHidden()` hide matching tiles and auto-load more pages if a whole page is hidden.
 
+### Search Lab artist avatar cache
+Fullscreen artist avatars are cached once per CivitAI artist in the
+`civitai_artist_profiles` table. Store a 96x96 WebP (maximum 16 KiB) as a
+SQLite `BLOB` with MIME type, source URL, and fetch timestamp; do not duplicate
+bytes on each `civitai_search_images` row.
+
+Search responses include cached avatars in a top-level `artist_avatars` map,
+keyed by the `artistAvatarKey` added to each hit. Values are base64 data URIs,
+so the browser does not make a separate avatar request. A cache miss is resolved
+through the normal `GET /api/civitai-search/image/{image_id}` metadata request,
+which downloads, compacts, stores, and returns the avatar inline. Never add a
+dedicated avatar endpoint.
+
+Do not hold a SQLAlchemy session while fetching CivitAI profile metadata or
+downloading an avatar. Read the cache in a short session, perform network work
+after it closes, then persist in another short session. This avoids exhausting
+the API database connection pool during concurrent imports and Search Lab use.
+
+Avatar downloads are size-limited and only follow redirects between approved
+CivitAI image hosts. Preparation failures serve an existing cached avatar when
+available.
+
+CivitAI `image.get.user.image` may be null even when the artist has a profile
+picture. In that case, call `user.getById` and build the CDN URL from its
+`profilePicture.url` UUID and `profilePicture.name` filename.
+
 ### Collection ID mapping (CivitAI → local DB)
 `_ensure_image_in_collection()` resolves CivitAI collection IDs to local `collections.id` automatically. The `image_collections.collection_id` FK references `collections.id` (local PK), but callers throughout the codebase may pass either the CivitAI ID or the local ID. The resolution logic handles both transparently. Do NOT assume callers pass the local ID — always use the resolution function.
 

@@ -1783,6 +1783,27 @@ class CivitaiSearchImageLink(Base):
     )
 
 
+class CivitaiArtistProfile(Base):
+    """Cached CivitAI artist identity and profile image."""
+
+    __tablename__ = "civitai_artist_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    artist_key = Column(String, nullable=False, unique=True, index=True)
+    artist_id = Column(Integer, nullable=True, index=True)
+    artist_name = Column(String, nullable=False, index=True)
+    avatar_data = Column(LargeBinary, nullable=False)
+    avatar_mime_type = Column(String, nullable=False)
+    avatar_source_url = Column(Text, nullable=False)
+    fetched_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class CivitaiArtistPreference(Base):
     """Aggregated keep/discard counts per artist from search-lab sessions.
 

@@ -233,7 +233,17 @@
       <div class="fullscreen-content">
         <img id="fullscreen-image" class="fullscreen-image" alt="">
         <video id="fullscreen-video" class="fullscreen-image hidden" controls playsinline preload="metadata"></video>
-        <aside id="fullscreen-tags-panel" class="fullscreen-tags-panel hidden" aria-label="Image tags">
+        <aside id="fullscreen-tags-panel" class="fullscreen-tags-panel hidden" aria-label="Artist and image tags">
+          <div id="fullscreen-artist" class="fullscreen-artist hidden">
+            <a id="fullscreen-artist-avatar-link" class="fullscreen-artist-avatar-link" href="#" target="_blank" rel="noopener noreferrer">
+              <img id="fullscreen-artist-avatar" class="fullscreen-artist-avatar hidden" alt="">
+              <span id="fullscreen-artist-initials" class="fullscreen-artist-initials" aria-hidden="true"></span>
+            </a>
+            <div class="fullscreen-artist-copy">
+              <a id="fullscreen-artist-name" class="fullscreen-artist-name" href="#" target="_blank" rel="noopener noreferrer"></a>
+              <time id="fullscreen-uploaded-at" class="fullscreen-uploaded-at"></time>
+            </div>
+          </div>
           <h3>Tags</h3>
           <div id="fullscreen-tags-cloud" class="fullscreen-tags-cloud"></div>
         </aside>

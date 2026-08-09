@@ -694,6 +694,16 @@ class CivitaiAPI:
             strict=strict,
         )
 
+    def fetch_user_by_id(
+        self, user_id: int, *, strict: bool = False
+    ) -> Optional[Dict]:
+        """Fetch CivitAI user identity and profile picture metadata."""
+        return self._make_request(
+            endpoint="user.getById",
+            payload_data={"id": int(user_id)},
+            strict=strict,
+        )
+
     def fetch_generation_data(
         self, image_id: int, *, strict: bool = False
     ) -> Optional[Dict]:

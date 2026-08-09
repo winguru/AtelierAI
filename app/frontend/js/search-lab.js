@@ -38,11 +38,17 @@
   const API_RATED_ARTISTS = '/api/civitai-search/rated/artists';
 
   // Fallback; overwritten once /api/config resolves.
+  let CIVITAI_WEB_URL = 'https://civitai.red';
   let CIVITAI_IMAGE_URL = 'https://civitai.red/images/';
 
   fetch('/api/config')
     .then(r => r.json())
-    .then(cfg => { if (cfg.civitai_web_base_url) CIVITAI_IMAGE_URL = cfg.civitai_web_base_url + '/images/'; })
+    .then(cfg => {
+      if (cfg.civitai_web_base_url) {
+        CIVITAI_WEB_URL = cfg.civitai_web_base_url;
+        CIVITAI_IMAGE_URL = cfg.civitai_web_base_url + '/images/';
+      }
+    })
     .catch(() => {});
 
   const THUMB_SIZE = 180;
@@ -193,6 +199,9 @@
     'fullscreen-image-info',
     'fullscreen-close-btn', 'fullscreen-prev', 'fullscreen-next',
     'fullscreen-tags-panel', 'fullscreen-tags-cloud',
+    'fullscreen-artist', 'fullscreen-artist-avatar-link',
+    'fullscreen-artist-avatar', 'fullscreen-artist-initials',
+    'fullscreen-artist-name', 'fullscreen-uploaded-at',
     'theme-toggle',
   ];
 
@@ -214,6 +223,9 @@
     imageRatings: new Map(),   // civitaiId → "keep" | "discard" | "skip"
     currentSearchId: null,     // DB id of the current search record
     imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
+    artistAvatars: new Map(),   // artist key → inline data URI
+    artistAvatarRequests: new Map(), // civitai image id → metadata request Promise
+    artistAvatarMisses: new Set(),   // image ids with no available avatar
     dedupeHashes: new Set(),   // perceptual hashes seen so far (for visual-dup hiding)
     hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true, identical: true },
     // NSFW level facet pills.  These supplement the NSFW dropdown: the
@@ -308,6 +320,7 @@
       }
 
       const data = await res.json();
+      mergeArtistAvatars(data.artist_avatars);
       const freshHit = data.hit;
 
       if (!freshHit) {
@@ -327,6 +340,7 @@
       const fullscreenOpen = !els.fullscreen_preview.classList.contains('hidden');
       if (fullscreenOpen) {
         _setFullscreenImage(merged);
+        renderFullscreenArtist(merged);
         renderFullscreenTags(merged);
       } else {
         renderResults(false);
@@ -340,6 +354,51 @@
         onClick: () => reloadCurrentImage(),
       });
     }
+  }
+
+  function mergeArtistAvatars(avatars) {
+    if (!avatars || typeof avatars !== 'object') return;
+    for (const [artistKey, dataUri] of Object.entries(avatars)) {
+      if (artistKey && typeof dataUri === 'string' && dataUri.startsWith('data:image/')) {
+        state.artistAvatars.set(artistKey, dataUri);
+      }
+    }
+  }
+
+  function artistAvatarKey(hit) {
+    if (hit?.artistAvatarKey) return String(hit.artistAvatarKey);
+    const user = hit && typeof hit.user === 'object' ? hit.user : null;
+    if (user?.id != null) return `id:${user.id}`;
+    const username = String(user?.username || hit?.username || '').trim().toLocaleLowerCase();
+    return username ? `username:${username}` : '';
+  }
+
+  function fetchInlineArtistAvatar(hit) {
+    if (!hit?.id || state.artistAvatarMisses.has(hit.id)) return;
+    const artistKey = artistAvatarKey(hit);
+    if (artistKey && state.artistAvatars.has(artistKey)) return;
+    if (state.artistAvatarRequests.has(hit.id)) return;
+
+    const request = fetch(API_SINGLE_IMAGE(hit.id))
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const data = await res.json();
+        mergeArtistAvatars(data.artist_avatars);
+        const idx = state.hits.findIndex(candidate => candidate.id === hit.id);
+        if (idx >= 0 && data.hit) state.hits[idx] = { ...state.hits[idx], ...data.hit };
+        const resolvedKey = artistAvatarKey(data.hit || hit);
+        if (!resolvedKey || !state.artistAvatars.has(resolvedKey)) {
+          state.artistAvatarMisses.add(hit.id);
+          return null;
+        }
+        if (state.hits[state.selectedHitIndex]?.id === hit.id) {
+          renderFullscreenArtist(state.hits[state.selectedHitIndex]);
+        }
+        return resolvedKey;
+      })
+      .catch(() => null)
+      .finally(() => state.artistAvatarRequests.delete(hit.id));
+    state.artistAvatarRequests.set(hit.id, request);
   }
 
   /* ── Initialise ── */
@@ -1761,6 +1820,7 @@
       }
 
       const data = await res.json();
+      mergeArtistAvatars(data.artist_avatars);
 
       const newHitsCount = append ? (data.hits || []).length : 0;
       if (append) {
@@ -1839,6 +1899,7 @@
           const hit = state.hits[firstNew];
           _setFullscreenImage(hit);
           updateFullscreenCounter();
+          renderFullscreenArtist(hit);
           renderFullscreenTags(hit);
         } else {
           // New page had no visible tiles either — keep loading or close.
@@ -2451,6 +2512,7 @@
   /* Preload cache: mid-res URLs for adjacent images so navigation is instant. */
   const _preloadCache = new Map(); // civitaiId → 'loaded' | HTMLImageElement
   const PRELOAD_RANGE = 2; // preload ±2 neighbors
+  let _fullscreenLoadGeneration = 0;
 
   function _preloadAdjacent(index) {
     for (let d = -PRELOAD_RANGE; d <= PRELOAD_RANGE; d++) {
@@ -2469,12 +2531,14 @@
   }
 
   function _setFullscreenImage(hit) {
+    const loadGeneration = ++_fullscreenLoadGeneration;
     const video = isVideoHit(hit);
 
     if (video) {
       // ── Video fullscreen ──
       els.fullscreen_image.classList.add('hidden');
-      els.fullscreen_image.src = '';
+      els.fullscreen_image.classList.remove('is-loading', 'is-placeholder');
+      els.fullscreen_image.removeAttribute('src');
       els.fullscreen_video.classList.remove('hidden');
       els.fullscreen_video.src = hit.video_url || hit.url || '';
       state.fullscreenImageSource = 'original';
@@ -2491,39 +2555,66 @@
     els.fullscreen_image.classList.remove('hidden');
 
     // Tiered loading strategy:
-    //   1. Show thumbnail immediately (already cached from tiles)
-    //   2. Upgrade to full-res original when loaded
+    //   1. Replace the previous image with a local placeholder immediately
+    //   2. Upgrade to the thumbnail as soon as it is available
+    //   3. Upgrade to the full-res original when loaded
     // The backend now serves the original image as mid_res_url, because
     // the CivitAI CDN's 1260px tier upscales typical AI images (512-1216px),
     // causing interpolation artifacts.
     const thumbUrl = hit.thumbnail_url || '';
     const midUrl = hit.mid_res_url || hit.url || '';
+    const placeholderUrl = blurHashToDataURL(hit.blurhash || hit.hash || '', 32, 32);
+    let appliedRank = -1;
 
-    const _applySource = (sourceTier, url) => {
-      els.fullscreen_image.src = url;
+    const _applySource = (sourceTier, url, rank) => {
+      if (loadGeneration !== _fullscreenLoadGeneration || rank < appliedRank) return;
+      appliedRank = rank;
+      if (url) {
+        els.fullscreen_image.src = url;
+      } else {
+        els.fullscreen_image.removeAttribute('src');
+      }
+      const placeholder = sourceTier === 'placeholder';
+      const loading = placeholder || sourceTier === 'loading';
+      els.fullscreen_image.classList.toggle('is-placeholder', placeholder);
+      els.fullscreen_image.classList.toggle('is-loading', loading);
       state.fullscreenImageSource = sourceTier;
       // naturalWidth is only available after load; set a fallback from the tier
       state.fullscreenImageWidth = sourceTier === 'thumbnail' ? 450 : null;
       updateFullscreenCounter();
     };
 
+    _applySource(
+      placeholderUrl ? 'placeholder' : 'loading',
+      placeholderUrl,
+      0,
+    );
+
     // If the full-res is already preloaded, use it directly
     if (_preloadCache.get(hit.id) === 'loaded' && midUrl) {
-      _applySource('original', midUrl);
+      _applySource('original', midUrl, 2);
       return;
     }
 
-    // Show thumbnail first (instant from browser cache)
+    // Keep the placeholder visible until the thumbnail has actually loaded.
     if (thumbUrl) {
-      _applySource('thumbnail', thumbUrl);
+      retryImageLoad(thumbUrl, `thumb_${hit.id}`).then((ok) => {
+        if (!ok || loadGeneration !== _fullscreenLoadGeneration) return;
+        const sourceTier = thumbUrl === midUrl ? 'original' : 'thumbnail';
+        _applySource(sourceTier, thumbUrl, sourceTier === 'original' ? 2 : 1);
+      });
     }
 
     // Upgrade to full-res original in background with automatic retry
     if (midUrl && midUrl !== thumbUrl) {
       retryImageLoad(midUrl, `mid_${hit.id}`).then((ok) => {
         // Only apply if user hasn't navigated away
-        if (ok && state.hits[state.selectedHitIndex]?.id === hit.id) {
-          _applySource('original', midUrl);
+        if (
+          ok
+          && loadGeneration === _fullscreenLoadGeneration
+          && state.hits[state.selectedHitIndex]?.id === hit.id
+        ) {
+          _applySource('original', midUrl, 2);
           _preloadCache.set(hit.id, 'loaded');
         }
       });
@@ -2537,6 +2628,7 @@
     _setFullscreenImage(hit);
     els.fullscreen_image.alt = hit.prompt ? hit.prompt.substring(0, 120) : '';
     updateFullscreenCounter();
+    renderFullscreenArtist(hit);
     renderFullscreenTags(hit);
 
     els.fullscreen_preview.classList.remove('hidden');
@@ -2545,6 +2637,7 @@
   }
 
   function closeFullscreen() {
+    _fullscreenLoadGeneration++;
     els.fullscreen_preview.classList.add('hidden');
     els.fullscreen_preview.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
@@ -2553,6 +2646,7 @@
     els.fullscreen_video.removeAttribute('src');
     els.fullscreen_video.load();
     els.fullscreen_video.classList.add('hidden');
+    els.fullscreen_image.classList.remove('is-loading', 'is-placeholder');
   }
 
   /** True if there are more result pages available to load. */
@@ -2565,12 +2659,16 @@
    * the next cursor page.  Clears the image, tags, and updates the counter.
    */
   function _setFullscreenLoading() {
-    els.fullscreen_image.src = '';
+    _fullscreenLoadGeneration++;
+    els.fullscreen_image.removeAttribute('src');
     els.fullscreen_image.alt = '';
+    els.fullscreen_image.classList.add('is-loading');
+    els.fullscreen_image.classList.remove('is-placeholder');
     els.fullscreen_video.pause();
     els.fullscreen_video.removeAttribute('src');
     els.fullscreen_video.classList.add('hidden');
     els.fullscreen_counter.textContent = 'Loading more…';
+    clearFullscreenArtist();
     const cloud = els.fullscreen_tags_cloud;
     if (cloud) cloud.innerHTML = '';
   }
@@ -2583,6 +2681,7 @@
       const hit = state.hits[next];
       _setFullscreenImage(hit);
       updateFullscreenCounter();
+      renderFullscreenArtist(hit);
       renderFullscreenTags(hit);
       return;
     }
@@ -2617,8 +2716,11 @@
       const source = state.fullscreenImageSource || '—';
       // Use naturalWidth if the image has loaded, otherwise fall back to the
       // tier-based estimate set by _applySource.
-      const natW = els.fullscreen_image.naturalWidth || state.fullscreenImageWidth;
-      const natH = els.fullscreen_image.naturalHeight || null;
+      const hasRealSource = !['loading', 'placeholder'].includes(state.fullscreenImageSource);
+      const natW = hasRealSource
+        ? els.fullscreen_image.naturalWidth || state.fullscreenImageWidth
+        : null;
+      const natH = hasRealSource ? els.fullscreen_image.naturalHeight || null : null;
       const resStr = natW
         ? (natH ? `${natW}×${natH}` : `${natW}px`)
         : '—';
@@ -2644,6 +2746,80 @@
     // Brief visual flash on the fullscreen image
     els.fullscreen_image.classList.add('fullscreen-select-flash');
     setTimeout(() => els.fullscreen_image.classList.remove('fullscreen-select-flash'), 300);
+  }
+
+  function clearFullscreenArtist() {
+    els.fullscreen_artist.classList.add('hidden');
+    els.fullscreen_artist_avatar.classList.add('hidden');
+    els.fullscreen_artist_avatar.removeAttribute('src');
+    els.fullscreen_artist_name.textContent = '';
+    els.fullscreen_uploaded_at.textContent = '';
+    els.fullscreen_uploaded_at.removeAttribute('datetime');
+    els.fullscreen_uploaded_at.removeAttribute('title');
+  }
+
+  function formatRelativeUploadTime(value) {
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp)) return '';
+
+    const elapsed = timestamp - Date.now();
+    const absolute = Math.abs(elapsed);
+    if (absolute < 60_000) return 'just now';
+
+    const units = [
+      ['year', 365 * 24 * 60 * 60 * 1000],
+      ['month', 30 * 24 * 60 * 60 * 1000],
+      ['day', 24 * 60 * 60 * 1000],
+      ['hour', 60 * 60 * 1000],
+      ['minute', 60 * 1000],
+    ];
+    const [unit, duration] = units.find(([, size]) => absolute >= size) || units.at(-1);
+    return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(
+      Math.round(elapsed / duration),
+      unit,
+    );
+  }
+
+  function renderFullscreenArtist(hit) {
+    const user = hit && typeof hit.user === 'object' ? hit.user : null;
+    const username = String(user?.username || hit?.username || '').trim();
+    if (!username) {
+      clearFullscreenArtist();
+      return;
+    }
+
+    const profileUrl = `${CIVITAI_WEB_URL}/user/${encodeURIComponent(username)}`;
+    els.fullscreen_artist.classList.remove('hidden');
+    els.fullscreen_artist_name.textContent = username;
+    els.fullscreen_artist_name.href = profileUrl;
+    els.fullscreen_artist_avatar_link.href = profileUrl;
+    els.fullscreen_artist_initials.textContent = username.slice(0, 1).toUpperCase();
+
+    const relativeTime = formatRelativeUploadTime(hit.createdAt);
+    els.fullscreen_uploaded_at.textContent = relativeTime ? `Uploaded ${relativeTime}` : 'Upload date unavailable';
+    if (hit.createdAt && Number.isFinite(Date.parse(hit.createdAt))) {
+      const absoluteTime = new Date(hit.createdAt);
+      els.fullscreen_uploaded_at.dateTime = absoluteTime.toISOString();
+      els.fullscreen_uploaded_at.title = absoluteTime.toLocaleString();
+    } else {
+      els.fullscreen_uploaded_at.removeAttribute('datetime');
+      els.fullscreen_uploaded_at.removeAttribute('title');
+    }
+
+    const avatar = els.fullscreen_artist_avatar;
+    avatar.classList.add('hidden');
+    avatar.removeAttribute('src');
+    avatar.alt = `${username}'s profile image`;
+    const avatarDataUri = state.artistAvatars.get(artistAvatarKey(hit));
+    if (avatarDataUri) {
+      avatar.onload = () => {
+        if (state.hits[state.selectedHitIndex]?.id === hit.id) avatar.classList.remove('hidden');
+      };
+      avatar.onerror = () => avatar.classList.add('hidden');
+      avatar.src = avatarDataUri;
+    } else {
+      fetchInlineArtistAvatar(hit);
+    }
   }
 
   function renderFullscreenTags(hit) {
@@ -2765,6 +2941,7 @@
     const hit = state.hits[index];
     _setFullscreenImage(hit);
     updateFullscreenCounter();
+    renderFullscreenArtist(hit);
     renderFullscreenTags(hit);
   }
 

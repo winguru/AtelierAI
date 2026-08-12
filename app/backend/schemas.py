@@ -63,7 +63,14 @@ class CivitaiNsfwBackfillRequest(BaseModel):
 
 
 class CivitaiCookieRequest(BaseModel):
-    cookie: str = Field(..., min_length=100, description="The __Secure-civitai-token cookie value (JWT-like string starting with eyJ).")
+    cookie: str = Field(
+        ...,
+        min_length=100,
+        description=(
+            "The __Secure-civ-token (or legacy __Secure-civitai-token) "
+            "cookie value (JWT-like string starting with eyJ)."
+        ),
+    )
 
 
 class CollectionCreateRequest(BaseModel):
@@ -1026,6 +1033,7 @@ class CivitaiArtistSummaryItem(BaseModel):
     artist_id: Optional[int] = None
     artist_name: str
     keeps: int = 0
+    skips: int = 0
     discards: int = 0
     score: int = 0
     is_blocked: bool = False
@@ -1036,3 +1044,20 @@ class CivitaiArtistBlockRequest(BaseModel):
     artist_name: str
     artist_id: Optional[int] = None
     is_blocked: bool
+
+
+class CivitaiArtistDiscardRequest(BaseModel):
+    """Batch-discard all images from an artist in the current search.
+
+    Used by the fullscreen ``b`` shortcut: marks every loaded image from
+    the named artist as ``discard`` so their tiles are hidden immediately,
+    and optionally blocks the artist so future searches exclude them.
+    """
+    artist_name: str
+    artist_id: Optional[int] = None
+    image_ids: list[int] = Field(
+        default_factory=list,
+        description="CivitAI image IDs (from the current search) to discard",
+    )
+    search_id: Optional[int] = None
+    is_blocked: bool = True

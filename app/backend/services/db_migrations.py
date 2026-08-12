@@ -140,6 +140,30 @@ def _ensure_collection_sync_columns() -> None:
             )
 
 
+def _ensure_civitai_search_media_columns() -> None:
+    """Add local preserved-media references to Search Lab rows."""
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_search_images)")
+            ).fetchall()
+        }
+        additions = {
+            "preserved_media_path": "TEXT",
+            "preserved_media_mime": "VARCHAR",
+            "preserved_media_sha256": "VARCHAR",
+            "preserved_source_url": "TEXT",
+        }
+        for column, column_type in additions.items():
+            if column not in existing:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE civitai_search_images ADD COLUMN {column} {column_type}"
+                    )
+                )
+
+
 def _ensure_civitai_uuid_column() -> None:
     """Backfill CivitAI UUID column for existing sqlite databases."""
     with engine.begin() as connection:
@@ -676,6 +700,14 @@ def _ensure_civitai_user_columns() -> None:
                 )
             )
 
+        if "civitai_user_banned" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE artists ADD COLUMN civitai_user_banned BOOLEAN "
+                    "DEFAULT 0"
+                )
+            )
+
         if "civitai_user_original_name" not in existing:
             connection.execute(
                 text(
@@ -710,6 +742,27 @@ def _ensure_civitai_user_columns() -> None:
                         )
                 except (ValueError, TypeError, _json.JSONDecodeError):
                     continue
+
+
+def _ensure_civitai_user_banned_at_column() -> None:
+    """Add the ``banned_at`` column to ``civitai_users`` if missing.
+
+    Introduced alongside the banned-vs-deleted distinction.  Older databases
+    created the table before this column existed, so we add it idempotently
+    with ``ALTER TABLE``.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_users)")
+            ).fetchall()
+        }
+
+        if "banned_at" not in existing:
+            connection.execute(
+                text("ALTER TABLE civitai_users ADD COLUMN banned_at DATETIME")
+            )
 
 
 def _ensure_observation_unique_constraint() -> None:
@@ -1208,4 +1261,25 @@ def _ensure_clip_embedding_columns() -> None:
         if "clip_embedding_at" not in existing:
             connection.execute(
                 text("ALTER TABLE images ADD COLUMN clip_embedding_at DATETIME")
+            )
+
+
+def _ensure_artist_preference_skips_column() -> None:
+    """Add ``skips`` column to civitai_artist_preferences for existing sqlite DBs.
+
+    Existing rows default to 0 skips, matching the model default.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_artist_preferences)")
+            ).fetchall()
+        }
+        if "skips" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE civitai_artist_preferences "
+                    "ADD COLUMN skips INTEGER NOT NULL DEFAULT 0"
+                )
             )

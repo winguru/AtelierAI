@@ -1348,6 +1348,7 @@ class ImageProcessor:
         username: str,
         civitai_user_id: Optional[int],
         is_deleted: bool = False,
+        is_banned: bool = False,
         original_name: Optional[str] = None,
     ) -> Artist:
         """Find or create an artist record linked to a CivitAI user account.
@@ -1359,6 +1360,10 @@ class ImageProcessor:
         When *is_deleted* is True, the original username is preserved in
         ``civitai_user_original_name`` and the artist's display name is
         left unchanged so the UI can show the original identity.
+
+        When *is_banned* is True, the account is still reachable via the API
+        (username and user data are still served), but we mark it as banned
+        for filtering and display purposes.
         """
         artist_obj: Optional[Artist] = None
 
@@ -1383,6 +1388,8 @@ class ImageProcessor:
                 artist_obj.civitai_user_deleted = True
                 if original_name:
                     artist_obj.civitai_user_original_name = original_name
+            if is_banned:
+                artist_obj.civitai_user_banned = True
             db.add(artist_obj)
             db.commit()
             db.refresh(artist_obj)
@@ -1397,6 +1404,9 @@ class ImageProcessor:
             artist_obj.civitai_user_deleted = True
             if original_name and not artist_obj.civitai_user_original_name:
                 artist_obj.civitai_user_original_name = original_name
+            dirty = True
+        if is_banned and not artist_obj.civitai_user_banned:
+            artist_obj.civitai_user_banned = True
             dirty = True
         if dirty:
             db.commit()

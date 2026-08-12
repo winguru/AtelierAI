@@ -454,6 +454,48 @@ body[data-theme="dark"] .filter-row select {
     color: var(--ink-soft);
 }
 
+/* ── CivitAI URL filter row ── */
+.filter-row-url {
+    grid-column: 1 / -1;   /* span full width of the auto-fill grid */
+}
+
+.url-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: stretch;
+}
+
+.url-row input[type="text"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.url-row input[readonly] {
+    cursor: text;
+    opacity: 0.85;
+}
+
+#civitai-url-go {
+    flex: 0 0 auto;
+    padding: 0.38rem 1rem;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    background: var(--accent);
+    color: white;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+
+#civitai-url-go:hover {
+    opacity: 0.88;
+}
+
+body[data-theme="dark"] #civitai-url-go {
+    border-color: var(--accent);
+}
+
 /* ── Facet bar (mirrors main page advanced-filter-pills) ── */
 .facet-bar {
     display: flex;
@@ -1391,6 +1433,57 @@ body[data-theme="dark"] .tag-chip {
     line-height: 1.3;
 }
 
+/* ── Fullscreen artist rating stats (thumbs icons) ── */
+
+.fullscreen-artist-stats {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.45rem;
+}
+
+.fs-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.fs-stat svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.fs-stat.is-keep {
+    color: #5fd470;
+}
+
+.fs-stat.is-skip {
+    color: #9a9aa5;
+}
+
+.fs-stat.is-discard {
+    color: #e87878;
+}
+
+.fs-artist-blocked {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.4rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    background: rgba(205, 50, 50, 0.2);
+    color: #e87878;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
 .fullscreen-tags-panel h3 {
     margin: 0;
     font-size: 0.9rem;
@@ -1531,7 +1624,7 @@ body[data-theme="dark"] .tag-chip {
     font-style: italic;
 }
 
-/* ── "In Library" badge on tiles ── */
+/* ── "Saved" badge on tiles ── */
 .tile-in-library-badge {
     position: absolute;
     top: 0.42rem;

@@ -11,6 +11,7 @@
   const API_RATE_IMAGE = '/api/civitai-search/rate';
   const API_RATINGS = '/api/civitai-search/ratings';
   const API_SINGLE_IMAGE = (id) => `/api/civitai-search/image/${id}`;
+  const API_PRESERVE_IMAGE = (id) => `/api/civitai-search/image/${id}/preserve`;
   const API_SEARCH_RECORD = '/api/civitai-search/search-record';
   const API_BATCH_IMPORT = '/api/import_civitai/batch';
   const API_CHECK_BLOCKED = '/api/civitai-search/check-blocked';
@@ -35,6 +36,7 @@
   const API_COLLECTIONS = '/api/collections/';
   const API_ARTIST_SUMMARY = '/api/civitai-search/artist-summary';
   const API_ARTIST_BLOCK = '/api/civitai-search/artist-block';
+  const API_ARTIST_DISCARD = '/api/civitai-search/artist-discard';
   const API_RATED_ARTISTS = '/api/civitai-search/rated/artists';
 
   // Fallback; overwritten once /api/config resolves.
@@ -184,6 +186,7 @@
     'mode-bar', 'review-rating-bar',
     'search-form', 'search-query', 'search-advanced',
     'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username', 'filter-nsfw', 'filter-match',
+    'civitai-url', 'civitai-url-go',
     'facet-bar', 'nsfw-level-bar', 'search-status', 'search-status-text',
     'gallery-grid', 'gallery-footer', 'load-more-btn', 'results-count',
     'selection-count',
@@ -202,6 +205,7 @@
     'fullscreen-artist', 'fullscreen-artist-avatar-link',
     'fullscreen-artist-avatar', 'fullscreen-artist-initials',
     'fullscreen-artist-name', 'fullscreen-uploaded-at',
+    'fullscreen-artist-stats',
     'theme-toggle',
   ];
 
@@ -221,6 +225,7 @@
     importedIds: new Set(),     // civitai_image_ids already in library
     importTasks: new Map(),    // civitaiId → task_id (pending imports)
     imageRatings: new Map(),   // civitaiId → "keep" | "discard" | "skip"
+    artistSummaryMap: {},      // lowercase artist name → summary item
     currentSearchId: null,     // DB id of the current search record
     imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
     artistAvatars: new Map(),   // artist key → inline data URI
@@ -430,6 +435,8 @@
       els.filter_match.value = saved.match || 'last';
       syncHideFiltersFromUrl(saved);
       executeSearch();
+    } else {
+      updateCivitaiUrlField();
     }
 
     // Save scroll position before unload for restore after reload
@@ -529,9 +536,9 @@
   }
 
   /* ── Import feature: fetch library status ── */
-  async function fetchLibraryStatus() {
+  async function fetchLibraryStatus({ preserveIds = [] } = {}) {
     const ids = state.hits.map(h => h.id).filter(Boolean);
-    if (!ids.length) return;
+    if (!ids.length) return new Set(preserveIds);
 
     const BATCH_SIZE = 200;
     let allImported = {};
@@ -544,7 +551,14 @@
         const data = await res.json();
         Object.assign(allImported, data.imported || {});
       }
-      state.importedIds = new Set(Object.keys(allImported).map(Number));
+      const confirmedIds = new Set([
+        ...preserveIds,
+        ...Object.keys(allImported).map(Number),
+      ]);
+      for (const id of ids) {
+        if (!confirmedIds.has(Number(id))) state.importedIds.delete(Number(id));
+      }
+      for (const id of confirmedIds) state.importedIds.add(Number(id));
       // Re-render badges on existing tiles
       refreshLibraryBadges();
       // Saved status affects hide-filter visibility
@@ -555,8 +569,10 @@
       if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
         updateImportButtonState(state.hits[state.selectedHitIndex]);
       }
+      return confirmedIds;
     } catch {
       // Silently fail — badges are non-essential
+      return new Set(preserveIds);
     }
   }
 
@@ -605,16 +621,17 @@
   /* ── Import feature: refresh badge overlays on tiles ── */
   function refreshLibraryBadges() {
     const tiles = els.gallery_grid.querySelectorAll('.tile');
-    tiles.forEach((tile, idx) => {
-      if (idx >= state.hits.length) return;
+    tiles.forEach((tile) => {
+      const idx = Number(tile.dataset.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= state.hits.length) return;
       const hit = state.hits[idx];
       const existing = tile.querySelector('.tile-in-library-badge');
       if (state.importedIds.has(hit.id)) {
         if (!existing) {
           const badge = document.createElement('span');
           badge.className = 'tile-in-library-badge';
-          badge.textContent = '✓ In Library';
-          badge.title = 'This image is already in your library';
+          badge.textContent = '✓ Saved';
+          badge.title = 'This image is already saved in your gallery';
           tile.appendChild(badge);
         }
       } else if (existing) {
@@ -687,7 +704,7 @@
       btn.textContent = '⏳ Importing…';
       btn.disabled = true;
     } else if (isImported) {
-      btn.textContent = '✓ In Library';
+      btn.textContent = '✓ Saved';
       btn.disabled = true;
     } else {
       btn.textContent = '⬇ Import';
@@ -828,6 +845,10 @@
       polls++;
       if (polls >= maxPolls) {
         clearInterval(interval);
+        for (const id of civitaiIds) state.importTasks.delete(id);
+        updateImportButtonState(state.hits[state.selectedHitIndex]);
+        updateSelectionCounter();
+        setStatus('Import is still running or could not be confirmed. The images remain retryable.', 'is-error');
         return;
       }
       try {
@@ -837,17 +858,24 @@
         if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
           clearInterval(interval);
           if (task.status === 'completed') {
+            const result = task.result || {};
+            const importedIds = Array.isArray(result.imported_ids) ? result.imported_ids.map(Number) : [];
+            const existingIds = Array.isArray(result.existing_ids) ? result.existing_ids.map(Number) : [];
+            const failedIds = Array.isArray(result.failed_ids) ? result.failed_ids.map(Number) : [];
+            const confirmedIds = new Set([...importedIds, ...existingIds]);
             for (const id of civitaiIds) {
-              state.importedIds.add(id);
               state.importTasks.delete(id);
             }
-            refreshLibraryBadges();
+            for (const id of confirmedIds) state.importedIds.add(id);
+            await fetchLibraryStatus({ preserveIds: confirmedIds });
             updateSelectionCounter();
-            applyHideFilters();
-            ensureVisibleSelection();
-            checkAutoLoadIfAllHidden();
             if (state.selectedHitIndex >= 0 && state.hits[state.selectedHitIndex]) {
               updateImportButtonState(state.hits[state.selectedHitIndex]);
+            }
+            const summary = `${importedIds.length} imported, ${existingIds.length} already saved, ${failedIds.length} failed or unavailable.`;
+            setStatus(summary, failedIds.length ? 'is-error' : '');
+            if (failedIds.length && importedIds.length === 0 && existingIds.length === 0) {
+              setStatus(`Import failed: ${failedIds.length} image(s) unavailable on CivitAI.`, 'is-error');
             }
           } else {
             for (const id of civitaiIds) {
@@ -943,6 +971,165 @@
     };
   }
 
+  /* ── CivitAI URL generation & parsing ── */
+
+  // Map AtelierAI sort values to CivitAI site sortBy params.
+  // CivitAI uses the format: images_v6:<field>:<direction>
+  const CIVITAI_SORT_LABELS = {
+    'stats.reactionCountAllTime:desc': 'images_v6:stats:reactionCountAllTime:desc',
+    'stats.commentCountAllTime:desc': 'images_v6:stats:commentCountAllTime:desc',
+    'stats.collectedCountAllTime:desc': 'images_v6:stats:collectedCountAllTime:desc',
+    'createdAt:desc': 'images_v6:createdAt:desc',
+    'createdAtUnix:asc': 'images_v6:createdAt:asc',
+  };
+
+  // Map CivitAI site sortBy params back to AtelierAI sort values.
+  const CIVITAI_SORT_VALUES = Object.fromEntries(
+    Object.entries(CIVITAI_SORT_LABELS).map(([v, l]) => [l.toLowerCase(), v])
+  );
+
+  /**
+   * Build a CivitAI site search URL from the current filter state.
+   * Uses the /search/images endpoint with the parameters that
+   * civitai.red actually accepts in its URL query string.
+   */
+  function buildCivitaiSearchUrl() {
+    const q = els.search_query.value.trim();
+    const tags = els.filter_tags.value.trim();
+    const sortBy = els.filter_sort.value;
+    const baseModel = els.filter_base_model.value;
+    const username = els.filter_username.value.trim();
+    const nsfw = els.filter_nsfw.value;
+
+    const parts = [];
+    // CivitAI uses "query" for the free-text search box.
+    if (q) parts.push(`query=${encodeURIComponent(q)}`);
+    // CivitAI expects each tag as a separate tags= param.
+    if (tags) {
+      tags.split(',').map((t) => t.trim()).filter(Boolean)
+        .forEach((t) => parts.push(`tags=${encodeURIComponent(t)}`));
+    }
+    if (sortBy && CIVITAI_SORT_LABELS[sortBy]) {
+      parts.push(`sortBy=${encodeURIComponent(CIVITAI_SORT_LABELS[sortBy])}`);
+    } else if (q || tags) {
+      // No explicit sort (Relevancy) — civitai.red expects sortBy=images_v6.
+      parts.push('sortBy=images_v6');
+    }
+    if (username) parts.push(`usernames=${encodeURIComponent(username)}`);
+    // CivitAI URLs use lowercase model identifiers (e.g. "sdxl").
+    if (baseModel) parts.push(`model=${encodeURIComponent(baseModel.toLowerCase())}`);
+    // NSFW dropdown values are comma-separated level bitmasks (e.g. "1,2,4").
+    // CivitAI's site uses a single browsingLevel bitmask integer.
+    if (nsfw) {
+      const levels = nsfw.split(',').map(Number).filter((n) => !isNaN(n));
+      const browsingLevel = levels.reduce((acc, n) => acc | n, 0);
+      if (browsingLevel > 0) parts.push(`browsingLevel=${browsingLevel}`);
+    }
+
+    const search = parts.join('&');
+    return `${CIVITAI_WEB_URL}/search/images${search ? '?' + search : ''}`;
+  }
+
+  /**
+   * Update the read-only CivitAI URL field with the generated URL.
+   */
+  function updateCivitaiUrlField() {
+    if (!els.civitai_url) return;
+    const q = els.search_query.value.trim();
+    const tags = els.filter_tags.value.trim();
+    const baseModel = els.filter_base_model.value;
+    const username = els.filter_username.value.trim();
+    const hasInput = q || tags || baseModel || username;
+    if (hasInput) {
+      els.civitai_url.value = buildCivitaiSearchUrl();
+    } else {
+      els.civitai_url.value = '';
+      els.civitai_url.placeholder = 'Adjust filters to generate URL…';
+    }
+  }
+
+  /**
+   * Parse a CivitAI site search URL and apply its parameters to the
+   * Search Lab filter controls, then trigger a fresh search.
+   *
+   * Recognized URL params: q, tags (multi-value), sortBy, model, usernames, browsingLevel.
+   * Also supports legacy params: sort, username.
+   */
+  function applyCivitaiUrl(urlText) {
+    try {
+      const url = new URL(urlText.trim());
+      const p = url.searchParams;
+
+      // CivitAI uses "query" (also accept legacy "q").
+      els.search_query.value = p.get('query') || p.get('q') || '';
+
+      // CivitAI uses multiple tags= params; join them with commas.
+      const tagList = p.getAll('tags');
+      els.filter_tags.value = tagList.join(', ');
+
+      // Match base model case-insensitively against dropdown values.
+      const modelParam = (p.get('model') || '').toLowerCase();
+      if (modelParam) {
+        const opts = els.filter_base_model.options;
+        for (const opt of opts) {
+          if (opt.value.toLowerCase() === modelParam) {
+            els.filter_base_model.value = opt.value;
+            break;
+          }
+        }
+      } else {
+        els.filter_base_model.value = '';
+      }
+
+      // CivitAI uses "usernames" param (also accept legacy "username").
+      els.filter_username.value = p.get('usernames') || p.get('username') || '';
+
+      // CivitAI uses "sortBy" param; also accept legacy "sort" label.
+      // Sort values may be full (images_v6:createdAt:desc) or abbreviated
+      // (images_v6 = Relevancy), so match case-insensitively by prefix as well.
+      const sortByParam = p.get('sortBy') || p.get('sort');
+      if (sortByParam) {
+        const key = sortByParam.toLowerCase();
+        // "images_v6" with no suffix is CivitAI's Relevancy sort (default).
+        if (key === 'images_v6') {
+          els.filter_sort.value = '';
+        } else {
+          let sortVal = CIVITAI_SORT_VALUES[key];
+          if (!sortVal) {
+            // Try prefix match for abbreviated forms like "images_v6".
+            const match = Object.keys(CIVITAI_SORT_VALUES).find((k) => k.startsWith(key));
+            if (match) sortVal = CIVITAI_SORT_VALUES[match];
+          }
+          if (sortVal) els.filter_sort.value = sortVal;
+        }
+      }
+
+      const browsingLevel = p.get('browsingLevel');
+      if (browsingLevel) {
+        const level = parseInt(browsingLevel, 10);
+        if (!isNaN(level) && level > 0) {
+          // Find the NSFW dropdown option whose bitmask matches.
+          const nsfwSelect = els.filter_nsfw;
+          for (const opt of nsfwSelect.options) {
+            const optLevel = opt.value.split(',').map(Number).reduce((a, n) => a | n, 0);
+            if (optLevel === level) {
+              nsfwSelect.value = opt.value;
+              break;
+            }
+          }
+        }
+      }
+
+      // Trigger fresh search and update URL field
+      state.offset = 0;
+      state.hits = [];
+      executeSearch();
+      updateCivitaiUrlField();
+    } catch (_e) {
+      setStatus('Invalid CivitAI URL.', 'is-error');
+    }
+  }
+
   function saveScrollPosition() {
     try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch (_e) { /* quota */ }
   }
@@ -1008,6 +1195,34 @@
       state.offset = 0;
       state.hits = [];
       executeSearch();
+    });
+
+    // CivitAI URL field — live update + Go button + paste-to-apply
+    const filterElsForUrl = [
+      els.search_query, els.filter_tags, els.filter_sort,
+      els.filter_base_model, els.filter_username, els.filter_nsfw,
+    ];
+    for (const el of filterElsForUrl) {
+      if (!el) continue;
+      el.addEventListener('input', updateCivitaiUrlField);
+      el.addEventListener('change', updateCivitaiUrlField);
+    }
+
+    // Go button — open generated URL in a new tab
+    els.civitai_url_go.addEventListener('click', () => {
+      const url = els.civitai_url.value.trim();
+      if (url) window.open(url, '_blank', 'noopener');
+    });
+
+    // Paste handler — parse pasted CivitAI URL and apply filters
+    els.civitai_url.addEventListener('paste', (e) => {
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      if (text && /civitai\./.test(text)) {
+        e.preventDefault();
+        els.civitai_url.value = text.trim();
+        els.civitai_url.blur();
+        applyCivitaiUrl(text);
+      }
     });
 
     // Load more — manual fallback; infinite scroll is primary
@@ -1388,6 +1603,16 @@
       const data = await res.json();
       // Backend returns a flat list of artist objects.
       const artists = Array.isArray(data) ? data : [];
+      // Cache by artist_name (lowercase) and artist_id for O(1) lookup.
+      state.artistSummaryMap = {};
+      for (const a of artists) {
+        if (a.artist_name) {
+          state.artistSummaryMap[a.artist_name.toLowerCase()] = a;
+        }
+        if (a.artist_id) {
+          state.artistSummaryMap['id:' + a.artist_id] = a;
+        }
+      }
       renderArtistSummary(artists);
     } catch (err) {
       console.warn('Artist summary fetch failed:', err);
@@ -1430,6 +1655,12 @@
         keep.className = 'artist-row-stat is-keep';
         keep.textContent = `↑${a.keeps}`;
         stats.appendChild(keep);
+      }
+      if (a.skips > 0) {
+        const skip = document.createElement('span');
+        skip.className = 'artist-row-stat is-skip';
+        skip.textContent = `→${a.skips}`;
+        stats.appendChild(skip);
       }
       if (a.discards > 0) {
         const discard = document.createElement('span');
@@ -1482,6 +1713,133 @@
     } catch (err) {
       console.error('Failed to toggle artist block:', err);
       setStatus(`Failed to ${shouldBlock ? 'block' : 'unblock'} artist: ${err.message}`, 'is-error');
+    }
+  }
+
+  /**
+   * Block or unblock the current image's artist **from fullscreen mode**.
+   *
+   * This is the 'b' shortcut handler.  It does NOT re-run the search or
+   * exit fullscreen:
+   *
+   *  • Blocking (artist not currently blocked):
+   *    Acts like 'x' (discard) for the current image, then immediately
+   *    marks **all other loaded images from the same artist** as
+   *    discarded so their tiles are hidden by the discard filter.
+   *    The artist is blocked on the backend so the next page load will
+   *    exclude them.  We then advance to the next visible image.
+   *
+   *  • Unblocking (artist already blocked):
+   *    Just toggles the block off.  Useful when a user explicitly
+   *    searched for a blocked artist and found a good image.
+   */
+  async function blockArtistFromFullscreen() {
+    const hit = state.hits[state.selectedHitIndex];
+    if (!hit) return;
+
+    const user = hit && typeof hit.user === 'object' ? hit.user : null;
+    const name = String(user?.username || hit?.username || '').trim();
+    if (!name) return;
+
+    const userId = user?.id ?? null;
+
+    // Determine current blocked state from the summary map.
+    const summaryMap = state.artistSummaryMap || {};
+    let entry = summaryMap[name.toLowerCase()];
+    if (!entry && userId) entry = summaryMap['id:' + userId];
+    const isBlocked = !!(entry && entry.is_blocked);
+
+    if (!isBlocked) {
+      // ── BLOCK: batch-discard all same-artist hits ──
+      // Collect all loaded images from this artist.
+      const sameArtistHits = state.hits.filter((h) => {
+        const hu = h && typeof h.user === 'object' ? h.user : null;
+        const hn = String(hu?.username || h?.username || '').trim().toLowerCase();
+        return hn === name.toLowerCase();
+      });
+
+      // Optimistically mark every same-artist hit as 'discard'.
+      sameArtistHits.forEach((h) => {
+        state.imageRatings.set(h.id, 'discard');
+      });
+
+      // Hide the tiles immediately.
+      applyHideFilters();
+      checkAutoLoadIfAllHidden();
+
+      // Fire-and-forget the backend batch discard + block.
+      const imageIds = sameArtistHits.map((h) => h.id).filter((v) => v != null);
+      fetch(API_ARTIST_DISCARD, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artist_name: name,
+          artist_id: userId,
+          image_ids: imageIds,
+          search_id: state.currentSearchId ?? null,
+          is_blocked: true,
+        }),
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(() => {
+          // Update summary map so the chip reflects blocked state.
+          if (entry) {
+            entry.is_blocked = true;
+            entry.discards = (entry.discards || 0) + imageIds.length;
+          } else {
+            state.artistSummaryMap[name.toLowerCase()] = {
+              artist_id: userId,
+              artist_name: name,
+              keeps: 0,
+              skips: 0,
+              discards: imageIds.length,
+              score: -imageIds.length,
+              is_blocked: true,
+            };
+          }
+          renderFullscreenArtistStats(user, name);
+          // Also refresh summary from backend (non-blocking).
+          fetchArtistSummary();
+        })
+        .catch((err) =>
+          console.error('Batch discard failed:', err)
+        );
+
+      // Advance to the next visible image — stay in fullscreen.
+      navigateFullscreen(1);
+
+      setStatus(
+        `Blocked "${name}" — ${imageIds.length} image(s) discarded`,
+        'is-info'
+      );
+    } else {
+      // ── UNBLOCK: simple toggle, no discarding ──
+      fetch(API_ARTIST_BLOCK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artist_name: name,
+          artist_id: userId,
+          is_blocked: false,
+        }),
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(() => {
+          if (entry) entry.is_blocked = false;
+          renderFullscreenArtistStats(user, name);
+          fetchArtistSummary();
+        })
+        .catch((err) =>
+          console.error('Unblock failed:', err)
+        );
+
+      setStatus(`Unblocked "${name}"`, 'is-info');
     }
   }
 
@@ -1798,7 +2156,7 @@
     const body = {
       query: query || undefined,
       tags: tags ? tags.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
-      sort_by: sortBy,
+      sort_by: sortBy || undefined,
       limit: state.limit,
       offset: state.offset,
       nsfw_levels: nsfwLevels ? nsfwLevels.split(',').map(Number) : undefined,
@@ -1868,6 +2226,7 @@
 
       // Persist search state to URL
       saveStateToUrl();
+      updateCivitaiUrlField();
 
       // Select first visible tile on fresh search (respecting hide filters)
       if (!append && state.hits.length > 0) {
@@ -2046,12 +2405,12 @@
       btn.insertBefore(indicator, btn.firstChild);
     }
 
-    // "In Library" badge for imported images
+    // "Saved" badge for images already in the gallery
     if (state.importedIds.has(hit.id)) {
       const badge = document.createElement('span');
       badge.className = 'tile-in-library-badge';
-      badge.textContent = '✓ In Library';
-      badge.title = 'This image is already in your library';
+      badge.textContent = '✓ Saved';
+      badge.title = 'This image is already saved in your gallery';
       btn.appendChild(badge);
     }
 
@@ -2509,25 +2868,79 @@
 
   /* ── Fullscreen ── */
 
-  /* Preload cache: mid-res URLs for adjacent images so navigation is instant. */
-  const _preloadCache = new Map(); // civitaiId → 'loaded' | HTMLImageElement
+  /* Cache-through original preservation and bounded adjacent prefetch. */
+  const _preloadCache = new Map(); // civitaiId → preserved URL
+  const _preserveRequests = new Map(); // civitaiId → Promise<string|null>
+  const _preserveQueue = [];
   const PRELOAD_RANGE = 2; // preload ±2 neighbors
   let _fullscreenLoadGeneration = 0;
+  let _preserveQueueRunning = false;
+  let _preserveResultSet = null;
+
+  async function _preserveOriginal(hit) {
+    if (!hit?.id || isVideoHit(hit)) return null;
+    if (hit.preserved_url) {
+      _preloadCache.set(hit.id, hit.preserved_url);
+      return hit.preserved_url;
+    }
+    if (_preloadCache.has(hit.id)) return _preloadCache.get(hit.id);
+    if (_preserveRequests.has(hit.id)) return _preserveRequests.get(hit.id);
+
+    const request = fetch(API_PRESERVE_IMAGE(hit.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(hit),
+    })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        const data = await response.json();
+        const url = data?.preserved_url || null;
+        if (!url) return null;
+        _preloadCache.set(hit.id, url);
+        hit.preserved_url = url;
+        hit.url = url;
+        hit.mid_res_url = url;
+        return url;
+      })
+      .catch(() => null)
+      .finally(() => _preserveRequests.delete(hit.id));
+    _preserveRequests.set(hit.id, request);
+    return request;
+  }
+
+  async function _drainPreserveQueue() {
+    if (_preserveQueueRunning) return;
+    _preserveQueueRunning = true;
+    try {
+      while (_preserveQueue.length) {
+        if (document.hidden || navigator.connection?.saveData) break;
+        const queued = _preserveQueue.shift();
+        if (queued.resultSet === _preserveResultSet) await _preserveOriginal(queued.hit);
+      }
+    } finally {
+      _preserveQueueRunning = false;
+    }
+  }
 
   function _preloadAdjacent(index) {
-    for (let d = -PRELOAD_RANGE; d <= PRELOAD_RANGE; d++) {
+    if (document.hidden || navigator.connection?.saveData) return;
+    const resultSet = state.hits;
+    if (_preserveResultSet !== resultSet) {
+      _preserveResultSet = resultSet;
+      _preserveQueue.length = 0;
+    }
+    for (let distance = 1; distance <= PRELOAD_RANGE; distance++) {
+      for (const d of [distance, -distance]) {
       const i = index + d;
       if (i < 0 || i >= state.hits.length) continue;
       const hit = state.hits[i];
-      const midUrl = hit.mid_res_url || hit.url;
-      if (!midUrl || _preloadCache.has(hit.id)) continue;
-      const img = new Image();
-      img.decoding = 'async';
-      img.onload = () => _preloadCache.set(hit.id, 'loaded');
-      img.onerror = () => {}; // silent — preloading is best-effort
-      img.src = midUrl;
-      _preloadCache.set(hit.id, img); // store the HTMLImageElement while loading
+      if (!hit?.id || isVideoHit(hit) || _preloadCache.has(hit.id) || _preserveRequests.has(hit.id)) continue;
+      if (!_preserveQueue.some(candidate => candidate.hit.id === hit.id)) {
+        _preserveQueue.push({ hit, resultSet });
+      }
+      }
     }
+    void _drainPreserveQueue();
   }
 
   function _setFullscreenImage(hit) {
@@ -2562,7 +2975,7 @@
     // the CivitAI CDN's 1260px tier upscales typical AI images (512-1216px),
     // causing interpolation artifacts.
     const thumbUrl = hit.thumbnail_url || '';
-    const midUrl = hit.mid_res_url || hit.url || '';
+    const localUrl = hit.preserved_url || _preloadCache.get(hit.id) || '';
     const placeholderUrl = blurHashToDataURL(hit.blurhash || hit.hash || '', 32, 32);
     let appliedRank = -1;
 
@@ -2590,33 +3003,25 @@
       0,
     );
 
-    // If the full-res is already preloaded, use it directly
-    if (_preloadCache.get(hit.id) === 'loaded' && midUrl) {
-      _applySource('original', midUrl, 2);
-      return;
+    if (localUrl) {
+      _applySource('original', localUrl, 2);
+    } else {
+      _preserveOriginal(hit).then((preservedUrl) => {
+        if (
+          preservedUrl
+          && loadGeneration === _fullscreenLoadGeneration
+          && state.hits[state.selectedHitIndex]?.id === hit.id
+        ) {
+          _applySource('original', preservedUrl, 2);
+        }
+      });
     }
 
     // Keep the placeholder visible until the thumbnail has actually loaded.
     if (thumbUrl) {
       retryImageLoad(thumbUrl, `thumb_${hit.id}`).then((ok) => {
         if (!ok || loadGeneration !== _fullscreenLoadGeneration) return;
-        const sourceTier = thumbUrl === midUrl ? 'original' : 'thumbnail';
-        _applySource(sourceTier, thumbUrl, sourceTier === 'original' ? 2 : 1);
-      });
-    }
-
-    // Upgrade to full-res original in background with automatic retry
-    if (midUrl && midUrl !== thumbUrl) {
-      retryImageLoad(midUrl, `mid_${hit.id}`).then((ok) => {
-        // Only apply if user hasn't navigated away
-        if (
-          ok
-          && loadGeneration === _fullscreenLoadGeneration
-          && state.hits[state.selectedHitIndex]?.id === hit.id
-        ) {
-          _applySource('original', midUrl, 2);
-          _preloadCache.set(hit.id, 'loaded');
-        }
+        _applySource('thumbnail', thumbUrl, 1);
       });
     }
   }
@@ -2756,6 +3161,10 @@
     els.fullscreen_uploaded_at.textContent = '';
     els.fullscreen_uploaded_at.removeAttribute('datetime');
     els.fullscreen_uploaded_at.removeAttribute('title');
+    if (els.fullscreen_artist_stats) {
+      els.fullscreen_artist_stats.innerHTML = '';
+      els.fullscreen_artist_stats.classList.add('hidden');
+    }
   }
 
   function formatRelativeUploadTime(value) {
@@ -2820,6 +3229,86 @@
     } else {
       fetchInlineArtistAvatar(hit);
     }
+
+    // Render rating stats (keep/skip/discard thumbs) next to the artist name.
+    renderFullscreenArtistStats(user, username);
+  }
+
+  /**
+   * Render keep/skip/discard thumbs icons for the current fullscreen artist.
+   * Looks up the cached artist-summary entry by name or id.
+   */
+  function renderFullscreenArtistStats(user, username) {
+    const container = els.fullscreen_artist_stats;
+    if (!container) return;
+    container.innerHTML = '';
+
+    const summaryMap = state.artistSummaryMap || {};
+    const artistId = user?.id ?? null;
+    let entry = null;
+    if (username && summaryMap[username.toLowerCase()]) {
+      entry = summaryMap[username.toLowerCase()];
+    } else if (artistId && summaryMap['id:' + artistId]) {
+      entry = summaryMap['id:' + artistId];
+    }
+
+    if (!entry) {
+      container.classList.add('hidden');
+      return;
+    }
+
+    const hasStats = (entry.keeps || 0) > 0 || (entry.skips || 0) > 0 || (entry.discards || 0) > 0;
+    if (!hasStats && !entry.is_blocked) {
+      container.classList.add('hidden');
+      return;
+    }
+
+    container.classList.remove('hidden');
+
+    if ((entry.keeps || 0) > 0) {
+      container.appendChild(makeFsStat('keep', entry.keeps));
+    }
+    if ((entry.skips || 0) > 0) {
+      container.appendChild(makeFsStat('skip', entry.skips));
+    }
+    if ((entry.discards || 0) > 0) {
+      container.appendChild(makeFsStat('discard', entry.discards));
+    }
+
+    if (entry.is_blocked) {
+      const badge = document.createElement('span');
+      badge.className = 'fs-artist-blocked';
+      badge.textContent = 'Blocked';
+      container.appendChild(badge);
+    }
+  }
+
+  /**
+   * Build a single stat chip: SVG thumbs icon + count.
+   * kind is "keep" (up), "skip" (sideways), or "discard" (down).
+   */
+  function makeFsStat(kind, count) {
+    const wrap = document.createElement('span');
+    wrap.className = 'fs-stat is-' + kind;
+    wrap.title = `${kind.charAt(0).toUpperCase() + kind.slice(1)}: ${count}`;
+    const icons = {
+      keep: 'M2 10h2v8H2v-8zm4 0V6.5C6 5.12 7.12 4 8.5 4H9V2h1.5C12 2 13 3.5 13 5.5S12 9 10.5 9H9v1h5l3 3v5H6V10z',
+      skip: 'M2 10h2v8H2v-8zm4 0V6.5C6 5.12 7.12 4 8.5 4H9v5h6c.55 0 1 .45 1 1v4c0 .55-.45 1-1 1H6V10z',
+      discard: 'M2 16h2v-8H2v8zm4 0V6.5C6 5.12 7.12 4 8.5 4H9v5h6c.55 0 1-.45 1-1V8c0-.55-.45-1-1-1H9V6h1.5C12 6 13 4.5 13 2.5S12 0 10.5 0H9v2h-.5C7.12 2 6 3.12 6 4.5V16z',
+    };
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 20');
+    svg.setAttribute('fill', 'currentColor');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS(svgNs, 'path');
+    path.setAttribute('d', icons[kind] || '');
+    svg.appendChild(path);
+    wrap.appendChild(svg);
+    const num = document.createElement('span');
+    num.textContent = String(count);
+    wrap.appendChild(num);
+    return wrap;
   }
 
   function renderFullscreenTags(hit) {
@@ -2905,6 +3394,25 @@
       if (e.key === 'Home') { const fi = nextVisibleIndex(0, 1); if (fi >= 0) { selectTile(fi); navigateFullscreenTo(fi); } return; }
       if (e.key === 'End') { const li = nextVisibleIndex(state.hits.length - 1, -1); if (li >= 0) { selectTile(li); navigateFullscreenTo(li); } return; }
       if (e.key === ' ') { e.preventDefault(); toggleFullscreenSelection(); return; }
+      // b — block/unblock the current artist
+      if (!isTyping && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault();
+        blockArtistFromFullscreen();
+        return;
+      }
+      // v — view the current artist's page on CivitAI
+      if (!isTyping && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault();
+        const hit = state.hits[state.selectedHitIndex];
+        if (hit) {
+          const user = hit && typeof hit.user === 'object' ? hit.user : null;
+          const name = String(user?.username || hit?.username || '').trim();
+          if (name) {
+            window.open(`${CIVITAI_WEB_URL}/user/${encodeURIComponent(name)}`, '_blank', 'noopener');
+          }
+        }
+        return;
+      }
       return;
     }
 

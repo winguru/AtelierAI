@@ -26,6 +26,7 @@ from typing import Any, Optional
 import requests
 
 from .http_client import CivitaiRequestError
+from .response_archive import CivitaiResponseArchive
 
 _log = logging.getLogger(__name__)
 
@@ -125,6 +126,32 @@ class CivitaiSearchClient:
         self._session_cookie = session_cookie
         self._timeout = timeout
         self._backend = backend
+        self._response_archive = CivitaiResponseArchive()
+
+    def _record_search_response(
+        self,
+        *,
+        endpoint: str,
+        method: str,
+        url: str,
+        request: dict[str, Any],
+        response: Any = None,
+        status_code: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        try:
+            self._response_archive.record(
+                kind="search",
+                endpoint=endpoint,
+                method=method,
+                url=url,
+                request=request,
+                response=response,
+                status_code=status_code,
+                error=error,
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Key acquisition
@@ -187,8 +214,13 @@ class CivitaiSearchClient:
         extra_filters: Optional[list[str]] = None,
         matching_strategy: Optional[str] = None,
         users: Optional[list[str]] = None,
+        viewer_username: Optional[str] = None,
     ) -> dict[str, Any]:
         """Search for images using Meilisearch (preferred) or REST API fallback.
+
+        ``viewer_username`` is the logged-in CivitAI user (if known).  It is
+        used in the POI filter so the viewer can still see their own POI
+        images while hiding everyone else's.
 
         Returns a normalised result dict with keys:
         ``hits``, ``estimatedTotalHits``, ``offset``, ``limit``,
@@ -218,6 +250,7 @@ class CivitaiSearchClient:
                         extra_filters=extra_filters,
                         matching_strategy=matching_strategy,
                         users=users,
+                        viewer_username=viewer_username,
                     )
                     result["backend"] = "meilisearch"
                     return result
@@ -264,6 +297,7 @@ class CivitaiSearchClient:
                                 extra_filters=extra_filters,
                                 matching_strategy=matching_strategy,
                                 users=users,
+                                viewer_username=viewer_username,
                             )
                             result["backend"] = "meilisearch"
                             _log.info(
@@ -301,6 +335,7 @@ class CivitaiSearchClient:
                                     extra_filters=extra_filters,
                                     matching_strategy=matching_strategy,
                                     users=users,
+                                    viewer_username=viewer_username,
                                 )
                                 result["backend"] = "meilisearch"
                                 _log.info(
@@ -378,6 +413,7 @@ class CivitaiSearchClient:
         extra_filters: Optional[list[str]],
         matching_strategy: Optional[str] = None,
         users: Optional[list[str]] = None,
+        viewer_username: Optional[str] = None,
     ) -> dict[str, Any]:
         """Execute a Meilisearch ``/multi-search`` request.
 
@@ -394,6 +430,7 @@ class CivitaiSearchClient:
             username=username,
             extra_filters=extra_filters,
             users=users,
+            viewer_username=viewer_username,
         )
 
         search_query = {
@@ -407,7 +444,7 @@ class CivitaiSearchClient:
             "limit": limit,
             "offset": offset,
             "filter": filters,
-            "sort": [sort_by],
+            "sort": [sort_by] if sort_by else [],
         }
         if matching_strategy in ("last", "all", "frequency"):
             search_query["matchingStrategy"] = matching_strategy
@@ -434,19 +471,58 @@ class CivitaiSearchClient:
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
+            self._record_search_response(
+                endpoint="meilisearch.multi-search",
+                method="POST",
+                url=url,
+                request=payload,
+                error=str(exc),
+            )
             raise CivitaiRequestError(
                 f"Meilisearch request failed: {exc}",
                 retryable=True,
             ) from exc
 
         if resp.status_code != 200:
+            self._record_search_response(
+                endpoint="meilisearch.multi-search",
+                method="POST",
+                url=url,
+                request=payload,
+                response=resp.text[:500],
+                status_code=resp.status_code,
+                error=f"HTTP {resp.status_code}",
+            )
             raise CivitaiRequestError(
                 f"Meilisearch returned HTTP {resp.status_code}: {resp.text[:500]}",
                 status_code=resp.status_code,
                 retryable=resp.status_code >= 500,
             )
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except requests.JSONDecodeError as exc:
+            self._record_search_response(
+                endpoint="meilisearch.multi-search",
+                method="POST",
+                url=url,
+                request=payload,
+                response=resp.text[:500],
+                status_code=resp.status_code,
+                error=f"Invalid JSON: {exc}",
+            )
+            raise CivitaiRequestError(
+                f"Meilisearch returned invalid JSON: {exc}",
+                status_code=resp.status_code,
+            ) from exc
+        self._record_search_response(
+            endpoint="meilisearch.multi-search",
+            method="POST",
+            url=url,
+            request=payload,
+            response=body,
+            status_code=resp.status_code,
+        )
         results = body.get("results", [])
 
         if not results:
@@ -503,19 +579,58 @@ class CivitaiSearchClient:
         try:
             resp = requests.get(url, params=params, timeout=self._timeout)
         except requests.RequestException as exc:
+            self._record_search_response(
+                endpoint="rest.images",
+                method="GET",
+                url=url,
+                request=params,
+                error=str(exc),
+            )
             raise CivitaiRequestError(
                 f"REST search request failed: {exc}",
                 retryable=True,
             ) from exc
 
         if resp.status_code != 200:
+            self._record_search_response(
+                endpoint="rest.images",
+                method="GET",
+                url=url,
+                request=params,
+                response=resp.text[:500],
+                status_code=resp.status_code,
+                error=f"HTTP {resp.status_code}",
+            )
             raise CivitaiRequestError(
                 f"REST search returned HTTP {resp.status_code}: {resp.text[:500]}",
                 status_code=resp.status_code,
                 retryable=resp.status_code >= 500,
             )
 
-        body = resp.json()
+        try:
+            body = resp.json()
+        except requests.JSONDecodeError as exc:
+            self._record_search_response(
+                endpoint="rest.images",
+                method="GET",
+                url=url,
+                request=params,
+                response=resp.text[:500],
+                status_code=resp.status_code,
+                error=f"Invalid JSON: {exc}",
+            )
+            raise CivitaiRequestError(
+                f"REST search returned invalid JSON: {exc}",
+                status_code=resp.status_code,
+            ) from exc
+        self._record_search_response(
+            endpoint="rest.images",
+            method="GET",
+            url=url,
+            request=params,
+            response=body,
+            status_code=resp.status_code,
+        )
         items = body.get("items", [])
         metadata = body.get("metadata", {})
 
@@ -595,6 +710,24 @@ def _scrape_meili_key() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+# Base models that are subject to additional NSFW restrictions on CivitAI.
+# Images generated with these models are excluded from higher NSFW levels
+# (4, 8, 16, 32) even when the viewer's browsing level allows them, matching
+# CivitAI's server-side safety filter.
+_RESTRICTED_BASE_MODELS = [
+    "SD 3",
+    "SD 3.5",
+    "SD 3.5 Medium",
+    "SD 3.5 Large",
+    "SD 3.5 Large Turbo",
+    "SDXL Turbo",
+    "SVD",
+    "SVD XT",
+    "Stable Cascade",
+    "Ideogram 4.0",
+]
+
+
 def _build_meili_filters(
     *,
     tags: Optional[list[str]] = None,
@@ -606,6 +739,7 @@ def _build_meili_filters(
     username: Optional[str] = None,
     extra_filters: Optional[list[str]] = None,
     users: Optional[list[str]] = None,
+    viewer_username: Optional[str] = None,
 ) -> list[str]:
     """Build Meilisearch filter expressions from simplified parameters.
 
@@ -613,6 +747,11 @@ def _build_meili_filters(
     username produces ``user.username = "alice"``; multiple usernames
     produce ``(user.username = "alice" OR user.username = "bob")`` so
     Meilisearch scopes results to images by any of the listed artists.
+
+    ``viewer_username`` is the logged-in CivitAI user (if known).  It is used
+    in the POI filter so the viewer can still see their *own* POI images
+    while hiding everyone else's — matching CivitAI's server-side behaviour:
+    ``(poi != true OR user.username = "<viewer>")``.
     """
     filters: list[str] = []
 
@@ -623,26 +762,35 @@ def _build_meili_filters(
     if users:
         all_users.extend(u for u in users if u)
 
-    # Tag inclusion filters.
+    has_username = bool(all_users)
+
+    # Tag inclusion / exclusion filters.
     for tag in tags or []:
         filters.append(f'"tagNames"="{tag}"')
-
-    # Tag exclusion filters.
     for tag in exclude_tags or []:
         filters.append(f'"tagNames"!="{tag}"')
 
-    # NSFW level filter.
-    if nsfw_levels:
-        level_expr = " OR ".join(f"nsfwLevel={lv}" for lv in nsfw_levels)
-        filters.append(f"({level_expr})")
+    # POI / minor exclusion.
+    poi_filter = _build_poi_minor_filter(
+        exclude_poi=exclude_poi,
+        exclude_minor=exclude_minor,
+        has_username=has_username,
+        viewer_username=viewer_username,
+    )
+    if poi_filter:
+        filters.append(poi_filter)
 
-    # Base model filter.
+    # NSFW level + restricted-base-model cross-filter.
+    nsfw_filter = _build_nsfw_filter(nsfw_levels)
+    if nsfw_filter:
+        filters.append(nsfw_filter)
+
+    # Explicit base-model filter (user selection).
     if base_models:
         model_expr = " OR ".join(f'baseModel="{m}"' for m in base_models)
         filters.append(f"({model_expr})")
 
     # Username filter — scope results to images by the listed artist(s).
-    # ``user.username`` is the nested field in Meilisearch hits.
     if all_users:
         if len(all_users) == 1:
             filters.append(f'user.username = "{all_users[0]}"')
@@ -652,27 +800,78 @@ def _build_meili_filters(
             )
             filters.append(f"({or_expr})")
 
-    # Determine if any username filtering is active.
-    has_username = bool(all_users)
-
-    # POI / minor exclusion.
-    poi_minor_parts: list[str] = []
-    if exclude_poi and not has_username:
-        poi_minor_parts.append("poi != true")
-    elif exclude_poi and has_username:
-        # When filtering by user, POI exclusion would hide their POI images.
-        # Omit the POI filter so the user's full gallery is visible.
-        pass
-    if exclude_minor:
-        poi_minor_parts.append("minor != true")
-    if poi_minor_parts:
-        filters.append(" AND ".join(poi_minor_parts))
-
     # Extra raw filters (power-user passthrough).
     for ef in extra_filters or []:
         filters.append(ef)
 
     return filters
+
+
+def _build_poi_minor_filter(
+    *,
+    exclude_poi: bool,
+    exclude_minor: bool,
+    has_username: bool,
+    viewer_username: Optional[str],
+) -> str:
+    """Build the POI + minor safety filter expression.
+
+    CivitAI combines these into one AND-expression::
+
+        (poi != true OR user.username = "<viewer>") AND (minor != true)
+
+    When the viewer is logged in, their own POI images remain visible.
+    When filtering by a specific artist, POI exclusion is skipped entirely
+    so that artist's full gallery (including POI) is shown.
+    """
+    parts: list[str] = []
+    if exclude_poi:
+        if viewer_username:
+            parts.append(
+                f'(poi != true OR user.username = "{viewer_username}")'
+            )
+        elif not has_username:
+            parts.append("poi != true")
+        # else: has_username and no viewer → skip POI filter
+    if exclude_minor:
+        parts.append("minor != true")
+    return " AND ".join(parts)
+
+
+def _build_nsfw_filter(
+    nsfw_levels: Optional[list[int]],
+) -> str:
+    """Build the NSFW level + restricted-base-model cross-filter.
+
+    CivitAI applies a safety filter that excludes higher NSFW levels
+    (4, 8, 16, 32) for certain base models (SD 3, SD 3.5 variants, SDXL
+    Turbo, SVD, Stable Cascade, Ideogram) regardless of browsing level.
+    This is combined with the user's NSFW level preference in a single
+    AND-expression::
+
+        NOT (nsfwLevel IN [4, 8, 16, 32] AND baseModel IN [...])
+        AND (nsfwLevel=1 OR nsfwLevel=2 OR ...)
+
+    Returns an empty string when *nsfw_levels* is empty/None.
+    """
+    if not nsfw_levels:
+        return ""
+
+    parts: list[str] = []
+
+    # Safety cross-filter — only needed when restricted levels are present.
+    if any(lv in (4, 8, 16, 32) for lv in nsfw_levels):
+        models_quoted = ", ".join(f'"{m}"' for m in _RESTRICTED_BASE_MODELS)
+        parts.append(
+            f"NOT (nsfwLevel IN [4, 8, 16, 32] "
+            f"AND baseModel IN [{models_quoted}])"
+        )
+
+    # User's browsing-level preference.
+    level_expr = " OR ".join(f"nsfwLevel={lv}" for lv in nsfw_levels)
+    parts.append(f"({level_expr})")
+
+    return " AND ".join(parts)
 
 
 def _rest_item_to_meili_hit(item: dict[str, Any]) -> dict[str, Any]:

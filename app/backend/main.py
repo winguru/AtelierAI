@@ -5,7 +5,9 @@
 # 📄 docs: app/docs/memories/parity-workbench.md
 # 📄 docs: app/docs/memories/civitai-integration.md
 # ──────────────────────────────────────────────────────────────────────────────
-# pyright: reportArgumentType=false, reportAssignmentType=false, reportAttributeAccessIssue=false, reportOperatorIssue=false, reportOptionalOperand=false, reportPossiblyUnboundVariable=false
+# pyright: reportArgumentType=false, reportAssignmentType=false
+# pyright: reportAttributeAccessIssue=false, reportOperatorIssue=false
+# pyright: reportOptionalOperand=false, reportPossiblyUnboundVariable=false
 # main.py
 import argparse
 import base64
@@ -40,7 +42,7 @@ from fastapi import (
     status,
     Body,
 )
-from typing import Any, Callable, Generator, List, Optional, Literal, cast
+from typing import Any, Callable, Generator, List, Optional, Literal, TYPE_CHECKING, cast
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode, urlparse
 from uuid import uuid4
@@ -58,6 +60,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import atelierai.config as app_config
+
+if TYPE_CHECKING:
+    from services.query_model import SuggestRequest
 
 # Use absolute imports for consistency with our project structure
 from database import (
@@ -125,6 +130,7 @@ from services.gallery_query import GalleryQuery
 from services.gallery_tag_service import GalleryTagService
 from services.image_query_service import ImageQueryService
 from services.metadata_extraction import extract_civitai_nsfw_level
+from services.civitai_search_media import get_preserved_search_media
 from services.model_reference_service import ModelReferenceService
 from services.taxonomy_service import TaxonomyService
 from services.db_migrations import (
@@ -141,12 +147,15 @@ from services.db_migrations import (
     _ensure_civitai_post_id_column as _ensure_civitai_post_id_column,
     _ensure_civitai_cdn_url_column as _ensure_civitai_cdn_url_column,
     _ensure_civitai_post_title_index_columns as _ensure_civitai_post_title_index_columns,
+    _ensure_civitai_search_media_columns as _ensure_civitai_search_media_columns,
     _ensure_civitai_user_columns as _ensure_civitai_user_columns,
+    _ensure_civitai_user_banned_at_column as _ensure_civitai_user_banned_at_column,
     _ensure_civitai_uuid_column as _ensure_civitai_uuid_column,
     _ensure_collection_sync_columns as _ensure_collection_sync_columns,
     ensure_collection_civitai_mappings_table as _ensure_collection_civitai_mappings_table,
     _ensure_concept_prototype_columns as _ensure_concept_prototype_columns,
     _ensure_clip_embedding_columns as _ensure_clip_embedding_columns,
+    _ensure_artist_preference_skips_column as _ensure_artist_preference_skips_column,
     _ensure_expected_file_size_column as _ensure_expected_file_size_column,
     _ensure_file_hash_nonunique as _ensure_file_hash_nonunique,
     _ensure_image_lifecycle_columns as _ensure_image_lifecycle_columns,
@@ -226,6 +235,7 @@ def _reconstruct_source_url(url: Optional[str]) -> Optional[str]:
     return _build_civitai_url(
         url, getattr(app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red")
     )
+
 
 try:
     import imagehash  # pyright: ignore[reportMissingImports]
@@ -486,7 +496,7 @@ def _on_any_session_commit(_session: Session) -> None:
 
 
 def search_suggest_impl(
-    body: "SuggestRequest",  # noqa: F821
+    body: "SuggestRequest",
     db: Session,
 ) -> dict:
     """Return autocomplete suggestions scoped to the filtered image set.
@@ -1396,9 +1406,6 @@ def _commit_with_lock_retry(db: Session, context: str = "database write") -> Non
 
 
 # ── Migration functions extracted to services/db_migrations.py ──────────────
-
-
-
 
 def _parse_civitai_image_id(value: str) -> int:
     cleaned = (value or "").strip()
@@ -8064,11 +8071,16 @@ def _get_runtime_warnings() -> list[str]:
     warnings: list[str] = []
     if not is_exiftool_available():
         warnings.append(
-            "exiftool is not installed or not on PATH. Video metadata extraction is limited; imports still continue."
+            "exiftool is not installed or not on PATH. Video metadata extraction "
+            "is limited; imports still continue."
         )
     if not is_ffmpeg_available():
         warnings.append(
-            "ffmpeg is not installed or not on PATH. Server-generated video posters are unavailable, so the gallery falls back to browser-generated static posters plus hover preview. Install ffmpeg to improve video thumbnail support; on macOS with Homebrew, run 'brew install ffmpeg'."
+            "ffmpeg is not installed or not on PATH. Server-generated video "
+            "posters are unavailable, so the gallery falls back to "
+            "browser-generated static posters plus hover preview. Install "
+            "ffmpeg to improve video thumbnail support; on macOS with "
+            "Homebrew, run 'brew install ffmpeg'."
         )
     return warnings
 
@@ -8104,10 +8116,10 @@ def _find_existing_image_by_source_url(
                 .all()
             )
             if indexed_matches:
-                for status in ("active", "placeholder", "tombstoned", "deleted"):
+                for image_status in ("active", "placeholder", "tombstoned", "deleted"):
                     for candidate in indexed_matches:
                         candidate_status = (candidate.image_status or "active").lower()
-                        if candidate_status == status:
+                        if candidate_status == image_status:
                             return candidate
 
     direct_matches = (
@@ -8118,10 +8130,10 @@ def _find_existing_image_by_source_url(
     )
     if direct_matches:
         # Priority: active > placeholder > tombstoned > deleted
-        for status in ("active", "placeholder", "tombstoned", "deleted"):
+        for image_status in ("active", "placeholder", "tombstoned", "deleted"):
             for candidate in direct_matches:
                 candidate_status = (candidate.image_status or "active").lower()
-                if candidate_status == status:
+                if candidate_status == image_status:
                     return candidate
 
     # Cross-domain fallback: images imported when CIVITAI_WEB_BASE_URL used a
@@ -8142,10 +8154,10 @@ def _find_existing_image_by_source_url(
             .all()
         )
         if cross_domain_matches:
-            for status in ("active", "placeholder", "tombstoned", "deleted"):
+            for image_status in ("active", "placeholder", "tombstoned", "deleted"):
                 for candidate in cross_domain_matches:
                     candidate_status = (candidate.image_status or "active").lower()
-                    if candidate_status == status:
+                    if candidate_status == image_status:
                         return candidate
 
     # Back-compat fallback: older rows may have source_url only in sidecar JSON.
@@ -8174,10 +8186,10 @@ def _find_existing_image_by_source_url(
             continue
 
     if fallback_matches:
-        for status in ("active", "placeholder", "tombstoned", "deleted"):
+        for image_status in ("active", "placeholder", "tombstoned", "deleted"):
             for candidate in fallback_matches:
                 candidate_status = (candidate.image_status or "active").lower()
-                if candidate_status == status:
+                if candidate_status == image_status:
                     return candidate
 
     return None
@@ -9071,8 +9083,12 @@ def _fetch_civitai_user_image_collections(
                     .all()
                 )
                 for r in legacy_rows:
-                    if r.civitai_collection_id and r.civitai_collection_id not in by_civitai_id:
-                        by_civitai_id[r.civitai_collection_id] = r
+                    civitai_collection_id = getattr(r, "civitai_collection_id", None)
+                    if (
+                        civitai_collection_id is not None
+                        and civitai_collection_id not in by_civitai_id
+                    ):
+                        by_civitai_id[civitai_collection_id] = r
 
         for col in collections:
             db_col = by_civitai_id.get(col["id"])
@@ -9942,6 +9958,159 @@ def _log_civitai_unavailable_item(detail: dict[str, Any]) -> None:
     )
 
 
+def _try_cached_import(
+    db: Session,
+    image_id: int,
+    *,
+    attach_collection_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Import from locally preserved media when CivitAI is unavailable."""
+    try:
+        preserved = get_preserved_search_media(image_id)
+    except Exception:
+        return None
+    if preserved is None or not preserved.absolute_path.exists():
+        return None
+
+    source_url = _build_civitai_image_source_url(image_id)
+    existing = _find_existing_image_by_source_url(db, source_url)
+    if existing is not None and existing.image_status == "active":
+        if _is_local_media_usable(
+            Path(IMAGE_LIBRARY_PATH) / str(existing.file_path), existing.mimetype
+        ):
+            if attach_collection_id is not None:
+                _ensure_image_in_collection(db, existing.id, attach_collection_id)
+            return {
+                "image_id": image_id,
+                "image_db_id": existing.id,
+                "images_added": 0,
+                "images_skipped": 1,
+                "images_recovered": 0,
+                "json_files_created": 0,
+                "metadata_backfilled": False,
+                "skip_reason": "existing_source_url",
+                "existing_image_id": existing.id,
+                "existing_file_hash": existing.file_hash,
+                "existing_file_path": existing.file_path,
+                "existing_source_url": existing.source_url,
+                "error": None,
+                "cancelled": False,
+            }
+
+    # Remove placeholder/stale record before fresh ingest
+    if existing is not None:
+        _remove_local_image_record(db, existing)
+
+    try:
+        ingest_result = ImageCollection(db).ingest_uploaded_file(
+            uploaded_file_path=preserved.absolute_path,
+            original_filename=f"civitai_{image_id}",
+            artist_name=None,
+            source_url=source_url,
+            license_id=None,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Cached import failed for CivitAI image %s: %s", image_id, exc
+        )
+        return None
+
+    resolved_image_db_id = (
+        ingest_result.get("image_id") or ingest_result.get("existing_image_id")
+    )
+    image_db_id = (
+        resolved_image_db_id if isinstance(resolved_image_db_id, int) else None
+    )
+
+    if isinstance(image_db_id, int):
+        image = db.query(ImageModel).filter(ImageModel.id == image_db_id).first()
+        if image is not None:
+            image.civitai_image_id = image_id
+            image.source_url = source_url
+            image.source_site = "civitai"
+
+            # Enrich with Search Lab metadata when available (artist,
+            # uuid, blurhash, tags) since the CivitAI API is unavailable.
+            try:
+                from models import CivitaiSearchImage
+
+                search_img = (
+                    db.query(CivitaiSearchImage)
+                    .filter(CivitaiSearchImage.civitai_image_id == image_id)
+                    .first()
+                )
+                if search_img is not None:
+                    if search_img.uuid:
+                        uuid_value = _extract_civitai_uuid_from_url_hash(search_img.uuid)
+                        if uuid_value:
+                            image.civitai_uuid = uuid_value
+                    if search_img.blurhash:
+                        image.civitai_hash = search_img.blurhash
+                        merged_meta = (
+                            dict(image.json_metadata)
+                            if isinstance(image.json_metadata, dict)
+                            else {}
+                        )
+                        merged_meta["blurhash"] = search_img.blurhash
+                        image.json_metadata = merged_meta
+                    if search_img.artist_name:
+                        artist = ImageProcessor.find_or_create_artist(
+                            db, search_img.artist_name
+                        )
+                        if artist is not None:
+                            image.artist_id = artist.id
+                    if search_img.tags:
+                        tag_records = [
+                            {"name": t} for t in search_img.tags if isinstance(t, str) and t.strip()
+                        ]
+                        if tag_records:
+                            _upsert_civitai_authority_terms(db, {"tags": tag_records})
+                            _insert_tag_observations_for_image(
+                                db, image_db_id=image.id, tag_records=tag_records
+                            )
+                    if search_img.generation_prompt:
+                        merged_meta = (
+                            dict(image.json_metadata)
+                            if isinstance(image.json_metadata, dict)
+                            else {}
+                        )
+                        civitai_meta = merged_meta.get("civitai")
+                        if not isinstance(civitai_meta, dict):
+                            civitai_meta = {}
+                        civitai_meta["prompt"] = search_img.generation_prompt
+                        merged_meta["civitai"] = civitai_meta
+                        image.json_metadata = merged_meta
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Failed to enrich cached import metadata for image %s",
+                    image_id,
+                    exc_info=True,
+                )
+
+            if attach_collection_id is not None:
+                _ensure_image_in_collection(db, image_db_id, attach_collection_id)
+            _commit_with_lock_retry(
+                db, context=f"Cached import commit for CivitAI image {image_id}"
+            )
+
+    return {
+        "image_id": image_id,
+        "image_db_id": image_db_id,
+        "images_added": int(ingest_result.get("images_added", 0) or 0),
+        "images_skipped": int(ingest_result.get("images_skipped", 0) or 0),
+        "images_recovered": 0,
+        "json_files_created": 0,
+        "metadata_backfilled": False,
+        "skip_reason": "cached_import",
+        "existing_image_id": None,
+        "existing_file_hash": None,
+        "existing_file_path": None,
+        "existing_source_url": source_url,
+        "error": None,
+        "cancelled": False,
+    }
+
+
 def _build_civitai_unavailable_result(
     image_id: int,
     exc: Exception,
@@ -10344,6 +10513,91 @@ def _sync_civitai_tags_from_sidecar(db: Session, image_path: Path) -> None:
             pass
 
 
+def _enrich_from_search_lab_metadata(
+    db: Session, image: ImageModel, civitai_image_id: int
+) -> None:
+    """Populate missing artist/uuid/tags from Search Lab stored metadata."""
+    try:
+        from models import CivitaiSearchImage
+
+        search_img = (
+            db.query(CivitaiSearchImage)
+            .filter(CivitaiSearchImage.civitai_image_id == civitai_image_id)
+            .first()
+        )
+        if search_img is None:
+            return
+
+        changed = False
+
+        if image.civitai_uuid is None and search_img.uuid:
+            uuid_value = _extract_civitai_uuid_from_url_hash(search_img.uuid)
+            if uuid_value:
+                image.civitai_uuid = uuid_value
+                changed = True
+
+        if image.civitai_hash is None and search_img.blurhash:
+            image.civitai_hash = search_img.blurhash
+            changed = True
+
+        if image.artist_id is None and search_img.artist_name:
+            artist = ImageProcessor.find_or_create_artist(
+                db, search_img.artist_name
+            )
+            if artist is not None:
+                image.artist_id = artist.id
+                changed = True
+
+        if search_img.tags:
+            tag_records = [
+                {"name": t}
+                for t in search_img.tags
+                if isinstance(t, str) and t.strip()
+            ]
+            if tag_records:
+                _upsert_civitai_authority_terms(db, {"tags": tag_records})
+                _insert_tag_observations_for_image(
+                    db, image_db_id=image.id, tag_records=tag_records
+                )
+                changed = True
+
+        if search_img.generation_prompt:
+            merged_meta = (
+                dict(image.json_metadata)
+                if isinstance(image.json_metadata, dict)
+                else {}
+            )
+            civitai_meta = merged_meta.get("civitai")
+            if not isinstance(civitai_meta, dict):
+                civitai_meta = {}
+            if "prompt" not in civitai_meta:
+                civitai_meta["prompt"] = search_img.generation_prompt
+                merged_meta["civitai"] = civitai_meta
+                image.json_metadata = merged_meta
+                changed = True
+
+        if search_img.blurhash:
+            merged_meta = (
+                dict(image.json_metadata)
+                if isinstance(image.json_metadata, dict)
+                else {}
+            )
+            if "blurhash" not in merged_meta:
+                merged_meta["blurhash"] = search_img.blurhash
+                image.json_metadata = merged_meta
+                changed = True
+
+        if changed:
+            image.date_modified = datetime.utcnow()
+            db.flush()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to enrich image %s from Search Lab metadata",
+            civitai_image_id,
+            exc_info=True,
+        )
+
+
 def _handle_existing_civitai_image(
     db: Session,
     *,
@@ -10360,24 +10614,12 @@ def _handle_existing_civitai_image(
         getattr(existing_by_source, "image_status", None) or "active"
     ).lower()
     if existing_status == "placeholder":
-        if attach_collection_id is not None:
-            _ensure_image_in_collection(db, existing_by_source.id, attach_collection_id)
-        return {
-            "image_id": image_id,
-            "image_db_id": existing_by_source.id,
-            "images_added": 0,
-            "images_skipped": 1,
-            "images_recovered": 0,
-            "json_files_created": 0,
-            "metadata_backfilled": False,
-            "skip_reason": "placeholder_source_url",
-            "existing_image_id": existing_by_source.id,
-            "existing_file_hash": existing_by_source.file_hash,
-            "existing_file_path": existing_by_source.file_path,
-            "existing_source_url": existing_by_source.source_url,
-            "error": None,
-            "cancelled": False,
-        }, False
+        # A placeholder means a previous import attempt failed (e.g. the
+        # image was temporarily unavailable on CivitAI).  Remove the stale
+        # placeholder and fall through to a fresh download attempt so the
+        # user can retry imports that may now succeed.
+        _remove_local_image_record(db, existing_by_source)
+        return None, True
 
     if existing_status == "tombstoned":
         return {
@@ -10422,6 +10664,10 @@ def _handle_existing_civitai_image(
 
     existing_path = Path(IMAGE_LIBRARY_PATH) / str(existing_by_source.file_path)
     if _is_local_media_usable(existing_path, existing_by_source.mimetype):
+        # Ensure civitai_image_id is populated so library-status lookups
+        # work for legacy imports that only stored source_url.
+        if existing_by_source.civitai_image_id is None:
+            existing_by_source.civitai_image_id = image_id
         metadata_backfilled = False
         if backfill_metadata:
             metadata_backfilled = _ensure_civitai_metadata_for_existing_image(
@@ -10434,6 +10680,10 @@ def _handle_existing_civitai_image(
             # tags from the sidecar into authority_terms so that legacy
             # terms gain their external_tag_id during normal syncs.
             _sync_civitai_tags_from_sidecar(db, existing_path)
+
+        # Fall back to Search Lab metadata when the image is missing
+        # artist/uuid/tags (common for cached imports and legacy records).
+        _enrich_from_search_lab_metadata(db, existing_by_source, image_id)
         if attach_collection_id is not None:
             _ensure_image_in_collection(db, existing_by_source.id, attach_collection_id)
         return {
@@ -10624,14 +10874,20 @@ def _ingest_prepared_civitai_import(
                 image.civitai_post_id = prepared.civitai_post_id
 
             # Persist post title and index from CivitAI metadata.
-            if prepared.civitai_post_title and not image.civitai_post_title:
+            if (
+                prepared.civitai_post_title
+                and getattr(image, "civitai_post_title", None) is None
+            ):
                 image.civitai_post_title = prepared.civitai_post_title
             if prepared.civitai_post_index is not None and image.civitai_post_index is None:
                 image.civitai_post_index = prepared.civitai_post_index
 
             # Persist the actual CDN URL used for download (may differ from
             # source_url when fallback width-based routes are used).
-            if prepared.effective_image_url and not image.civitai_cdn_url:
+            if (
+                prepared.effective_image_url
+                and getattr(image, "civitai_cdn_url", None) is None
+            ):
                 image.civitai_cdn_url = prepared.effective_image_url
 
             # Persist declared file size from CivitAI metadata
@@ -10768,11 +11024,143 @@ def _cleanup_temp_file(path: Optional[Path]) -> None:
         pass
 
 
-def _build_civitai_empty_collection_message(collection_id: int) -> str:
-    return (
-        f"No importable items were returned for CivitAI collection {collection_id}. "
-        "The collection may be empty, unavailable, private, inaccessible to the current session, "
-        "or it may not be an image collection."
+@dataclass(frozen=True)
+class _CivitaiEmptyCollectionDiagnosis:
+    kind: Literal[
+        "post",
+        "empty",
+        "authentication",
+        "authorization",
+        "unavailable",
+        "response_mismatch",
+    ]
+    message: str
+    collection_json: dict[str, Any] = field(default_factory=dict)
+
+
+def _validate_civitai_session_for_empty_collection(
+    api: CivitaiAPI,
+) -> tuple[bool, bool, str]:
+    token = str(getattr(api, "session_cookie", "") or "").strip()
+    if len(token) < 100:
+        return False, True, "No valid CivitAI session cookie is configured."
+
+    from atelierai.civitai.civitai_auth import _validate_token_with_civitai
+
+    return _validate_token_with_civitai(token)
+
+
+def _diagnose_civitai_empty_collection(
+    api: CivitaiAPI,
+    collection_id: int,
+) -> _CivitaiEmptyCollectionDiagnosis:
+    collection_json: dict[str, Any] = {}
+    request_error: Optional[Exception] = None
+    try:
+        raw_data = api._make_raw_request(
+            "collection.getById",
+            {"id": collection_id},
+            strict=True,
+        )
+        if isinstance(raw_data, dict):
+            result = raw_data.get("result")
+            data = result.get("data") if isinstance(result, dict) else None
+            raw_json = data.get("json") if isinstance(data, dict) else None
+            if isinstance(raw_json, dict):
+                collection_json = raw_json
+    except Exception as exc:
+        request_error = exc
+
+    collection = collection_json.get("collection")
+    collection = collection if isinstance(collection, dict) else {}
+    permissions = collection_json.get("permissions")
+    permissions = permissions if isinstance(permissions, dict) else {}
+    collection_type = str(
+        collection.get("type") or permissions.get("collectionType") or ""
+    ).strip().lower()
+
+    if collection_type == "post":
+        return _CivitaiEmptyCollectionDiagnosis(
+            kind="post",
+            message="CivitAI returned a post collection.",
+            collection_json=collection_json,
+        )
+
+    is_authenticated, auth_failure_is_definitive, auth_message = (
+        _validate_civitai_session_for_empty_collection(api)
+    )
+    if not is_authenticated and auth_failure_is_definitive:
+        return _CivitaiEmptyCollectionDiagnosis(
+            kind="authentication",
+            message=(
+                f"CivitAI collection {collection_id} could not be imported because "
+                f"the configured CivitAI session is missing or expired. {auth_message} "
+                "Refresh the CivitAI session and retry."
+            ),
+            collection_json=collection_json,
+        )
+
+    can_read = permissions.get("read")
+    is_owner = permissions.get("isOwner")
+    if is_authenticated and (can_read is False or is_owner is False and not collection):
+        return _CivitaiEmptyCollectionDiagnosis(
+            kind="authorization",
+            message=(
+                f"The configured CivitAI account cannot access private collection {collection_id}. "
+                "Refresh or replace the CivitAI session using the account that owns or can view "
+                "the collection, then retry."
+            ),
+            collection_json=collection_json,
+        )
+
+    if collection:
+        reported_count = next(
+            (
+                value
+                for key in ("itemCount", "imageCount", "itemsCount")
+                if isinstance((value := collection.get(key)), int)
+            ),
+            None,
+        )
+        if reported_count and reported_count > 0:
+            return _CivitaiEmptyCollectionDiagnosis(
+                kind="response_mismatch",
+                message=(
+                    f"CivitAI collection {collection_id} reports {reported_count} items, but none "
+                    "could be decoded for import. CivitAI may have changed its collection response "
+                    "format; retry and inspect the archived API response if this continues."
+                ),
+                collection_json=collection_json,
+            )
+        return _CivitaiEmptyCollectionDiagnosis(
+            kind="empty",
+            message=(
+                f"CivitAI collection {collection_id} is accessible but contains no importable "
+                "image items."
+            ),
+            collection_json=collection_json,
+        )
+
+    if is_authenticated:
+        return _CivitaiEmptyCollectionDiagnosis(
+            kind="unavailable",
+            message=(
+                f"CivitAI collection {collection_id} does not exist or is not available to the "
+                "configured CivitAI account. If it is private, update the session using an account "
+                "that can view it."
+            ),
+            collection_json=collection_json,
+        )
+
+    error_suffix = f" Metadata request failed: {request_error}." if request_error else ""
+    return _CivitaiEmptyCollectionDiagnosis(
+        kind="response_mismatch",
+        message=(
+            f"CivitAI returned no importable items for collection {collection_id}, and session "
+            f"validation was inconclusive: {auth_message}.{error_suffix} Retry after checking "
+            "CivitAI availability and authentication."
+        ),
+        collection_json=collection_json,
     )
 
 
@@ -12165,7 +12553,7 @@ def _load_display_image_items_unified(
         db_user_neg_tags = getattr(image, "user_negative_tags", None)
         if isinstance(db_user_neg_tags, list) and db_user_neg_tags:
             merged["user_negative_tags"] = db_user_neg_tags
-        
+
         # Query CivitAI tags from image_concept_observations (post-backfill data)
         civitai_tag_rows = (
             db.query(AuthorityTerm.external_name)
@@ -12182,7 +12570,7 @@ def _load_display_image_items_unified(
             .all()
         )
         merged["civitai_tags"] = [row[0] for row in civitai_tag_rows if row[0]]
-        
+
         display_items.extend(
             _build_display_items_for_image(
                 image, merged, group_variants=group_variants,
@@ -12876,21 +13264,33 @@ def _process_civitai_image_ids(
 
                     traceback.print_exc()
                 db.rollback()
+                cached_result = None
                 if _is_civitai_remote_not_found_error(exc):
-                    result = _build_civitai_unavailable_result(
-                        image_id,
-                        exc,
-                        api=api,
-                        db=db,
-                        attach_collection_id=attach_collection_id,
-                        collection_id=(collection_context or {}).get("collection_id"),
-                        collection_name=(collection_context or {}).get(
-                            "collection_name"
-                        ),
-                        collection_item=_collection_context_item(
-                            collection_context, image_id
-                        ),
-                    )
+                    with SessionLocal() as cached_db:
+                        cached_result = _try_cached_import(
+                            cached_db,
+                            image_id,
+                            attach_collection_id=attach_collection_id,
+                        )
+                        if cached_result is not None:
+                            cached_db.commit()
+                    if cached_result is None:
+                        result = _build_civitai_unavailable_result(
+                            image_id,
+                            exc,
+                            api=api,
+                            db=db,
+                            attach_collection_id=attach_collection_id,
+                            collection_id=(collection_context or {}).get("collection_id"),
+                            collection_name=(collection_context or {}).get(
+                                "collection_name"
+                            ),
+                            collection_item=_collection_context_item(
+                                collection_context, image_id
+                            ),
+                        )
+                    else:
+                        result = cached_result
                 else:
                     result = _build_failed_civitai_import_result(image_id, str(exc))
                 _maybe_add_desired_image_db_id(result, desired_image_db_ids)
@@ -13007,24 +13407,36 @@ def _process_civitai_image_ids(
                         import traceback
 
                         traceback.print_exc()
+                    cached_result = None
                     if _is_civitai_remote_not_found_error(exc):
-                        with SessionLocal() as db:
-                            result = _build_civitai_unavailable_result(
+                        with SessionLocal() as cached_db:
+                            cached_result = _try_cached_import(
+                                cached_db,
                                 image_id,
-                                exc,
-                                api=api,
-                                db=db,
                                 attach_collection_id=attach_collection_id,
-                                collection_id=(collection_context or {}).get(
-                                    "collection_id"
-                                ),
-                                collection_name=(collection_context or {}).get(
-                                    "collection_name"
-                                ),
-                                collection_item=_collection_context_item(
-                                    collection_context, image_id
-                                ),
                             )
+                            if cached_result is not None:
+                                cached_db.commit()
+                        if cached_result is None:
+                            with SessionLocal() as db:
+                                result = _build_civitai_unavailable_result(
+                                    image_id,
+                                    exc,
+                                    api=api,
+                                    db=db,
+                                    attach_collection_id=attach_collection_id,
+                                    collection_id=(collection_context or {}).get(
+                                        "collection_id"
+                                    ),
+                                    collection_name=(collection_context or {}).get(
+                                        "collection_name"
+                                    ),
+                                    collection_item=_collection_context_item(
+                                        collection_context, image_id
+                                    ),
+                                )
+                        else:
+                            result = cached_result
                     else:
                         result = _build_failed_civitai_import_result(image_id, str(exc))
                     _maybe_add_desired_image_db_id(result, desired_image_db_ids)
@@ -13296,8 +13708,6 @@ def _run_civitai_post_collection_import_pipeline(
 
     # 2. Fetch all posts in the collection via two-tier fallback
     posts: list[dict] = []
-    _fallback_used: Optional[str] = None
-
     if post_ids:
         # Manual override: fetch each post individually by ID
         task_context.set_message(
@@ -13312,9 +13722,6 @@ def _run_civitai_post_collection_import_pipeline(
                     "Could not fetch post %s for collection %s",
                     pid, collection_id,
                 )
-        if posts:
-            _fallback_used = "manual_post_ids"
-
     if not posts:
         # Tier 1: standard collection query (finds published posts)
         posts = api.fetch_collection_posts(collection_id)
@@ -13383,7 +13790,6 @@ def _run_civitai_post_collection_import_pipeline(
 
                 if draft_items:
                     posts = draft_items
-                    _fallback_used = "draft_fallback"
                     logging.getLogger(__name__).info(
                         "Draft fallback found %d unpublished post(s) for user %s "
                         "in collection %s",
@@ -13596,48 +14002,22 @@ def _run_civitai_collection_import_pipeline(
         _archive_civitai_collection_items(normalized_items)
 
     if not collection_items:
-        # ── Probe: is this a post-type collection? ──
-        # image.getInfinite returns nothing for post-type collections.
-        # Check the collection metadata and redirect if needed.
-        try:
-            coll_data = api._make_raw_request(
-                "collection.getById",
-                {"id": collection_id},
-                strict=True,
+        diagnosis = _diagnose_civitai_empty_collection(api, collection_id)
+        if diagnosis.kind == "post":
+            collection = diagnosis.collection_json.get("collection")
+            collection = collection if isinstance(collection, dict) else {}
+            logging.getLogger(__name__).info(
+                "Collection %s is a post-type collection, redirecting to post collection pipeline.",
+                collection_id,
             )
-            coll_json = (
-                coll_data.get("result", {}).get("data", {}).get("json", {})
-                if isinstance(coll_data, dict)
-                else {}
+            return _run_civitai_post_collection_import_pipeline(
+                task_context,
+                api=api,
+                collection_id=collection_id,
+                collection_name=collection_name or str(collection.get("name") or ""),
+                limit=limit,
             )
-            coll_type = (
-                coll_json.get("collection", {})
-                .get("type", "")
-            ) if isinstance(coll_json.get("collection"), dict) else ""
-            if not coll_type:
-                permissions = coll_json.get("permissions", {})
-                coll_type = (
-                    permissions.get("collectionType", "")
-                    if isinstance(permissions, dict)
-                    else ""
-                )
-            if coll_type.strip().lower() == "post":
-                logging.getLogger(__name__).info(
-                    "Collection %s is a post-type collection, redirecting to post collection pipeline.",
-                    collection_id,
-                )
-                return _run_civitai_post_collection_import_pipeline(
-                    task_context,
-                    api=api,
-                    collection_id=collection_id,
-                    collection_name=collection_name or coll_json.get("collection", {}).get("name", ""),
-                    limit=limit,
-                )
-        except Exception as probe_exc:
-            logging.getLogger(__name__).debug(
-                "Collection type probe failed for %s: %s", collection_id, probe_exc
-            )
-        raise RuntimeError(_build_civitai_empty_collection_message(collection_id))
+        raise RuntimeError(diagnosis.message)
 
     seen_ids: set[int] = set()
     image_ids: list[int] = []
@@ -14947,6 +15327,7 @@ async def lifespan(app: FastAPI):
                         try:
                             Base.metadata.create_all(bind=engine, checkfirst=True)
                             _ensure_civitai_user_columns()
+                            _ensure_civitai_user_banned_at_column()
                             _ensure_civitai_creator_id_column()
                             _ensure_base_model_id_column()
                             _seed_civitai_base_models()
@@ -15033,6 +15414,7 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine, checkfirst=True)
     _ensure_image_lifecycle_columns()
     _ensure_collection_sync_columns()
+    _ensure_civitai_search_media_columns()
     _ensure_collection_civitai_mappings_table()
     _ensure_user_nsfw_columns()
     _ensure_civitai_uuid_column()
@@ -15051,6 +15433,7 @@ async def lifespan(app: FastAPI):
     _ensure_civitai_post_title_index_columns()
     _ensure_civitai_cdn_url_column()
     _ensure_civitai_user_columns()
+    _ensure_civitai_user_banned_at_column()
     _ensure_civitai_creator_id_column()
     _ensure_base_model_id_column()
     _seed_civitai_base_models()
@@ -15062,6 +15445,7 @@ async def lifespan(app: FastAPI):
     _ensure_expected_file_size_column()
     _ensure_concept_prototype_columns()
     _ensure_clip_embedding_columns()
+    _ensure_artist_preference_skips_column()
 
     # --- CLIP provider auto-detection ---
     from services.clip_provider import (
@@ -15106,7 +15490,7 @@ async def lifespan(app: FastAPI):
     print("Shutting down AtelierAI API...")
 
     # Cleanup CLIP provider
-    from services.clip_provider import get_clip_provider, close_http_client
+    from services.clip_provider import get_clip_provider
     provider = get_clip_provider()
     if provider is not None and hasattr(provider, "close"):
         try:
@@ -21144,7 +21528,7 @@ def civitai_auth_status():
 def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
     """Accept a manually-pasted CivitAI session cookie.
 
-    The caller supplies just the ``__Secure-civitai-token`` value (the long
+    The caller supplies just the ``__Secure-civ-token`` value (the long
     JWT-like string starting with ``eyJ``).  The endpoint validates it against
     CivitAI before persisting.
     """
@@ -23745,8 +24129,16 @@ def _sync_session_to_response(session: SyncSession) -> dict:
         "active_step": session.active_step,
         "error_message": session.error_message,
         "is_complete": session.is_complete,
-        "created_at": session.created_at.isoformat() if session.created_at else None,
-        "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+        "created_at": (
+            created_at.isoformat()
+            if (created_at := getattr(session, "created_at", None)) is not None
+            else None
+        ),
+        "updated_at": (
+            updated_at.isoformat()
+            if (updated_at := getattr(session, "updated_at", None)) is not None
+            else None
+        ),
     }
 
 
@@ -23810,7 +24202,7 @@ def sync_session_update_step(
     if payload.status == "in_progress":
         session.active_step = step
     elif payload.status in ("complete", "failed", "cancelled"):
-        if session.active_step == step:
+        if getattr(session, "active_step", None) == step:
             session.active_step = None
     if payload.error_message is not None:
         session.error_message = payload.error_message
@@ -23882,7 +24274,10 @@ def _checkpoint_sync_step(session_id: Optional[str], step: int, status: str,
                     setattr(session, f"step_{step}_data", data)
                 if status == "in_progress":
                     session.active_step = step
-                elif status in ("complete", "failed", "cancelled") and session.active_step == step:
+                elif (
+                    status in ("complete", "failed", "cancelled")
+                    and getattr(session, "active_step", None) == step
+                ):
                     session.active_step = None
                 if error_message is not None:
                     session.error_message = error_message
@@ -24658,8 +25053,13 @@ def sync_lab_ingest(
             _restore_db = SessionLocal()
             try:
                 _restore_sess = _restore_db.query(SyncSession).filter(SyncSession.id == session_id).first()
-                if _restore_sess and _restore_sess.prepared_imports:
-                    for _k, _v in _restore_sess.prepared_imports.items():
+                prepared_imports = (
+                    getattr(_restore_sess, "prepared_imports", None)
+                    if _restore_sess is not None
+                    else None
+                )
+                if prepared_imports:
+                    for _k, _v in prepared_imports.items():
                         _restored = _PreparedCivitaiImport(
                             image_id=_v["image_id"],
                             image_url=_v.get("image_url"),
@@ -24716,8 +25116,13 @@ def sync_lab_ingest(
                     _coll_name = f"CivitAI Collection {collection_id}"
                     if session_id:
                         _sess = db.query(SyncSession).filter(SyncSession.id == session_id).first()
-                        if _sess and _sess.collection_name:
-                            _coll_name = _sess.collection_name
+                        collection_name = (
+                            getattr(_sess, "collection_name", None)
+                            if _sess is not None
+                            else None
+                        )
+                        if collection_name:
+                            _coll_name = collection_name
                     try:
                         _get_or_create_collection(
                             db,

@@ -314,6 +314,9 @@ document.addEventListener('DOMContentLoaded', () => {
         taskStatusById: new Map(),
         taskRefreshInFlight: false,
         galleryRefreshInFlight: false,
+        // When true, the DOM tiles are stale (from a previous load) and
+        // renderGallery must do a full rebuild, not an incremental append.
+        galleryDomStale: false,
         lastRenderedGallerySignature: null,
         lastRenderedFilterSignature: null,
         lastRenderedSelectionSignature: null,
@@ -9477,9 +9480,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const fullscreenOpen = !fullscreenPreview.classList.contains('hidden');
 
         if (!state.filteredImages.length) {
+            // During a background refresh with stale tiles still visible,
+            // keep the old content rather than blanking out prematurely.
+            if (state.galleryDomStale && state.galleryRefreshInFlight) {
+                return;
+            }
             galleryGrid.innerHTML = state.galleryRefreshInFlight
                 ? '<p>Refreshing gallery...</p>'
                 : '<p>No items match your filter.</p>';
+            state.galleryDomStale = false;
             if (!state.galleryRefreshInFlight && !fullscreenOpen) {
                 showDetails(null);
             }
@@ -9488,9 +9497,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Append-only mode: only create tiles for newly added images.
         // This avoids a full innerHTML wipe when just adding the next page.
+        // When tiles are stale (from a background refresh that kept old DOM
+        // visible), always do a full rebuild — the offsets won't match.
         const existingTileCount = galleryGrid.querySelectorAll('.tile').length;
+        const canAppend = appendOnly && !state.galleryDomStale;
 
-        if (appendOnly && existingTileCount > 0 && existingTileCount < state.filteredImages.length) {
+        if (canAppend && existingTileCount > 0 && existingTileCount < state.filteredImages.length) {
             // Incremental append — skip the full rebuild.
             const fragment = document.createDocumentFragment();
             const startIndex = existingTileCount;
@@ -9508,6 +9520,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         galleryGrid.querySelectorAll('video').forEach((node) => releaseVideoElement(node));
         galleryGrid.innerHTML = '';
+        state.galleryDomStale = false;
         const fragment = document.createDocumentFragment();
 
         state.filteredImages.forEach((image) => {
@@ -10503,7 +10516,18 @@ document.addEventListener('DOMContentLoaded', () => {
         state.lastRenderedSelectionSignature = null;
         state.lastRenderedDetailKey = null;
         _clearPrefetch();
-        galleryGrid.innerHTML = '';
+        // For background refreshes (auto-refresh / task completion), keep the
+        // existing tiles visible as a stale snapshot until new data is ready.
+        // This prevents the distracting "blank then reload" flash during imports.
+        // The full rebuild in renderGallery() will atomically swap content.
+        if (showRefreshUi) {
+            galleryGrid.innerHTML = '';
+            state.galleryDomStale = false;
+        } else {
+            // Mark existing tiles as stale so renderGallery knows to do a full
+            // rebuild rather than an incremental append.
+            state.galleryDomStale = galleryGrid.querySelectorAll('.tile').length > 0;
+        }
         updatePagingUi();
 
         try {

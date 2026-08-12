@@ -78,18 +78,24 @@ class CivitaiPrivateScraper:
             print(f"Error fetching collection page: {exc}")
             return None, None
 
+        if debug:
+            print(f"  DEBUG: Request URL: {self.api.base_url}/{endpoint}")
+
+        # Handle CivitAI's column-oriented flat-array serialization format
+        # (image.getInfinite as of mid-2026). _make_raw_request unwraps the
+        # tRPC envelope, so the stringified flat array is returned directly.
+        flat_array_response = (
+            {"result": {"data": data}} if isinstance(data, str) else data
+        )
+        deserialized = self.api._deserialize_trpc_flat_array(flat_array_response)
+        if deserialized is not None:
+            return deserialized, deserialized.get("nextCursor")
+
         if not isinstance(data, dict):
             return None, None
 
-        if debug:
-            print(f"  DEBUG: Request URL: {self.api.base_url}/{endpoint}")
-        try:
-            next_cursor = (
-                data.get("result", {}).get("data", {}).get("json", {}).get("nextCursor")
-            )
-        except Exception:
-            next_cursor = None
-
+        # Legacy responses are also unwrapped by _make_raw_request.
+        next_cursor = data.get("nextCursor")
         return data, next_cursor
 
     def _check_duplicates(self, page_items: List[Dict], seen_item_ids: set) -> bool:

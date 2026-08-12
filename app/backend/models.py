@@ -45,6 +45,7 @@ class ObservationCertainty(enum.IntEnum):
     CONFIRMED = 2    # user verified
     # Future: UNCERTAIN = 3
 
+
 # 1. Define the values in a single, constant tuple. This is the source of truth.
 COLLECTION_TYPE_VALUES = ("public", "paid", "private", "user_created")
 
@@ -62,7 +63,8 @@ class ImageModel(Base):
     original_file_name = Column(String, nullable=True)
     file_hash = Column(String, index=True, nullable=False)  # Not unique — CivitAI duplicate assets can share the same SHA256
     file_size = Column(Integer)
-    expected_file_size = Column(Integer, nullable=True, comment="Size (bytes) declared by source API (e.g. CivitAI metadata.size). NULL for non-CivitAI images or before enrichment.")
+    expected_file_size = Column(Integer, nullable=True,
+                                comment="Size (bytes) declared by source API (e.g. CivitAI metadata.size). NULL for non-CivitAI images or before enrichment.")
     width = Column(Integer)
     height = Column(Integer)
     mimetype = Column(String, nullable=True)
@@ -611,6 +613,7 @@ class Artist(Base):
     # CivitAI user identity — survives account deletion
     civitai_user_id = Column(Integer, unique=True, nullable=True, index=True)
     civitai_user_deleted = Column(Boolean, nullable=True, default=False)
+    civitai_user_banned = Column(Boolean, nullable=True, default=False)
     civitai_user_original_name = Column(String, nullable=True)
 
     # Relationship back to images
@@ -1008,7 +1011,8 @@ class CivitaiUser(Base):
     civitai_user_id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     deleted_at = Column(DateTime, nullable=True)  # When the CivitAI account was deleted
-    original_name = Column(String, nullable=True)  # Name at time of deletion
+    banned_at = Column(DateTime, nullable=True)  # When the CivitAI account was banned
+    original_name = Column(String, nullable=True)  # Name at time of deletion/ban
     created_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=True)
     scraped_at = Column(DateTime, nullable=True)  # When we last saw this user
@@ -1418,8 +1422,6 @@ class PendingUserBinding(Base):
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # Concept Review and Training Support Models
 # ---------------------------------------------------------------------------
@@ -1708,6 +1710,10 @@ class CivitaiSearchImage(Base):
     uuid = Column(String, nullable=True)
     file_size = Column(Integer, nullable=True)
     image_url = Column(Text, nullable=True)
+    preserved_media_path = Column(Text, nullable=True)
+    preserved_media_mime = Column(String, nullable=True)
+    preserved_media_sha256 = Column(String, nullable=True)
+    preserved_source_url = Column(Text, nullable=True)
     tags = Column(JSON, nullable=True)
     generation_prompt = Column(Text, nullable=True)
     generation_models = Column(JSON, nullable=True)
@@ -1817,6 +1823,7 @@ class CivitaiArtistPreference(Base):
     artist_id = Column(Integer, nullable=True, index=True)
     artist_name = Column(String, nullable=False, index=True)
     keeps = Column(Integer, nullable=False, default=0)
+    skips = Column(Integer, nullable=False, default=0)
     discards = Column(Integer, nullable=False, default=0)
     is_blocked = Column(Boolean, nullable=False, default=False)
 

@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Any
 
 
 from .http_client import CivitaiHttpClient, CivitaiRequestError
+from .response_archive import CivitaiResponseArchive
 
 
 def _get_config_value(name: str) -> Optional[str]:
@@ -137,6 +138,7 @@ class CivitaiAPI:
         }
         self._image_uuid_index: Dict[int, str] = {}
         self._api_archive_lock = threading.Lock()
+        self._response_archive = CivitaiResponseArchive()
 
         self._initialized = True
 
@@ -158,7 +160,7 @@ class CivitaiAPI:
         requests without requiring a server restart.
 
         Args:
-            new_cookie: The new __Secure-civitai-token value.
+            new_cookie: The new __Secure-civ-token (or legacy __Secure-civitai-token) value.
         """
         if not new_cookie or len(new_cookie) < 100:
             raise ValueError("Session cookie appears too short to be valid.")
@@ -239,13 +241,15 @@ class CivitaiAPI:
     def _get_headers(self) -> Dict:
         """Returns standard headers for requests.
 
-        Sends both cookie names that CivitAI may use for authentication
-        (``__Secure-civitai-token`` and ``__Secure-next-auth.session-token``)
-        because CivitAI has changed cookie naming across different flows.
+        Sends all known session-cookie names because CivitAI has changed
+        naming across different flows.  The current name is
+        ``__Secure-civ-token`` (renamed from ``__Secure-civitai-token``
+        in mid-2026); the legacy names are kept as fallbacks.
         """
         return {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
             "Cookie": (
+                f"__Secure-civ-token={self.session_cookie}; "
                 f"__Secure-civitai-token={self.session_cookie}; "
                 f"__Secure-next-auth.session-token={self.session_cookie}"
             ),
@@ -283,6 +287,13 @@ class CivitaiAPI:
                 self.http_client.activate_global_backoff(
                     90.0, reason="HTTP 403 (Cloudflare)"
                 )
+            self._record_response_archive(
+                endpoint=endpoint,
+                payload_data=payload_data,
+                response_json=None,
+                status_code=e.status_code,
+                error=str(e),
+            )
             if strict:
                 raise
             status_text = (
@@ -351,6 +362,13 @@ class CivitaiAPI:
                 return None
 
             if not isinstance(data, dict):
+                self._record_response_archive(
+                    endpoint=endpoint,
+                    payload_data=payload_data,
+                    response_json=data,
+                    status_code=None,
+                    error="CivitAI returned a non-object tRPC response",
+                )
                 return data
 
             error_payload = data.get("error")
@@ -407,6 +425,13 @@ class CivitaiAPI:
                     continue
 
                 if strict:
+                    self._record_response_archive(
+                        endpoint=endpoint,
+                        payload_data=payload_data,
+                        response_json=data,
+                        status_code=normalized_status,
+                        error=str(exc),
+                    )
                     raise exc
 
                 status_text = (
@@ -418,15 +443,38 @@ class CivitaiAPI:
                     self._record_to_db_cache(
                         endpoint, payload_data, None, exc.status_code
                     )
+                self._record_response_archive(
+                    endpoint=endpoint,
+                    payload_data=payload_data,
+                    response_json=data,
+                    status_code=normalized_status,
+                    error=str(exc),
+                )
                 return None
 
             result_wrapper = data.get("result")
             if not isinstance(result_wrapper, dict):
+                self._record_response_archive(
+                    endpoint=endpoint,
+                    payload_data=payload_data,
+                    response_json=data,
+                    status_code=None,
+                    error="CivitAI tRPC response did not contain a result object",
+                )
                 return None
 
             result_data = result_wrapper.get("data")
             if isinstance(result_data, dict) and "json" in result_data:
                 result_json = result_data["json"]
+            elif isinstance(result_data, str):
+                # CivitAI's column-oriented flat-array serialization format
+                # (image.getInfinite as of mid-2026): the data field is a
+                # stringified JSON flat array that must be deserialized.
+                deserialized = self._deserialize_trpc_flat_array(data)
+                if deserialized is not None:
+                    result_json = deserialized
+                else:
+                    result_json = result_data
             else:
                 result_json = result_data
 
@@ -434,6 +482,12 @@ class CivitaiAPI:
                 endpoint=endpoint,
                 payload_data=payload_data,
                 response_json=result_json,
+            )
+            self._record_response_archive(
+                endpoint=endpoint,
+                payload_data=payload_data,
+                response_json=result_json,
+                status_code=200,
             )
             self._record_to_db_cache(endpoint, payload_data, result_json, 200)
             return result_json
@@ -507,6 +561,29 @@ class CivitaiAPI:
         )
         return Path(image_resources_path) / "civitai_api_responses"
 
+    def _record_response_archive(
+        self,
+        *,
+        endpoint: str,
+        payload_data: Dict[str, Any],
+        response_json: Any,
+        status_code: int | None,
+        error: str | None = None,
+    ) -> None:
+        try:
+            self._response_archive.record(
+                kind="trpc",
+                endpoint=endpoint,
+                method="GET",
+                url=f"{self.base_url}/{endpoint}",
+                request=payload_data,
+                response=response_json,
+                status_code=status_code,
+                error=error,
+            )
+        except Exception:
+            pass
+
     def _extract_uuid_from_hash(self, hash_value: Optional[str]) -> Optional[str]:
         if not hash_value:
             return None
@@ -518,7 +595,7 @@ class CivitaiAPI:
             return first
         return None
 
-    def _archive_json_file(self, filename: str, payload: Dict[str, Any]) -> None:
+    def _archive_json_file(self, filename: str, payload: Any) -> None:
         root = self._archive_root()
         root.mkdir(parents=True, exist_ok=True)
         path = root / filename
@@ -933,7 +1010,7 @@ class CivitaiAPI:
         Returns:
             Parsed response dict/list, or None.
         """
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         svc = self._load_cache_service()
         session_factory = self._load_session_factory()
@@ -964,6 +1041,25 @@ class CivitaiAPI:
                             response_json=entry.response_json,
                         )
                     return entry.response_json
+
+        snapshot = self._response_archive.read_latest(
+            kind="trpc",
+            endpoint=endpoint,
+            request=payload_data,
+        )
+        if snapshot is not None and snapshot.get("success") is True:
+            accept_snapshot = max_age is None
+            if max_age is not None:
+                try:
+                    recorded_at = datetime.fromisoformat(str(snapshot["recorded_at"]))
+                    if recorded_at.tzinfo is None:
+                        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+                    accept_snapshot = datetime.now(timezone.utc) - recorded_at <= max_age
+                except (KeyError, TypeError, ValueError):
+                    accept_snapshot = False
+            if accept_snapshot:
+                self.http_client.record_cache_hit(endpoint)
+                return snapshot.get("response")
 
         if cache_only:
             return None
@@ -1019,6 +1115,13 @@ class CivitaiAPI:
         except CivitaiRequestError as e:
             if e.status_code == 403:
                 self.http_client.activate_global_backoff(90.0, reason="HTTP 403 (Cloudflare)")
+            self._record_response_archive(
+                endpoint=endpoint,
+                payload_data=payload_data,
+                response_json=None,
+                status_code=e.status_code,
+                error=str(e),
+            )
             if strict:
                 raise
             print(f"❌ tRPC request error for {endpoint} (HTTP {e.status_code}): {e}")
@@ -1046,6 +1149,13 @@ class CivitaiAPI:
                 )
                 if exc.status_code is not None:
                     self._record_to_db_cache(endpoint, payload_data, None, exc.status_code)
+                self._record_response_archive(
+                    endpoint=endpoint,
+                    payload_data=payload_data,
+                    response_json=raw_response,
+                    status_code=normalized_status,
+                    error=str(exc),
+                )
                 if strict:
                     raise exc
                 return None
@@ -1065,6 +1175,12 @@ class CivitaiAPI:
             endpoint=endpoint,
             payload_data=payload_data,
             response_json=result_json,
+        )
+        self._record_response_archive(
+            endpoint=endpoint,
+            payload_data=payload_data,
+            response_json=result_json,
+            status_code=200,
         )
         self._record_to_db_cache(endpoint, payload_data, result_json, 200)
         return result_json
@@ -1586,6 +1702,109 @@ class CivitaiAPI:
         return items
 
     # ===== Helper Methods =====
+
+    def _deserialize_trpc_flat_array(self, response: Dict) -> Optional[Dict]:
+        """Deserialize CivitAI's column-oriented flat-array serialization format.
+
+        As of mid-2026, CivitAI's ``image.getInfinite`` tRPC endpoint returns
+        responses in a double-encoded columnar format:
+
+        ``{"result": {"data": "<stringified JSON flat array>"}}``
+
+        The inner string, once ``json.loads``-ed, is a flat array where:
+
+        * ``[0]`` — metadata: ``{"nextCursor": <int|-1>, "items": <count>}``
+        * ``[1]`` — row offsets: list of absolute indices into the flat array,
+          each pointing to a per-row *column template* dict.
+        * ``[2:]`` — flat data pool containing all scalar values and nested
+          template dicts/lists referenced by position.
+
+        Each column template maps field names to **absolute positions** in the
+        flat array.  Nested dicts and lists within templates follow the same
+        positional scheme recursively.
+
+        Args:
+            response: The parsed top-level response dict from ``_make_raw_request``.
+
+        Returns:
+            ``{"items": [...], "nextCursor": <int|None>}`` if the response is in
+            the flat-array format, otherwise ``None`` (caller should fall back to
+            legacy parsing).
+        """
+        if not isinstance(response, dict):
+            return None
+
+        result_wrapper = response.get("result")
+        if not isinstance(result_wrapper, dict):
+            return None
+
+        raw_data = result_wrapper.get("data")
+        # The flat-array format is a *string* inside result.data.
+        if not isinstance(raw_data, str):
+            return None
+
+        try:
+            flat_array: List = json.loads(raw_data)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        if not isinstance(flat_array, list) or len(flat_array) < 3:
+            return None
+
+        meta = flat_array[0]
+        if not isinstance(meta, dict):
+            return None
+
+        items_reference = meta.get("items")
+        uses_metadata_references = (
+            isinstance(items_reference, int)
+            and 0 <= items_reference < len(flat_array)
+            and isinstance(flat_array[items_reference], list)
+        )
+        row_offsets = (
+            flat_array[items_reference]
+            if uses_metadata_references
+            else flat_array[1]
+        )
+        if not isinstance(row_offsets, list):
+            return None
+
+        def _resolve(val: Any, depth: int = 0) -> Any:
+            """Recursively resolve positional references in the flat array."""
+            if depth > 20:
+                return val
+            if isinstance(val, dict):
+                return {
+                    k: _resolve(flat_array[v] if isinstance(v, int) and 0 <= v < len(flat_array) else v, depth + 1)
+                    for k, v in val.items()
+                }
+            if isinstance(val, list):
+                return [
+                    _resolve(flat_array[v] if isinstance(v, int) and 0 <= v < len(flat_array) else v, depth + 1)
+                    for v in val
+                ]
+            return val
+
+        items: List[Dict] = []
+        for offset in row_offsets:
+            if isinstance(offset, int) and offset < len(flat_array):
+                template = flat_array[offset]
+                if isinstance(template, dict):
+                    items.append(_resolve(template))
+                else:
+                    items.append(template)
+
+        next_cursor = meta.get("nextCursor")
+        if (
+            uses_metadata_references
+            and isinstance(next_cursor, int)
+            and 0 <= next_cursor < len(flat_array)
+        ):
+            next_cursor = flat_array[next_cursor]
+        return {
+            "items": items,
+            "nextCursor": next_cursor if next_cursor and next_cursor > 0 else None,
+        }
 
     def _is_image_list(self, obj: List) -> bool:
         """Check if a list contains gallery media objects from image.getInfinite."""

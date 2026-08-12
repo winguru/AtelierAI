@@ -77,6 +77,7 @@
                 <div class="filter-row">
                   <label for="filter-sort">Sort</label>
                   <select id="filter-sort">
+                    <option value="">Relevancy</option>
                     <option value="stats.reactionCountAllTime:desc">Most Reactions</option>
                     <option value="stats.commentCountAllTime:desc">Most Comments</option>
                     <option value="stats.collectedCountAllTime:desc">Most Collected</option>
@@ -120,6 +121,15 @@
                     <option value="frequency">Frequency</option>
                   </select>
                   <span class="filter-hint">Term matching strategy</span>
+                </div>
+                <div class="filter-row filter-row-url">
+                  <label for="civitai-url">CivitAI URL</label>
+                  <div class="url-row">
+                    <input id="civitai-url" type="text" readonly
+                           placeholder="Adjust filters to generate URL…">
+                    <button id="civitai-url-go" type="button" title="Open this URL on civitai.red">Go</button>
+                  </div>
+                  <span class="filter-hint">Paste a CivitAI search URL to apply its filters</span>
                 </div>
               </div>
             </details>
@@ -243,6 +253,7 @@
               <a id="fullscreen-artist-name" class="fullscreen-artist-name" href="#" target="_blank" rel="noopener noreferrer"></a>
               <time id="fullscreen-uploaded-at" class="fullscreen-uploaded-at"></time>
             </div>
+            <div id="fullscreen-artist-stats" class="fullscreen-artist-stats hidden" aria-label="Artist rating stats"></div>
           </div>
           <h3>Tags</h3>
           <div id="fullscreen-tags-cloud" class="fullscreen-tags-cloud"></div>

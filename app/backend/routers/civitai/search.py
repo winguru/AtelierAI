@@ -20,7 +20,8 @@ from urllib.parse import quote, urljoin, urlparse
 
 import atelierai.config as app_config
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 from sqlalchemy import Text as sa_Text, func as sa_func, or_ as sa_or
 from sqlalchemy.exc import IntegrityError
@@ -37,11 +38,17 @@ from models import (
 )
 from schemas import (
     CivitaiArtistBlockRequest,
+    CivitaiArtistDiscardRequest,
     CivitaiArtistSummaryItem,
     CivitaiImageRatingRequest,
     CivitaiImageRatingResponse,
     CivitaiSearchRecordRequest,
     CivitaiSearchRequest,
+)
+from services.civitai_search_media import (
+    get_preserved_search_media,
+    is_safe_preserved_path,
+    preserve_search_media,
 )
 from utils.cache import (
     _build_search_cache_key,
@@ -442,6 +449,19 @@ def _get_civitai_search_client():
 
         _civitai_search_client = CivitaiSearchClient()
         return _civitai_search_client
+
+
+def _get_viewer_username() -> str:
+    """Return the configured CivitAI username for the logged-in user.
+
+    Used in the POI filter so the viewer can still see their own POI images
+    while hiding everyone else's (matching CivitAI's server-side behaviour).
+    """
+    try:
+        from config import CIVITAI_USERNAME
+        return (CIVITAI_USERNAME or "").strip()
+    except (ImportError, AttributeError):
+        return ""
 
 
 def _maybe_lazy_fetch_missing_metadata(hits: list[dict]) -> None:
@@ -954,6 +974,7 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
             extra_filters=meili_extra_filters,
             matching_strategy=payload.matching_strategy,
             users=users_list if len(users_list) > 1 else None,
+            viewer_username=_get_viewer_username(),
         )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)
@@ -1097,6 +1118,76 @@ def civitai_search_single_image(image_id: int):
     return {"hit": hit, "artist_avatars": artist_avatars}
 
 
+@router.post("/image/{image_id}/preserve", response_model=dict)
+def preserve_civitai_search_image(
+    image_id: int,
+    hit: dict[str, Any] = Body(default_factory=dict),
+):
+    """Cache an original Search Lab asset locally and return its stable URL."""
+    metadata = dict(hit)
+    with SessionLocal() as db:
+        stored = (
+            db.query(CivitaiSearchImage)
+            .filter(CivitaiSearchImage.civitai_image_id == image_id)
+            .first()
+        )
+        if stored is not None:
+            metadata = {
+                "uuid": stored.uuid,
+                "file_name": stored.file_name,
+                "image_url": stored.image_url,
+                "preserved_source_url": stored.preserved_source_url,
+                **metadata,
+            }
+
+    try:
+        preserved = preserve_search_media(image_id, metadata)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        upstream_status = getattr(exc, "status_code", None)
+        if upstream_status in {404, 410}:
+            raise HTTPException(
+                status_code=410,
+                detail=f"CivitAI image {image_id} is no longer available.",
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not preserve CivitAI image {image_id}: {exc}",
+        ) from exc
+
+    with SessionLocal() as db:
+        _persist_search_image(
+            db,
+            civitai_image_id=image_id,
+            preserved_media_path=preserved.relative_path,
+            preserved_media_mime=preserved.mime_type,
+            preserved_media_sha256=preserved.sha256,
+            preserved_source_url=preserved.source_url,
+        )
+        db.commit()
+
+    return {
+        "image_id": image_id,
+        "preserved_url": f"/api/civitai-search/image/{image_id}/preserved",
+        "mime_type": preserved.mime_type,
+        "size": preserved.size,
+        "sha256": preserved.sha256,
+    }
+
+
+@router.get("/image/{image_id}/preserved")
+def get_civitai_search_preserved_image(image_id: int):
+    preserved = get_preserved_search_media(image_id)
+    if preserved is None or not is_safe_preserved_path(preserved.absolute_path):
+        raise HTTPException(status_code=404, detail="Preserved media not found.")
+    return FileResponse(
+        preserved.absolute_path,
+        media_type=preserved.mime_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @router.get("/library-status", response_model=dict)
 def civitai_search_library_status(
     civitai_image_ids: str = Query("", description="Comma-separated CivitAI image IDs"),
@@ -1136,7 +1227,7 @@ def civitai_search_library_status(
         )
         .filter(
             ImageModel.civitai_image_id.in_(ids),
-            ImageModel.image_status.in_(["active", "placeholder"]),
+            ImageModel.image_status == "active",
         )
         .all()
     )
@@ -1244,28 +1335,27 @@ def _persist_search_image(db: Session, civitai_image_id: int, **fields) -> None:
         db.add(img)
         db.flush()
 
-    if fields.get("post_id") is not None:
-        img.post_id = fields["post_id"]
-    if fields.get("artist_id") is not None:
-        img.artist_id = fields["artist_id"]
-    if fields.get("artist_name") is not None:
-        img.artist_name = fields["artist_name"]
-    if fields.get("blurhash") is not None:
-        img.blurhash = fields["blurhash"]
-    if fields.get("uuid") is not None:
-        img.uuid = fields["uuid"]
-    if fields.get("image_url") is not None:
-        img.image_url = fields["image_url"]
-    if fields.get("tags") is not None:
-        img.tags = fields["tags"]
-    if fields.get("generation_prompt") is not None:
-        img.generation_prompt = fields["generation_prompt"]
-    if fields.get("generation_models") is not None:
-        img.generation_models = fields["generation_models"]
-    if fields.get("reactions") is not None:
-        img.reactions = fields["reactions"]
-    if fields.get("likes") is not None:
-        img.likes = fields["likes"]
+    allowed_fields = {
+        "post_id",
+        "artist_id",
+        "artist_name",
+        "blurhash",
+        "uuid",
+        "image_url",
+        "preserved_media_path",
+        "preserved_media_mime",
+        "preserved_media_sha256",
+        "preserved_source_url",
+        "tags",
+        "generation_prompt",
+        "generation_models",
+        "reactions",
+        "likes",
+    }
+    for field_name in allowed_fields:
+        value = fields.get(field_name)
+        if value is not None:
+            setattr(img, field_name, value)
 
     db.flush()
 
@@ -1275,9 +1365,15 @@ def _update_artist_preference(
     artist_id: int | None,
     artist_name: str | None,
     *,
-    is_keep: bool,
+    rating: str,
 ) -> None:
-    """Increment keep/discard counter for the artist, if known."""
+    """Increment keep/skip/discard counter for the artist, if known.
+
+    ``rating`` must be one of ``"keep"``, ``"skip"``, or ``"discard"``.
+    Any other value is ignored.
+    """
+    if rating not in ("keep", "skip", "discard"):
+        return
     if not artist_name and artist_id is None:
         return
 
@@ -1301,12 +1397,15 @@ def _update_artist_preference(
             artist_id=artist_id,
             artist_name=effective_name,
             keeps=0,
+            skips=0,
             discards=0,
         )
         db.add(pref)
 
-    if is_keep:
+    if rating == "keep":
         pref.keeps = (pref.keeps or 0) + 1
+    elif rating == "skip":
+        pref.skips = (pref.skips or 0) + 1
     else:
         pref.discards = (pref.discards or 0) + 1
 
@@ -1389,13 +1488,13 @@ def rate_civitai_image(
     if payload.position is not None:
         link.position = payload.position
 
-    # Update artist preference counters (only for keep/discard, not skip).
-    if payload.rating in ("keep", "discard"):
+    # Update artist preference counters for all rating types.
+    if payload.rating in ("keep", "skip", "discard"):
         _update_artist_preference(
             db,
             artist_id=payload.artist_id,
             artist_name=payload.artist_name,
-            is_keep=(payload.rating == "keep"),
+            rating=payload.rating,
         )
 
     db.commit()
@@ -1538,11 +1637,16 @@ def _build_hit_from_search_image(img: CivitaiSearchImage) -> dict[str, Any]:
         elif isinstance(t, dict) and t.get("name"):
             tag_names.append(t["name"])
 
+    preserved_url = (
+        f"/api/civitai-search/image/{img.civitai_image_id}/preserved"
+        if img.preserved_media_path
+        else None
+    )
     hit: dict[str, Any] = {
         "id": img.civitai_image_id,
-        "url": full_url,
+        "url": preserved_url or full_url,
         "thumbnail_url": thumbnail_url,
-        "mid_res_url": mid_res_url,
+        "mid_res_url": preserved_url or mid_res_url,
         "name": img.file_name or "",
         "uuid": uuid or None,
         "is_video": is_video,
@@ -1554,6 +1658,8 @@ def _build_hit_from_search_image(img: CivitaiSearchImage) -> dict[str, Any]:
         "prompt": img.generation_prompt or "",
         "resources": img.generation_models if isinstance(img.generation_models, list) else None,
     }
+    if preserved_url:
+        hit["preserved_url"] = preserved_url
 
     if img.blurhash:
         hit["hash"] = img.blurhash
@@ -1914,6 +2020,7 @@ def get_artist_summary(db: Session = Depends(get_db)):
                 artist_id=r.artist_id,
                 artist_name=r.artist_name,
                 keeps=r.keeps or 0,
+                skips=r.skips or 0,
                 discards=r.discards or 0,
                 score=score,
                 is_blocked=r.is_blocked,
@@ -1942,6 +2049,7 @@ def toggle_artist_block(
             artist_id=payload.artist_id,
             artist_name=payload.artist_name,
             keeps=0,
+            skips=0,
             discards=0,
         )
         db.add(pref)
@@ -1960,7 +2068,104 @@ def toggle_artist_block(
         artist_id=pref.artist_id,
         artist_name=pref.artist_name,
         keeps=pref.keeps or 0,
+        skips=pref.skips or 0,
         discards=pref.discards or 0,
         score=(pref.keeps or 0) - (pref.discards or 0),
         is_blocked=pref.is_blocked,
     )
+
+
+@router.post("/artist-discard", response_model=dict)
+def batch_discard_artist_images(
+    payload: CivitaiArtistDiscardRequest, db: Session = Depends(get_db)
+):
+    """Batch-discard all images from an artist and optionally block them.
+
+    Marks every image in ``image_ids`` as ``discard`` (``is_excluded=True``)
+    so their tiles disappear from the gallery immediately.  When
+    ``is_blocked`` is true the artist is also blocked, which takes effect
+    on the next page load via the Meilisearch-layer exclusion filter.
+
+    Returns the list of CivitAI image IDs that were discarded.
+    """
+    discarded_ids: list[int] = []
+
+    for civitai_id in payload.image_ids:
+        img = (
+            db.query(CivitaiSearchImage)
+            .filter(CivitaiSearchImage.civitai_image_id == civitai_id)
+            .first()
+        )
+        if img is None:
+            # Image hasn't been seen before — create a minimal record so
+            # we can attach a link + exclusion flag.
+            img = CivitaiSearchImage(civitai_image_id=civitai_id)
+            img.artist_id = payload.artist_id
+            img.artist_name = payload.artist_name
+            db.add(img)
+            db.flush()
+
+        # Find or create the search-image link.
+        if payload.search_id is not None:
+            link = (
+                db.query(CivitaiSearchImageLink)
+                .filter(
+                    CivitaiSearchImageLink.search_id == payload.search_id,
+                    CivitaiSearchImageLink.image_id == img.id,
+                )
+                .first()
+            )
+        else:
+            link = (
+                db.query(CivitaiSearchImageLink)
+                .filter(
+                    CivitaiSearchImageLink.search_id.is_(None),
+                    CivitaiSearchImageLink.image_id == img.id,
+                )
+                .first()
+            )
+        if link is None:
+            link = CivitaiSearchImageLink(image_id=img.id, search_id=payload.search_id)
+            db.add(link)
+
+        link.rating = "discard"
+        link.is_excluded = True
+        discarded_ids.append(civitai_id)
+
+    # Update artist preference counters (one discard per image).
+    for _ in payload.image_ids:
+        _update_artist_preference(
+            db,
+            artist_id=payload.artist_id,
+            artist_name=payload.artist_name,
+            rating="discard",
+        )
+
+    # Optionally block the artist for future searches.
+    if payload.is_blocked:
+        pref = (
+            db.query(CivitaiArtistPreference)
+            .filter(
+                CivitaiArtistPreference.artist_id == payload.artist_id,
+                CivitaiArtistPreference.artist_name
+                == (payload.artist_name or f"artist-{payload.artist_id}"),
+            )
+            .first()
+        )
+        if pref is None:
+            pref = CivitaiArtistPreference(
+                artist_id=payload.artist_id,
+                artist_name=payload.artist_name or f"artist-{payload.artist_id}",
+                keeps=0,
+                skips=0,
+                discards=0,
+            )
+            db.add(pref)
+        pref.is_blocked = True
+
+    db.commit()
+
+    # Invalidate cache so the next page load excludes the blocked artist.
+    _invalidate_search_cache(reason="artist_block")
+
+    return {"discarded_ids": discarded_ids, "is_blocked": payload.is_blocked}

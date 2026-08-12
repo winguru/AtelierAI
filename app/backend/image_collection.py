@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
 import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -414,6 +417,44 @@ class ImageCollection:
             )
             if created:
                 stats["danbooru_terms_created"] += 1
+
+        # ── CivitAI tags ──
+        # Also sync civitai tags so they appear in the gallery.  This is
+        # especially important for deleted images enriched from Search Lab
+        # data, whose tags would otherwise never reach the taxonomy tables.
+        civitai_authority = self._get_or_create_authority("civitai", is_external=True)
+        civitai_tag_map: dict[str, int | None] = {}
+        civitai_data = merged_payload.get("civitai_data") or merged_payload.get(
+            "civitai"
+        )
+        if isinstance(civitai_data, dict):
+            for tag in civitai_data.get("tags") or []:
+                if isinstance(tag, dict):
+                    tag_name = str(tag.get("name") or "").strip()
+                    if tag_name:
+                        raw_id = tag.get("id")
+                        try:
+                            civitai_tag_map[tag_name] = (
+                                int(raw_id) if raw_id is not None else None
+                            )
+                        except (TypeError, ValueError):
+                            civitai_tag_map[tag_name] = None
+                elif isinstance(tag, str) and tag.strip():
+                    civitai_tag_map[tag.strip()] = None
+        stats["civitai_terms_created"] = 0
+        for name in sorted(by_source.get("civitai", set())):
+            external_tag_id = civitai_tag_map.get(name)
+            created = self._upsert_authority_term(
+                authority_id=int(civitai_authority.id),
+                external_tag_id=external_tag_id,
+                external_name=name,
+                metadata={
+                    "origin": "image_rescan",
+                    "source": "civitai",
+                },
+            )
+            if created:
+                stats["civitai_terms_created"] += 1
 
         return stats
 
@@ -2033,13 +2074,16 @@ class ImageCollection:
             actions_taken.append(
                 f"Updated parsed metadata for {generation_prompt_updates} generation prompt(s)."
             )
-        if authority_sync_stats.get("prompt_terms_created") or authority_sync_stats.get(
-            "danbooru_terms_created"
+        if (
+            authority_sync_stats.get("prompt_terms_created")
+            or authority_sync_stats.get("danbooru_terms_created")
+            or authority_sync_stats.get("civitai_terms_created")
         ):
             actions_taken.append(
                 "Synced image tags to taxonomy authority terms "
                 f"(prompt +{authority_sync_stats.get('prompt_terms_created', 0)}, "
-                f"danbooru +{authority_sync_stats.get('danbooru_terms_created', 0)})."
+                f"danbooru +{authority_sync_stats.get('danbooru_terms_created', 0)}, "
+                f"civitai +{authority_sync_stats.get('civitai_terms_created', 0)})."
             )
 
         print(
@@ -2164,7 +2208,69 @@ class ImageCollection:
             civitai_hash = raw_hash.strip()
 
         merged_json_metadata = dict(existing_json_metadata)
-        merged_json_metadata["civitai"] = civitai_data
+
+        # ── Field-level merge ────────────────────────────────────────────
+        # Previously this did a wholesale replacement:
+        #     merged_json_metadata["civitai"] = civitai_data
+        # which overwrote richer existing data (tags, prompt, models) whenever
+        # fresh enrichment returned a sparser payload — particularly for
+        # deleted images that fall back to Search Lab data.
+        #
+        # The new behaviour is a conservative field-level merge:
+        #   * Non-user fields are filled only when MISSING in the existing
+        #     record (we never overwrite existing values).
+        #   * User/author identity fields are ALWAYS overwritten from fresh
+        #     data, so that deleted/banned status changes propagate.
+        # See app/docs/memories/civitai-integration.md for rationale.
+        existing_civitai = dict(
+            existing_json_metadata.get("civitai")
+            if isinstance(existing_json_metadata.get("civitai"), dict)
+            else {}
+        )
+
+        # Fields that reflect account status and must always be updated.
+        _AUTHOR_FIELDS = {
+            "author_deleted",
+            "author_banned",
+            "author_name",
+            "author_id",
+            "author_profile",
+            "author_original_name",
+        }
+
+        for key, value in civitai_data.items():
+            if key in _AUTHOR_FIELDS:
+                # Always propagate fresh user-status data.
+                existing_civitai[key] = value
+            elif not existing_civitai.get(key):
+                # Fill only missing non-user fields.
+                existing_civitai[key] = value
+
+        merged_json_metadata["civitai"] = existing_civitai
+
+        # ── Update the linked Artist record with CivitAI user status ─────
+        # Propagate deleted/banned flags to the Artist table so the UI can
+        # filter and display them appropriately.
+        author_name = existing_civitai.get("author_name")
+        author_id_raw = existing_civitai.get("author_id")
+        if author_name and author_id_raw is not None:
+            try:
+                author_id_int = int(author_id_raw)
+            except (TypeError, ValueError):
+                author_id_int = None
+
+            if author_id_int is not None:
+                try:
+                    ImageProcessor.find_or_update_civitai_artist(
+                        self.db,
+                        username=author_name,
+                        civitai_user_id=author_id_int,
+                        is_deleted=bool(existing_civitai.get("author_deleted")),
+                        is_banned=bool(existing_civitai.get("author_banned")),
+                        original_name=existing_civitai.get("author_original_name"),
+                    )
+                except Exception:
+                    pass  # fail open — artist update must not block enrichment
 
         # Extract civitai_nsfw_level from the enrichment data
         nsfw_level = extract_civitai_nsfw_level({"civitai": civitai_data})
@@ -2203,7 +2309,7 @@ class ImageCollection:
         processor.save_json_metadata(
             image_path,
             db_record,
-            additional_data={"civitai": civitai_data},
+            additional_data={"civitai": merged_json_metadata["civitai"]},
         )
         self.db.commit()
         self.results["civitai_lookup_successes"] += 1

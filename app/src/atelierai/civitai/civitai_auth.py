@@ -17,6 +17,8 @@ import atelierai.config as app_config
 from urllib.parse import quote
 from playwright.async_api import async_playwright, BrowserContext
 
+from .response_archive import CivitaiResponseArchive
+
 # Derive CivitAI domain URLs from config (supports civitai.com / civitai.red split).
 _CIVITAI_WEB_BASE = (
     getattr(app_config, "CIVITAI_WEB_BASE_URL", None) or "https://civitai.red"
@@ -25,11 +27,35 @@ _CIVITAI_TRPC_BASE = (
     getattr(app_config, "CIVITAI_TRPC_BASE_URL", None) or "https://civitai.red/api/trpc"
 )
 _CIVITAI_BASE_DOMAIN = getattr(app_config, "CIVITAI_BASE_DOMAIN", None) or "civitai.red"
+_response_archive = CivitaiResponseArchive()
 
 
-# CivitAI token is typically a JWT/JWE-like compact string beginning with "eyJ"
-# and containing dot-separated base64url segments.
-TOKEN_CANDIDATE_RE = re.compile(r"eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){4}")
+def _record_auth_validation(
+    *,
+    response: Any = None,
+    status_code: int | None = None,
+    error: str | None = None,
+) -> None:
+    try:
+        _response_archive.record(
+            kind="auth",
+            endpoint="collection.getAllUser",
+            method="GET",
+            url=f"{_CIVITAI_TRPC_BASE}/collection.getAllUser",
+            request={"authed": True},
+            response=response,
+            status_code=status_code,
+            error=error,
+        )
+    except Exception:
+        pass
+
+
+# CivitAI token is a JWT/JWE compact string beginning with "eyJ" and containing
+# dot-separated base64url segments.  Two formats are seen in the wild:
+#   * JWE (legacy): 5 segments / 4 dots (alg=dir, enc=A256GCM)
+#   * JWT (current): 3 segments / 2 dots (alg=ES256)
+TOKEN_CANDIDATE_RE = re.compile(r"eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){2,}")
 
 # Resolve project root from this file path so cache/profile locations are
 # stable regardless of caller current working directory.
@@ -500,6 +526,7 @@ class CivitaiAuthenticator:
         print(f"🔍 Found {len(cookies)} cookies total")
 
         preferred_cookie_names = {
+            "__Secure-civ-token",
             "__Secure-civitai-token",
             "__Secure-next-auth.session-token",
         }
@@ -551,6 +578,7 @@ class CivitaiAuthenticator:
 
         print("❌ No valid CivitAI session cookie found.")
         print("   Expected one of:")
+        print("   - __Secure-civ-token")
         print("   - __Secure-civitai-token")
         print("   - __Secure-next-auth.session-token")
         print("   Available cookie names:")
@@ -905,7 +933,7 @@ def _prompt_for_manual_token() -> str | None:
     print("Manual token fallback")
     print(f"- In normal Chrome, sign in to {_CIVITAI_BASE_DOMAIN}")
     print(f"- Open DevTools -> Application -> Cookies -> {_CIVITAI_WEB_BASE}")
-    print("- Copy the value of '__Secure-civitai-token'")
+    print("- Copy the value of '__Secure-civ-token' (or '__Secure-civitai-token')")
     print("- Paste it here (visible input); press Enter")
     print("- Press Enter on an empty line to cancel")
     print()
@@ -922,7 +950,7 @@ def _prompt_for_manual_token() -> str | None:
 
         token = _normalize_token(raw)
         if not token:
-            print("⚠️  Token looks too short; expected a long JWT-like value.")
+            print("⚠️  Token doesn't look like a valid CivitAI session token (expected eyJ... JWT/JWE).")
             continue
 
         return token
@@ -947,10 +975,11 @@ def _normalize_token(raw: str | None) -> str | None:
         token = "".join(token.split())
 
     # Reject obvious non-token content.
+    # Accept both JWE (5 segments / 4 dots) and JWT (3 segments / 2 dots).
     if not token.startswith("eyJ"):
         return None
 
-    if token.count(".") < 4:
+    if token.count(".") < 2:
         return None
 
     if len(token) < 100:
@@ -998,8 +1027,10 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
             "Chrome/136.0.0.0 Safari/537.36"
         ),
         "Referer": f"{_CIVITAI_WEB_BASE}/",
-        # Send both names because CivitAI auth naming has changed across flows.
+        # Send all known names: CivitAI renamed the cookie from
+        # ``__Secure-civitai-token`` to ``__Secure-civ-token`` in mid-2026.
         "Cookie": (
+            f"__Secure-civ-token={token}; "
             f"__Secure-civitai-token={token}; "
             f"__Secure-next-auth.session-token={token}"
         ),
@@ -1007,13 +1038,15 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
 
     try:
         response = requests.get(url, headers=headers, timeout=20)
-    except requests.Timeout:
+    except requests.Timeout as exc:
+        _record_auth_validation(error=str(exc))
         return (
             False,
             False,
             "Token validation timed out (network/transient).",
         )
     except requests.RequestException as e:
+        _record_auth_validation(error=str(e))
         return (
             False,
             False,
@@ -1021,6 +1054,11 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
         )
 
     if response.status_code in (401, 403):
+        _record_auth_validation(
+            response=response.text[:500],
+            status_code=response.status_code,
+            error=f"HTTP {response.status_code}",
+        )
         return (
             False,
             True,
@@ -1029,6 +1067,11 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
         )
 
     if response.status_code == 429:
+        _record_auth_validation(
+            response=response.text[:500],
+            status_code=response.status_code,
+            error="HTTP 429",
+        )
         return (
             False,
             False,
@@ -1036,6 +1079,11 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
         )
 
     if 500 <= response.status_code <= 599:
+        _record_auth_validation(
+            response=response.text[:500],
+            status_code=response.status_code,
+            error=f"HTTP {response.status_code}",
+        )
         return (
             False,
             False,
@@ -1043,6 +1091,11 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
         )
 
     if response.status_code != 200:
+        _record_auth_validation(
+            response=response.text[:500],
+            status_code=response.status_code,
+            error=f"HTTP {response.status_code}",
+        )
         return (
             False,
             False,
@@ -1051,7 +1104,12 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
 
     try:
         payload = response.json()
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        _record_auth_validation(
+            response=response.text[:500],
+            status_code=response.status_code,
+            error=f"Invalid JSON: {exc}",
+        )
         return (
             False,
             False,
@@ -1060,6 +1118,11 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
 
     # tRPC errors often appear under `error` even with HTTP 200.
     if isinstance(payload, dict) and payload.get("error"):
+        _record_auth_validation(
+            response=payload,
+            status_code=response.status_code,
+            error="CivitAI returned a tRPC authentication error",
+        )
         error_json = payload.get("error", {})
         if isinstance(error_json, dict):
             inner = error_json.get("json", {})
@@ -1078,6 +1141,7 @@ def _validate_token_with_civitai(token: str) -> tuple[bool, bool, str]:
         )
 
     # Successful response from an authenticated endpoint means token is valid.
+    _record_auth_validation(response=payload, status_code=response.status_code)
     return (
         True,
         False,

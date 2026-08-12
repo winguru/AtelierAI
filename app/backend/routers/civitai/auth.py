@@ -72,7 +72,7 @@ def civitai_auth_status():
 def civitai_auth_save_cookie(payload: CivitaiCookieRequest):
     """Accept a manually-pasted CivitAI session cookie.
 
-    The caller supplies just the ``__Secure-civitai-token`` value (the long
+    The caller supplies just the ``__Secure-civ-token`` value (the long
     JWT-like string starting with ``eyJ``).  The endpoint validates it against
     CivitAI before persisting.
     """

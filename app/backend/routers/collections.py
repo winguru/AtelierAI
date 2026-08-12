@@ -58,6 +58,93 @@ from utils.cache import (
 router = APIRouter(tags=["collections"])
 
 
+def _summarize_civitai_batch_results(
+    requested_ids: list[int],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify batch outcomes by whether an image is truly in the gallery."""
+    imported_ids: list[int] = []
+    existing_ids: list[int] = []
+    failed_ids: list[int] = []
+    failures: list[dict[str, Any]] = []
+    results_by_id = {
+        int(result["image_id"]): result
+        for result in results
+        if result.get("image_id") is not None
+    }
+
+    for image_id in requested_ids:
+        result = results_by_id.get(int(image_id))
+        if result is None:
+            failed_ids.append(int(image_id))
+            failures.append({"image_id": int(image_id), "reason": "No import result returned."})
+            continue
+
+        error = str(result.get("error") or "").strip()
+        cancelled = bool(result.get("cancelled"))
+        skip_reason = str(result.get("skip_reason") or "").strip()
+        images_added = int(result.get("images_added", 0) or 0)
+        images_recovered = int(result.get("images_recovered", 0) or 0)
+        existing_image_id = result.get("existing_image_id")
+        image_db_id = result.get("image_db_id")
+        placeholder_created = bool(result.get("placeholder_created"))
+
+        # Only count as imported when a real gallery image was added or
+        # recovered.  Placeholder records (remote_not_found etc.) set
+        # image_db_id but are not real gallery images.  Cached imports
+        # (from preserved media) produce a real gallery image.
+        if (
+            not error
+            and not cancelled
+            and not placeholder_created
+            and (images_added > 0 or images_recovered > 0)
+        ):
+            imported_ids.append(int(image_id))
+            continue
+        if (
+            not error
+            and not cancelled
+            and skip_reason == "cached_import"
+            and image_db_id is not None
+        ):
+            imported_ids.append(int(image_id))
+            continue
+        if (
+            not error
+            and not cancelled
+            and skip_reason == "existing_source_url"
+            and existing_image_id is not None
+        ):
+            existing_ids.append(int(image_id))
+            continue
+
+        failed_ids.append(int(image_id))
+        failures.append(
+            {
+                "image_id": int(image_id),
+                "reason": (
+                    error
+                    or result.get("skip_message")
+                    or skip_reason
+                    or ("cancelled" if cancelled else "Import did not add an image.")
+                ),
+            }
+        )
+
+    return {
+        "requested": len(requested_ids),
+        "imported": len(imported_ids),
+        "existing": len(existing_ids),
+        "failed": len(failed_ids),
+        "skipped": len(existing_ids) + len(failed_ids),
+        "imported_ids": imported_ids,
+        "existing_ids": existing_ids,
+        "failed_ids": failed_ids,
+        "failures": failures,
+        "results": results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Draft-post fallback helper (shared between Sync Lab and import pipeline)
 # ---------------------------------------------------------------------------
@@ -792,14 +879,9 @@ def import_civitai_batch(payload: CivitaiBatchImportRequest, db: Session = Depen
                 item_key_prefix="civitai-batch-import",
             )
             all_results.extend(results)
-        imported_count = sum(1 for r in all_results if r.get("status") != "skipped")
-        return {
-            "requested": total_ids,
-            "imported": imported_count,
-            "skipped": total_ids - imported_count,
-            "collection_id": collection_id,
-            "results": all_results,
-        }
+        summary = _summarize_civitai_batch_results(civitai_ids, all_results)
+        summary["collection_id"] = collection_id
+        return summary
 
     task = task_manager.create_task(
         kind="civitai-batch-import",

@@ -39,6 +39,18 @@ Architecture:
 
 The frontend already handles this: `fetchImageRatings()` fetches the rating for returned hits, then `applyHideFilters()` + `checkAutoLoadIfAllHidden()` hide matching tiles and auto-load more pages if a whole page is hidden.
 
+### Search Lab batch import reconciliation
+A batch task reaching `completed` only means every requested ID finished
+processing. It does not mean every ID was added to the gallery. The batch task
+result must expose authoritative `imported_ids`, `existing_ids`, and
+`failed_ids`; Search Lab marks only imported/existing IDs as saved.
+
+Placeholder, tombstoned, remote-not-found, cancelled, and errored outcomes stay
+visible and retryable. The `/civitai-search/library-status` endpoint reports
+only active images, never placeholder rows. Frontend library-status refreshes
+must merge task-confirmed IDs before applying Hide Saved so an older concurrent
+status response cannot erase a successful import.
+
 ### Search Lab artist avatar cache
 Fullscreen artist avatars are cached once per CivitAI artist in the
 `civitai_artist_profiles` table. Store a 96x96 WebP (maximum 16 KiB) as a
@@ -113,3 +125,124 @@ Some CivitAI images have a UUID for which the `original=true` CDN route returns 
 **Gotcha:** The Sync Lab Step 3 (`sync_lab_fetch_collection_items` in `collections.py`) has its **own** `_fetch_post_collection_items()` inner function that is separate from the import pipeline in `main.py`. Both now use the shared `_fetch_collection_posts_with_draft_fallback()` helper for the three-tier draft fallback.
 
 **Gotcha:** `browsingLevel` must be 31 (not lower) to capture all possible ratings. Lower values are what the browser captures when the user has filtered ratings in the UI.
+
+### Deleted-user username resolution (June 2026)
+
+**Problem:** When a CivitAI user deletes their account, `image.get` returns `username: null` and `deletedAt: <date>`. The enrichment pipeline was producing synthetic `[deleted:USERID]` artist names, losing the historical username entirely.
+
+**API limitation:** `user.getById` returns the real `username` only for **banned** accounts (`deletedAt: null`). For **truly deleted** accounts (`deletedAt` present), it returns `username: null`. There is no CivitAI API endpoint that resolves a user ID back to the historical username for deleted accounts.
+
+**Resolution strategy** (`_try_resolve_deleted_username()` in `civitai_enrichment.py`):
+1. **Live API** (`CivitaiAPI.fetch_user_by_id`) — works for banned and active users; fails for truly deleted.
+2. **Local Search Lab data** (`CivitaiSearchImage.artist_name` where `artist_id == user_id`) — captures the username at scrape time, even for users later fully deleted. This is the **only** source for truly deleted accounts. Covers ~15/77 cases in the current DB.
+3. **Synthetic fallback** — `[deleted:USERID]` when no source yields a name.
+
+The enrichment pipeline sets `author_deleted=True`, `author_original_name` (preserving the resolved name), and `author_profile` when resolution succeeds.
+
+**Retroactive repair:** `app/scripts/repair_deleted_artists.py` scans the `artists` table for `[deleted:UID]` names, applies the same resolution strategy, and merges resolved artists into existing real-name artists (reassigning images, deleting the synthetic artist first to avoid UNIQUE constraint on `civitai_user_id`). Run with `--dry-run` first. 62/77 remain unresolvable (no API data, no local Search Lab data).
+
+### Deleted image tag fallback via Search Lab (August 2026)
+
+**Problem:** When a CivitAI image is deleted, the API returns HTTP 404 (`"No image with id X"`) for both `fetch_basic_info()` and `fetch_generation_data()`. The enrichment pipeline (`fetch_civitai_image_data()`) returned `None`, losing all metadata (tags, prompt, models, author) for the image. Tags from deleted images never appeared in the gallery.
+
+**Resolution strategy** (`_build_fallback_data_from_search_lab()` in `civitai_enrichment.py`):
+When both API calls fail, fall back to the `CivitaiSearchImage` table (populated at scrape time). Build the enrichment dict from:
+- `tags`: string list → `[{"name": str, "id": None}]` (id unavailable for Search Lab data)
+- `prompt`: from `generation_prompt`
+- `models`: from `generation_models`
+- `author_name`, `author_profile`, `author_id`: from artist fields (skips `[deleted:` prefixed names for profile URL)
+- `author_deleted = True`, `civitai_uuid`, `blurhash`
+
+Returns `None` only when no Search Lab record exists.
+
+**Taxonomy sync gap (also fixed):** The gallery `civitai_tags` field is built from `ImageConceptObservation` JOIN `AuthorityTerm` JOIN `TagAuthority(name='civitai')`, NOT from `json_metadata.civitai.tags` directly. During rescan, `_sync_image_tags_to_authority_terms()` extracted civitai tags but only upserted prompt and danbooru authorities — civitai tags were silently dropped. Fixed by adding a civitai authority upsert loop after the danbooru loop (around line 430 of `image_collection.py`). Observations are then created by `_hydrate_observations_from_tags()` which already iterates all sources including civitai.
+
+**Key files:**
+- `app/backend/civitai_enrichment.py` — `_build_fallback_data_from_search_lab()`, early return in `fetch_civitai_image_data()`
+- `app/backend/image_collection.py` — civitai authority upsert in `_sync_image_tags_to_authority_terms()`
+- `app/backend/main.py` — gallery `civitai_tags` query (lines ~12420-12438, ~19316)
+
+**Gotcha:** Import convention inside `_try_resolve_deleted_username` must use `from database import SessionLocal` / `from models import CivitaiSearchImage` (not `backend.database` / `backend.models`). See `backend-startup.md` gotcha for details.
+
+### Field-level merge in enrichment & banned vs deleted distinction (August 2026)
+
+**Problem:** `_enrich_from_civitai_if_needed()` in `image_collection.py` did a wholesale replacement of `json_metadata.civitai`:
+```python
+merged_json_metadata["civitai"] = civitai_data  # overwrote everything
+```
+When fresh enrichment returned a sparser payload (e.g. Search Lab fallback for deleted images), it overwrote richer existing data — tags, prompts, models were lost. Re-enrichment could never *improve* a record, only *replace* it.
+
+**Resolution — field-level merge (only fill missing fields):**
+Non-user fields (tags, prompt, models, etc.) are filled only when MISSING in the existing record. User/author identity fields are ALWAYS overwritten from fresh data so deleted/banned status changes propagate.
+
+Author fields that always update: `author_deleted`, `author_banned`, `author_name`, `author_id`, `author_profile`, `author_original_name`.
+
+The sidecar JSON write (`processor.save_json_metadata`) was also updated to persist the merged dict, not the raw `civitai_data`.
+
+**Banned vs deleted CivitAI accounts:**
+The CivitAI `image.get` user object has no explicit "banned" field. The distinction is:
+- **Deleted accounts**: `deletedAt` timestamp is set, `username` is null/None.
+- **Banned accounts**: `deletedAt` is null, `username` is still present (full user data still served by `user.getById`).
+
+**Database schema changes:**
+- `Artist` model: added `civitai_user_banned` (Boolean, nullable) alongside existing `civitai_user_deleted`.
+- `CivitaiUser` model: added `banned_at` (DateTime, nullable) alongside existing `deleted_at`.
+- `civitai_enrichment.py`: `fetch_civitai_image_data()` now emits `author_banned` alongside `author_deleted` for both live API and Search Lab fallback paths.
+
+**Artist record propagation:**
+`_enrich_from_civitai_if_needed()` now calls `ImageProcessor.find_or_update_civitai_artist()` after the merge, passing `is_deleted` and `is_banned` flags. This updates the linked `Artist` record so the UI can filter/display banned and deleted accounts. The call is wrapped in a try/except to fail open.
+
+`find_or_update_civitai_artist()` in `image_processor.py` accepts a new `is_banned: bool = False` parameter and sets `civitai_user_banned = True` on the Artist record.
+
+**Key files:**
+- `app/backend/image_collection.py` — `_enrich_from_civitai_if_needed()` field-level merge + artist update call
+- `app/backend/civitai_enrichment.py` — `fetch_civitai_image_data()` emits `author_banned`; fallback also sets it
+- `app/backend/image_processor.py` — `find_or_update_civitai_artist()` accepts `is_banned`
+- `app/backend/models.py` — `Artist.civitai_user_banned`, `CivitaiUser.banned_at`
+
+### CivitAI tRPC flat-array serialization for `image.getInfinite` (June 2026)
+
+**Problem:** CivitAI's `image.getInfinite` tRPC endpoint now returns responses in a **column-oriented flat-array** format that is **double-encoded** — the entire flat array is stringified and placed inside `{"result":{"data":"<stringified-JSON>"}}`. Previous code expected the standard tRPC format `{"result":{"data":{"json":{"items":[...],"nextCursor":...}}}}` and could not parse the new format, causing "Post X has no images or could not be fetched" errors for post imports and empty results for collection item fetches.
+
+**Scope:** Only `image.getInfinite` uses this format (post images and collection items). `post.getInfinite` still returns the standard dict format.
+
+**Flat-array format structure:**
+1. The raw response is `{"result":{"data":"<stringified JSON flat array>"}}`.
+2. After `json.loads()`, you get a flat list where:
+   - `[0]` = metadata dict whose `nextCursor` and `items` values may be **absolute positions** in the flat array
+   - In the current format, `flat_array[metadata["items"]]` is the row-offset array and `flat_array[metadata["nextCursor"]]` is the cursor value
+   - Older responses place the row-offset array directly at `[1]`; the decoder retains this fallback
+   - Each column template (e.g. at position `[2]`) maps field names to **absolute positions** in the flat array. Example: `{"id": 3, "name": 4, "url": 5, ...}` — so `flat_array[3]` is the first item's `id` value
+   - Nested dicts and lists within templates follow the same positional scheme recursively (nested dicts map keys → absolute positions; nested lists contain absolute positions)
+3. **Deserialization algorithm:** For each row offset in `[1]`, get the template dict at `flat_array[row_offset]`, then recursively resolve each field's value by looking up `flat_array[position]`. Lists of positions are resolved element-by-element.
+
+**Solution — `_deserialize_trpc_flat_array()` method:**
+Added to `CivitaiAPI` in `civitai_api.py` (~line 1706). Accepts the raw response dict, extracts and `json.loads()` the stringified data, extracts `nextCursor` from `[0]`, and resolves all rows. Returns `{"items": [...], "nextCursor": <int|None>}` or `None` if the format doesn't match (graceful fallback for old-format responses).
+
+Contains a nested `_resolve()` recursive function that handles:
+- `int` → `flat_array[int]` (positional lookup, with depth limit of 20)
+- `list` → recursively resolve each element
+- `dict` → recursively resolve each value
+- Everything else → return as-is (scalar values)
+
+**Integration points:**
+1. **`_make_request()`** (~line 467): Centralized fix. After extracting `result.data`, checks `isinstance(result_data, str)`. If so, calls `_deserialize_trpc_flat_array()` and uses the deserialized dict as `result_json`. This covers all `CivitaiAPI` methods (`fetch_post_images`, `fetch_collection_items`, `fetch_collection_posts`).
+2. **`civitai.py._make_collection_request()`** (~line 107): `CivitaiPrivateScraper` calls `_make_raw_request()` directly (for strict error propagation), bypassing `_make_request()`. Added the same deserialization call here: after getting the raw response, calls `self.api._deserialize_trpc_flat_array(data)`. If it returns non-None, returns `(deserialized, deserialized.get("nextCursor"))`. Otherwise falls through to legacy `result.data.json.nextCursor` extraction.
+
+### Private collection empty responses (August 2026)
+
+CivitAI can return HTTP 200 with an empty `image.getInfinite` item list when a
+collection is private and the configured session belongs to an account without
+access. Do not treat every empty list as a genuinely empty collection.
+
+The import pipeline diagnoses empty responses with `collection.getById` and the
+protected session validation endpoint. Token validity and collection-level
+authorization are separate states: a valid token with `permissions.read ==
+false` must report a wrong-account/private-access error, while an invalid token
+must request session refresh. Post collections still redirect to the post
+pipeline, and readable image collections with a positive reported item count
+are classified as response/parser mismatches.
+
+**Key files:**
+- `app/src/atelierai/civitai/civitai_api.py` — `_deserialize_trpc_flat_array()`, `_make_request()` string branch
+- `app/src/atelierai/civitai/civitai.py` — `_make_collection_request()` flat array deserialization path

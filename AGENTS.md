@@ -164,8 +164,10 @@ For files that reference multiple memory docs:
 - Always run ruff and/or pylint to check for warnings and errors after any code changes
 
 ## MCP (Model Context Protocol) Considerations
-- At the start of the session, the agent should run this instruction to load the MCP context:
-```text
-Activate the current dir as project using serena
-```
-- This will load the project context, including file contents and memory documents, into the agent's working memory, allowing it to reference design decisions and code history when making edits or suggestions.
+
+- Serena is registered as a workspace MCP server in `.vscode/mcp.json` and automatically activates this project at startup.
+- At the start of a session, read Serena's initial instructions before using its symbolic tools.
+- If Serena tools are unavailable, check `MCP: List Servers` and the Serena MCP output before continuing with repeated file reads.
+- This checkout's Serena project is named `AtelierAI-devcontainer` (see `.serena/project.yml`) to disambiguate it from other local AtelierAI checkouts registered in a developer's global Serena project registry.
+- A developer's user-profile-level Serena entry (if configured, e.g. `oraios/serena`) runs on the local client machine, not inside this devcontainer, and cannot see `/workspace` or this project. If both a global and the workspace `serena` server are active, chat tools may show duplicated `serena`/`serena2` tool sets; disable the global entry for this workspace via `MCP: List Servers` to avoid calling the non-functional instance.
+- Serena's version in this container is pinned in `.devcontainer/Dockerfile` (`serena-agent==<version>`), not `@latest`, for reproducible builds. Bump intentionally with `uv tool upgrade serena-agent --prerelease=allow` and re-pin the Dockerfile line to match.

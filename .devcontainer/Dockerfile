@@ -45,7 +45,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /tmp/atelier-deps/requirements.txt && \
     pip install --no-cache-dir -r /tmp/atelier-deps/dev-requirements.txt
 
-# RUN uvx --from git+https://github.com/oraios/serena serena-mcp-server
-RUN uv tool install -p 3.13 serena-agent@latest --prerelease=allow
+# Pinned (not @latest) so rebuilt images get a reproducible, known-good Serena version.
+RUN uv tool install -p 3.13 serena-agent==1.7.0
 
 CMD ["tail", "-f", "/dev/null"]

@@ -574,7 +574,7 @@
         return;
       }
 
-      const remotePayload = await fetchPayload(`/generation-prototype/civitai/${encodeURIComponent(imageId)}`);
+      const remotePayload = await fetchPayload(`/api/generation-prototype/civitai/${encodeURIComponent(imageId)}`);
       const remotePreviewUrl = String(
         remotePayload?.overview?.image_url
         || remotePayload?.raw?.prepared_import_target?.image_url
@@ -3103,16 +3103,16 @@
       targets.push({
         mode: 'civitai',
         descriptor: `CivitAI image ${civitaiId}`,
-        url: `/generation-prototype/civitai/${encodeURIComponent(civitaiId)}`,
-        comfyUrl: `/generation-prototype/civitai/${encodeURIComponent(civitaiId)}/comfy-workspace${catalogQuery ? `?${catalogQuery}` : ''}`,
+        url: `/api/generation-prototype/civitai/${encodeURIComponent(civitaiId)}`,
+        comfyUrl: `/api/generation-prototype/civitai/${encodeURIComponent(civitaiId)}/comfy-workspace${catalogQuery ? `?${catalogQuery}` : ''}`,
       });
     }
     if (fileHash) {
       targets.push({
         mode: 'local',
         descriptor: `local image ${fileHash}`,
-        url: `/images/${encodeURIComponent(fileHash)}/generation-prototype`,
-        comfyUrl: `/images/${encodeURIComponent(fileHash)}/generation-prototype/comfy-workspace${catalogQuery ? `?${catalogQuery}` : ''}`,
+        url: `/api/images/${encodeURIComponent(fileHash)}/generation-prototype`,
+        comfyUrl: `/api/images/${encodeURIComponent(fileHash)}/generation-prototype/comfy-workspace${catalogQuery ? `?${catalogQuery}` : ''}`,
       });
     }
 

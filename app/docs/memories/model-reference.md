@@ -23,3 +23,4 @@ Same-type duplicates exist in the local catalog (e.g., same hash under different
 - The LoRA Manager API is at `http://192.168.50.10:8188`
 - `_normalize_model_type()` maps user input to "Checkpoint" or "LORA" — other values raise HTTPException
 - The model maintenance table shows `row.type` from CivitAI API data, not the local catalog resource_type
+- Model prototype routes own FastAPI `Query`/`Depends` declarations and must forward every resolved value to the framework-neutral implementations in `main.py`.

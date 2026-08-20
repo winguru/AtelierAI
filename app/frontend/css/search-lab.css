@@ -314,6 +314,16 @@ body[data-theme="dark"] .details-pane {
     opacity: 1;
 }
 
+/* When in gallery mode, the search form is not used — dim it */
+.search-toolbar.gallery-active .search-form {
+    opacity: 0.45;
+    transition: opacity 0.2s;
+}
+
+.search-toolbar.gallery-active .search-form:focus-within {
+    opacity: 1;
+}
+
 .search-form {
     display: flex;
     flex-direction: column;
@@ -1438,36 +1448,72 @@ body[data-theme="dark"] .tag-chip {
 .fullscreen-artist-stats {
     display: flex;
     align-items: center;
-    gap: 0.55rem;
+    flex-wrap: wrap;
+    gap: 0.45rem;
     margin-top: 0.45rem;
 }
 
 .fs-stat {
+    --fs-stat-rgb: 154, 154, 165;
     display: inline-flex;
     align-items: center;
-    gap: 0.2rem;
-    font-size: 0.8rem;
-    font-weight: 600;
+    gap: 0.35rem;
+    padding: 0.14rem 0.46rem 0.14rem 0.28rem;
+    border-radius: 999px;
+    border: 1px solid rgba(var(--fs-stat-rgb), 0.52);
+    background: color-mix(in srgb, rgba(var(--fs-stat-rgb), 0.28) 45%, rgba(10, 13, 20, 0.72));
+    font-size: 0.78rem;
+    font-weight: 700;
     line-height: 1;
     white-space: nowrap;
 }
 
+.fs-stat-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    height: auto;
+}
+
 .fs-stat svg {
-    width: 14px;
-    height: 14px;
+    width: 0.92rem;
+    height: 0.92rem;
     flex-shrink: 0;
 }
 
+.fs-stat-count {
+    min-width: 0.85rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
 .fs-stat.is-keep {
+    --fs-stat-rgb: 95, 212, 112;
     color: #5fd470;
 }
 
 .fs-stat.is-skip {
-    color: #9a9aa5;
+    --fs-stat-rgb: 233, 188, 92;
+    color: #e9bc5c;
+}
+
+.fs-stat.is-skip .fs-stat-icon svg {
+    transform: rotate(90deg);
 }
 
 .fs-stat.is-discard {
+    --fs-stat-rgb: 232, 120, 120;
     color: #e87878;
+}
+
+.fs-stat.is-discard .fs-stat-icon svg {
+    transform: rotate(180deg);
+}
+
+.fs-stat:hover {
+    border-color: rgba(var(--fs-stat-rgb), 0.8);
+    box-shadow: 0 0 0 1px rgba(var(--fs-stat-rgb), 0.22);
 }
 
 .fs-artist-blocked {

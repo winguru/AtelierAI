@@ -1559,6 +1559,56 @@ class CivitaiAPI:
 
         return all_images
 
+    def fetch_user_gallery_images(
+        self,
+        username: str,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fetch a single page of images from a user's gallery.
+
+        Uses ``image.getInfinite`` with the ``username`` parameter to browse
+        a user's complete image gallery. Unlike ``fetch_post_images`` which
+        paginates internally, this method fetches ONE page and returns both
+        the images and the pagination cursor so the caller can control
+        page-by-page loading.
+
+        Gallery cursors use a composite string format (e.g. ``"5|1777728329760"``)
+        that must be passed verbatim on subsequent requests.
+
+        Args:
+            username: CivitAI username whose gallery to browse.
+            cursor: Pagination cursor from a previous page (string for gallery
+                    mode). ``None`` fetches the first page.
+
+        Returns:
+            Dict with keys:
+                ``images``: list of image dicts (id, url, hash, width, height,
+                           nsfwLevel, baseModel, postId, stats, user, etc.)
+                ``nextCursor``: cursor string for the next page, or ``None``
+                               if this was the last page.
+        """
+        payload_data: Dict[str, Any] = {
+            **self.default_params,
+            "username": username,
+            "cursor": cursor,
+        }
+        # Remove collectionId from default params — we're filtering by username
+        payload_data.pop("collectionId", None)
+
+        response = self._make_request(
+            endpoint="image.getInfinite", payload_data=payload_data
+        )
+        if not response:
+            return {"images": [], "nextCursor": None}
+
+        page_images = self._find_deep_image_list(response) or []
+
+        next_cursor = None
+        if isinstance(response, dict):
+            next_cursor = response.get("nextCursor")
+
+        return {"images": page_images, "nextCursor": next_cursor}
+
     # ===== Collection API Methods =====
 
     def fetch_collection_items(self, collection_id: int) -> List[Dict]:
@@ -1801,9 +1851,18 @@ class CivitaiAPI:
             and 0 <= next_cursor < len(flat_array)
         ):
             next_cursor = flat_array[next_cursor]
+        # Cursor can be an integer (collection responses) or a string token
+        # (gallery/username-filtered responses).  Guard the truthiness check
+        # so we don't compare str vs int.
+        if isinstance(next_cursor, str):
+            resolved_cursor: Optional[Any] = next_cursor if next_cursor else None
+        elif isinstance(next_cursor, int):
+            resolved_cursor = next_cursor if next_cursor > 0 else None
+        else:
+            resolved_cursor = None
         return {
             "items": items,
-            "nextCursor": next_cursor if next_cursor and next_cursor > 0 else None,
+            "nextCursor": resolved_cursor,
         }
 
     def _is_image_list(self, obj: List) -> bool:

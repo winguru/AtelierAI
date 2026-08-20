@@ -1,6 +1,6 @@
 meta:
   api_name: CivitAI tRPC (Reverse-Engineered)
-  version: "0.3.0"
+  version: "0.4.0"
   base_url: https://civitai.com/api/trpc
   auth:
     - type: session_cookie
@@ -24,6 +24,19 @@ meta:
         root_key: "0"
         json_path: "0.json"
       response_unwrap_path: "result.data.json"
+      response_formats:
+        - name: standard_object
+          description: "result.data is a JSON object with .json key (unwrap path result.data.json)."
+        - name: flat_array
+          description: >-
+            result.data is a *stringified JSON flat array* (double-encoded).
+            The inner string, once json.loads-ed, is a flat array where [0]=metadata
+            ({nextCursor, items}), [1]=row offsets (absolute indices), [2:]=data pool.
+            Each item is a column-template dict mapping field names to absolute
+            positions in the flat array (resolved recursively).
+            Handled by CivitaiAPI._deserialize_trpc_flat_array().
+          endpoints:
+            - image.getInfinite
     paging_and_meta:
       image_getInfinite_first_page:
         cursor: null
@@ -97,7 +110,9 @@ procedures:
         user: { type: object }
 
   image.getInfinite:
-    description: Paged image listing used for collection and feed crawling.
+    description: >-
+      Paged image listing used for collection crawling, feed browsing,
+      user gallery browsing, and post image fetching.
     status:
       implemented_in_civitai_api: true
       validated_with_debug_data: true
@@ -112,6 +127,22 @@ procedures:
         collectionId:
           type: integer
           description: Optional collection filter.
+        username:
+          type: string
+          description: >-
+            Filter to images by this username — fetches the user's complete image
+            gallery. Verified working 2026-08-12 against user/BRTGML/images.
+            Gallery mode returns composite-string cursors (see cursor_formats).
+        userId:
+          type: integer
+          description: >-
+            Filter to images by this numeric user ID. Listed on post.getInfinite
+            and likely accepted here as well, but unverified as of 2026-08-12.
+        postId:
+          type: integer
+          description: >-
+            Filter to images belonging to a specific post. Used by
+            CivitaiAPI.fetch_post_images(); was undocumented but verified working.
         period:
           type: string
           enum: [AllTime, Day, Week, Month]
@@ -157,6 +188,30 @@ procedures:
       meta_behavior:
         required_when_cursor_is_null: true
         omit_when_cursor_present: true
+    cursor_formats:
+      collection_mode:
+        type: integer
+        example: 62702
+        description: Simple integer offset (legacy collection responses).
+      gallery_mode:
+        type: string
+        example: "5|1777728329760"
+        description: >-
+          Composite string token in the format <offset>|<unix_timestamp_ms>.
+          Returned when filtering by username. Pass the full string verbatim
+          as the cursor on subsequent page requests.
+    serialization_formats:
+      - name: standard_object
+        description: >-
+          result.data is a JSON object; items at result.data.json.items.
+      - name: flat_array
+        description: >-
+          result.data is a *stringified JSON flat array* (double-encoded column-
+          oriented format, mid-2026+). Inner string json.loads-ed yields:
+          [0]=metadata({nextCursor, items}), [1]=row offsets (absolute indices),
+          [2:]=data pool. Each item is a column-template dict mapping field
+          names to absolute positions in the flat array (resolved recursively).
+          Handled by CivitaiAPI._deserialize_trpc_flat_array().
     output:
       type: object
       properties:
@@ -174,8 +229,30 @@ procedures:
               nsfwLevel: { type: ["integer", "null"] }
               mimeType: { type: ["string", "null"] }
               hash: { type: ["string", "null"] }
+              postId: { type: ["integer", "null"] }
+              userId: { type: ["integer", "null"] }
+              baseModel: { type: ["string", "null"] }
+              combinedNsfwLevel: { type: ["integer", "null"] }
+              availability: { type: ["string", "null"] }
+              publishedAt: { type: ["string", "null"] }
+              sortAt: { type: ["string", "null"] }
+              tagIds:
+                type: array
+                items: { type: integer }
+              modelVersionIds:
+                type: array
+                items: { type: integer }
+              stats:
+                type: ["object", "null"]
+                description: Object with likeCountAllTime, commentCountAllTime, etc.
+              user:
+                type: ["object", "null"]
+                description: Object with id, username, image (avatar URL).
         nextCursor:
-          type: ["string", "null"]
+          type: ["string", "integer", "null"]
+          description: >-
+            Type varies by filter mode: integer for collection mode,
+            composite string for gallery/username mode (see cursor_formats).
 
   image.get:
     description: Get details for a single image.

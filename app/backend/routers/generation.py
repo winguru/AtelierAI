@@ -1589,33 +1589,63 @@ def search_perceptual_similarity(
 
 
 @router.get("/model-prototype/civitai/{image_id}", response_model=dict)
-def get_civitai_model_prototype(image_id: int):
-    from main import get_civitai_model_prototype as _impl  # noqa: PLC0415
-
-    return _impl(image_id=image_id)
-
-
-@router.get("/images/{file_hash}/model-prototype", response_model=dict)
-def get_local_model_prototype(file_hash: str, db: Session = Depends(get_db)):
-    from main import get_local_model_prototype as _impl  # noqa: PLC0415
-
-    return _impl(file_hash=file_hash, db=db)
-
-
-@router.get("/model-prototype/catalog", response_model=dict)
-def get_model_catalog_prototype(
+def get_civitai_model_prototype(
+    image_id: int,
     catalog_url: Optional[str] = Query(default=None),
     checkpoints_url: Optional[str] = Query(default=None),
     loras_url: Optional[str] = Query(default=None),
     include_full_catalog_raw: bool = Query(default=False),
 ):
-    from main import get_model_catalog_prototype as _impl  # noqa: PLC0415
+    from main import get_civitai_model_prototype as _impl  # noqa: PLC0415
 
     return _impl(
+        image_id=image_id,
         catalog_url=catalog_url,
         checkpoints_url=checkpoints_url,
         loras_url=loras_url,
         include_full_catalog_raw=include_full_catalog_raw,
+    )
+
+
+@router.get("/images/{file_hash}/model-prototype", response_model=dict)
+def get_local_model_prototype(
+    file_hash: str,
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    from main import get_local_model_prototype as _impl  # noqa: PLC0415
+
+    return _impl(
+        file_hash=file_hash,
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_catalog_raw=include_full_catalog_raw,
+        db=db,
+    )
+
+
+@router.get("/model-prototype/catalog", response_model=dict)
+def get_model_catalog_prototype(
+    image_limit: int = Query(default=250, ge=1, le=2000),
+    catalog_url: Optional[str] = Query(default=None),
+    checkpoints_url: Optional[str] = Query(default=None),
+    loras_url: Optional[str] = Query(default=None),
+    include_full_catalog_raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    from main import get_model_catalog_prototype as _impl  # noqa: PLC0415
+
+    return _impl(
+        image_limit=image_limit,
+        catalog_url=catalog_url,
+        checkpoints_url=checkpoints_url,
+        loras_url=loras_url,
+        include_full_catalog_raw=include_full_catalog_raw,
+        db=db,
     )
 
 

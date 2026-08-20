@@ -18737,10 +18737,10 @@ def search_perceptual_similarity(
 
 def get_civitai_model_prototype(
     image_id: int,
-    catalog_url: Optional[str] = Query(default=None),
-    checkpoints_url: Optional[str] = Query(default=None),
-    loras_url: Optional[str] = Query(default=None),
-    include_full_catalog_raw: bool = Query(default=False),
+    catalog_url: Optional[str] = None,
+    checkpoints_url: Optional[str] = None,
+    loras_url: Optional[str] = None,
+    include_full_catalog_raw: bool = False,
 ):
     local_catalog = model_reference_service.fetch_local_catalog(
         catalog_url=catalog_url,
@@ -18757,10 +18757,10 @@ def get_civitai_model_prototype(
 
 def get_local_model_prototype(
     file_hash: str,
-    catalog_url: Optional[str] = Query(default=None),
-    checkpoints_url: Optional[str] = Query(default=None),
-    loras_url: Optional[str] = Query(default=None),
-    include_full_catalog_raw: bool = Query(default=False),
+    catalog_url: Optional[str] = None,
+    checkpoints_url: Optional[str] = None,
+    loras_url: Optional[str] = None,
+    include_full_catalog_raw: bool = False,
     db: Session = Depends(get_db),
 ):
     image = (
@@ -18785,11 +18785,11 @@ def get_local_model_prototype(
 
 
 def get_model_catalog_prototype(
-    image_limit: int = Query(default=250, ge=1, le=2000),
-    catalog_url: Optional[str] = Query(default=None),
-    checkpoints_url: Optional[str] = Query(default=None),
-    loras_url: Optional[str] = Query(default=None),
-    include_full_catalog_raw: bool = Query(default=False),
+    image_limit: int = 250,
+    catalog_url: Optional[str] = None,
+    checkpoints_url: Optional[str] = None,
+    loras_url: Optional[str] = None,
+    include_full_catalog_raw: bool = False,
     db: Session = Depends(get_db),
 ):
     local_catalog = model_reference_service.fetch_local_catalog(

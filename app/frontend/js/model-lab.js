@@ -1271,13 +1271,13 @@
     if (formState.civitaiId) {
       targets.push({
         descriptor: `CivitAI image ${formState.civitaiId}`,
-        url: withQuery(`/model-prototype/civitai/${encodeURIComponent(formState.civitaiId)}`),
+        url: withQuery(`/api/model-prototype/civitai/${encodeURIComponent(formState.civitaiId)}`),
       });
     }
     if (formState.fileHash) {
       targets.push({
         descriptor: `local image ${formState.fileHash}`,
-        url: withQuery(`/images/${encodeURIComponent(formState.fileHash)}/model-prototype`),
+        url: withQuery(`/api/images/${encodeURIComponent(formState.fileHash)}/model-prototype`),
       });
     }
     if (formState.includeCatalog) {
@@ -1299,7 +1299,7 @@
       }
       targets.push({
         descriptor: 'known model catalog',
-        url: `/model-prototype/catalog?${catalogParams.toString()}`,
+        url: `/api/model-prototype/catalog?${catalogParams.toString()}`,
       });
     }
 

@@ -40,6 +40,7 @@ from schemas import (
     CivitaiArtistBlockRequest,
     CivitaiArtistDiscardRequest,
     CivitaiArtistSummaryItem,
+    CivitaiGalleryRequest,
     CivitaiImageRatingRequest,
     CivitaiImageRatingResponse,
     CivitaiSearchRecordRequest,
@@ -451,19 +452,6 @@ def _get_civitai_search_client():
         return _civitai_search_client
 
 
-def _get_viewer_username() -> str:
-    """Return the configured CivitAI username for the logged-in user.
-
-    Used in the POI filter so the viewer can still see their own POI images
-    while hiding everyone else's (matching CivitAI's server-side behaviour).
-    """
-    try:
-        from config import CIVITAI_USERNAME
-        return (CIVITAI_USERNAME or "").strip()
-    except (ImportError, AttributeError):
-        return ""
-
-
 def _maybe_lazy_fetch_missing_metadata(hits: list[dict]) -> None:
     """Lazily fetch tags / generation data for hits missing them.
 
@@ -823,6 +811,77 @@ def _build_hit_from_trpc(
     return hit
 
 
+def _normalize_gallery_item(item: dict) -> dict:
+    """Transform a raw ``image.getInfinite`` gallery item into a frontend hit.
+
+    Gallery items from the ``username``-filtered ``image.getInfinite`` endpoint
+    have a different field layout than Meilisearch hits — they already contain
+    rich metadata (stats, user, baseModel, dimensions) but use the same UUID
+    convention for ``url``.  This normaliser produces the same dict shape as
+    ``_normalize_meili_hit`` so the frontend can consume gallery hits without
+    any changes.
+    """
+    uuid = item.get("url", "") or ""
+    orig_w = item.get("width")
+
+    is_video = _is_video_hit(item)
+    video_url = None
+    if is_video:
+        video_url = _build_video_url(uuid) or uuid
+        thumbnail_url = mid_res_url = full_url = video_url
+    else:
+        thumbnail_url, mid_res_url, full_url = _build_cdn_urls(
+            uuid, orig_width=orig_w if isinstance(orig_w, int) else None
+        )
+        if not thumbnail_url:
+            thumbnail_url = mid_res_url = full_url = uuid
+
+    hit: dict[str, Any] = {
+        "id": item.get("id", 0),
+        "url": full_url,
+        "thumbnail_url": thumbnail_url,
+        "mid_res_url": mid_res_url,
+        "uuid": uuid,
+        "type": item.get("type", "image"),
+        "is_video": is_video,
+        "video_url": video_url if is_video else None,
+        "width": item.get("width"),
+        "height": item.get("height"),
+        "nsfwLevel": item.get("nsfwLevel"),
+        "baseModel": item.get("baseModel"),
+        "postId": item.get("postId"),
+        "mimeType": item.get("mimeType", "image/jpeg"),
+        "publishedAt": item.get("publishedAt"),
+        "name": item.get("name", ""),
+    }
+
+    # BlurHash
+    if item.get("hash"):
+        hit["hash"] = item["hash"]
+        hit["blurhash"] = item["hash"]
+
+    # Author info — gallery items include a ``user`` object
+    user = item.get("user")
+    if isinstance(user, dict):
+        hit["user"] = {
+            "id": user.get("id"),
+            "username": user.get("username", ""),
+            "image": user.get("image"),
+        }
+        hit["username"] = user.get("username", "")
+
+    # Stats normalisation (strip "AllTime" suffix)
+    stats = item.get("stats")
+    if isinstance(stats, dict):
+        normalised = {}
+        for key, value in stats.items():
+            short = key.replace("AllTime", "")
+            normalised[short] = value
+        hit["stats"] = normalised
+
+    return hit
+
+
 def _classify_civitai_upstream_error(exc: Any) -> HTTPException:
     """Map a CivitaiRequestError to a semantically correct HTTPException.
 
@@ -974,7 +1033,6 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
             extra_filters=meili_extra_filters,
             matching_strategy=payload.matching_strategy,
             users=users_list if len(users_list) > 1 else None,
-            viewer_username=_get_viewer_username(),
         )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)
@@ -1024,6 +1082,66 @@ def civitai_search_proxy(payload: CivitaiSearchRequest, db: Session = Depends(ge
     _search_cache_put(cache_key, dict(response), ttl_seconds=60)
     response["artist_avatars"] = _attach_cached_artist_avatars(db, normalized_hits)
 
+    return response
+
+
+@router.post("/gallery", response_model=dict)
+def civitai_user_gallery(payload: CivitaiGalleryRequest, db: Session = Depends(get_db)):
+    """Browse a CivitAI user's image gallery via ``image.getInfinite``.
+
+    Fetches one page of images from the specified user's gallery using the
+    ``username`` parameter.  Gallery mode uses **cursor-based pagination** —
+    the response includes a ``nextCursor`` that must be passed verbatim on the
+    next request.
+
+    Returns the same hit shape as the search endpoint so the frontend can
+    consume gallery hits without any changes.
+    """
+    from atelierai.civitai.civitai_api import CivitaiAPI
+    from atelierai.civitai.http_client import CivitaiRequestError
+
+    username = (payload.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+
+    try:
+        api = CivitaiAPI.get_instance()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CivitAI API initialisation error: {exc}",
+        )
+
+    try:
+        result = api.fetch_user_gallery_images(
+            username=username,
+            cursor=payload.cursor,
+        )
+    except CivitaiRequestError as exc:
+        raise _classify_civitai_upstream_error(exc)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"CivitAI gallery fetch error: {exc}",
+        )
+
+    raw_items = result.get("images", [])
+    next_cursor = result.get("nextCursor")
+
+    normalized_hits = [_normalize_gallery_item(item) for item in raw_items]
+    normalized_hits = _enrich_hits_from_db(db, normalized_hits)
+    _maybe_lazy_fetch_missing_metadata(normalized_hits)
+
+    response = {
+        "hits": normalized_hits,
+        "total": len(normalized_hits),  # page-level count (gallery has no total)
+        "nextCursor": next_cursor,
+        "hasMore": next_cursor is not None,
+        "limit": payload.limit,
+        "backend": "civitai-gallery",
+        "username": username,
+    }
+    response["artist_avatars"] = _attach_cached_artist_avatars(db, normalized_hits)
     return response
 
 
@@ -1666,7 +1784,10 @@ def _build_hit_from_search_image(img: CivitaiSearchImage) -> dict[str, Any]:
         hit["blurhash"] = img.blurhash
 
     if img.artist_name:
-        hit["user"] = {"username": img.artist_name}
+        # Include the CivitAI user id so ``_artist_profile_key`` resolves to
+        # the stable ``id:{artist_id}`` cache key — matches the key space used
+        # by ``CivitaiArtistProfile`` and the live search endpoints.
+        hit["user"] = {"id": img.artist_id, "username": img.artist_name}
         hit["username"] = img.artist_name
 
     if img.reactions is not None or img.likes is not None:
@@ -1863,6 +1984,11 @@ def get_rated_images(
         hits.append(hit)
         ratings_map[str(img.civitai_image_id)] = r
 
+    # Serve avatars from the local CivitaiArtistProfile cache so review
+    # browsing does not fall back to the live single-image endpoint (which
+    # makes tRPC metadata calls to civitai.red) just to render an avatar.
+    artist_avatars = _attach_cached_artist_avatars(db, hits)
+
     return {
         "hits": hits,
         "total": total,
@@ -1876,6 +2002,7 @@ def get_rated_images(
         "order": order,
         "q": q,
         "artists": selected_artists,
+        "artist_avatars": artist_avatars,
     }
 
 

@@ -39,6 +39,39 @@ Architecture:
 
 The frontend already handles this: `fetchImageRatings()` fetches the rating for returned hits, then `applyHideFilters()` + `checkAutoLoadIfAllHidden()` hide matching tiles and auto-load more pages if a whole page is hidden.
 
+### Gallery mode (image.getInfinite + username)
+
+Gallery mode is a third Search Lab mode (`state.mode === 'gallery'`) that browses a CivitAI user's complete image gallery using the `image.getInfinite` tRPC endpoint with a `username` parameter.
+
+**API flow:**
+
+- `CivitaiAPI.fetch_user_gallery_images(username, cursor)` → `image.getInfinite` with `username` param
+- Cursor format is a composite string (`"<offset>|<unix_timestamp_ms>"`), passed verbatim on subsequent pages
+- `image.getInfinite` returns a double-encoded column-oriented format; `_make_request()` + `_deserialize_trpc_flat_array()` handle this transparently
+- `collectionId` is popped from `default_params` before the request (gallery is not collection-scoped)
+
+**Backend endpoint:** `POST /api/civitai-search/gallery`
+
+- Schema: `CivitaiGalleryRequest(username, cursor=None, limit=51)`
+- Response shape mirrors the search proxy but with cursor-based pagination: `{hits, nextCursor, hasMore, ...}`
+- `_normalize_gallery_item()` converts raw tRPC items to the standard hit shape (CDN URLs, video detection, stats normalization stripping "AllTime", user extraction, hash→blurhash)
+- DB enrichment (`_enrich_hits_from_db`) and lazy metadata fetch are shared with search mode
+
+**Frontend pagination differences:**
+
+- Gallery mode uses **cursor-based pagination** — `state.galleryCursor` advances via API response `nextCursor`, NOT `state.offset += state.limit`
+- Every `state.offset += state.limit` in the IIFE is guarded with `if (state.mode !== 'gallery')` (infinite scroll `onLoadMore`, `load_more_btn` handler, `advanceToNext`, `navigateFullscreen`, `checkAutoLoadIfAllHidden`)
+- `_hasMorePages()` returns `state.galleryHasMore && state.galleryCursor !== null` in gallery mode
+- `switchMode()` resets `galleryCursor`, `galleryUsername`, `galleryHasMore` when leaving gallery mode
+
+**Key files:**
+
+- `app/src/atelierai/civitai/civitai_api.py` — `fetch_user_gallery_images()`
+- `app/backend/routers/civitai/search.py` — `civitai_user_gallery()` endpoint, `_normalize_gallery_item()`
+- `app/backend/schemas.py` — `CivitaiGalleryRequest`
+- `app/frontend/js/search-lab.js` — `executeGallerySearch()`, gallery state fields, mode switching
+- `app/frontend/search-lab.html` — Gallery mode button in mode-bar
+
 ### Search Lab batch import reconciliation
 A batch task reaching `completed` only means every requested ID finished
 processing. It does not mean every ID was added to the gallery. The batch task
@@ -73,9 +106,29 @@ Avatar downloads are size-limited and only follow redirects between approved
 CivitAI image hosts. Preparation failures serve an existing cached avatar when
 available.
 
+Cache-miss metadata merges must be field-scoped. `fetchInlineArtistAvatar`
+fires for fullscreen neighbors while browsing; if it merges the whole
+`GET /api/civitai-search/image/{id}` hit onto the in-memory hit (as it did
+before 2026-08), detail-only fields — notably numeric `nsfwLevel` — land on
+review hits that never carried one. `isHiddenByFilter` only applies the NSFW
+pill filter when `nsfwLevel` is a number, so every visited/prefetched image
+silently gained an NSFW verdict. With the NSFW dropdown on "Safe" (levels
+{1,2}), Explicit neighbors became permanently hidden mid-session and
+fullscreen navigation skipped them until reload; the skips clustered wherever
+the user had browsed. Fix: merge only `artistAvatarKey`, `user`, and
+`username`. The user-invoked `reloadCurrentImage` keeps its intentional
+full merge (it preserves local UI state explicitly).
+
 CivitAI `image.get.user.image` may be null even when the artist has a profile
 picture. In that case, call `user.getById` and build the CDN URL from its
 `profilePicture.url` UUID and `profilePicture.name` filename.
+
+Review mode (`GET /rated`) is local-only: it attaches the same cached
+`artist_avatars` map via `_attach_cached_artist_avatars`, and
+`_build_hit_from_search_image` includes `user.id` so hit keys resolve to the
+stable `id:{artist_id}` profile rows. Browsing reviews must not trigger live
+tRPC calls to civitai.red for avatars — if it does, the `user.id` pass-through
+is broken.
 
 ### Collection ID mapping (CivitAI → local DB)
 `_ensure_image_in_collection()` resolves CivitAI collection IDs to local `collections.id` automatically. The `image_collections.collection_id` FK references `collections.id` (local PK), but callers throughout the codebase may pass either the CivitAI ID or the local ID. The resolution logic handles both transparently. Do NOT assume callers pass the local ID — always use the resolution function.

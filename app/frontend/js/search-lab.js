@@ -5,6 +5,7 @@
 
   /* ── Constants ── */
   const API_SEARCH = '/api/civitai-search';
+  const API_GALLERY = '/api/civitai-search/gallery';
   const API_AUTH_STATUS = '/api/civitai-search/auth-status';
   const API_LIBRARY_STATUS = '/api/civitai-search/library-status';
   const API_RATED = '/api/civitai-search/rated';
@@ -250,6 +251,10 @@
     reviewArtistFacets: [],       // [{artist, count}] from /rated/artists
     reviewSelectedArtists: new Set(), // selected artist names (filter)
     reviewFacetFilter: '',        // text filter within the facets panel
+    // Gallery mode state (cursor-based pagination)
+    galleryCursor: null,          // cursor for next page, or null when no more
+    galleryUsername: '',          // username currently being browsed
+    galleryHasMore: false,        // whether the last page indicated more images
   };
 
   /* ── Image load retry utilities ── */
@@ -390,7 +395,18 @@
         const data = await res.json();
         mergeArtistAvatars(data.artist_avatars);
         const idx = state.hits.findIndex(candidate => candidate.id === hit.id);
-        if (idx >= 0 && data.hit) state.hits[idx] = { ...state.hits[idx], ...data.hit };
+        if (idx >= 0 && data.hit) {
+          // Merge only avatar-relevant fields. A blanket merge copied
+          // detail-only fields (notably nsfwLevel) onto review hits, which
+          // retro-activated the NSFW pill filter for prefetched neighbors
+          // and made fullscreen navigation skip them for the rest of the
+          // session. See app/docs/memories/civitai-integration.md.
+          const merged = { ...state.hits[idx] };
+          if (data.hit.artistAvatarKey != null) merged.artistAvatarKey = data.hit.artistAvatarKey;
+          if (data.hit.user != null) merged.user = data.hit.user;
+          if (data.hit.username != null) merged.username = data.hit.username;
+          state.hits[idx] = merged;
+        }
         const resolvedKey = artistAvatarKey(data.hit || hit);
         if (!resolvedKey || !state.artistAvatars.has(resolvedKey)) {
           state.artistAvatarMisses.add(hit.id);
@@ -445,10 +461,20 @@
     // Set up shared infinite scroll on the gallery-grid container
     _infiniteScroll = InfiniteScroll.create({
       scrollContainer: els.gallery_grid,
-      hasMore: () => state.total <= 0 || state.hits.length < state.total,
+      hasMore: () => {
+        // Gallery mode uses cursor-based pagination
+        if (state.mode === 'gallery') {
+          return state.galleryHasMore && state.galleryCursor !== null;
+        }
+        // Search/review modes use offset-based pagination
+        return state.total <= 0 || state.hits.length < state.total;
+      },
       isLoading: () => state.loading,
       onLoadMore: () => {
-        state.offset += state.limit;
+        // Gallery mode doesn't increment offset — cursor is advanced by the API
+        if (state.mode !== 'gallery') {
+          state.offset += state.limit;
+        }
         executeSearch(true);
       },
     });
@@ -1228,7 +1254,10 @@
     // Load more — manual fallback; infinite scroll is primary
     els.load_more_btn.addEventListener('click', () => {
       if (state.loading) return;
-      state.offset += state.limit;
+      // Gallery mode uses cursor-based pagination (no offset increment)
+      if (state.mode !== 'gallery') {
+        state.offset += state.limit;
+      }
       executeSearch(true);
     });
 
@@ -1298,11 +1327,93 @@
   }
 
   /* ── Image preference (keep / discard / skip) ── */
+  function _ratingToArtistCounter(rating) {
+    if (rating === 'keep') return 'keeps';
+    if (rating === 'skip') return 'skips';
+    if (rating === 'discard') return 'discards';
+    return null;
+  }
+
+  function _renderArtistSummaryFromMap() {
+    const map = state.artistSummaryMap || {};
+    const artists = [];
+    const seen = new Set();
+
+    for (const key of Object.keys(map)) {
+      const entry = map[key];
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      artists.push(entry);
+    }
+
+    // Keep ordering stable and useful after local optimistic updates.
+    artists.sort((a, b) => {
+      const scoreDiff = (b.score || 0) - (a.score || 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      return String(a.artist_name || '').localeCompare(String(b.artist_name || ''));
+    });
+
+    renderArtistSummary(artists);
+  }
+
+  function _adjustArtistSummaryForRating(hit, fromRating, toRating) {
+    if (fromRating === toRating) return;
+
+    const user = hit && typeof hit.user === 'object' ? hit.user : null;
+    const artistName = String(user?.username || hit?.username || '').trim();
+    const artistId = user?.id ?? null;
+    if (!artistName && !artistId) return;
+
+    const map = state.artistSummaryMap || (state.artistSummaryMap = {});
+    let entry = null;
+    if (artistName && map[artistName.toLowerCase()]) {
+      entry = map[artistName.toLowerCase()];
+    } else if (artistId && map['id:' + artistId]) {
+      entry = map['id:' + artistId];
+    }
+
+    // No summary row exists yet: create one so fullscreen stats update instantly.
+    if (!entry) {
+      entry = {
+        artist_id: artistId,
+        artist_name: artistName || `Artist #${artistId}`,
+        keeps: 0,
+        skips: 0,
+        discards: 0,
+        score: 0,
+        is_blocked: false,
+      };
+      if (artistName) map[artistName.toLowerCase()] = entry;
+      if (artistId) map['id:' + artistId] = entry;
+    }
+
+    const fromField = _ratingToArtistCounter(fromRating);
+    const toField = _ratingToArtistCounter(toRating);
+
+    if (fromField) {
+      entry[fromField] = Math.max(0, (entry[fromField] || 0) - 1);
+    }
+    if (toField) {
+      entry[toField] = (entry[toField] || 0) + 1;
+    }
+
+    // Score matches backend convention: keeps - discards.
+    entry.score = (entry.keeps || 0) - (entry.discards || 0);
+
+    _renderArtistSummaryFromMap();
+
+    // If fullscreen is open, update the current artist strip immediately.
+    if (!els.fullscreen_preview.classList.contains('hidden')) {
+      renderFullscreenArtistStats(user, artistName);
+    }
+  }
+
   async function rateImage(rating) {
     const idx = state.selectedHitIndex;
     if (idx < 0 || idx >= state.hits.length) return;
 
     const hit = state.hits[idx];
+    const previousRating = state.imageRatings.get(hit.id) || null;
     const body = {
       civitai_image_id: hit.id,
       rating,
@@ -1324,6 +1435,7 @@
 
     // Optimistic update — reflect rating immediately in the UI.
     state.imageRatings.set(hit.id, rating);
+    _adjustArtistSummaryForRating(hit, previousRating, rating);
     updateTileRatingIndicator(idx);
     applyHideFilters();
     checkAutoLoadIfAllHidden();
@@ -1336,7 +1448,12 @@
       });
       if (!res.ok) {
         // Roll back optimistic state on failure.
-        state.imageRatings.delete(hit.id);
+        if (previousRating) {
+          state.imageRatings.set(hit.id, previousRating);
+        } else {
+          state.imageRatings.delete(hit.id);
+        }
+        _adjustArtistSummaryForRating(hit, rating, previousRating);
         updateTileRatingIndicator(idx);
         console.error('Failed to rate image:', await res.text());
       } else {
@@ -1344,7 +1461,12 @@
         scheduleArtistSummaryRefresh();
       }
     } catch (err) {
-      state.imageRatings.delete(hit.id);
+      if (previousRating) {
+        state.imageRatings.set(hit.id, previousRating);
+      } else {
+        state.imageRatings.delete(hit.id);
+      }
+      _adjustArtistSummaryForRating(hit, rating, previousRating);
       updateTileRatingIndicator(idx);
       console.error('Failed to rate image:', err);
     }
@@ -1496,9 +1618,12 @@
       // Keep loading pages while:
       //   • we haven't reached a full page of visible tiles, AND
       //   • there are more pages available
-      while (countVisibleTiles() < state.limit && state.hits.length < state.total) {
+      while (countVisibleTiles() < state.limit && _hasMorePages()) {
         const prevHitCount = state.hits.length;
-        state.offset += state.limit;
+        // Gallery mode uses cursor-based pagination (no offset increment)
+        if (state.mode !== 'gallery') {
+          state.offset += state.limit;
+        }
         await executeSearch(true);
 
         // Re-apply filters after the new hits are loaded so
@@ -1526,8 +1651,11 @@
       if (next >= 0) {
         selectTile(next);
       } else if (_hasMorePages() && !state.loading) {
-        // At the last visible tile in gallery mode — load next page.
-        state.offset += state.limit;
+        // At the last visible tile — load next page.
+        // Gallery mode uses cursor-based pagination (no offset increment)
+        if (state.mode !== 'gallery') {
+          state.offset += state.limit;
+        }
         executeSearch(true);
       }
     }
@@ -1743,6 +1871,24 @@
 
     const userId = user?.id ?? null;
 
+    const renderStatsIfStillCurrentArtist = () => {
+      if (els.fullscreen_preview.classList.contains('hidden')) return;
+      const currentHit = state.hits[state.selectedHitIndex];
+      if (!currentHit) return;
+      const currentUser = currentHit && typeof currentHit.user === 'object'
+        ? currentHit.user
+        : null;
+      const currentName = String(
+        currentUser?.username || currentHit?.username || ''
+      ).trim();
+      const sameById = userId != null && currentUser?.id === userId;
+      const sameByName =
+        !!currentName && currentName.toLowerCase() === name.toLowerCase();
+      if (sameById || sameByName) {
+        renderFullscreenArtistStats(currentUser, currentName);
+      }
+    };
+
     // Determine current blocked state from the summary map.
     const summaryMap = state.artistSummaryMap || {};
     let entry = summaryMap[name.toLowerCase()];
@@ -1800,7 +1946,7 @@
               is_blocked: true,
             };
           }
-          renderFullscreenArtistStats(user, name);
+          renderStatsIfStillCurrentArtist();
           // Also refresh summary from backend (non-blocking).
           fetchArtistSummary();
         })
@@ -1832,7 +1978,7 @@
         })
         .then(() => {
           if (entry) entry.is_blocked = false;
-          renderFullscreenArtistStats(user, name);
+          renderStatsIfStillCurrentArtist();
           fetchArtistSummary();
         })
         .catch((err) =>
@@ -1975,8 +2121,10 @@
       if (state.mode === 'review') facetPanel.open = true;
     }
 
-    // Toggle CSS class on the toolbar to dim search form in review mode
-    els.mode_bar.closest('.search-toolbar').classList.toggle('review-active', state.mode === 'review');
+    // Toggle CSS class on the toolbar to dim search form in review/gallery mode
+    const toolbar = els.mode_bar.closest('.search-toolbar');
+    toolbar.classList.toggle('review-active', state.mode === 'review');
+    toolbar.classList.toggle('gallery-active', state.mode === 'gallery');
 
     // Swap sort options and search placeholder for the active mode
     if (_galleryToolbar) {
@@ -1985,6 +2133,9 @@
         // Select the option matching current reviewSort/reviewOrder
         const combined = `${state.reviewSort}:${state.reviewOrder}`;
         _galleryToolbar.setSortValue(combined);
+      } else if (state.mode === 'gallery') {
+        // Gallery mode uses cursor-based pagination — no client-side sort
+        _galleryToolbar.setSortOptions([]);
       } else {
         // Restore search-mode sort options
         _galleryToolbar.setSortOptions([
@@ -2000,11 +2151,15 @@
       }
     }
 
-    // Update search placeholder for review mode
+    // Update search placeholder for review/gallery mode
     if (els.search_query) {
-      els.search_query.placeholder = state.mode === 'review'
-        ? 'Filter rated images…'
-        : 'Search CivitAI images…';
+      if (state.mode === 'review') {
+        els.search_query.placeholder = 'Filter rated images…';
+      } else if (state.mode === 'gallery') {
+        els.search_query.placeholder = 'Gallery mode — use the username field →';
+      } else {
+        els.search_query.placeholder = 'Search CivitAI images…';
+      }
     }
 
     updateReviewRatingUI();
@@ -2031,9 +2186,15 @@
     // Clear artist facet selection when switching modes
     state.reviewSelectedArtists.clear();
     state.reviewFacetFilter = '';
+    // Reset gallery pagination state when leaving gallery mode
+    state.galleryCursor = null;
+    state.galleryUsername = '';
+    state.galleryHasMore = false;
 
     if (mode === 'review') {
       setStatus('Loading rated images…', '');
+    } else if (mode === 'gallery') {
+      setStatus('Enter a CivitAI username in the username field to browse their gallery.', '');
     } else {
       setStatus('Enter a search query to get started.', '');
     }
@@ -2080,6 +2241,11 @@
         }
       }
 
+      // Merge locally-cached artist avatars so review browsing does not
+      // trigger the live single-image metadata fetch just to render an
+      // avatar (see fetchInlineArtistAvatar).
+      mergeArtistAvatars(data.artist_avatars);
+
       const newHitsCount = append ? (data.hits || []).length : 0;
       if (append) {
         state.hits = state.hits.concat(data.hits || []);
@@ -2121,6 +2287,104 @@
     }
   }
 
+  /* ── Gallery mode search (cursor-based pagination) ── */
+  async function executeGallerySearch(append = false) {
+    state.loading = true;
+    const savedCursor = state.galleryCursor;
+    const savedHits = state.hits;
+
+    // On a fresh search (not appending), read the username and validate
+    if (!append) {
+      const username = els.filter_username.value.trim();
+      if (!username) {
+        setStatus('Enter a CivitAI username in the username field to browse their gallery.', '');
+        state.loading = false;
+        return;
+      }
+      state.galleryUsername = username;
+      state.galleryCursor = null;
+      state.hits = [];
+      state.selectedHitIndex = -1;
+      state.selectedIndices.clear();
+      state.lastSelectionAnchor = -1;
+    }
+
+    if (!state.galleryUsername) {
+      setStatus('Enter a CivitAI username in the username field to browse their gallery.', '');
+      state.loading = false;
+      return;
+    }
+
+    setStatus(`Loading gallery for ${state.galleryUsername}…`, 'is-loading');
+
+    try {
+      const body = {
+        username: state.galleryUsername,
+        cursor: state.galleryCursor,
+      };
+
+      const res = await fetch(API_GALLERY, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      const newHits = data.hits || [];
+      if (append) {
+        state.hits = state.hits.concat(newHits);
+      } else {
+        state.hits = newHits;
+        state.selectedIndices.clear();
+        state.lastSelectionAnchor = -1;
+      }
+
+      // Gallery uses cursor-based pagination — store the cursor for the next page
+      state.galleryCursor = data.nextCursor || null;
+      state.galleryHasMore = data.hasMore !== undefined ? data.hasMore : (data.nextCursor !== null && data.nextCursor !== undefined);
+      // Gallery mode has no total count — approximate from loaded hits
+      state.total = state.hits.length;
+
+      // Merge artist avatars from the response
+      if (data.artist_avatars) {
+        for (const [key, uri] of Object.entries(data.artist_avatars)) {
+          state.artistAvatars.set(key, uri);
+        }
+      }
+
+      rebuildDedupeSet();
+      renderResults(append);
+      applyHideFilters();
+      checkAutoLoadIfAllHidden();
+      fetchLibraryStatus();
+
+      const count = newHits.length;
+      if (count === 0 && !append) {
+        setStatus(`No images found in ${state.galleryUsername}'s gallery. Check the username spelling.`, '');
+      } else if (append) {
+        setStatus(`Loaded ${state.hits.length} images from ${state.galleryUsername}'s gallery${state.galleryHasMore ? ' (more available)' : ' (end of gallery)'}.`, '');
+      } else {
+        setStatus(`Showing ${state.hits.length} images from ${state.galleryUsername}'s gallery${state.galleryHasMore ? ' (more available)' : ''}.`, '');
+      }
+    } catch (err) {
+      // Roll back cursor/hits on failure
+      state.galleryCursor = savedCursor;
+      if (!append) state.hits = savedHits;
+      setStatus(`Gallery load failed: ${err.message}`, 'is-error', {
+        label: 'Retry',
+        onClick: () => executeSearch(append),
+      });
+    } finally {
+      state.loading = false;
+    }
+  }
+
   /* ── Search ── */
   async function executeSearch(append = false) {
     if (state.loading) return;
@@ -2134,6 +2398,11 @@
     // ── Review mode: fetch rated images from DB ──
     if (state.mode === 'review') {
       return executeReviewSearch(append);
+    }
+
+    // ── Gallery mode: fetch a user's gallery via image.getInfinite ──
+    if (state.mode === 'gallery') {
+      return executeGallerySearch(append);
     }
 
     const query = els.search_query.value.trim();
@@ -3056,6 +3325,10 @@
 
   /** True if there are more result pages available to load. */
   function _hasMorePages() {
+    // Gallery mode uses cursor-based pagination
+    if (state.mode === 'gallery') {
+      return state.galleryHasMore && state.galleryCursor !== null;
+    }
     return state.total <= 0 || state.hits.length < state.total;
   }
 
@@ -3097,7 +3370,10 @@
       if (_hasMorePages() && !state.loading) {
         _setFullscreenLoading();
         state.fullscreenAdvanceOnLoad = true;
-        state.offset += state.limit;
+        // Gallery mode uses cursor-based pagination (no offset increment)
+        if (state.mode !== 'gallery') {
+          state.offset += state.limit;
+        }
         executeSearch(true);
       } else {
         // No more pages — exit fullscreen.
@@ -3291,21 +3567,30 @@
     const wrap = document.createElement('span');
     wrap.className = 'fs-stat is-' + kind;
     wrap.title = `${kind.charAt(0).toUpperCase() + kind.slice(1)}: ${count}`;
-    const icons = {
-      keep: 'M2 10h2v8H2v-8zm4 0V6.5C6 5.12 7.12 4 8.5 4H9V2h1.5C12 2 13 3.5 13 5.5S12 9 10.5 9H9v1h5l3 3v5H6V10z',
-      skip: 'M2 10h2v8H2v-8zm4 0V6.5C6 5.12 7.12 4 8.5 4H9v5h6c.55 0 1 .45 1 1v4c0 .55-.45 1-1 1H6V10z',
-      discard: 'M2 16h2v-8H2v8zm4 0V6.5C6 5.12 7.12 4 8.5 4H9v5h6c.55 0 1-.45 1-1V8c0-.55-.45-1-1-1H9V6h1.5C12 6 13 4.5 13 2.5S12 0 10.5 0H9v2h-.5C7.12 2 6 3.12 6 4.5V16z',
-    };
+    const iconPaths = [
+      'M7 10v12',
+      'M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z',
+    ];
     const svgNs = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(svgNs, 'svg');
-    svg.setAttribute('viewBox', '0 0 16 20');
-    svg.setAttribute('fill', 'currentColor');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.9');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
     svg.setAttribute('aria-hidden', 'true');
-    const path = document.createElementNS(svgNs, 'path');
-    path.setAttribute('d', icons[kind] || '');
-    svg.appendChild(path);
-    wrap.appendChild(svg);
+    for (const d of iconPaths) {
+      const path = document.createElementNS(svgNs, 'path');
+      path.setAttribute('d', d);
+      svg.appendChild(path);
+    }
+    const icon = document.createElement('span');
+    icon.className = 'fs-stat-icon';
+    icon.appendChild(svg);
+    wrap.appendChild(icon);
     const num = document.createElement('span');
+    num.className = 'fs-stat-count';
     num.textContent = String(count);
     wrap.appendChild(num);
     return wrap;

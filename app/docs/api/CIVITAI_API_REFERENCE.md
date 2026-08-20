@@ -175,6 +175,27 @@ https://civitai.com/api/trpc/{endpoint}?input={encoded_payload}
   - With `meta`: `200`, but returned a page fully overlapping first-page IDs (`50` overlap)
   - Without `meta`: `200`, returned non-overlapping next-page IDs (`0` overlap)
 
+**Flat-Array Serialization Format (2026-08-12 discovery):**
+
+As of mid-2026, `image.getInfinite` may return responses in a **double-encoded column-oriented flat-array** format instead of the standard object format:
+
+```
+{"result": {"data": "<stringified JSON flat array>"}}
+```
+
+The inner string, once `json.loads`-ed, is a flat array where:
+- `[0]` — metadata: `{"nextCursor": <int|str|-1>, "items": <count or positional ref>}`
+- `[1]` — row offsets: list of absolute indices into the flat array, each pointing to a per-row *column template* dict
+- `[2:]` — flat data pool containing all scalar values and nested template dicts/lists referenced by position
+
+Each column template maps field names to **absolute positions** in the flat array. Nested dicts and lists follow the same positional scheme recursively.
+
+This format is handled by `CivitaiAPI._deserialize_trpc_flat_array()`, which resolves positional references and returns `{"items": [...], "nextCursor": <value>}`.
+
+**⚠️ Cursor type note:** In flat-array responses, `nextCursor` type varies by filter mode:
+- Collection mode: integer (e.g., `62702`)
+- Gallery/username mode: composite string (e.g., `"5|1777728329760"`)
+
 Test scripts used:
 - `app/dev/check_meta_requirement.py`
 - `/tmp/check_infinite_cursor_meta.py`
@@ -666,6 +687,9 @@ Fetch collection items with pagination support.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `collectionId` | int | Collection ID to fetch |
+| `username` | str | Username to fetch a user's complete image gallery (verified 2026-08-12) |
+| `userId` | int | Numeric user ID filter (listed on `post.getInfinite`; likely works here but unverified) |
+| `postId` | int | Post ID to fetch images for a specific post (used by `fetch_post_images()`) |
 | `period` | str | Time period ("AllTime", "Day", "Week", "Month", "Year") |
 | `sort` | str | Sort order ("Newest", "Oldest", "MostCollected", etc.) |
 | `browsingLevel` | int | NSFW filter (0-31, 31=everything) |
@@ -680,6 +704,83 @@ Fetch collection items with pagination support.
 - Pass cursor value in subsequent requests
 - Omit `meta` for cursor-based follow-up requests (only use it for first-page `cursor: null`)
 - Stop when `nextCursor` is null or empty
+
+**⚠️ Cursor format varies by filter mode:**
+- **Collection mode** (`collectionId`): `nextCursor` is a simple integer (e.g., `62702`).
+- **Gallery mode** (`username`): `nextCursor` is a composite string token in the format `<offset>|<unix_timestamp_ms>` (e.g., `"5|1777728329760"`). Pass the full string verbatim as the cursor on subsequent requests.
+
+---
+
+##### User Gallery Mode
+
+Fetch a user's complete image gallery by passing `username` instead of `collectionId`. Verified working 2026-08-12 against `https://civitai.red/user/BRTGML/images`.
+
+**Payload:**
+```json
+{
+  "json": {
+    "username": "BRTGML",
+    "authed": true,
+    "period": "AllTime",
+    "sort": "Newest",
+    "browsingLevel": 31,
+    "include": ["cosmetics"],
+    "disablePoi": true,
+    "disableMinor": true,
+    "limit": 51,
+    "cursor": null
+  },
+  "meta": {
+    "values": {
+      "cursor": ["undefined"]
+    }
+  }
+}
+```
+
+**Response item shape (gallery mode returns rich metadata):**
+```json
+{
+  "id": 129369845,
+  "url": "7c5fa77b-6b16-4afa-a6e9-d2df232402eb",
+  "type": "image",
+  "width": 1336,
+  "height": 912,
+  "nsfwLevel": 16,
+  "combinedNsfwLevel": 16,
+  "postId": 28323335,
+  "userId": 6914499,
+  "baseModel": "Illustrious",
+  "hash": "UBELmao$0f58MxE1xBInEk9u^+-p~BjE9ZNG",
+  "availability": "Public",
+  "publishedAt": "2026-05-02T13:25:29.760Z",
+  "sortAt": "2026-05-02T13:25:29.760Z",
+  "tagIds": [304, 308, 1465, ...],
+  "modelVersionIds": [2091617],
+  "stats": {
+    "likeCountAllTime": 1,
+    "commentCountAllTime": 0,
+    "collectedCountAllTime": 0,
+    "viewCountAllTime": 0
+  },
+  "user": {
+    "id": 6914499,
+    "username": "BRTGML",
+    "image": null
+  }
+}
+```
+
+**Pagination:** The first page returns `nextCursor` as a composite string (e.g., `"5|1777728329760"`). Subsequent pages pass this string verbatim as `cursor` and omit `meta`:
+```json
+{
+  "json": {
+    "username": "BRTGML",
+    "cursor": "5|1777728329760",
+    ...same params...
+  }
+}
+```
 
 ---
 
@@ -1468,3 +1569,4 @@ This API reference is based on reverse-engineering and testing. CivitAI may chan
 |---------|------------|------------------------------------------|
 | 1.0     | 2026-01-30 | Initial documentation of known endpoints |
 | 1.1     | 2026-03-11 | Documented `post.getInfinite` (public browsing + draft/unpublished discovery), `fetch_user_draft_posts()` API method, and two-tier fallback pattern |
+| 1.2     | 2026-08-12 | Documented `image.getInfinite` `username` (gallery mode) and `postId` filters, flat-array serialization format, and composite-string `nextCursor` in gallery mode |

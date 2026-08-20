@@ -582,6 +582,14 @@ class CivitaiSearchRequest(BaseModel):
     matching_strategy: Optional[str] = None  # "last" | "all" | "frequency"
 
 
+class CivitaiGalleryRequest(BaseModel):
+    """Browse a CivitAI user's image gallery via image.getInfinite."""
+
+    username: str
+    cursor: Optional[str] = None  # composite string cursor for pagination
+    limit: int = Field(default=51, ge=1, le=100)  # informational only
+
+
 class SyncLabAnalyzeRequest(BaseModel):
     """Sync Lab: analyze-local and fetch-metadata step payload."""
     image_ids: list[int]

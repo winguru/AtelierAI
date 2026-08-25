@@ -55,6 +55,16 @@
             <button type="button" class="mode-btn" data-mode="gallery" role="tab" aria-selected="false">🖼️ Gallery</button>
           </div>
 
+          <div id="nsfw-visibility-control" class="nsfw-visibility-control" role="group" aria-label="NSFW visibility">
+            <span class="nsfw-visibility-prefix">Show:</span>
+            <button id="nsfw-visibility-current" class="nsfw-visibility-current" type="button" aria-haspopup="true" aria-expanded="false">Explicit</button>
+            <div class="nsfw-visibility-options" role="menu" aria-label="NSFW visibility levels">
+              <button type="button" class="nsfw-visibility-option" data-nsfw-level="safe" role="menuitemradio" aria-checked="false">Safe</button>
+              <button type="button" class="nsfw-visibility-option" data-nsfw-level="mature" role="menuitemradio" aria-checked="false">Mature</button>
+              <button type="button" class="nsfw-visibility-option" data-nsfw-level="explicit" role="menuitemradio" aria-checked="true">Explicit</button>
+            </div>
+          </div>
+
           <div id="review-rating-bar" class="review-rating-bar hidden" role="tablist" aria-label="Review rating filter">
             <button type="button" class="review-rating-btn active" data-rating="keep" role="tab" aria-selected="true">Keep</button>
             <button type="button" class="review-rating-btn" data-rating="skip" role="tab" aria-selected="false">Skip</button>
@@ -106,15 +116,6 @@
                   <input id="filter-username" type="text" placeholder="e.g. winguru">
                 </div>
                 <div class="filter-row">
-                  <label for="filter-nsfw">NSFW Level</label>
-                  <select id="filter-nsfw">
-                    <option value="1,2">Safe</option>
-                    <option value="1,2,4">Soft</option>
-                    <option value="1,2,4,8,16">Mature</option>
-                    <option value="1,2,4,8,16,32">Explicit</option>
-                  </select>
-                </div>
-                <div class="filter-row">
                   <label for="filter-match">Match</label>
                   <select id="filter-match">
                     <option value="last">Last (default)</option>
@@ -157,6 +158,8 @@
           <label class="hide-filter-opt"><input type="checkbox" id="hide-skip" data-hide="skip"> Skip</label>
           <label class="hide-filter-opt"><input type="checkbox" id="hide-discard" data-hide="discard" checked> Discard</label>
           <label class="hide-filter-opt"><input type="checkbox" id="hide-identical" data-hide="identical" checked> Identical</label>
+          <span class="hide-filter-spacer"></span>
+          <button type="button" id="nsfw-backfill-btn" class="btn ghost nsfw-backfill-btn hidden" title="Fetch missing CivitAI NSFW levels for imported images (runs in background)">↻ Backfill NSFW metadata</button>
         </div>
 
         <div id="gallery-toolbar-mount"></div>

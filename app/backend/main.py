@@ -989,6 +989,18 @@ def _build_missing_data_condition(key: str) -> list:
                 Im.civitai_nsfw_level.is_(None),
             )
         ]
+    if key in ("no civitai nsfw level", "no civitai_nsfw_level"):
+        # CivitAI-sourced images missing the imported nsfwLevel — the
+        # candidate set the NSFW backfill job processes.
+        return [
+            sa.and_(
+                sa.or_(
+                    sa.func.lower(Im.source_url).like("%civitai.com/images/%"),
+                    sa.func.lower(Im.source_url).like("%civitai.red/images/%"),
+                ),
+                Im.civitai_nsfw_level.is_(None),
+            )
+        ]
     if key == "no safety class":
         return [
             Im.user_nsfw_safety_class.is_(None),
@@ -10869,6 +10881,17 @@ def _ingest_prepared_civitai_import(
             if image.civitai_image_id is None and prepared.image_id:
                 image.civitai_image_id = prepared.image_id
 
+            # Ensure the CivitAI NSFW level is persisted on fresh imports.
+            # prepared.raw_basic_info carries the nsfwLevel fetched during the
+            # prepare/download step; without this the column stayed NULL until
+            # a later metadata refresh happened to populate it.
+            if image.civitai_nsfw_level is None and prepared.raw_basic_info:
+                nsfw_level = extract_civitai_nsfw_level(
+                    {"civitai": prepared.raw_basic_info}
+                )
+                if nsfw_level is not None:
+                    image.civitai_nsfw_level = nsfw_level
+
             # Ensure civitai_post_id is populated from the prepared import.
             if image.civitai_post_id is None and prepared.civitai_post_id:
                 image.civitai_post_id = prepared.civitai_post_id
@@ -10897,6 +10920,14 @@ def _ingest_prepared_civitai_import(
             # Add pre-saved API response file paths (includes basic_info, generation_data, and infinite)
             if prepared.api_response_paths:
                 civitai_metadata_info.update(prepared.api_response_paths)
+
+            # Record the NSFW level in the merged civitai metadata payload so
+            # the backfill job (and the /images response sidecar merge) can
+            # see the image is already complete without re-querying CivitAI.
+            if image.civitai_nsfw_level is not None:
+                civitai_metadata_info.setdefault(
+                    "nsfwLevel", image.civitai_nsfw_level
+                )
 
             # Update image metadata with UUID and paths
             if civitai_metadata_info:

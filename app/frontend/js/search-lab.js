@@ -27,6 +27,33 @@
     { level: 16, label: 'XXX' },
   ];
 
+  // NSFW visibility modes (mirrors the main gallery control).
+  // Safe = PG/PG-13, Mature = +R, Explicit = everything (X/XXX/32).
+  // The mode is a CLIENT-SIDE display filter: searches are always sent
+  // unfiltered so Meilisearch facet counts stay truthful; changing the
+  // mode only re-applies the level visibility set to loaded hits.
+  const NSFW_VISIBILITY_MODES = ['safe', 'mature', 'explicit'];
+  const NSFW_VISIBILITY_LEVEL_SETS = {
+    safe: new Set([1, 2]),
+    mature: new Set([1, 2, 4]),
+    explicit: new Set([1, 2, 4, 8, 16, 32]),
+  };
+
+  function normalizeNsfwVisibilityMode(value) {
+    const mode = String(value || '').toLowerCase();
+    return NSFW_VISIBILITY_MODES.includes(mode) ? mode : 'explicit';
+  }
+
+  function getNsfwVisibilityLevels(mode) {
+    return NSFW_VISIBILITY_LEVEL_SETS[normalizeNsfwVisibilityMode(mode)]
+      || NSFW_VISIBILITY_LEVEL_SETS.explicit;
+  }
+
+  function formatNsfwVisibilityLabel(mode) {
+    const normalized = normalizeNsfwVisibilityMode(mode);
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
+
   /* ── Sort options for review mode (value format: "key:order") ── */
   const REVIEW_SORT_OPTIONS = [
     { value: 'recent:desc', label: 'Most Recently Rated' },
@@ -186,7 +213,8 @@
   const requiredIds = [
     'mode-bar', 'review-rating-bar',
     'search-form', 'search-query', 'search-advanced',
-    'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username', 'filter-nsfw', 'filter-match',
+    'filter-tags', 'filter-sort', 'filter-base-model', 'filter-username',
+    'filter-match',
     'civitai-url', 'civitai-url-go',
     'facet-bar', 'nsfw-level-bar', 'search-status', 'search-status-text',
     'gallery-grid', 'gallery-footer', 'load-more-btn', 'results-count',
@@ -235,10 +263,12 @@
     dedupeHashes: new Set(),   // perceptual hashes seen so far (for visual-dup hiding)
     hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true, identical: true },
     // NSFW level facet pills.  These supplement the NSFW dropdown: the
-    // dropdown sets the baseline allowed levels, and the pills let the user
-    // further narrow the visible tiles per individual level.
+    // The top visibility control (Safe/Mature/Explicit) sets the baseline
+    // allowed levels, and the pills let the user further narrow the visible
+    // tiles per individual level.
     // Pill counts come from the Meilisearch facet distribution and stay
     // stable when toggling pills (only other filter changes refresh them).
+    nsfwVisibility: 'explicit',        // 'safe' | 'mature' | 'explicit'
     nsfwLevelVisible: new Set([1, 2, 4, 8, 16, 32]),  // levels currently shown
     autoLoading: false,         // guards against recursive auto-load
     fullscreenAdvanceOnLoad: false, // when true, advance fullscreen to first new visible tile after search
@@ -438,6 +468,7 @@
     initFolderTabs();
     checkAuthStatus();
     createImportUI();
+    void checkNsfwBackfillNeed();
 
     // Restore state from URL if present — just repopulate form and search
     const saved = loadStateFromUrl();
@@ -447,7 +478,7 @@
       els.filter_sort.value = saved.sortBy;
       els.filter_base_model.value = saved.baseModel;
       els.filter_username.value = saved.username;
-      els.filter_nsfw.value = saved.nsfw;
+      if (saved.nsfw) setNsfwVisibility(saved.nsfw, { fromUrl: true });
       els.filter_match.value = saved.match || 'last';
       syncHideFiltersFromUrl(saved);
       executeSearch();
@@ -947,7 +978,6 @@
     const sort = els.filter_sort.value;
     const baseModel = els.filter_base_model.value;
     const username = els.filter_username.value.trim();
-    const nsfw = els.filter_nsfw.value;
     const match = els.filter_match.value;
 
     if (q) p.set('q', q);
@@ -955,7 +985,9 @@
     if (sort) p.set('sort', sort);
     if (baseModel) p.set('baseModel', baseModel);
     if (username) p.set('username', username);
-    if (nsfw) p.set('nsfw', nsfw);
+    // NSFW visibility is a client-side mode — persist it, but never send it
+    // to CivitAI (their search API has no equivalent browsingLevel support).
+    if (state.nsfwVisibility !== 'explicit') p.set('nsfw', state.nsfwVisibility);
     if (match && match !== 'last') p.set('match', match);
     if (state.hits.length > 0) p.set('offset', String(state.hits.length));
 
@@ -975,6 +1007,21 @@
     history.replaceState(null, '', url);
   }
 
+  /** Map legacy comma-separated nsfw level params to a visibility mode. */
+  function parseLegacyNsfwParam(raw) {
+    if (!raw) return '';
+    const mode = normalizeNsfwVisibilityMode(raw);
+    if (NSFW_VISIBILITY_MODES.includes(mode)) return mode;
+    const levels = new Set(raw.split(',').map(Number).filter(Boolean));
+    for (const candidate of NSFW_VISIBILITY_MODES) {
+      const set = NSFW_VISIBILITY_LEVEL_SETS[candidate];
+      if (set.size === levels.size && [...set].every((lvl) => levels.has(lvl))) {
+        return candidate;
+      }
+    }
+    return '';
+  }
+
   function loadStateFromUrl() {
     const p = new URLSearchParams(window.location.search);
     if (!p.has('q') && !p.has('tags') && !p.has('baseModel') && !p.has('username')) return null;
@@ -985,7 +1032,9 @@
       sortBy: p.get('sort') || '',
       baseModel: p.get('baseModel') || '',
       username: p.get('username') || '',
-      nsfw: p.get('nsfw') || '',
+      // Legacy URLs may carry comma-separated level lists; map any old
+      // preset to the closest mode, otherwise accept safe/mature/explicit.
+      nsfw: parseLegacyNsfwParam(p.get('nsfw')),
       match: p.get('match') || 'last',
       offset: parseInt(p.get('offset') || '0', 10),
       hideSeen: p.has('hideSeen') ? p.get('hideSeen') === '1' : null,
@@ -1025,7 +1074,6 @@
     const sortBy = els.filter_sort.value;
     const baseModel = els.filter_base_model.value;
     const username = els.filter_username.value.trim();
-    const nsfw = els.filter_nsfw.value;
 
     const parts = [];
     // CivitAI uses "query" for the free-text search box.
@@ -1044,13 +1092,9 @@
     if (username) parts.push(`usernames=${encodeURIComponent(username)}`);
     // CivitAI URLs use lowercase model identifiers (e.g. "sdxl").
     if (baseModel) parts.push(`model=${encodeURIComponent(baseModel.toLowerCase())}`);
-    // NSFW dropdown values are comma-separated level bitmasks (e.g. "1,2,4").
-    // CivitAI's site uses a single browsingLevel bitmask integer.
-    if (nsfw) {
-      const levels = nsfw.split(',').map(Number).filter((n) => !isNaN(n));
-      const browsingLevel = levels.reduce((acc, n) => acc | n, 0);
-      if (browsingLevel > 0) parts.push(`browsingLevel=${browsingLevel}`);
-    }
+    // NOTE: browsingLevel is intentionally NOT emitted. CivitAI's image
+    // search endpoint does not support NSFW level filtering, so NSFW
+    // visibility is handled client-side only.
 
     const search = parts.join('&');
     return `${CIVITAI_WEB_URL}/search/images${search ? '?' + search : ''}`;
@@ -1078,8 +1122,9 @@
    * Parse a CivitAI site search URL and apply its parameters to the
    * Search Lab filter controls, then trigger a fresh search.
    *
-   * Recognized URL params: q, tags (multi-value), sortBy, model, usernames, browsingLevel.
+   * Recognized URL params: q, tags (multi-value), sortBy, model, usernames.
    * Also supports legacy params: sort, username.
+   * browsingLevel is ignored — CivitAI's search has no NSFW filter.
    */
   function applyCivitaiUrl(urlText) {
     try {
@@ -1130,22 +1175,6 @@
         }
       }
 
-      const browsingLevel = p.get('browsingLevel');
-      if (browsingLevel) {
-        const level = parseInt(browsingLevel, 10);
-        if (!isNaN(level) && level > 0) {
-          // Find the NSFW dropdown option whose bitmask matches.
-          const nsfwSelect = els.filter_nsfw;
-          for (const opt of nsfwSelect.options) {
-            const optLevel = opt.value.split(',').map(Number).reduce((a, n) => a | n, 0);
-            if (optLevel === level) {
-              nsfwSelect.value = opt.value;
-              break;
-            }
-          }
-        }
-      }
-
       // Trigger fresh search and update URL field
       state.offset = 0;
       state.hits = [];
@@ -1177,7 +1206,194 @@
   let _galleryToolbar = null;
 
   /* ── Events ── */
+  /* ── NSFW visibility control (Safe / Mature / Explicit) ── */
+
+  const NSFW_VISIBILITY_COOKIE = 'atelier_nsfw_visibility';
+
+  /** Update the current-mode button label and menu check states. */
+  function syncNsfwVisibilityUi() {
+    const control = document.getElementById('nsfw-visibility-control');
+    const currentBtn = document.getElementById('nsfw-visibility-current');
+    if (!control || !currentBtn) return;
+    currentBtn.textContent = formatNsfwVisibilityLabel(state.nsfwVisibility);
+    currentBtn.setAttribute('aria-expanded', 'false');
+    control.querySelectorAll('[data-nsfw-level]').forEach((button) => {
+      const level = String(button.dataset.nsfwLevel || '').toLowerCase();
+      const isActive = level === state.nsfwVisibility;
+      button.classList.toggle('is-active', isActive);
+      button.setAttribute('aria-checked', isActive ? 'true' : 'false');
+    });
+  }
+
+  /**
+   * Set the NSFW visibility mode.
+   *
+   * Client-side only: re-applies the level visibility set to already-loaded
+   * hits (no re-query), keeping facet counts truthful. The mode is persisted
+   * to the shared cookie (same one the main gallery uses) and the page URL.
+   */
+  function setNsfwVisibility(nextMode, opts = {}) {
+    const mode = normalizeNsfwVisibilityMode(nextMode);
+    if (mode === state.nsfwVisibility && !opts.fromUrl) return;
+    const changed = mode !== state.nsfwVisibility;
+    state.nsfwVisibility = mode;
+
+    const prefs = window.AtelierPreferences;
+    if (prefs?.writeCookieValue) prefs.writeCookieValue(NSFW_VISIBILITY_COOKIE, mode);
+
+    syncNsfwVisibilityUi();
+    if (!changed) return;
+
+    // Reset per-level pills to the new baseline and re-filter loaded tiles.
+    state.nsfwLevelVisible = new Set(getNsfwVisibilityLevels(mode));
+    renderNsfwPills();
+    applyHideFilters();
+    checkAutoLoadIfAllHidden();
+    saveStateToUrl();
+  }
+
+  /** Mount the shared hover-choice dropdown on the visibility control. */
+  function mountNsfwVisibilityControl() {
+    const control = document.getElementById('nsfw-visibility-control');
+    const currentBtn = document.getElementById('nsfw-visibility-current');
+    if (!control || !currentBtn) return;
+
+    // Seed from the shared cookie so search-lab and the main gallery agree.
+    const prefs = window.AtelierPreferences;
+    const saved = prefs?.readCookieString
+      ? prefs.readCookieString(NSFW_VISIBILITY_COOKIE, '', NSFW_VISIBILITY_MODES)
+      : '';
+    if (saved) state.nsfwVisibility = saved;
+
+    const optionButtons = Array.from(control.querySelectorAll('[data-nsfw-level]'));
+    const uiKit = window.AtelierUi;
+    if (uiKit?.mountHoverChoiceControl) {
+      uiKit.mountHoverChoiceControl({
+        root: control,
+        currentButton: currentBtn,
+        optionButtons,
+        getValue: () => state.nsfwVisibility,
+        // Delegate the full change flow (cookie, pills, filters, URL) here —
+        // ui-kit invokes setValue before onChange, so onChange alone would
+        // arrive after state already matches and early-return.
+        setValue: (nextMode) => {
+          setNsfwVisibility(nextMode);
+        },
+        allowedValues: NSFW_VISIBILITY_MODES,
+        formatLabel: (value) => formatNsfwVisibilityLabel(value),
+      });
+    } else {
+      // Fallback: plain click-to-toggle menu.
+      currentBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        control.classList.toggle('is-open');
+        currentBtn.setAttribute('aria-expanded', control.classList.contains('is-open') ? 'true' : 'false');
+      });
+      for (const button of optionButtons) {
+        button.addEventListener('click', () => {
+          control.classList.remove('is-open');
+          setNsfwVisibility(button.dataset.nsfwLevel);
+        });
+      }
+    }
+    syncNsfwVisibilityUi();
+  }
+
+  /**
+   * Kick off the CivitAI NSFW metadata backfill task and poll it to
+   * completion, surfacing the job summary in the status bar.
+   */
+  async function runNsfwMetadataBackfill() {
+    const btn = document.getElementById('nsfw-backfill-btn');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    setStatus('Starting NSFW metadata backfill…', 'is-loading');
+    try {
+      const res = await fetch('/api/civitai/backfill/nsfw-levels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.detail || `HTTP ${res.status}`);
+      }
+      const task = await res.json();
+      const taskId = task?.task?.id || task?.id;
+      if (!taskId) throw new Error('No task id returned.');
+
+      const maxPolls = 120;
+      let polls = 0;
+      const interval = setInterval(async () => {
+        polls++;
+        if (polls >= maxPolls) {
+          clearInterval(interval);
+          setStatus('Backfill still running in the background — check the maintenance page later.', '');
+          btn.disabled = false;
+          return;
+        }
+        try {
+          const poll = await fetch(`/api/tasks/${taskId}`);
+          if (!poll.ok) { clearInterval(interval); return; }
+          const t = await poll.json();
+          if (t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled') {
+            clearInterval(interval);
+            btn.disabled = false;
+            if (t.status === 'completed') {
+              const r = t.result || {};
+              const parts = [];
+              if (r.metadata_backfilled) parts.push(`${r.metadata_backfilled} backfilled`);
+              if (r.reimport_recovered) parts.push(`${r.reimport_recovered} recovered via reimport`);
+              if (r.already_complete) parts.push(`${r.already_complete} already set`);
+              if (r.remote_unavailable) parts.push(`${r.remote_unavailable} unavailable remotely`);
+              if (r.images_failed) parts.push(`${r.images_failed} failed`);
+              if (!parts.length) parts.push('nothing to do');
+              setStatus(`NSFW backfill complete — ${parts.join(', ')}.`, r.images_failed ? 'is-error' : '');
+              // Re-probe: hide the button when nothing is missing anymore.
+              checkNsfwBackfillNeed();
+            } else {
+              setStatus(`NSFW backfill ${t.status}: ${t.error || t.message || 'no details'}`, 'is-error');
+            }
+          }
+        } catch (_err) {
+          clearInterval(interval);
+          btn.disabled = false;
+          setStatus('Lost track of the backfill task — it may still finish in the background.', 'is-error');
+        }
+      }, 2000);
+    } catch (err) {
+      btn.disabled = false;
+      setStatus(`Could not start NSFW backfill: ${err.message}`, 'is-error');
+    }
+  }
+
+  /** Show the backfill button when any imported images lack NSFW levels. */
+  async function checkNsfwBackfillNeed() {
+    const btn = document.getElementById('nsfw-backfill-btn');
+    if (!btn) return;
+    try {
+      const res = await fetch('/api/images?missing_data=civitai_nsfw_level&limit=1');
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = Array.isArray(data)
+        ? data
+        : (Array.isArray(data?.images) ? data.images : []);
+      btn.classList.toggle('hidden', list.length === 0);
+    } catch (_e) {
+      // Fail open — leave the button hidden if the probe fails.
+    }
+  }
+
   function bindEvents() {
+    // NSFW visibility dropdown + metadata backfill button
+    mountNsfwVisibilityControl();
+    const backfillBtn = document.getElementById('nsfw-backfill-btn');
+    if (backfillBtn) {
+      backfillBtn.addEventListener('click', () => {
+        void runNsfwMetadataBackfill();
+      });
+    }
+
     // Mode toggle (Search ↔ Review)
     els.mode_bar.addEventListener('click', (e) => {
       const btn = e.target.closest('.mode-btn');
@@ -1226,7 +1442,7 @@
     // CivitAI URL field — live update + Go button + paste-to-apply
     const filterElsForUrl = [
       els.search_query, els.filter_tags, els.filter_sort,
-      els.filter_base_model, els.filter_username, els.filter_nsfw,
+      els.filter_base_model, els.filter_username,
     ];
     for (const el of filterElsForUrl) {
       if (!el) continue;
@@ -1691,7 +1907,7 @@
   }
 
   /** Persist the search query so image ratings can be linked to it. */
-  async function recordSearch(query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy, resultCount) {
+  async function recordSearch(query, tags, sortBy, baseModel, username, nsfwMode, matchStrategy, resultCount) {
     const body = {
       search_text: query || null,
       search_terms: {
@@ -1699,7 +1915,9 @@
         sort_by: sortBy || null,
         base_model: baseModel || null,
         username: username || null,
-        nsfw_levels: nsfwLevels || null,
+        // Log the client-side visibility mode that was active (safe/mature/
+        // explicit) — the request itself was sent unfiltered.
+        nsfw_visibility: nsfwMode || null,
         match_strategy: matchStrategy || null,
       },
       result_count: resultCount,
@@ -2410,7 +2628,7 @@
     const sortBy = els.filter_sort.value;
     const baseModel = els.filter_base_model.value;
     const username = els.filter_username.value.trim();
-    const nsfwLevels = els.filter_nsfw.value;
+    const nsfwMode = state.nsfwVisibility;
     const matchStrategy = els.filter_match.value;
 
     if (!query && !tags && !baseModel && !username) {
@@ -2419,7 +2637,7 @@
     }
 
     state.loading = true;
-    state.currentQuery = { query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy };
+    state.currentQuery = { query, tags, sortBy, baseModel, username, nsfwMode, matchStrategy };
     setStatus('Searching…', 'is-loading');
 
     const body = {
@@ -2428,7 +2646,8 @@
       sort_by: sortBy || undefined,
       limit: state.limit,
       offset: state.offset,
-      nsfw_levels: nsfwLevels ? nsfwLevels.split(',').map(Number) : undefined,
+      // No nsfw_levels: the request is sent unfiltered so facet counts stay
+      // truthful; NSFW visibility is applied client-side (isHiddenByFilter).
       base_models: baseModel ? [baseModel] : undefined,
       username: username || undefined,
       matching_strategy: matchStrategy !== 'last' ? matchStrategy : undefined,
@@ -2514,7 +2733,7 @@
 
       // Record the search to the backend for history (fresh searches only)
       if (!append) {
-        recordSearch(query, tags, sortBy, baseModel, username, nsfwLevels, matchStrategy, data.total || 0);
+        recordSearch(query, tags, sortBy, baseModel, username, nsfwMode, matchStrategy, data.total || 0);
       }
 
       // If we loaded a new page because fullscreen was at the last visible
@@ -2757,13 +2976,12 @@
   }
 
   /**
-   * Reset the NSFW level visibility set to match the dropdown's current
-   * selection.  Called on every fresh search so pill toggles don't persist
+   * Reset the NSFW level visibility set to match the current visibility
+   * mode.  Called on every fresh search so pill toggles don't persist
    * across unrelated query changes.
    */
   function resetNsfwLevelVisible() {
-    const raw = (els.filter_nsfw?.value || '').split(',').map(Number).filter(Boolean);
-    state.nsfwLevelVisible = new Set(raw.length ? raw : [1, 2, 4, 8, 16, 32]);
+    state.nsfwLevelVisible = new Set(getNsfwVisibilityLevels(state.nsfwVisibility));
   }
 
   /**

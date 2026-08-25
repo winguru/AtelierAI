@@ -699,6 +699,20 @@ body[data-theme="dark"] .nsfw-pill-label {
     accent-color: var(--accent, #2563eb);
 }
 
+/* Flexible spacer pushing the NSFW backfill button to the row end */
+.hide-filter-spacer {
+    flex: 1 1 auto;
+}
+
+.nsfw-backfill-btn {
+    white-space: nowrap;
+}
+
+.nsfw-backfill-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
 /* Tiles hidden by hide-filter */
 .tile.tile-hidden {
     display: none !important;

@@ -299,3 +299,52 @@ are classified as response/parser mismatches.
 **Key files:**
 - `app/src/atelierai/civitai/civitai_api.py` — `_deserialize_trpc_flat_array()`, `_make_request()` string branch
 - `app/src/atelierai/civitai/civitai.py` — `_make_collection_request()` flat array deserialization path
+
+### Search Lab NSFW visibility modes (September 2026)
+
+The Search Lab toolbar has a dedicated NSFW visibility control (separate from
+the advanced hide-filter bar), matching the main gallery. It is a **client-side
+post-filter** — the NSFW mode is never sent in the search POST body so CivitAI
+facet counts stay truthful, and tiles are hidden via the existing
+`isHiddenByFilter` / `applyHideFilters` (`.tile-hidden` class) pipeline.
+
+- **Modes:** Safe = levels {1,2}; Mature = {1,2,4}; Explicit =
+  {1,2,4,8,16,32} (all). Per-level pills remain in the hide-filter bar for
+  fine-grained control on top of the mode.
+- **Persistence:** cookie `atelier_nsfw_visibility` (mode string) + URL param
+  `?nsfw=safe|mature|explicit`. URL restores on load; Explicit omits the param
+  (default). Legacy comma-separated level lists in the URL still parse.
+- **CivitAI URL builder:** `browsingLevel` was removed from generated CivitAI
+  URLs — CivitAI does not support that parameter; filtering stays local.
+- **ui-kit gotcha:** `mountHoverChoiceControl` calls `setValue(nextValue)`
+  BEFORE `onChange(nextValue)`. If `setValue` writes state directly, the
+  subsequent `setNsfwVisibility` call early-returns (state already matches) and
+  cookie/URL are never written. Delegate the full change flow inside
+  `setValue` and omit `onChange`.
+
+### NSFW level ingest, backfill & missing-data probe (September 2026)
+
+Imports were silently dropping `nsfwLevel`. Fixed in two places:
+
+1. `_ingest_prepared_civitai_import` sets `image.civitai_nsfw_level` from
+   `extract_civitai_nsfw_level({"civitai": prepared.raw_basic_info})` when the
+   column is still `None`.
+2. The same ingest writes `nsfwLevel` (via `setdefault`) into the merged
+   `json_metadata["civitai"]` payload so `_payload_has_nsfw_level` treats the
+   image as complete and the backfill job skips it without re-querying CivitAI.
+
+**Backfill UI:** Search Lab shows a "Backfill NSFW metadata" button only when
+`GET /api/images?missing_data=civitai_nsfw_level&limit=1` returns rows (plain
+JSON array — not `{images: [...]}`). Clicking POSTs to
+`/api/civitai/backfill/nsfw-levels` (202 + task id) and polls
+`GET /api/tasks/{id}` every 2s. On completion it re-probes and hides itself
+when nothing remains missing; images with no remote NSFW data keep the button
+visible (that is correct — some images genuinely lack the field remotely).
+
+**Key files:**
+- `app/backend/main.py` — `_build_missing_data_condition`
+  (`civitai_nsfw_level` keys), `_ingest_prepared_civitai_import`,
+  `_payload_has_nsfw_level`
+- `app/frontend/js/search-lab.js` — `setNsfwVisibility`,
+  `mountNsfwVisibilityControl`, `runNsfwMetadataBackfill`,
+  `checkNsfwBackfillNeed`

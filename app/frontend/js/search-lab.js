@@ -1,4 +1,9 @@
 /* global AtelierUi, AtelierFolderTabs, applyThemePreference */
+/*
+ * ── Memory ───────────────────────────────────────────────────────────────────
+ * 📄 docs: app/docs/memories/civitai-integration.md
+ * ──────────────────────────────────────────────────────────────────────────────
+ */
 
 (function () {
   'use strict';
@@ -1624,8 +1629,34 @@
     }
   }
 
+  /**
+   * Rate the current image, or — when multiple images are selected — apply
+   * the rating to every selected image at once.  After a multi-rating the
+   * selection is cleared and we advance to the next visible image.
+   */
+  function rateSelectedImages(rating) {
+    if (state.selectedIndices.size > 1) {
+      // Multi-select: apply the rating to all selected images.
+      const indices = [...state.selectedIndices].filter(
+        (i) => i >= 0 && i < state.hits.length && state.hits[i]
+      );
+      for (const i of indices) {
+        rateImageAt(i, rating);
+      }
+      clearSelection();
+      advanceToNext();
+    } else {
+      rateImage(rating);
+      advanceToNext();
+    }
+  }
+
   async function rateImage(rating) {
-    const idx = state.selectedHitIndex;
+    await rateImageAt(state.selectedHitIndex, rating);
+  }
+
+  /** Rate the hit at `idx` (used for both single- and multi-select rating). */
+  async function rateImageAt(idx, rating) {
     if (idx < 0 || idx >= state.hits.length) return;
 
     const hit = state.hits[idx];
@@ -2122,14 +2153,23 @@
         return hn === name.toLowerCase();
       });
 
+      // Snapshot previous ratings: only *transitions* to 'discard' should
+      // bump the summary counter, and the old values let us roll the
+      // optimistic updates back if the request fails.
+      const prevRatings = new Map(
+        sameArtistHits.map((h) => [h.id, state.imageRatings.get(h.id) || null])
+      );
+
       // Optimistically mark every same-artist hit as 'discard'.
       sameArtistHits.forEach((h) => {
         state.imageRatings.set(h.id, 'discard');
       });
 
-      // Hide the tiles immediately.
+      // Hide the tiles immediately.  Auto-load is deferred until the
+      // backend confirms the block — otherwise the next page could be
+      // fetched before the block is committed and re-serve the same
+      // artist's images.
       applyHideFilters();
-      checkAutoLoadIfAllHidden();
 
       // Fire-and-forget the backend batch discard + block.
       const imageIds = sameArtistHits.map((h) => h.id).filter((v) => v != null);
@@ -2150,27 +2190,44 @@
         })
         .then(() => {
           // Update summary map so the chip reflects blocked state.
+          // Only count transitions into 'discard' (matches backend logic).
+          const newlyDiscarded = imageIds.filter(
+            (id) => (prevRatings.get(id) || null) !== 'discard'
+          ).length;
           if (entry) {
             entry.is_blocked = true;
-            entry.discards = (entry.discards || 0) + imageIds.length;
+            entry.discards = (entry.discards || 0) + newlyDiscarded;
           } else {
             state.artistSummaryMap[name.toLowerCase()] = {
               artist_id: userId,
               artist_name: name,
               keeps: 0,
               skips: 0,
-              discards: imageIds.length,
-              score: -imageIds.length,
+              discards: newlyDiscarded,
+              score: -newlyDiscarded,
               is_blocked: true,
             };
           }
           renderStatsIfStillCurrentArtist();
+          // Now that the block is committed, auto-load is safe — the next
+          // page fetch will exclude this artist.
+          checkAutoLoadIfAllHidden();
           // Also refresh summary from backend (non-blocking).
           fetchArtistSummary();
         })
-        .catch((err) =>
-          console.error('Batch discard failed:', err)
-        );
+        .catch((err) => {
+          console.error('Batch discard failed:', err);
+          // Roll back the optimistic hides so tiles reappear.
+          for (const [id, prev] of prevRatings) {
+            if (prev) {
+              state.imageRatings.set(id, prev);
+            } else {
+              state.imageRatings.delete(id);
+            }
+          }
+          applyHideFilters();
+          setStatus(`Failed to block "${name}" — changes reverted`, 'is-error');
+        });
 
       // Advance to the next visible image — stay in fullscreen.
       navigateFullscreen(1);
@@ -3867,20 +3924,17 @@
     if (!isTyping && state.hits.length > 0) {
       if (e.key === 'z' || e.key === 'Z') {
         e.preventDefault();
-        rateImage('skip');
-        advanceToNext();
+        rateSelectedImages('skip');
         return;
       }
       if (e.key === 'x' || e.key === 'X') {
         e.preventDefault();
-        rateImage('discard');
-        advanceToNext();
+        rateSelectedImages('discard');
         return;
       }
       if (e.key === 'c' || e.key === 'C') {
         e.preventDefault();
-        rateImage('keep');
-        advanceToNext();
+        rateSelectedImages('keep');
         return;
       }
       if (e.key === 'r' || e.key === 'R') {

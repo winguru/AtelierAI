@@ -388,3 +388,27 @@ visible (that is correct — some images genuinely lack the field remotely).
 - `app/frontend/js/search-lab.js` — `setNsfwVisibility`,
   `mountNsfwVisibilityControl`, `runNsfwMetadataBackfill`,
   `checkNsfwBackfillNeed`
+
+### Search Lab keyboard rating + artist-block rollback (September 2026)
+
+**z/x/c multi-select rating.** `rateSelectedImages(rating)` in
+`search-lab.js` applies a rating to every selected image when
+`state.selectedIndices.size > 1` (calling `rateImageAt(i, rating)` per
+selected index), then clears the selection and advances. Single-selection
+falls through to `rateImage(rating)` + advance. `rateImage` is now a thin
+wrapper over `rateImageAt(state.selectedHitIndex, rating)`; keep the
+optimistic-update/POST/rollback body in `rateImageAt` only.
+
+**Artist-block rollback.** `blockArtistFromFullscreen` uses a `.then/.catch`
+pair: `.then` counts only rating *transitions*
+(`(prevRatings.get(id) || null) !== 'discard'`), updates the summary, calls
+`renderStatsIfStillCurrentArtist()`, then `checkAutoLoadIfAllHidden()` (only
+after backend confirmation), then `fetchArtistSummary()`. `.catch` restores
+all previous ratings (set-or-delete per entry), re-runs `applyHideFilters()`,
+and surfaces an error status. Never call `checkAutoLoadIfAllHidden()`
+speculatively — that caused the auto-load race.
+
+**Grid selection model.** Multi-select state is `state.selectedIndices: Set`;
+tiles are `button.tile[data-index]` inside `#gallery-grid`. A delegated click
+handler (~line 1512) implements shift-click range (`selectRange(idx,
+{additive})`) and ctrl/cmd-click toggle (`toggleSelection(idx)`).

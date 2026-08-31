@@ -1487,11 +1487,15 @@ def _update_artist_preference(
     artist_name: str | None,
     *,
     rating: str,
+    previous_rating: str | None = None,
 ) -> None:
-    """Increment keep/skip/discard counter for the artist, if known.
+    """Update keep/skip/discard counters for the artist, if known.
 
     ``rating`` must be one of ``"keep"``, ``"skip"``, or ``"discard"``.
-    Any other value is ignored.
+    Any other value is ignored.  ``previous_rating`` is the link's prior
+    rating (if any): when it equals ``rating`` the counters are already
+    correct, so nothing is incremented — this keeps repeated keypresses
+    and re-discards from inflating counts.
     """
     if rating not in ("keep", "skip", "discard"):
         return
@@ -1522,6 +1526,24 @@ def _update_artist_preference(
             discards=0,
         )
         db.add(pref)
+        # Flush immediately: with autoflush=False the next lookup in this
+        # transaction would miss the pending INSERT and create a duplicate
+        # row (NULL artist_id values bypass the UNIQUE index in SQLite).
+        db.flush()
+
+    # Only move counters on a rating transition. Re-applying the same rating
+    # (repeat keypress, artist-discard after manual 'x') is a no-op.
+    if previous_rating == rating:
+        return
+
+    # When switching away from a previous rating, decrement its counter so
+    # the counters always reflect the link's current rating.
+    if previous_rating == "keep":
+        pref.keeps = max((pref.keeps or 0) - 1, 0)
+    elif previous_rating == "skip":
+        pref.skips = max((pref.skips or 0) - 1, 0)
+    elif previous_rating == "discard":
+        pref.discards = max((pref.discards or 0) - 1, 0)
 
     if rating == "keep":
         pref.keeps = (pref.keeps or 0) + 1
@@ -1604,18 +1626,21 @@ def rate_civitai_image(
         )
         db.add(link)
 
+    previous_rating = link.rating
     link.rating = payload.rating
     link.is_excluded = is_excluded
     if payload.position is not None:
         link.position = payload.position
 
-    # Update artist preference counters for all rating types.
+    # Update artist preference counters for all rating types.  Pass the
+    # prior rating so re-pressing the same key doesn't double-count.
     if payload.rating in ("keep", "skip", "discard"):
         _update_artist_preference(
             db,
             artist_id=payload.artist_id,
             artist_name=payload.artist_name,
             rating=payload.rating,
+            previous_rating=previous_rating,
         )
 
     db.commit()
@@ -2220,6 +2245,11 @@ def batch_discard_artist_images(
     """
     discarded_ids: list[int] = []
 
+    # Track whether any link's rating actually changed so preference
+    # counters only move on real transitions (re-discarding images that
+    # were already discarded must not inflate the counts).
+    transitioned: list[tuple[int | None, str | None, str | None]] = []
+
     for civitai_id in payload.image_ids:
         img = (
             db.query(CivitaiSearchImage)
@@ -2258,17 +2288,24 @@ def batch_discard_artist_images(
             link = CivitaiSearchImageLink(image_id=img.id, search_id=payload.search_id)
             db.add(link)
 
+        previous_rating = link.rating
         link.rating = "discard"
         link.is_excluded = True
         discarded_ids.append(civitai_id)
+        if previous_rating != "discard":
+            transitioned.append(
+                (img.artist_id, img.artist_name or payload.artist_name, previous_rating)
+            )
 
-    # Update artist preference counters (one discard per image).
-    for _ in payload.image_ids:
+    # Update artist preference counters — one per image whose rating
+    # actually transitioned to "discard".
+    for artist_id, artist_name, previous_rating in transitioned:
         _update_artist_preference(
             db,
-            artist_id=payload.artist_id,
-            artist_name=payload.artist_name,
+            artist_id=artist_id if artist_id is not None else payload.artist_id,
+            artist_name=artist_name,
             rating="discard",
+            previous_rating=previous_rating,
         )
 
     # Optionally block the artist for future searches.

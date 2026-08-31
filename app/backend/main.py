@@ -156,6 +156,9 @@ from services.db_migrations import (
     _ensure_concept_prototype_columns as _ensure_concept_prototype_columns,
     _ensure_clip_embedding_columns as _ensure_clip_embedding_columns,
     _ensure_artist_preference_skips_column as _ensure_artist_preference_skips_column,
+    _ensure_artist_preference_blocked_column as _ensure_artist_preference_blocked_column,
+    _ensure_search_link_search_id_nullable as _ensure_search_link_search_id_nullable,
+    rebuild_artist_preference_counters as rebuild_artist_preference_counters,
     _ensure_expected_file_size_column as _ensure_expected_file_size_column,
     _ensure_file_hash_nonunique as _ensure_file_hash_nonunique,
     _ensure_image_lifecycle_columns as _ensure_image_lifecycle_columns,
@@ -15477,6 +15480,9 @@ async def lifespan(app: FastAPI):
     _ensure_concept_prototype_columns()
     _ensure_clip_embedding_columns()
     _ensure_artist_preference_skips_column()
+    _ensure_artist_preference_blocked_column()
+    _ensure_search_link_search_id_nullable()
+    rebuild_artist_preference_counters()
 
     # --- CLIP provider auto-detection ---
     from services.clip_provider import (

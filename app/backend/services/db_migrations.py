@@ -1283,3 +1283,277 @@ def _ensure_artist_preference_skips_column() -> None:
                     "ADD COLUMN skips INTEGER NOT NULL DEFAULT 0"
                 )
             )
+
+
+def _ensure_artist_preference_blocked_column() -> None:
+    """Add ``is_blocked`` column to civitai_artist_preferences if missing.
+
+    The table is created by ``Base.metadata.create_all`` for new databases,
+    but existing databases that pre-date this column need an ALTER TABLE.
+    """
+    with engine.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_artist_preferences)")
+            ).fetchall()
+        }
+        if "is_blocked" not in existing:
+            connection.execute(
+                text(
+                    "ALTER TABLE civitai_artist_preferences "
+                    "ADD COLUMN is_blocked BOOLEAN DEFAULT 0 NOT NULL"
+                )
+            )
+
+
+def _ensure_search_link_search_id_nullable() -> None:
+    """Make civitai_search_image_links.search_id nullable for existing databases.
+
+    SQLite cannot ALTER a column's NOT NULL constraint in place, so we recreate
+    the table via a temp copy when the column is still NOT NULL.
+    """
+    with engine.connect() as connection:
+        col_info = {
+            row[1]: row
+            for row in connection.execute(
+                text("PRAGMA table_info(civitai_search_image_links)")
+            ).fetchall()
+        }
+
+    search_id_col = col_info.get("search_id")
+    if search_id_col is None:
+        return  # table doesn't exist yet — create_all will handle it
+
+    # PRAGMA row: (cid, name, type, notnull, dflt_value, pk) — notnull=1 means NOT NULL.
+    if search_id_col[3] == 0:
+        return  # already nullable
+
+    print(
+        "  [migration] civitai_search_image_links.search_id is NOT NULL "
+        "— recreating table with nullable column..."
+    )
+
+    with engine.begin() as connection:
+        result = connection.execute(
+            text("SELECT COUNT(*) FROM civitai_search_image_links")
+        ).fetchone()
+        row_count = result[0] if result else 0
+
+        connection.execute(
+            text("ALTER TABLE civitai_search_image_links RENAME TO _csil_legacy")
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE civitai_search_image_links (\n"
+                "    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\n"
+                "    search_id INTEGER REFERENCES civitai_search_records(id),\n"
+                "    image_id INTEGER NOT NULL REFERENCES civitai_search_images(id),\n"
+                "    position INTEGER,\n"
+                "    rating VARCHAR,\n"
+                "    is_excluded BOOLEAN DEFAULT 0 NOT NULL,\n"
+                "    created_at DATETIME DEFAULT (CURRENT_TIMESTAMP) NOT NULL\n"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_civitai_search_image_links_search_id "
+                "ON civitai_search_image_links (search_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_civitai_search_image_links_image_id "
+                "ON civitai_search_image_links (image_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_civitai_search_link_search_image "
+                "ON civitai_search_image_links (search_id, image_id)\n"
+            )
+        )
+
+        # Copy existing rows (all have non-null search_id from the old schema).
+        connection.execute(
+            text(
+                "INSERT INTO civitai_search_image_links "
+                "(id, search_id, image_id, position, rating, is_excluded, created_at)\n"
+                "SELECT id, search_id, image_id, position, rating, is_excluded, created_at\n"
+                "FROM _csil_legacy"
+            )
+        )
+        connection.execute(text("DROP TABLE _csil_legacy"))
+
+    print(
+        f"  [migration] Migrated {row_count} rows; "
+        "search_id is now nullable."
+    )
+
+
+def rebuild_artist_preference_counters() -> None:
+    """Dedupe and recompute civitai_artist_preferences from link ratings.
+
+    Two historic bugs inflated/fragmented these rows:
+
+    1. ``_update_artist_preference`` inserted duplicate rows without flushing
+       (``autoflush=False``), and NULL ``artist_id`` values bypass the
+       UNIQUE(artist_id, artist_name) index in SQLite — leaving several rows
+       per artist, each holding a fraction of the counters.
+    2. Re-applying the same rating incremented the counter again, so counts
+       drifted above the real number of rated images.
+
+    Link rows (``civitai_search_image_links``) are the source of truth and
+    are never deleted, so counters can be recomputed from them exactly.
+
+    Idempotent: groups preference rows per artist, merges everything into
+    the row with the lowest id, and then recomputes counters via SQL.
+    """
+    # Skip entirely when there is nothing to do (keeps startup quiet and
+    # avoids creating the table if the DB is brand new — create_all handles
+    # that).
+    with engine.connect() as connection:
+        has_prefs = connection.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type='table' "
+                 "AND name='civitai_artist_preferences'")
+        ).first()
+        if has_prefs is None:
+            return
+
+    dup_groups = 0
+    with engine.begin() as connection:
+        # --- 1. Merge duplicate (artist_id, artist_name) rows -------------
+        # Group by the *effective* key. NULL artist_id rows for the same
+        # artist_name must merge too (NULL != NULL in SQL equality).
+        rows = connection.execute(
+            text(
+                "SELECT id, artist_id, artist_name, keeps, skips, discards, "
+                "is_blocked FROM civitai_artist_preferences ORDER BY id"
+            )
+        ).fetchall()
+
+        best: dict[tuple[int | None, str], dict] = {}
+        for row_id, artist_id, artist_name, keeps, skips, discards, is_blocked in rows:
+            key = (artist_id, artist_name)
+            if key not in best:
+                best[key] = {
+                    "id": row_id,
+                    "keeps": keeps or 0,
+                    "skips": skips or 0,
+                    "discards": discards or 0,
+                    "is_blocked": bool(is_blocked),
+                }
+            else:
+                target = best[key]
+                target["keeps"] += keeps or 0
+                target["skips"] += skips or 0
+                target["discards"] += discards or 0
+                target["is_blocked"] = target["is_blocked"] or bool(is_blocked)
+                dup_groups += 1
+
+        if dup_groups:
+            for key, merged in best.items():
+                connection.execute(
+                    text(
+                        "UPDATE civitai_artist_preferences "
+                        "SET keeps=:keeps, skips=:skips, discards=:discards, "
+                        "is_blocked=:is_blocked WHERE id=:id"
+                    ),
+                    {
+                        "keeps": merged["keeps"],
+                        "skips": merged["skips"],
+                        "discards": merged["discards"],
+                        "is_blocked": 1 if merged["is_blocked"] else 0,
+                        "id": merged["id"],
+                    },
+                )
+                connection.execute(
+                    text(
+                        "DELETE FROM civitai_artist_preferences "
+                        "WHERE (artist_id IS :artist_id OR "
+                        "(artist_id IS NULL AND :artist_id IS NULL)) "
+                        "AND artist_name=:artist_name AND id<>:id"
+                    ),
+                    {
+                        "artist_id": key[0],
+                        "artist_name": key[1],
+                        "id": merged["id"],
+                    },
+                )
+            print(
+                f"  [migration] Merged {dup_groups} duplicate "
+                "civitai_artist_preferences rows."
+            )
+
+    # --- 2. Recompute counters from link ratings --------------------------
+    # A link "points at" a preference row via the image's artist identity
+    # (image.artist_name, falling back to the 'artist-<id>' convention used
+    # by the rating endpoints).
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE civitai_artist_preferences\n"
+                "SET keeps = COALESCE((\n"
+                "    SELECT COUNT(*) FROM (\n"
+                "        SELECT csil.image_id\n"
+                "        FROM civitai_search_image_links csil\n"
+                "        JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
+                "        WHERE csil.rating = 'keep'\n"
+                "          AND csil.id = (\n"
+                "              SELECT csil2.id\n"
+                "              FROM civitai_search_image_links csil2\n"
+                "              WHERE csil2.image_id = csil.image_id\n"
+                "              ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
+                "          )\n"
+                "          AND COALESCE(NULLIF(csi.artist_name, ''), "
+                "               'artist-' || csi.artist_id) = "
+                "civitai_artist_preferences.artist_name\n"
+                "    )\n"
+                "), 0),\n"
+                "skips = COALESCE((\n"
+                "    SELECT COUNT(*) FROM (\n"
+                "        SELECT csil.image_id\n"
+                "        FROM civitai_search_image_links csil\n"
+                "        JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
+                "        WHERE csil.rating = 'skip'\n"
+                "          AND csil.id = (\n"
+                "              SELECT csil2.id\n"
+                "              FROM civitai_search_image_links csil2\n"
+                "              WHERE csil2.image_id = csil.image_id\n"
+                "              ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
+                "          )\n"
+                "          AND COALESCE(NULLIF(csi.artist_name, ''), "
+                "               'artist-' || csi.artist_id) = "
+                "civitai_artist_preferences.artist_name\n"
+                "    )\n"
+                "), 0),\n"
+                "discards = COALESCE((\n"
+                "    SELECT COUNT(*) FROM (\n"
+                "        SELECT csil.image_id\n"
+                "        FROM civitai_search_image_links csil\n"
+                "        JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
+                "        WHERE csil.rating = 'discard'\n"
+                "          AND csil.id = (\n"
+                "              SELECT csil2.id\n"
+                "              FROM civitai_search_image_links csil2\n"
+                "              WHERE csil2.image_id = csil.image_id\n"
+                "              ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
+                "          )\n"
+                "          AND COALESCE(NULLIF(csi.artist_name, ''), "
+                "               'artist-' || csi.artist_id) = "
+                "civitai_artist_preferences.artist_name\n"
+                "    )\n"
+                "), 0)\n"
+            )
+        )
+
+        # Drop preference rows that no longer have any ratings and are not
+        # explicitly blocked — they are stale fragments of the old bug.
+        connection.execute(
+            text(
+                "DELETE FROM civitai_artist_preferences\n"
+                "WHERE keeps = 0 AND skips = 0 AND discards = 0\n"
+                "  AND COALESCE(is_blocked, 0) = 0"
+            )
+        )

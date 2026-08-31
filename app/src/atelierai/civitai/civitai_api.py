@@ -570,6 +570,10 @@ class CivitaiAPI:
         status_code: int | None,
         error: str | None = None,
     ) -> None:
+        # Best-effort timing context from the most recent transport call.
+        # Kept optional: the archive must record even when no request info
+        # is available (e.g. cache hits, direct archive calls).
+        last_info = CivitaiHttpClient.get_last_request_info() or {}
         try:
             self._response_archive.record(
                 kind="trpc",
@@ -580,6 +584,8 @@ class CivitaiAPI:
                 response=response_json,
                 status_code=status_code,
                 error=error,
+                queue_wait_seconds=last_info.get("queue_wait_seconds"),
+                elapsed_seconds=last_info.get("elapsed_seconds"),
             )
         except Exception:
             pass

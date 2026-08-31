@@ -8,16 +8,20 @@ import struct
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from concurrent.futures import Future
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import requests
 import urllib3.util.connection as urllib3_conn
 from requests import PreparedRequest, Response
 from requests.adapters import HTTPAdapter
+
+from .transport_log import record_transport_event
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +309,7 @@ class CivitaiHttpClient:
     # Single-threaded callers (scripts) can read this immediately after a
     # blocking API call returns — the consumer has already written it by then.
     _LAST_REQUEST_INFO: Optional[dict] = None
+
     def __init__(
         self,
         headers_factory: Callable[[], dict[str, str]],
@@ -410,12 +415,31 @@ class CivitaiHttpClient:
                 time.sleep(0.5)
                 continue
 
+            dequeued_at = time.monotonic()
+            timing: dict[str, Any] = {
+                "queue_wait_seconds": round(dequeued_at - envelope.enqueued_at, 4)
+            }
+
             try:
+                # Snapshot backoff state as it was when this request was
+                # dequeued (the consumer waits backoff out before dispatch,
+                # so post-wait state would always read inactive).
+                timing["backoff_active_at_dequeue"] = cls.is_global_backoff_active()
+                if timing["backoff_active_at_dequeue"]:
+                    with cls._GLOBAL_BACKOFF_LOCK:
+                        timing["backoff_reason"] = (
+                            str(cls._GLOBAL_BACKOFF_REASON or "rate-limit") or None
+                        )
+
                 # Wait out any active global backoff (reactive — only
                 # triggered after an actual 429 response).
+                backoff_wait_started = time.monotonic()
                 instance = cls._get_any_instance()
                 if instance is not None:
                     instance._wait_for_global_backoff()
+                timing["backoff_wait_seconds"] = round(
+                    time.monotonic() - backoff_wait_started, 4
+                )
 
                 # Per-type / per-FQDN / per-endpoint counters
                 cls._increment_type_counter(cls._TYPE_COUNTS, envelope.request_type)
@@ -429,8 +453,8 @@ class CivitaiHttpClient:
                 # `now`. This means slow calls (RTT > interval) leave
                 # `_NEXT_ALLOWED_TIME` in the past, banking credit that fast
                 # calls then consume by firing back-to-back with no sleep.
-                # Steady-state throughput converges to `_TARGET_TPM`
-                # regardless of per-call RTT variation.
+                # steady state regardless of per-call RTT variation.
+                pacing_started = time.monotonic()
                 min_interval = 60.0 / cls._TARGET_TPM
                 if envelope.request_type != RequestType.CDN_DOWNLOAD:
                     with cls._REQUEST_COUNTER_LOCK:
@@ -471,6 +495,15 @@ class CivitaiHttpClient:
                         time.sleep(wait_needed)
                     with cls._REQUEST_COUNTER_LOCK:
                         cls._NEXT_CDN_ALLOWED_TIME += cdn_interval
+                timing["pacing_wait_seconds"] = round(
+                    time.monotonic() - pacing_started, 4
+                )
+
+                # Snapshot dispatch context (rate observed entering this
+                # request; recorded before _record_request adds it to the
+                # sliding window).
+                timing["rpm_at_dispatch"] = cls._current_rpm()
+                timing["queue_depth"] = cls._REQUEST_QUEUE.qsize()
 
                 # Record in the sliding window (used for observed-rate metrics)
                 cls._record_request(endpoint=envelope.endpoint)
@@ -484,12 +517,17 @@ class CivitaiHttpClient:
                         "CivitaiHttpClient singleton not available; "
                         "cannot execute queued request"
                     )
-                response = instance._execute_envelope_request(envelope)
+                response = instance._execute_envelope_request(envelope, timing=timing)
                 envelope.future.set_result(response)
             except Exception as exc:
+                timing["error"] = str(exc) or type(exc).__name__
+                error_status = getattr(exc, "status_code", None)
+                if error_status is not None:
+                    timing.setdefault("final_status_code", error_status)
                 if not envelope.future.done():
                     envelope.future.set_exception(exc)
             finally:
+                cls._emit_transport_log(envelope, timing, dequeued_at)
                 cls._REQUEST_QUEUE.task_done()
 
     @classmethod
@@ -501,14 +539,52 @@ class CivitaiHttpClient:
         """
         return _SINGLETON_REF[0] if _SINGLETON_REF else None
 
+    @classmethod
+    def _emit_transport_log(
+        cls,
+        envelope: _RequestEnvelope,
+        timing: dict[str, Any],
+        dequeued_at: float,
+    ) -> None:
+        """Emit one transport-log record for a completed request.
+
+        Called from the consumer loop's ``finally`` for every dispatched
+        request (tRPC and CDN alike). Must never raise — logging failures
+        are swallowed by the transport-log module itself, but we guard
+        here too so a broken log sink can't take down request handling.
+        """
+        try:
+            instance = cls._get_any_instance()
+            record_transport_event(
+                {
+                    "request_id": uuid4().hex[:12],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "request_type": envelope.request_type.value,
+                    "fqdn": envelope.fqdn,
+                    "endpoint": envelope.endpoint,
+                    "url": envelope.url,  # sanitized by transport_log
+                    "method": envelope.method,
+                    "queue_wait_seconds": timing.get("queue_wait_seconds"),
+                    "total_duration_seconds": round(
+                        time.monotonic() - envelope.enqueued_at, 4
+                    ),
+                    "max_attempts": instance._max_attempts if instance else None,
+                    **timing,
+                }
+            )
+        except Exception:
+            pass
+
     def _execute_envelope_request(
-        self, envelope: _RequestEnvelope
+        self, envelope: _RequestEnvelope, *, timing: Optional[dict[str, Any]] = None
     ) -> requests.Response:
         """Send the HTTP request described by *envelope*, with full retry logic.
 
         This is the core of the consumer thread — it handles retries, 429
         backoff, and server-error retries identically to the old inline
-        ``request()`` method.
+        ``request()`` method. When *timing* is provided (by the consumer
+        loop), per-attempt outcomes and retry delays are recorded into it
+        for the transport log.
         """
         merged_headers = {
             **self._headers_factory(),
@@ -516,148 +592,227 @@ class CivitaiHttpClient:
         }
         request_timeout = envelope.kwargs.get("timeout") or self._default_timeout
         last_error: Optional[Exception] = None
+        attempts_log: list[dict[str, Any]] = []
+        http_started = time.monotonic()
 
-        for attempt in range(1, self._max_attempts + 1):
-            session = self._get_session()
-            try:
-                response = session.request(
-                    method=envelope.method,
-                    url=envelope.url,
-                    params=envelope.kwargs.get("params"),
-                    headers=merged_headers,
-                    timeout=request_timeout,
-                    stream=envelope.kwargs.get("stream", False),
-                )
-            except (requests.Timeout, requests.ConnectionError) as exc:
-                last_error = exc
-                if attempt >= self._max_attempts:
-                    raise CivitaiRequestError(
-                        f"Request failed after {attempt} attempts: {exc}",
-                        retryable=True,
-                    ) from exc
-                time.sleep(self._retry_delay(attempt))
-                continue
-            except requests.RequestException as exc:
-                raise CivitaiRequestError(str(exc), retryable=False) from exc
-
-            if response.status_code == 429:
-                # Snapshot the observed request rate at time of 429
-                rpm_now = self.__class__._current_rpm()
-                self._increment_type_counter(
-                    self.__class__._TYPE_429_COUNTS, envelope.request_type
-                )
-                with self.__class__._REQUEST_COUNTER_LOCK:
-                    self.__class__._RATE_LIMITED_429 += 1
-                    self.__class__._LAST_RPM_AT_429 = rpm_now
-                    self.__class__._LAST_429_TIME = time.time()
-                retry_after_seconds = self._retry_delay(attempt, response=response)
-                enforced_wait = self.activate_global_backoff(
-                    retry_after_seconds, reason="HTTP 429"
-                )
-                print(
-                    f"⏳ CivitAI rate limit reached ({envelope.request_type.value} "
-                    f"{envelope.endpoint}) at {rpm_now} RPM; "
-                    f"enforcing global backoff for {enforced_wait:.1f}s\n"
-                    f"{self.__class__._format_tpm_table()}"
-                )
-                last_error = CivitaiRequestError(
-                    "CivitAI rate limit reached (HTTP 429)",
-                    status_code=429,
-                    retryable=True,
-                )
-                if attempt >= self._max_attempts:
-                    raise last_error
-                continue
-
-            if 500 <= response.status_code < 600:
-                last_error = CivitaiRequestError(
-                    f"CivitAI server error (HTTP {response.status_code})",
-                    status_code=response.status_code,
-                    retryable=True,
-                )
-                # Track 503 separately — it usually signals rate-limiting
-                # at the CDN / reverse-proxy layer rather than app-level 429.
-                if response.status_code == 503:
-                    rpm_now = self.__class__._current_rpm()
-                    self._increment_type_counter(
-                        self.__class__._TYPE_503_COUNTS, envelope.request_type
-                    )
-                    with self.__class__._REQUEST_COUNTER_LOCK:
-                        self.__class__._RATE_LIMITED_503 += 1
-                        self.__class__._LAST_RPM_AT_503 = rpm_now
-                        self.__class__._LAST_503_TIME = time.time()
-                    print(
-                        f"🚫 CivitAI 503 ({envelope.request_type.value} "
-                        f"{envelope.endpoint}) at {rpm_now} RPM\n"
-                        f"{self.__class__._format_tpm_table()}"
-                    )
-                if attempt >= self._max_attempts:
-                    raise last_error
-                time.sleep(self._retry_delay(attempt, response=response))
-                continue
-
-            if response.status_code >= 400:
-                body_excerpt = ""
-                try:
-                    body_excerpt = response.text[:240].strip()
-                except Exception:
-                    body_excerpt = ""
-
-                # ── Detect Cloudflare challenge (403) ────────────────────────
-                # CivitAI rate-limits via Cloudflare "Just a moment..." pages.
-                # Track these as rate-limit events so they appear in metrics.
-                if response.status_code == 403 and "Just a moment" in body_excerpt:
-                    rpm_now = self.__class__._current_rpm()
-                    self._increment_type_counter(
-                        self.__class__._TYPE_403_CLOUDFLARE_COUNTS,
-                        envelope.request_type,
-                    )
-                    with self.__class__._REQUEST_COUNTER_LOCK:
-                        self.__class__._RATE_LIMITED_403_CLOUDFLARE += 1
-                        self.__class__._LAST_RPM_AT_403_CF = rpm_now
-                        self.__class__._LAST_403_CF_TIME = time.time()
-                    backoff = self.activate_global_backoff(
-                        90.0, reason="HTTP 403 (Cloudflare)"
-                    )
-                    print(
-                        f"🚫 CivitAI 403 Cloudflare "
-                        f"({envelope.request_type.value} {envelope.endpoint}) "
-                        f"at {rpm_now} RPM; "
-                        f"pausing all requests for {backoff:.0f}s\n"
-                        f"{self.__class__._format_tpm_table()}"
-                    )
-
-                detail = f"CivitAI request failed with HTTP {response.status_code}"
-                if body_excerpt:
-                    detail = f"{detail}: {body_excerpt}"
-                raise CivitaiRequestError(
-                    detail,
-                    status_code=response.status_code,
-                    retryable=False,
-                )
-
-            # Record metadata for debug consumers (e.g. verbose script flags).
-            try:
-                base_url = (response.url or envelope.url).split("?")[0]
-                self.__class__._LAST_REQUEST_INFO = {
-                    "url": base_url,
-                    "status_code": response.status_code,
-                    "content_length": len(response.content),
-                    "elapsed_seconds": (
-                        response.elapsed.total_seconds()
-                        if response.elapsed is not None
-                        else None
-                    ),
-                    "endpoint": envelope.endpoint,
+        def _note_attempt(
+            attempt: int,
+            outcome: str,
+            *,
+            started: float,
+            status_code: Optional[int] = None,
+            rpm_at_response: Optional[int] = None,
+            error: Optional[str] = None,
+        ) -> None:
+            if timing is None:
+                return
+            attempts_log.append(
+                {
+                    "attempt": attempt,
+                    "outcome": outcome,
+                    "status_code": status_code,
+                    "elapsed_seconds": round(time.monotonic() - started, 4),
+                    "rpm_at_response": rpm_at_response,
+                    "error": error,
                 }
-            except Exception:
-                pass
+            )
 
-            return response
+        try:
+            for attempt in range(1, self._max_attempts + 1):
+                attempt_started = time.monotonic()
+                session = self._get_session()
+                try:
+                    response = session.request(
+                        method=envelope.method,
+                        url=envelope.url,
+                        params=envelope.kwargs.get("params"),
+                        headers=merged_headers,
+                        timeout=request_timeout,
+                        stream=envelope.kwargs.get("stream", False),
+                    )
+                except (requests.Timeout, requests.ConnectionError) as exc:
+                    last_error = exc
+                    _note_attempt(
+                        attempt,
+                        "transport_error",
+                        started=attempt_started,
+                        error=str(exc) or type(exc).__name__,
+                    )
+                    if attempt >= self._max_attempts:
+                        raise CivitaiRequestError(
+                            f"Request failed after {attempt} attempts: {exc}",
+                            retryable=True,
+                        ) from exc
+                    time.sleep(self._retry_delay(attempt))
+                    continue
+                except requests.RequestException as exc:
+                    raise CivitaiRequestError(str(exc), retryable=False) from exc
 
-        if isinstance(last_error, CivitaiRequestError):
-            raise last_error
-        raise CivitaiRequestError("CivitAI request failed", retryable=False)
+                if response.status_code == 429:
+                    # Snapshot the observed request rate at time of 429
+                    rpm_now = self.__class__._current_rpm()
+                    self._increment_type_counter(
+                        self.__class__._TYPE_429_COUNTS, envelope.request_type
+                    )
+                    with self.__class__._REQUEST_COUNTER_LOCK:
+                        self.__class__._RATE_LIMITED_429 += 1
+                        self.__class__._LAST_RPM_AT_429 = rpm_now
+                        self.__class__._LAST_429_TIME = time.time()
+                    _note_attempt(
+                        attempt,
+                        "http_429",
+                        started=attempt_started,
+                        status_code=429,
+                        rpm_at_response=rpm_now,
+                    )
+                    retry_after_seconds = self._retry_delay(attempt, response=response)
+                    enforced_wait = self.activate_global_backoff(
+                        retry_after_seconds, reason="HTTP 429"
+                    )
+                    print(
+                        f"⏳ CivitAI rate limit reached ({envelope.request_type.value} "
+                        f"{envelope.endpoint}) at {rpm_now} RPM; "
+                        f"enforcing global backoff for {enforced_wait:.1f}s\n"
+                        f"{self.__class__._format_tpm_table()}"
+                    )
+                    last_error = CivitaiRequestError(
+                        "CivitAI rate limit reached (HTTP 429)",
+                        status_code=429,
+                        retryable=True,
+                    )
+                    if attempt >= self._max_attempts:
+                        raise last_error
+                    continue
+
+                if 500 <= response.status_code < 600:
+                    last_error = CivitaiRequestError(
+                        f"CivitAI server error (HTTP {response.status_code})",
+                        status_code=response.status_code,
+                        retryable=True,
+                    )
+                    _note_attempt(
+                        attempt,
+                        f"http_{response.status_code}",
+                        started=attempt_started,
+                        status_code=response.status_code,
+                        rpm_at_response=(
+                            self.__class__._current_rpm()
+                            if response.status_code == 503
+                            else None
+                        ),
+                    )
+                    # Track 503 separately — it usually signals rate-limiting
+                    # at the CDN / reverse-proxy layer rather than app-level 429.
+                    if response.status_code == 503:
+                        rpm_now = self.__class__._current_rpm()
+                        self._increment_type_counter(
+                            self.__class__._TYPE_503_COUNTS, envelope.request_type
+                        )
+                        with self.__class__._REQUEST_COUNTER_LOCK:
+                            self.__class__._RATE_LIMITED_503 += 1
+                            self.__class__._LAST_RPM_AT_503 = rpm_now
+                            self.__class__._LAST_503_TIME = time.time()
+                        print(
+                            f"🚫 CivitAI 503 ({envelope.request_type.value} "
+                            f"{envelope.endpoint}) at {rpm_now} RPM\n"
+                            f"{self.__class__._format_tpm_table()}"
+                        )
+                    if attempt >= self._max_attempts:
+                        raise last_error
+                    time.sleep(self._retry_delay(attempt, response=response))
+                    continue
+
+                if response.status_code >= 400:
+                    body_excerpt = ""
+                    try:
+                        body_excerpt = response.text[:240].strip()
+                    except Exception:
+                        body_excerpt = ""
+
+                    # ── Detect Cloudflare challenge (403) ────────────────────
+                    # CivitAI rate-limits via Cloudflare "Just a moment..." pages.
+                    # Track these as rate-limit events so they appear in metrics.
+                    if response.status_code == 403 and "Just a moment" in body_excerpt:
+                        rpm_now = self.__class__._current_rpm()
+                        _note_attempt(
+                            attempt,
+                            "http_403_cloudflare",
+                            started=attempt_started,
+                            status_code=403,
+                            rpm_at_response=rpm_now,
+                        )
+                        self._increment_type_counter(
+                            self.__class__._TYPE_403_CLOUDFLARE_COUNTS,
+                            envelope.request_type,
+                        )
+                        with self.__class__._REQUEST_COUNTER_LOCK:
+                            self.__class__._RATE_LIMITED_403_CLOUDFLARE += 1
+                            self.__class__._LAST_RPM_AT_403_CF = rpm_now
+                            self.__class__._LAST_403_CF_TIME = time.time()
+                        backoff = self.activate_global_backoff(
+                            90.0, reason="HTTP 403 (Cloudflare)"
+                        )
+                        print(
+                            f"🚫 CivitAI 403 Cloudflare "
+                            f"({envelope.request_type.value} {envelope.endpoint}) "
+                            f"at {rpm_now} RPM; "
+                            f"pausing all requests for {backoff:.0f}s\n"
+                            f"{self.__class__._format_tpm_table()}"
+                        )
+
+                    detail = f"CivitAI request failed with HTTP {response.status_code}"
+                    if body_excerpt:
+                        detail = f"{detail}: {body_excerpt}"
+                    _note_attempt(
+                        attempt,
+                        "http_error",
+                        started=attempt_started,
+                        status_code=response.status_code,
+                    )
+                    raise CivitaiRequestError(
+                        detail,
+                        status_code=response.status_code,
+                        retryable=False,
+                    )
+
+                # Record metadata for debug consumers (e.g. verbose script flags).
+                _note_attempt(
+                    attempt,
+                    "success",
+                    started=attempt_started,
+                    status_code=response.status_code,
+                )
+                try:
+                    base_url = (response.url or envelope.url).split("?")[0]
+                    self.__class__._LAST_REQUEST_INFO = {
+                        "url": base_url,
+                        "status_code": response.status_code,
+                        "content_length": len(response.content),
+                        "elapsed_seconds": (
+                            response.elapsed.total_seconds()
+                            if response.elapsed is not None
+                            else None
+                        ),
+                        "queue_wait_seconds": (
+                            timing.get("queue_wait_seconds") if timing else None
+                        ),
+                        "endpoint": envelope.endpoint,
+                    }
+                except Exception:
+                    pass
+
+                return response
+
+            if isinstance(last_error, CivitaiRequestError):
+                raise last_error
+            raise CivitaiRequestError("CivitAI request failed", retryable=False)
+        finally:
+            if timing is not None:
+                timing["attempts"] = attempts_log
+                timing["attempts_used"] = len(attempts_log)
+                timing["http_elapsed_seconds"] = round(
+                    time.monotonic() - http_started, 4
+                )
 
     # ── Request metrics ────────────────────────────────────────────────────
 
@@ -666,7 +821,8 @@ class CivitaiHttpClient:
         """Return metadata for the most recently completed HTTP request.
 
         Keys: url (base, no query string), status_code, content_length (bytes),
-        elapsed_seconds (HTTP round-trip), endpoint (tRPC/REST name).
+        elapsed_seconds (HTTP round-trip), queue_wait_seconds (time spent in
+        the FIFO queue before dispatch), endpoint (tRPC/REST name).
         Returns None if no request has completed yet.
         """
         return cls._LAST_REQUEST_INFO

@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
-from importlib import import_module
 import json
 import os
-from pathlib import Path
 import re
 import threading
+from datetime import datetime, timezone
+from importlib import import_module
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
 
 _SENSITIVE_KEYS = {
     "api_key",
@@ -89,6 +88,8 @@ class CivitaiResponseArchive:
         url: str | None = None,
         status_code: int | None = None,
         error: str | None = None,
+        queue_wait_seconds: float | None = None,
+        elapsed_seconds: float | None = None,
     ) -> Path:
         now = datetime.now(timezone.utc)
         safe_request = _sanitize(request)
@@ -106,6 +107,8 @@ class CivitaiResponseArchive:
             "success": error is None and (status_code is None or status_code < 400),
             "status_code": status_code,
             "error": error,
+            "queue_wait_seconds": queue_wait_seconds,
+            "elapsed_seconds": elapsed_seconds,
             "response": _sanitize(response),
         }
         history_path = (

@@ -77,6 +77,40 @@ def test_failure_record_preserves_status_and_error(tmp_path):
     assert latest["error"] == "HTTP 404"
 
 
+def test_timing_fields_persisted_when_provided(tmp_path):
+    archive = CivitaiResponseArchive(tmp_path)
+    archive.record(
+        kind="trpc",
+        endpoint="image.list",
+        request={"limit": 50},
+        response={"items": []},
+        status_code=200,
+        queue_wait_seconds=0.1234,
+        elapsed_seconds=1.5678,
+    )
+
+    latest = archive.read_latest(kind="trpc", endpoint="image.list", request={"limit": 50})
+    assert latest is not None
+    assert latest["queue_wait_seconds"] == 0.1234
+    assert latest["elapsed_seconds"] == 1.5678
+
+
+def test_timing_fields_default_to_none_when_omitted(tmp_path):
+    archive = CivitaiResponseArchive(tmp_path)
+    archive.record(
+        kind="trpc",
+        endpoint="image.get",
+        request={"id": 7},
+        response={"id": 7},
+        status_code=200,
+    )
+
+    latest = archive.read_latest(kind="trpc", endpoint="image.get", request={"id": 7})
+    assert latest is not None
+    assert latest["queue_wait_seconds"] is None
+    assert latest["elapsed_seconds"] is None
+
+
 def test_api_cache_falls_back_to_latest_filesystem_snapshot(tmp_path):
     archive = CivitaiResponseArchive(tmp_path)
     request = {"id": 42, "authed": True}

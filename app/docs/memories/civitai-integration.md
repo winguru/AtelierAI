@@ -18,8 +18,41 @@ The Playwright-managed launch is kept only as a fallback when no Chrome binary i
 ### Modules location
 CivitAI modules live under `app/src/atelierai/civitai`.
 
+### Transport logging (request/response/timing)
+Every dispatched CivitAI HTTP request emits one JSONL record to
+`<IMAGE_RESOURCES_PATH>/civitai_transport_logs/civitai_transport_YYYY-MM-DD.jsonl`
+via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
+≥128 entries or 1s; daily files pruned to last 14 by default).
+
+- **Env toggles:** `CIVITAI_TRANSPORT_LOG` (default `1`; `0` disables),
+  `CIVITAI_TRANSPORT_LOG_PATH` (override root), `CIVITAI_TRANSPORT_LOG_MAX_FILES`
+  (retention, default 14).
+- **Schema:** one record per request — `request_id`, `timestamp`, `request_type`,
+  `fqdn`, `endpoint`, `url` (query strings stripped), `method`,
+  `total_duration_seconds`, `max_attempts`, `queue_wait_seconds`,
+  `pacing_wait_seconds`, `rpm_at_dispatch`, `queue_depth`, backoff snapshot at
+  dequeue (`backoff_active_at_dequeue`, `backoff_reason`, `backoff_wait_seconds`),
+  and aggregated per-attempt log (`attempts[]` with outcome/status/elapsed —
+  outcomes: `transport_error`, `http_429`, `http_503`, `http_403_cloudflare`,
+  `http_error`, `success`), `http_elapsed_seconds`, `attempts_used`.
+- **Fail-open constraint:** logging must never break or slow requests —
+  `record()`/`record_transport_event()` never raise; `_emit_transport_log()`
+  wraps everything in try/except.
+- **Response archive timing:** `CivitaiResponseArchive.record()` accepts optional
+  `queue_wait_seconds`/`elapsed_seconds` kwargs (kwarg-only, non-breaking);
+  `CivitaiAPI._record_response_archive` sources them from
+  `CivitaiHttpClient.get_last_request_info()`.
+- **Analyzer:** `python scripts/analyze_civitai_logs.py [--by-type] [--timeline]
+  [--json] [--date YYYY-MM-DD] [--last N] [--log-dir PATH]` — latency
+  percentiles, outcome counts, rpm-at-dispatch correlation, rate-limit events.
+- Log dirs are gitignored via `image_resources/` rules.
+
 ## Key Files
 - `app/src/atelierai/civitai/civitai_auth.py` — `_launch_chrome_cdp()`, `_launch_context()`, `_terminate_chrome()`
+- `app/src/atelierai/civitai/transport_log.py` — JSONL transport logger (`get_transport_log()`, `record_transport_event()`)
+- `app/src/atelierai/civitai/http_client.py` — consumer loop timing capture, `_emit_transport_log()`, `get_last_request_info()`
+- `app/src/atelierai/civitai/response_archive.py` — durable redacted archives with timing fields
+- `app/scripts/analyze_civitai_logs.py` — transport-log analysis CLI
 - `app/backend/services/civitai_service.py` — CivitAI API client
 - `app/backend/civitai_enrichment.py` — enrichment pipeline
 - `app/backend/routers/civitai/` — CivitAI-related API endpoints

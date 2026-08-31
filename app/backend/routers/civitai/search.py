@@ -98,6 +98,9 @@ _ARTIST_AVATAR_HOSTS = {
     "image-b2.civitai.com",
     "image.civitai.com",
     "image.civitai.red",
+    # B2-backed blob storage; image CDN 301-redirects here for newer avatars
+    # (no .red mirror exists — DNS does not resolve for blobs-b2.civitai.red).
+    "blobs-b2.civitai.com",
 }
 
 

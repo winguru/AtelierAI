@@ -60,6 +60,13 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
 ## Gotchas
 - Chrome CDP port must be available; if already in use, auth fails
 - CivitAI API rate limits apply — batch operations should include delays
+- Artist avatars: `image.civitai.com` 301-redirects newer avatars to
+  `blobs-b2.civitai.com` (B2 blob storage; no `.red` mirror exists). The
+  `_ARTIST_AVATAR_HOSTS` allowlist must include it or every artist-summary
+  request re-attempts a failing download (allowlist failure = nothing cached).
+- Single-image 404s (`❌ API request error (HTTP 404)`) on the backend console
+  are usually remotely-deleted CivitAI images; tombstones are recorded to avoid
+  re-fetching and the frontend handles the miss gracefully — not a bug.
 - Sync Lab collection listing (`/api/sync-lab/collections`) is cache-first (2-minute max age) to keep troubleshooting responsive; use `?force_refresh=true` to force a live CivitAI pull.
 
 ### Search Lab pagination & filtering (no post-fetch image filtering)

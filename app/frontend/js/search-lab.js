@@ -1209,6 +1209,10 @@
   let _infiniteScroll = null;
   // GalleryToolbar controller (set up after DOM ready)
   let _galleryToolbar = null;
+  // Set when a fresh (non-append) search is requested while another load is
+  // still in flight — the request is deferred until the current load settles
+  // (see executeSearch / _drainPendingFreshSearch).
+  let _pendingFreshSearch = false;
 
   /* ── Events ── */
   /* ── NSFW visibility control (Safe / Mature / Explicit) ── */
@@ -2559,6 +2563,7 @@
       });
     } finally {
       state.loading = false;
+      _drainPendingFreshSearch();
     }
   }
 
@@ -2657,12 +2662,31 @@
       });
     } finally {
       state.loading = false;
+      _drainPendingFreshSearch();
     }
+  }
+
+  /**
+   * Run the most recently requested fresh search, if one was queued while a
+   * load was in flight.  Called after `state.loading` is cleared so the
+   * queued search never races the load that preceded it.
+   */
+  function _drainPendingFreshSearch() {
+    if (!_pendingFreshSearch) return;
+    _pendingFreshSearch = false;
+    executeSearch();
   }
 
   /* ── Search ── */
   async function executeSearch(append = false) {
-    if (state.loading) return;
+    if (state.loading) {
+      // A fresh search requested while a load is still in flight would be
+      // silently dropped — leaving rendered tiles from the previous results
+      // generation misaligned with the rebuilt state.hits (gallery/preview
+      // desync). Queue it and run it once the current load settles.
+      if (!append) _pendingFreshSearch = true;
+      return;
+    }
 
     if (!append) {
       _preloadCache.clear();
@@ -2829,6 +2853,7 @@
       });
     } finally {
       state.loading = false;
+      _drainPendingFreshSearch();
     }
   }
 
@@ -2976,6 +3001,16 @@
 
   function renderResults(append = false) {
     const grid = els.gallery_grid;
+
+    // Defensive realignment: an append must continue exactly where the
+    // rendered grid stopped. If the grid somehow holds more tiles than
+    // state.hits (e.g. a fresh search reset hits while tiles from the
+    // previous results generation were still on screen), fall back to a
+    // full re-render so tile indices always stay aligned with hits —
+    // otherwise the gallery and the preview pane diverge silently.
+    if (append && grid.children.length > state.hits.length) {
+      append = false;
+    }
 
     if (!append) grid.innerHTML = '';
 

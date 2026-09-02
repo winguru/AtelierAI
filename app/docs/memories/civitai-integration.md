@@ -79,6 +79,19 @@ Architecture:
 
 The frontend already handles this: `fetchImageRatings()` fetches the rating for returned hits, then `applyHideFilters()` + `checkAutoLoadIfAllHidden()` hide matching tiles and auto-load more pages if a whole page is hidden.
 
+### Search Lab frozen-grid race (gallery/preview desync)
+
+**Never mutate search state (offset=0, hits=[]) and then call a guarded `executeSearch()` that can silently drop the call.** If a fresh (non-append) search is submitted while an append (load-more / infinite scroll / fullscreen advance) is in flight, the old code's `if (state.loading) return;` swallowed the fresh search entirely. When the in-flight append then completed (`state.hits = state.hits.concat(page)` + `renderResults(append=true)`), the grid kept stale tiles from the previous results generation while `state.hits` held the new generation — tile `data-index` no longer matched `hits[i]`, so the preview pane (`showDetails(state.hits[index])`) showed a *different image* than the clicked tile. Symptom: gallery and detail pane "from completely different sets of images", with the desync boundary exactly at the frozen grid's tile count.
+
+Fix (two layers, both in `search-lab.js`):
+1. **Queue swallowed fresh searches** — `executeSearch` sets `_pendingFreshSearch = true` instead of returning silently; `_drainPendingFreshSearch()` runs it from the `finally` blocks of `executeReviewSearch` / `executeGallerySearch` / the search path, after `state.loading = false`. Handlers already reset `offset`/`hits` before the swallowed call, so the queued re-run picks up the handler's intent.
+2. **Defensive realignment in `renderResults(append=true)`** — if `grid.children.length > state.hits.length` (impossible in a healthy generation), fall back to a full re-render so tile indices always match hits. Heals any already-diverged session on the next append.
+
+Gotchas:
+- The load-more button handler checks `if (state.loading) return;` *before* incrementing `state.offset` — correct order. The shared InfiniteScroll module also guards via its `isLoading()` callback before firing `onLoadMore`. Preserve both when touching pagination code.
+- `renderResults` append uses `startIdx = grid.children.length`, which assumes tile count == prior hits length. Any code path that lets the grid and `state.hits` diverge breaks that invariant — this is the fragile assumption to protect.
+- Repro technique: monkeypatch `window.fetch` to delay `/api/civitai-search` ~2500ms (or fully mock it), submit a fresh search during an in-flight append, then compare `tile[data-index=N] img.src` with the detail-pane image after clicking.
+
 ### Gallery mode (image.getInfinite + username)
 
 Gallery mode is a third Search Lab mode (`state.mode === 'gallery'`) that browses a CivitAI user's complete image gallery using the `image.getInfinite` tRPC endpoint with a `username` parameter.

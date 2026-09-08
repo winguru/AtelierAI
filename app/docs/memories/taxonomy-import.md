@@ -60,6 +60,20 @@ Storage uses the existing `confidence` float on `ImageConceptObservation`. Sourc
 - `_upsert_civitai_authority_terms()` already creates terms with `concept_id=None` (correct behavior)
 - `main.py` contains duplicate copies of the import functions — changes must be applied to both
 - Snapshot import can be expensive on large catalogs because post-import rebuild options scan all images/sidecars.
+- `tag-maint.js` is a single IIFE; an unmatched event-handler delimiter prevents parsing and leaves the table at `Loading...` with all controls inert.
+- **Never-null Ext ID guard**: all three authority-term upsert paths (`_upsert_civitai_authority_terms` in `taxonomy.py` ~line 1036 and `main.py` ~line 8698, `_upsert_authority_terms` in `scan_missing_service.py` ~line 121) must never overwrite an existing `external_tag_id` with `None`. Id-less tier-1 sidecar payloads (only ~193/5125 sidecars carry tag ids) repeatedly nulled IDs resolved from richer sources — root cause of recurring "missing Ext ID" regressions. Guard shape: `if external_tag_id is not None and getattr(term, "external_tag_id", None) != external_tag_id:`.
+
+## CivitAI Ext ID Backfill
+
+### Why sidecars can't fix it
+Only 193/5125 sidecars carry `civitai.tags[].id`; the sidecar-based backfill (`POST /taxonomy/tag-maint/civitai/backfill-tag-ids`) resolves ~0. CivitAI has no live name→ID lookup (REST v1 `/api/v1/tags?query=` returns names/links only, no ids; `tag.getById` needs a known id; Meilisearch maps names→images only).
+
+### Cache resolver (the efficient path)
+`POST /taxonomy/tag-maint/civitai/backfill-tag-ids-from-cache?dry_run=` builds a normalized name→id map from all cached `tag.getVotableTags` rows in `civitai_api_cache` (12,288 rows → 4,790 unique names, 0 conflicts) and fills NULL ext-ids on CivitAI authority_terms. Zero network calls. UI: "Resolve Ext IDs (cache)" button in tag-maint step 1.
+
+### Legitimately ID-less pseudo-tags (do NOT chase)
+~13 CivitAI terms have no tag IDs to fetch — moderation/rating pseudo-tags from CivitAI's votable payload: `book`, `child - 13`, `child - 15`, `explicit`, `exposed buttocks or anus`, `exposed female genitalia`, `holding cat`, `pg`, `pg-13`, `publication`, `r`, `x`, `xxx`. Enrichment (`tag.getById`) can never resolve these; safe to ignore.
+
 
 ## Observation ↔ Concept Linkage
 

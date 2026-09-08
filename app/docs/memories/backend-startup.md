@@ -22,6 +22,12 @@ Do not rely on global shell/profile PYTHONPATH for this project.
 ### Database configuration
 Runtime DB configuration comes from `atelierai.config` (backed by `app/backend/config.py`). `IMAGE_LIBRARY_PATH` and DB directories must be writable. Sidecar metadata is merged into `/images` responses.
 
+### Lifecycle migration lock avoidance
+`_ensure_image_lifecycle_columns()` must only run its status backfill `UPDATE` when stale/null `image_status` rows exist. On schema-current databases this keeps the startup check read-only and avoids needless SQLite write-lock contention.
+
+### Artist preference counter rebuild
+`rebuild_artist_preference_counters()` identifies each image's latest rating with `(image_id, created_at DESC, id DESC)`. Keep the `ix_civitai_search_image_links_latest` index for this lookup; without it, startup repeatedly scans and sorts the link table for every artist preference.
+
 ## Key Files
 - `start.sh` — root launcher
 - `app/backend/config.py` — runtime configuration

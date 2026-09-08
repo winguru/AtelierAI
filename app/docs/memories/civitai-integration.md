@@ -18,6 +18,29 @@ The Playwright-managed launch is kept only as a fallback when no Chrome binary i
 ### Modules location
 CivitAI modules live under `app/src/atelierai/civitai`.
 
+### Response archive layout (2026-09-06: 2-level hex sharding)
+`civitai_api_responses/` uses deterministic 2-level shard dirs so writers and
+readers compute file locations without an index (`shard_parts()` /
+`shard_root()` in `atelierai.civitai.response_archive`):
+
+- Writer-1 (`CivitaiAPI._archive_json_file`, key = image uuid or
+  `imageid_<n>` fallback):
+  `<endpoint>/<s1>/<s2>/civitai_image_<kind>_<key>.json`
+- Writer-2 (`CivitaiResponseArchive.record`, key = sha256 of the redacted
+  request, first 16 hex chars `req16`):
+  `latest/<endpoint-slug>/<req16[:2]>/<req16[2:4]>/<kind>_<endpoint>_<req16>.json`
+  — overwrite-in-place, replay via `read_latest(kind=…, endpoint=…, request=…)`.
+- Shard rule: hex-ish key → chars `[0:2]` + `[2:4]`; `imageid_<n>` → zero-padded
+  last 2 + previous 2 digits. Endpoint dirs are `_slug()`-ed (dots preserved:
+  `image.get`, `tag.getVotableTags`).
+- **`history/` is retired** (was per-request versioned copies, ~80k files):
+  renamed to `image_resources/civitai_api_responses_history_retired_20260906/`
+  by `app/scripts/migrate_civitai_api_responses_sharded.py` (idempotent, dry-run
+  default, `--apply` executes). Delete the retired dir manually once satisfied —
+  nothing references it.
+- Readers that glob the tree (`scan_missing_service._build_tag_archive_index`)
+  must dual-glob flat + sharded layouts; new writes go sharded only.
+
 ### Transport logging (request/response/timing)
 Every dispatched CivitAI HTTP request emits one JSONL record to
 `<IMAGE_RESOURCES_PATH>/civitai_transport_logs/civitai_transport_YYYY-MM-DD.jsonl`
@@ -47,6 +70,41 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   percentiles, outcome counts, rpm-at-dispatch correlation, rate-limit events.
 - Log dirs are gitignored via `image_resources/` rules.
 
+### 503 analysis findings (2026-09-05/06 transport logs)
+- `rpm_at_dispatch` is a **GLOBAL** rpm (all types combined), not CDN-local —
+  do not use it to infer per-CDN rate causes. Derive CDN-local rates from the
+  timeline instead.
+- Two distinct 503 modes observed:
+  1. **Morning rate-cap bursts** — CDN-local 22-37 req/min correlates with 503
+     bursts; global rpm looks innocuous. Mitigation: `CIVITAI_CDN_MIN_INTERVAL`
+     default raised 1.0 → 2.0s (~30/min, below the danger zone).
+  2. **Evening "sticky flag"** — instant (p50 ~0.198s) 503 edge rejections at
+     near-zero global rpm, persisting 20-40 min. Retry probes during the flag
+     window keep re-tripping it. Mitigation: consecutive-CDN-503 flag cooldown
+     (below) — stop probing, wait it out.
+- All calls in the analyzed window were live (no cached hits).
+
+### CDN 503 flag cooldown (added 2026-09-06)
+- **Detection:** `_CDN_503_CONSECUTIVE` counts consecutive CDN 503s (any CDN
+  endpoint); threshold `CIVITAI_CDN_FLAG_THRESHOLD` (default 3); tRPC 503s are
+  ignored. A CDN success resets the streak.
+- **Cooldown:** CDN-scoped only — tRPC continues normally (unlike the global
+  429/403-CF backoff). Escalating schedule 300 → 600 → 1200s (capped) via
+  `activate_cdn_flag_cooldown()`. Strikes reset only after cooldown expiry AND
+  a successful CDN request.
+- **Retry abort:** while the flag is active, the inner retry loop aborts
+  immediately on a CDN 503 (raises retryable error → `main.py` soft-skips →
+  retried next sync) instead of burning attempts as flag-feeding probes.
+- **Observability:** `get_request_metrics()` exposes `endpoint_503_counts`,
+  `cdn_503_consecutive`, `cdn_flag_active`, `cdn_flag_remaining_seconds`,
+  `cdn_flag_strikes`; the TPM stats table gained a "503s" column
+  (`session_503s` in `_build_tpm_breakdown`). Envelope timing gains
+  `cdn_flag_wait_seconds` / `cdn_flag_tripped` / `cdn_flag_abort`, and
+  `backoff_reason="cdn_503_flag"` on dequeues during cooldown.
+- **Tests:** `app/tests/test_civitai_cdn_503_flag.py` (calls
+  `_execute_envelope_request` directly — no queue/consumer-thread timing
+  involved); regression pair `app/tests/test_civitai_cdn_503_softskip.py`.
+
 ## Key Files
 - `app/src/atelierai/civitai/civitai_auth.py` — `_launch_chrome_cdp()`, `_launch_context()`, `_terminate_chrome()`
 - `app/src/atelierai/civitai/transport_log.py` — JSONL transport logger (`get_transport_log()`, `record_transport_event()`)
@@ -67,7 +125,53 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
 - Single-image 404s (`❌ API request error (HTTP 404)`) on the backend console
   are usually remotely-deleted CivitAI images; tombstones are recorded to avoid
   re-fetching and the frontend handles the miss gracefully — not a bug.
+- **Download retry semantics** (`download_to_temp`): the inner request loop
+  (`_send_with_retries`) already retries 5xx ×4 with backoff + Retry-After; the
+  outer loop must NOT re-retry 5xx (previously 4×4=16 attempts/URL on persistent
+  503). Outer retries only for non-5xx retryable errors; `max_attempts=` kwarg
+  overrides the outer cap per call. Callers in `backend/main.py` treat retryable
+  5xx as "try next candidate URL, then soft-skip + retry next sync" (see
+  `civitai-sync-tasks.md`).
 - Sync Lab collection listing (`/api/sync-lab/collections`) is cache-first (2-minute max age) to keep troubleshooting responsive; use `?force_refresh=true` to force a live CivitAI pull.
+- `_fetch_civitai_user_image_collections()` DB enrichment resolves collections
+  via the junction table (`CollectionCivitaiMapping`) join first, then a legacy
+  `CollectionModel.civitai_collection_id` column fallback for ids with no
+  junction row. Do NOT add a NOT IN / subquery exclusion to the fallback —
+  the unmigrated id set is provably disjoint from junction rows by
+  construction (any junction hit would already be in the join result), so
+  such a clause is dead logic and only emits SAWarning "Coercing Subquery
+  object into a select() for use in IN()" (removed 2026-09-07).
+
+### Concept observations: UNIQUE(image, concept, authority) ignores the term
+`image_concept_observations` has `uq_obs_image_concept_authority` on
+`(image_id, concept_id, authority_id)` — `authority_term_id` is NOT part of it.
+CivitAI tags routinely alias one concept (`forest`/`full moon`/`indoors` →
+concept "indoors"), so a tag batch containing ≥2 aliases produces a duplicate
+INSERT, a failed flush, and a full-transaction rollback that takes every other
+row in the sync batch with it (symptom: `PendingRollbackError` wrapping
+`sqlite3.IntegrityError` on the next session use).
+
+Rules for every observation-insert path (4 helpers: `_insert_tag_observations_for_image`
+and `_hydrate_observations_from_payload` in `main.py`;
+`_hydrate_missing_observations_if_needed` and `_hydrate_observations_from_tags`
+in `image_collection.py`):
+
+- **Dedupe on the concept key** `(image_id, concept_id, authority_id)` before
+  inserting — one observation per concept per image per authority; first alias
+  term in the batch wins.
+- **Batch pre-load** existing `(authority_term_id, concept_id)` pairs per
+  (image, authority) — sessions run with `autoflush=False`, so pending `db.add()`
+  objects are invisible to queries and per-row existence checks are both wrong
+  and N+1.
+- **`IntegrityError` → `db.rollback()` → warn and continue.** A failed flush
+  poisons the session even inside `with db.begin_nested():` (empirically
+  verified — savepoints do NOT unpoison; the pending object is auto-expunged).
+  Rollback is mandatory before any session reuse; observations are enrichment,
+  so fail open per AGENTS.md.
+- `concept_id = NULL` rows evade the unique constraint entirely — never rely on
+  the DB alone to dedupe; the pre-load sets are the source of truth.
+
+Regression tests: `app/tests/test_civitai_tag_observations.py`.
 
 ### Search Lab pagination & filtering (no post-fetch image filtering)
 **Never filter per-image states (discard/seen/saved/keep/skip) on the backend search proxy.** Doing so shifts the Meilisearch offset on every page and causes the same images to reappear across pages (duplicate tiles).
@@ -335,6 +439,20 @@ Contains a nested `_resolve()` recursive function that handles:
 1. **`_make_request()`** (~line 467): Centralized fix. After extracting `result.data`, checks `isinstance(result_data, str)`. If so, calls `_deserialize_trpc_flat_array()` and uses the deserialized dict as `result_json`. This covers all `CivitaiAPI` methods (`fetch_post_images`, `fetch_collection_items`, `fetch_collection_posts`).
 2. **`civitai.py._make_collection_request()`** (~line 107): `CivitaiPrivateScraper` calls `_make_raw_request()` directly (for strict error propagation), bypassing `_make_request()`. Added the same deserialization call here: after getting the raw response, calls `self.api._deserialize_trpc_flat_array(data)`. If it returns non-None, returns `(deserialized, deserialized.get("nextCursor"))`. Otherwise falls through to legacy `result.data.json.nextCursor` extraction.
 
+### Superjson Date tuples in flat-array payloads (September 2026)
+
+Timestamp fields (`createdAt`, `publishedAt`, `sortAt`) inside flat-array
+responses arrive as superjson-tagged **two-element lists**:
+`["Date", "2026-03-17T00:00:00.000Z"]` — not plain strings. `_resolve()` in
+`_deserialize_trpc_flat_array()` unwraps them to the plain ISO string
+(verified across all ~1600 archived `image.getInfinite` responses, `Date` is
+the only tag in use). Without unwrapping, every consumer downstream breaks
+silently: JS `new Date([...])` → "Invalid Date" in the Sync Lab items table,
+and `civitai_models.py` `.replace("Z", ...)` on a list would raise
+`AttributeError`. Frontend `fmtTimestamp()` also normalizes the tuple shape
+defensively (for archived/cached payloads predating the fix) and returns `—`
+instead of "Invalid Date" for unparseable values.
+
 ### Private collection empty responses (August 2026)
 
 CivitAI can return HTTP 200 with an empty `image.getInfinite` item list when a
@@ -425,3 +543,73 @@ speculatively — that caused the auto-load race.
 tiles are `button.tile[data-index]` inside `#gallery-grid`. A delegated click
 handler (~line 1512) implements shift-click range (`selectRange(idx,
 {additive})`) and ctrl/cmd-click toggle (`toggleSelection(idx)`).
+
+### CDN 503 root-cause: webm origin timeouts, NOT rate flagging (2026-09-08)
+
+Definitive correlation from transport logs (1,114 CDN requests, one day):
+- images: 1/965 failed (0.1%) · .mp4: 0/92 (0.0%) · **.webm: 24/54 (44.4%)**
+- Two 503 modes on the SAME assets: **slow** (~35.1s elapsed = origin-side
+  on-demand transcode timeout) and **instant** (~0.2s = edge-cached failure
+  for the same asset/variant). 8 of 11 failing UUIDs later succeeded —
+  per-asset, not per-client.
+- Browser sessions succeed on the same assets because the web player uses
+  `transcode=true,original=true,quality=90` (pre-warmed edge variant);
+  our URLs omitted `quality=90`, landing on the on-demand transcode path.
+
+Mitigations:
+1. `_build_civitai_media_url()` now appends `quality=90` to video transcode
+   segments (matches the browser's URL form). Image URLs unchanged.
+2. Flag-streak exclusion: 503s with attempt elapsed >
+   `_CDN_SLOW_503_ELAPSED_SECONDS` (default 10s, env
+   `CIVITAI_CDN_SLOW_503_SECONDS`) no longer increment
+   `_CDN_503_CONSECUTIVE` — slow origin timeouts are asset-specific and
+   must not trip the client-holding cooldown. Instant edge rejections
+   still count (true flag signal).
+
+The earlier "sticky flag" theory (2026-09-06) partially stands — instant
+503 clusters at low rpm exist — but the dominant trigger in sync workloads
+was webm origin misses masquerading as flag trips.
+
+### Video download hardening additions (2026-09-08, later)
+
+- **Stale edge 503s**: Cloudflare serves CACHED 503s (`cf-cache-status:
+  STALE`, `age` >> `max-age=120`) long after origin recovery — retries hit
+  the poisoned cache entry, not the origin. Cache-busting (`?nocache=`)
+  forces a MISS but the origin may still 503 while transcoding.
+- **B2 transcode mirror**: `image-b2.civitai.com/file/civitai-media-cache/
+  {uuid}/.mp4_hm` serves the pre-transcoded mp4 (200 HIT) even while the
+  main CDN is stuck serving stale 503s. This is what the CivitAI web player
+  falls back to. Added to `_build_civitai_video_candidate_urls()` AFTER the
+  main-CDN transcode URL, BEFORE the B2 `/original` path (which 404s for
+  assets that only exist as transcodes).
+- **Retry-After cap for slow 503s**: origin transcode-timeout 503s carry
+  `Retry-After: 120` meant for rate-limited clients — honoring it produced
+  490s downloads that were ~130s of real work (3×120s sleeps between
+  probes while the origin kept transcoding regardless). `_retry_delay()`
+  now caps the wait at `_CDN_SLOW_503_RETRY_CAP_SECONDS` (default 15s, env
+  `CIVITAI_CDN_SLOW_503_RETRY_CAP`) when the 503 was slow (>10s elapsed).
+  Instant edge 503s still honor the full header.
+- Gotcha: uvicorn --reload graceful shutdown can wedge when browser tabs
+  hold open SSE connections; the old worker ignores SIGTERM. SIGKILL on
+  the WORKER pid only (never the supervisor on port 8000) forces the
+  supervisor to respawn a fresh worker immediately.
+
+### 503 console diagnostics (2026-09-08)
+
+`CivitaiHttpClient.request()` / `download_to_temp()` accept an optional
+`log_label` threaded through the request envelope; the 🚫 503 and 🚩 flag
+prints append it when present. `_download_civitai_image()` builds it as
+`(civitai.red/images/{id}, {mime}, ~{size})` so failures can be correlated
+to the exact asset in a browser. No-op for callers that don't pass it.
+
+### best_effort request semantics (2026-09-08)
+
+`CivitaiHttpClient.request(..., best_effort=True)` marks enrichment fetches
+(preview variants, optional lookups). Their 503s still log (with
+`log_label`) and count toward per-endpoint stats, but do NOT increment
+`_CDN_503_CONSECUTIVE` — best-effort traffic must never trip the CDN flag
+cooldown that pauses PRIMARY downloads. The preview-variant fetch in
+`_preserve_civitai_source_variant()` sets it and now also builds a
+`(preview variant — civitai.red/images/{id}, {mime}, ~{size})` log label.
+Incident: a preview fetch's 3× 503 tripped the flag mid-ingest and held
+CDN downloads for 300s while the primary import had already succeeded.

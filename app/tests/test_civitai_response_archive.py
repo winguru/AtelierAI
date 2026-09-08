@@ -6,21 +6,23 @@ from atelierai.civitai.civitai_api import CivitaiAPI
 from atelierai.civitai.response_archive import CivitaiResponseArchive
 
 
-def test_record_writes_history_and_latest_with_redaction(tmp_path):
+def test_record_writes_sharded_latest_with_redaction(tmp_path):
     archive = CivitaiResponseArchive(tmp_path)
 
-    history_path = archive.record(
+    latest_path = archive.record(
         kind="trpc",
         endpoint="image.get",
         method="GET",
         url="https://civitai.red/api/trpc/image.get",
         request={"id": 42, "token": "secret", "nested": {"authorization": "Bearer secret"}},
-        response={"id": 42, "url": "https://image.civitai.com/example"},
+        response={"id": 42, "url": "https://image.civtai.com/example"},
         status_code=200,
     )
 
-    assert history_path.exists()
-    records = list((tmp_path / "civitai_api_responses" / "latest").glob("*.json"))
+    # history/ writes are retired; only the sharded latest/ path exists.
+    assert latest_path.exists()
+    assert not (tmp_path / "civitai_api_responses" / "history").exists()
+    records = list((tmp_path / "civitai_api_responses" / "latest").rglob("*.json"))
     assert len(records) == 1
     payload = json.loads(records[0].read_text(encoding="utf-8"))
     assert payload["request"]["token"] == "[REDACTED]"
@@ -29,7 +31,7 @@ def test_record_writes_history_and_latest_with_redaction(tmp_path):
     assert payload["success"] is True
 
 
-def test_latest_is_replayable_and_history_is_immutable(tmp_path):
+def test_latest_is_replayable_and_overwritten_in_place(tmp_path):
     archive = CivitaiResponseArchive(tmp_path)
     request = {"queries": [{"q": "portrait", "offset": 0}]}
 
@@ -48,8 +50,12 @@ def test_latest_is_replayable_and_history_is_immutable(tmp_path):
         status_code=200,
     )
 
-    assert first_path != second_path
-    assert first_path.exists() and second_path.exists()
+    # Identical requests map to the same sharded latest file, which is
+    # overwritten in place — only the newest response survives.
+    assert first_path == second_path
+    assert first_path.exists()
+    records = list((tmp_path / "civitai_api_responses" / "latest").rglob("*.json"))
+    assert len(records) == 1
     latest = archive.read_latest(
         kind="search",
         endpoint="meilisearch.multi-search",

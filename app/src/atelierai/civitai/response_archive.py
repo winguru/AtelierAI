@@ -1,5 +1,9 @@
 """Durable, redacted request/response archives for CivitAI calls."""
 
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 
 import hashlib
@@ -57,6 +61,32 @@ def _slug(value: str) -> str:
     return cleaned[:80] or "request"
 
 
+def shard_parts(key: str) -> tuple[str, str]:
+    """Return (level1, level2) shard dir names derived from an entity key.
+
+    Keys are either UUID-ish hex strings (image uuid from the response URL hash)
+    or ``imageid_<n>`` fallbacks. Sharding is stable and deterministic so both
+    writers and all readers can compute a file's location without an index:
+
+    - hex-ish key  → first 2 chars, next 2 chars (padded if short)
+    - imageid_<n>  → zero-padded last 2 digits, previous 2 digits
+    """
+    key = key.strip()
+    if key.startswith("imageid_"):
+        digits = key[len("imageid_"):].lstrip("0") or "0"
+        padded = digits.zfill(4)
+        return padded[-2:], padded[-4:-2]
+    hexish = re.sub(r"[^0-9a-fA-F]", "", key)[:4].lower()
+    hexish = hexish.ljust(4, "0")
+    return hexish[:2], hexish[2:4]
+
+
+def shard_root(base: Path, key: str) -> Path:
+    """Return ``base`` joined with the two shard directories for ``key``."""
+    level1, level2 = shard_parts(key)
+    return base / level1 / level2
+
+
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -71,7 +101,16 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 
 
 class CivitaiResponseArchive:
-    """Write immutable history records and stable latest snapshots."""
+    """Write sharded, redacted latest-response snapshots for CivitAI calls.
+
+    Layout (no date/time segments; deterministic from the call itself)::
+
+        latest/<endpoint-slug>/<key[0:2]>/<key[2:4]>/<kind>_<endpoint>_<sha16>.json
+
+    ``history/`` writes were retired 2026-09-06 (date-keyed dirs removed by
+    design; ``latest/`` snapshots are overwritten in place and remain the
+    read path for cache replays).
+    """
 
     def __init__(self, root: Path | str | None = None) -> None:
         resources = root or _config_value("IMAGE_RESOURCES_PATH") or "image_resources"
@@ -97,6 +136,7 @@ class CivitaiResponseArchive:
             json.dumps(safe_request, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:16]
         stem = f"{_slug(kind)}_{_slug(endpoint)}_{request_key}"
+        shard1, shard2 = shard_parts(request_key)
         payload = {
             "recorded_at": now.isoformat(),
             "kind": kind,
@@ -111,24 +151,27 @@ class CivitaiResponseArchive:
             "elapsed_seconds": elapsed_seconds,
             "response": _sanitize(response),
         }
-        history_path = (
-            self.root
-            / "history"
-            / now.strftime("%Y-%m-%d")
-            / f"{stem}_{now.strftime('%H%M%S_%f')}_{uuid4().hex[:8]}.json"
+        latest_path = (
+            self.root / "latest" / _slug(endpoint) / shard1 / shard2 / f"{stem}.json"
         )
-        latest_path = self.root / "latest" / f"{stem}.json"
         with _archive_lock:
-            _atomic_json_write(history_path, payload)
             _atomic_json_write(latest_path, payload)
-        return history_path
+        return latest_path
 
     def read_latest(self, *, kind: str, endpoint: str, request: Any) -> dict[str, Any] | None:
         safe_request = _sanitize(request)
         request_key = hashlib.sha256(
             json.dumps(safe_request, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()[:16]
-        path = self.root / "latest" / f"{_slug(kind)}_{_slug(endpoint)}_{request_key}.json"
+        shard1, shard2 = shard_parts(request_key)
+        path = (
+            self.root
+            / "latest"
+            / _slug(endpoint)
+            / shard1
+            / shard2
+            / f"{_slug(kind)}_{_slug(endpoint)}_{request_key}.json"
+        )
         try:
             with path.open("r", encoding="utf-8") as handle:
                 value = json.load(handle)

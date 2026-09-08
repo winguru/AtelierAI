@@ -23,6 +23,35 @@ services:
       ATELIER_RELOAD: 1
       ATELIER_SUPPRESS_STATUS_GET_LOGS: ${ATELIER_SUPPRESS_STATUS_GET_LOGS:-1}
 
+  # Chrome sidecar for the CivitAI browser bridge (CDP + noVNC).
+  # Opt-in via the dedicated "browser" profile so standard dev/runtime
+  # stacks don't pay the Chromium overhead:
+  #   docker compose --profile browser up -d chrome-sidecar
+  # Combine with a stack profile as needed:
+  #   docker compose --profile dev --profile browser up
+  chrome-sidecar:
+    profiles: ["browser"]
+    build:
+      context: ./docker/chrome-sidecar
+    init: true
+    ports:
+      - "127.0.0.1:6080:6080"   # noVNC web UI (localhost-only, no auth — see docs)
+    environment:
+      SCREEN_WIDTH: ${CHROME_SCREEN_WIDTH:-1440}
+      SCREEN_HEIGHT: ${CHROME_SCREEN_HEIGHT:-900}
+      # Bind CDP into the host loopback for devcontainer-less local dev.
+      # In compose networks the backend reaches the sidecar by service name.
+      CDP_PORT: 9222
+    volumes:
+      - chrome-profile:/data/profile
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9222/json/version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
   atelier-runtime:
     profiles: ["runtime"]
     build:
@@ -55,3 +84,4 @@ services:
 
 volumes:
   atelier-runtime-data:
+  chrome-profile:

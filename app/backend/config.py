@@ -175,6 +175,28 @@ CIVITAI_CHROME_PROFILE_DIRECTORY = os.getenv(
     "CIVITAI_CHROME_PROFILE_DIRECTORY", ""
 ).strip()
 
+# --- Browser Bridge Configuration --------------------------------------------
+# Optional egress lane that routes CivitAI tRPC fetches through a real,
+# sidecar-hosted Chromium via CDP (Playwright connect_over_cdp). The browser
+# session carries authentic TLS/HTTP2 fingerprints and the user's real cookie
+# jar, so requests look like organic page traffic instead of Python clients.
+#
+# Disabled by default; when enabled the bridge fails open (errors surface as
+# bridge-unavailable, callers fall back to the direct lane) so the sidecar
+# being down never blocks syncs.
+BROWSER_BRIDGE_CDP_URL = os.getenv("BROWSER_BRIDGE_CDP_URL", "").strip()
+# Default points at the compose service name; override for host-local Chrome:
+#   BROWSER_BRIDGE_CDP_URL=http://127.0.0.1:9222
+BROWSER_BRIDGE_DEFAULT_CDP_URL = "http://chrome-sidecar:9222"
+# Timeouts (seconds) for page-context fetches issued through the bridge.
+BROWSER_BRIDGE_FETCH_TIMEOUT = _env_float("BROWSER_BRIDGE_FETCH_TIMEOUT", 45.0)
+BROWSER_BRIDGE_NAVIGATE_TIMEOUT = _env_float(
+    "BROWSER_BRIDGE_NAVIGATE_TIMEOUT", 30.0
+)
+# Where page-context fetch() results are appended (JSONL, one record per fetch).
+# Empty disables capture-to-disk.
+BROWSER_BRIDGE_CAPTURE_PATH = os.getenv("BROWSER_BRIDGE_CAPTURE_PATH", "").strip()
+
 # --- ComfyUI Configuration ---
 ATELIER_COMFYUI_BASE_URL = os.getenv("ATELIER_COMFYUI_BASE_URL", "").strip()
 ATELIER_COMFY_MATCH_THRESHOLD = max(

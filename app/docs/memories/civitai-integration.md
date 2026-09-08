@@ -104,9 +104,22 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
 - **Tests:** `app/tests/test_civitai_cdn_503_flag.py` (calls
   `_execute_envelope_request` directly — no queue/consumer-thread timing
   involved); regression pair `app/tests/test_civitai_cdn_503_softskip.py`.
+- **Browser bridge (CDP sidecar lane):** `CivitaiBrowserBridge` in
+  `app/src/atelierai/civitai/browser_bridge.py` owns a Playwright
+  `connect_over_cdp` connection to the optional `chrome-sidecar` container
+  (compose profile `browser`). `fetch()` evaluates `fetch()` inside a live
+  civitai tab so requests carry Chromium's TLS fingerprint + profile cookies
+  (auth once by hand via noVNC `:6080`; profile volume persists it). Fail-open
+  contract everywhere: never raises, returns `{"ok": false, "bridge": ...}`.
+  Tests: `app/tests/test_browser_bridge.py` (offline, mocked browser).
 
 ## Key Files
 - `app/src/atelierai/civitai/civitai_auth.py` — `_launch_chrome_cdp()`, `_launch_context()`, `_terminate_chrome()`
+- `app/src/atelierai/civitai/browser_bridge.py` — CDP browser bridge singleton (`get_browser_bridge()`), fail-open `fetch()`/`navigate()`/`status()`
+- `app/backend/routers/browser_bridge.py` — `/api/browser-bridge/*` control endpoints
+- `docker/chrome-sidecar/` — headed Chromium + Xvfb + noVNC sidecar (compose profile `browser`, CDP `:9222`, noVNC `:6080` loopback-only)
+- `app/frontend/browser-bridge-lab.html` — bridge status/fetch/navigate UI
+- `app/docs/features/browser-bridge.md` — full operational runbook
 - `app/src/atelierai/civitai/transport_log.py` — JSONL transport logger (`get_transport_log()`, `record_transport_event()`)
 - `app/src/atelierai/civitai/http_client.py` — consumer loop timing capture, `_emit_transport_log()`, `get_last_request_info()`
 - `app/src/atelierai/civitai/response_archive.py` — durable redacted archives with timing fields
@@ -133,6 +146,7 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   5xx as "try next candidate URL, then soft-skip + retry next sync" (see
   `civitai-sync-tasks.md`).
 - Sync Lab collection listing (`/api/sync-lab/collections`) is cache-first (2-minute max age) to keep troubleshooting responsive; use `?force_refresh=true` to force a live CivitAI pull.
+- **Browser bridge is additive, not a replacement** — nothing in the sync/enrichment pipeline routes through it by default; integration is per-caller opt-in. The bridge is fail-open (sidecar down → `ok:false, bridge:"unavailable"`, callers fall back to direct). CDP `:9222` is full profile control — compose-internal only, never publish it. Sidecar uses Debian `chromium` because google-chrome-stable has no Linux ARM64 builds (this repo targets aarch64).
 - `_fetch_civitai_user_image_collections()` DB enrichment resolves collections
   via the junction table (`CollectionCivitaiMapping`) join first, then a legacy
   `CollectionModel.civitai_collection_id` column fallback for ids with no

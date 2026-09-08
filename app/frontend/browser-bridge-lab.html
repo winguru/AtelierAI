@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser Bridge Lab</title>
+  <link rel="icon" type="svg+xml" href="/frontend/favicon.svg">
+  <link rel="stylesheet" href="/frontend/css/shared-ui.css">
+  <style>
+    .bridge-layout { display: grid; gap: 18px; max-width: 980px; margin: 0 auto; }
+    .bridge-card {
+      background: var(--surface, #fff); border: 1px solid var(--border, #ddd);
+      border-radius: 10px; padding: 16px 20px;
+    }
+    .bridge-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .status-chip { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #999; }
+    .status-dot.on { background: #2e9e5b; }
+    .status-dot.off { background: #c0392b; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+    .kv-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    .kv-table td { padding: 4px 10px; border-bottom: 1px solid var(--border, #eee); }
+    .kv-table td:first-child { color: var(--muted, #666); white-space: nowrap; width: 180px; }
+    .pages-list { margin: 6px 0 0; padding-left: 18px; }
+    .pages-list li { font-family: ui-monospace, Menlo, monospace; font-size: 0.8em; word-break: break-all; }
+    .actions-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    pre.response-block {
+      background: var(--surface-2, #f6f6f6); border: 1px solid var(--border, #ddd);
+      border-radius: 6px; padding: 10px; max-height: 260px; overflow: auto;
+      font-size: 0.8em; white-space: pre-wrap; word-break: break-all;
+    }
+    input.bridge-input {
+      width: 100%; box-sizing: border-box; padding: 8px 10px;
+      border: 1px solid var(--border, #ccc); border-radius: 6px;
+      font-family: ui-monospace, Menlo, monospace; font-size: 0.85em;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div>
+        <h1>Browser Bridge Lab</h1>
+        <p class="step-desc">CDP sidecar egress lane for CivitAI requests</p>
+      </div>
+      <div class="header-actions">
+        <a class="btn ghost" href="/">← Gallery</a>
+        <a class="btn ghost" href="/frontend/sync-lab.html">Sync Lab</a>
+      </div>
+    </header>
+
+    <main class="bridge-layout">
+
+      <section class="bridge-card" id="status-card">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+          <h2 style="margin:0;">Sidecar Status</h2>
+          <div class="status-chip" id="bridge-chip">
+            <span class="status-dot off" id="bridge-dot"></span>
+            <span id="bridge-state-text">checking…</span>
+          </div>
+        </div>
+        <div class="bridge-status-grid" style="margin-top:12px;">
+          <div>
+            <table class="kv-table">
+              <tr><td>CDP endpoint</td><td class="mono" id="kv-cdp">—</td></tr>
+              <tr><td>Browser version</td><td class="mono" id="kv-version">—</td></tr>
+              <tr><td>Fetch count</td><td class="mono" id="kv-fetches">0</td></tr>
+              <tr><td>Last fetch</td><td class="mono" id="kv-last-fetch">—</td></tr>
+              <tr><td>Last error</td><td class="mono" id="kv-error">—</td></tr>
+            </table>
+          </div>
+          <div>
+            <strong>Open tabs</strong>
+            <ul class="pages-list" id="bridge-pages"><li>—</li></ul>
+          </div>
+        </div>
+        <div class="actions-row">
+          <button class="btn primary" id="btn-connect">Connect</button>
+          <button class="btn ghost" id="btn-disconnect">Disconnect</button>
+          <button class="btn ghost" id="btn-refresh">Refresh</button>
+          <a class="btn ghost" id="novnc-link" href="#" target="_blank" rel="noreferrer">Open noVNC ↗</a>
+        </div>
+      </section>
+
+      <section class="bridge-card" id="fetch-card">
+        <h2 style="margin-top:0;">Page-Context Fetch</h2>
+        <p class="step-desc" style="margin-top:0;">
+          Runs <span class="mono">fetch()</span> inside the sidecar's civitai tab —
+          same-origin, profile cookies, Chromium TLS fingerprint.
+        </p>
+        <input class="bridge-input" id="fetch-url" type="text"
+               placeholder="https://civitai.red/api/trpc/...?" />
+        <div class="actions-row">
+          <button class="btn primary" id="btn-fetch">Fetch via bridge</button>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="fetch-as-post"> POST with empty JSON body
+          </label>
+        </div>
+        <pre class="response-block" id="fetch-response">No fetch issued yet.</pre>
+      </section>
+
+      <section class="bridge-card" id="navigate-card">
+        <h2 style="margin-top:0;">Navigate</h2>
+        <p class="step-desc" style="margin-top:0;">
+          Drive the sidecar tab to a URL. Watch it live in noVNC; the profile's
+          cookie jar handles auth.
+        </p>
+        <input class="bridge-input" id="navigate-url" type="text"
+               placeholder="https://civitai.red/" />
+        <div class="actions-row">
+          <button class="btn primary" id="btn-navigate">Navigate</button>
+        </div>
+        <pre class="response-block" id="navigate-response">Idle.</pre>
+      </section>
+
+    </main>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, opts) {
+      const resp = await fetch(`/api/browser-bridge/${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+      });
+      return resp.json();
+    }
+
+    function fmtTs(ts) {
+      if (!ts) return '—';
+      return new Date(ts * 1000).toLocaleTimeString();
+    }
+
+    function renderStatus(s) {
+      const connected = !!s.connected;
+      $('bridge-dot').className = `status-dot ${connected ? 'on' : 'off'}`;
+      $('bridge-state-text').textContent = connected ? 'connected' : 'disconnected';
+      $('kv-cdp').textContent = s.cdp_url || '—';
+      $('kv-version').textContent = s.browser_version || '—';
+      $('kv-fetches').textContent = s.fetch_count ?? 0;
+      $('kv-last-fetch').textContent = fmtTs(s.last_fetch_at);
+      $('kv-error').textContent = s.last_error || '—';
+      const ul = $('bridge-pages');
+      ul.innerHTML = '';
+      if (s.civitai_pages && s.civitai_pages.length) {
+        for (const p of s.civitai_pages) {
+          const li = document.createElement('li');
+          li.textContent = p;
+          ul.appendChild(li);
+    }
+      } else {
+        ul.innerHTML = '<li>—</li>';
+      }
+    }
+
+    async function refreshStatus() {
+      try {
+        renderStatus(await api('status'));
+      } catch (e) {
+        $('bridge-state-text').textContent = `error: ${e.message}`;
+      }
+    }
+
+    $('btn-connect').onclick = async () => {
+      renderStatus((await api('connect', { method: 'POST' })).status);
+    };
+    $('btn-disconnect').onclick = async () => {
+      await api('disconnect', { method: 'POST' });
+      await refreshStatus();
+    };
+    $('btn-refresh').onclick = refreshStatus;
+
+    $('btn-fetch').onclick = async () => {
+      const url = $('fetch-url').value.trim();
+      if (!url) return;
+      const asPost = $('fetch-as-post').checked;
+      const body = JSON.stringify({
+        url,
+        method: asPost ? 'POST' : 'GET',
+        ...(asPost ? { payload: {} } : {}),
+      });
+      $('fetch-response').textContent = 'Fetching…';
+      try {
+        const out = await api('fetch', { method: 'POST', body });
+        $('fetch-response').textContent = JSON.stringify(out, null, 2);
+      } catch (e) {
+        $('fetch-response').textContent = `Error: ${e.message}`;
+      }
+    };
+
+    $('btn-navigate').onclick = async () => {
+      const url = $('navigate-url').value.trim();
+      if (!url) return;
+      $('navigate-response').textContent = 'Navigating…';
+      try {
+        const out = await api('navigate', { method: 'POST', body: JSON.stringify({ url }) });
+        $('navigate-response').textContent = JSON.stringify(out, null, 2);
+      } catch (e) {
+        $('navigate-response').textContent = `Error: ${e.message}`;
+      }
+    };
+
+    // Default the noVNC link to the standard sidecar port.
+    $('novnc-link').href = `${location.protocol}//${location.hostname}:6080/vnc.html`;
+
+    refreshStatus();
+    setInterval(refreshStatus, 15000);
+  </script>
+</body>
+</html>

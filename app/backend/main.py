@@ -15944,6 +15944,7 @@ from routers.civitai import router as _civitai_router  # noqa: E402, PLC0415
 from routers import models_tree as _models_tree_router_mod  # noqa: E402, PLC0415
 from routers import clip_router as _clip_router_mod  # noqa: E402, PLC0415
 from routers import visual_lookup as _visual_lookup_router_mod  # noqa: E402, PLC0415
+from routers import browser_bridge as _browser_bridge_router_mod  # noqa: E402, PLC0415
 
 app.include_router(_health_router_mod.router)
 app.include_router(_taxonomy_router_mod.router, prefix="/api")
@@ -15955,6 +15956,7 @@ app.include_router(_civitai_router, prefix="/api")
 app.include_router(_models_tree_router_mod.router, prefix="/api")
 app.include_router(_clip_router_mod.router, prefix="/api")
 app.include_router(_visual_lookup_router_mod.router, prefix="/api")
+app.include_router(_browser_bridge_router_mod.router, prefix="/api")
 
 
 # Define a root endpoint to serve the main index.html file

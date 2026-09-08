@@ -1,0 +1,381 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
+"""CDP browser bridge: route CivitAI requests through a real Chromium session.
+
+An optional sidecar container (docker/chrome-sidecar) runs a headed Chromium
+under Xvfb with a persistent profile. AtelierAI connects via Playwright's
+``connect_over_cdp`` and issues tRPC fetches from inside a civitai tab's page
+context. Because the request originates in the page:
+
+- the TLS/HTTP2 fingerprint is Chromium's (not Python/OpenSSL),
+- cookies come from the profile's live jar (no server-side cookie copies),
+- headers/Referer match what the page itself would send.
+
+The bridge is deliberately *fail-open*: every entry point catches connection
+errors and returns a structured unavailable response instead of raising, so a
+missing or crashed sidecar never blocks syncs — callers fall back to the
+direct lane.
+
+Lane selection is the caller's policy; this module only provides transport.
+See docs/features/browser-bridge.md for the operational runbook.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+# playwright imports are done lazily inside methods so a missing install never
+# breaks backend startup (fail-open contract).
+
+
+@dataclass
+class BridgeSessionState:
+    """Snapshot of bridge connectivity for status endpoints."""
+
+    connected: bool = False
+    cdp_url: str = ""
+    browser_version: str = ""
+    last_error: str = ""
+    last_connected_at: float | None = None
+    fetch_count: int = 0
+    last_fetch_at: float | None = None
+
+
+class CivitaiBrowserBridge:
+    """Owns the CDP connection to the sidecar Chromium.
+
+    One instance per backend process. The connection is established on
+    demand and re-established after sidecar restarts (the profile volume
+    keeps cookies alive across restarts, so reconnection is transparent).
+    """
+
+    def __init__(self, cdp_url: str = "", *, capture_path: str = ""):
+        self._cdp_url = cdp_url
+        self._capture_path = capture_path
+        self._lock = asyncio.Lock()
+        self._playwright = None
+        self._browser = None
+        self._state = BridgeSessionState(cdp_url=cdp_url)
+
+    # ------------------------------------------------------------------
+    # Configuration helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_cdp_url(self) -> str:
+        """Return the configured CDP URL, falling back to config defaults."""
+        if self._cdp_url:
+            return self._cdp_url
+        try:
+            import atelierai.config as app_config
+
+            configured = (
+                getattr(app_config, "BROWSER_BRIDGE_CDP_URL", "") or ""
+            ).strip()
+            if configured:
+                return configured
+            return getattr(
+                app_config,
+                "BROWSER_BRIDGE_DEFAULT_CDP_URL",
+                "http://chrome-sidecar:9222",
+            )
+        except Exception:  # noqa: BLE001 — fail-open contract
+            return "http://chrome-sidecar:9222"
+
+    def _nav_timeout_ms(self) -> int:
+        try:
+            import atelierai.config as app_config
+
+            return int(
+                getattr(app_config, "BROWSER_BRIDGE_NAVIGATE_TIMEOUT", 30.0) * 1000
+            )
+        except Exception:  # noqa: BLE001
+            return 30000
+
+    @staticmethod
+    def _web_base_url() -> str:
+        try:
+            import atelierai.config as app_config
+
+            return getattr(app_config, "CIVITAI_WEB_BASE_URL", "https://civitai.red")
+        except Exception:  # noqa: BLE001
+            return "https://civitai.red"
+
+    def _capture_record(self, record: dict[str, Any]) -> None:
+        """Append a fetch record to the JSONL capture log, best-effort."""
+        if not self._capture_path:
+            # Fall back to the configured capture path when the instance was
+            # not given an explicit one.
+            try:
+                import atelierai.config as app_config
+
+                self._capture_path = (
+                    getattr(app_config, "BROWSER_BRIDGE_CAPTURE_PATH", "") or ""
+                ).strip()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        if not self._capture_path:
+            return
+        try:
+            path = Path(self._capture_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            # Capture is observability, not correctness — never propagate.
+            pass
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    async def _ensure_connected(self) -> bool:
+        """Connect to the sidecar if not already. Returns True when usable."""
+        if self._browser is not None and self._browser.is_connected():
+            return True
+
+        async with self._lock:
+            # Double-check after acquiring the lock.
+            if self._browser is not None and self._browser.is_connected():
+                return True
+
+            cdp_url = self._resolve_cdp_url()
+            try:
+                from playwright.async_api import async_playwright
+
+                if self._playwright is None:
+                    self._playwright = await async_playwright().start()
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    cdp_url
+                )
+                self._state.connected = True
+                self._state.cdp_url = cdp_url
+                self._state.browser_version = self._browser.version
+                self._state.last_error = ""
+                self._state.last_connected_at = time.time()
+                return True
+            except Exception as exc:  # noqa: BLE001 — fail-open contract
+                self._state.connected = False
+                self._state.last_error = f"{type(exc).__name__}: {exc}"
+                return False
+
+    async def disconnect(self) -> None:
+        """Close the CDP connection (the sidecar browser keeps running)."""
+        async with self._lock:
+            if self._browser is not None:
+                try:
+                    await self._browser.close()
+                except Exception:  # noqa: BLE001, S110 — best-effort teardown
+                    pass
+                self._browser = None
+            if self._playwright is not None:
+                try:
+                    await self._playwright.stop()
+                except Exception:  # noqa: BLE001, S110 — best-effort teardown
+                    pass
+                self._playwright = None
+
+    async def status(self) -> dict[str, Any]:
+        """Return a connectivity + activity snapshot for status endpoints."""
+        await self._ensure_connected()
+        pages: list[str] = []
+        if self._browser is not None and self._browser.is_connected():
+            try:
+                for ctx in self._browser.contexts:
+                    for page in ctx.pages:
+                        url = page.url or ""
+                        if url and not url.startswith(("chrome", "about", "devtools")):
+                            pages.append(url)
+            except Exception:  # noqa: BLE001 — snapshot is best-effort
+                pages = []
+        return {
+            "connected": self._state.connected,
+            "cdp_url": self._state.cdp_url or self._resolve_cdp_url(),
+            "browser_version": self._state.browser_version,
+            "civitai_pages": pages,
+            "last_error": self._state.last_error,
+            "last_connected_at": self._state.last_connected_at,
+            "fetch_count": self._state.fetch_count,
+            "last_fetch_at": self._state.last_fetch_at,
+        }
+
+    # ------------------------------------------------------------------
+    # Page-context fetch
+    # ------------------------------------------------------------------
+
+    async def _pick_page(self) -> Any | None:
+        """Return a live page on a civitai origin, or None.
+
+        Prefers an existing civitai tab; otherwise opens one on the
+        configured base domain so commanded fetches always have a
+        same-origin context to ride on.
+        """
+        if self._browser is None or not self._browser.is_connected():
+            return None
+        try:
+            for ctx in self._browser.contexts:
+                for page in ctx.pages:
+                    url = (page.url or "").lower()
+                    if "civitai" in url:
+                        return page
+            ctx = self._browser.contexts[0] if self._browser.contexts else None
+            if ctx is None:
+                return None
+            page = await ctx.new_page()
+            try:
+                await page.goto(
+                    self._web_base_url(),
+                    timeout=self._nav_timeout_ms(),
+                    wait_until="domcontentloaded",
+                )
+            except Exception:  # noqa: BLE001, S110 — page may half-load; still usable
+                pass
+            return page
+        except Exception:  # noqa: BLE001 — fail-open contract
+            return None
+
+    # JS executed inside the page context. Keep the return shape in sync
+    # with the response handling in fetch() below.
+    _FETCH_JS = """
+    async (url, init) => {
+        const resp = await fetch(url, init);
+        const text = await resp.text();
+        let parsed = null;
+        try { parsed = JSON.parse(text); } catch (e) { /* keep null */ }
+        return {
+            status: resp.status,
+            headers: Object.fromEntries(resp.headers.entries()),
+            bodyText: text.length > 200000 ? null : text,
+            bodyParsed: parsed,
+        };
+    }
+    """
+
+    async def fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a CivitAI URL from inside a civitai page context.
+
+        Returns a plain dict with ok/status/body/headers. Never raises —
+        callers treat the bridge as an optional lane (fail-open contract).
+        """
+        started = time.time()
+        self._state.fetch_count += 1
+
+        ok = await self._ensure_connected()
+        if not ok:
+            return {
+                "ok": False,
+                "bridge": "unavailable",
+                "error": self._state.last_error,
+                "elapsed_seconds": round(time.time() - started, 3),
+                "via": "browser-bridge",
+            }
+
+        page = await self._pick_page()
+        if page is None:
+            return {
+                "ok": False,
+                "bridge": "no-page",
+                "error": "No usable civitai page context available",
+                "elapsed_seconds": round(time.time() - started, 3),
+                "via": "browser-bridge",
+            }
+
+        init: dict[str, Any] = {"method": method}
+        if payload is not None:
+            init["body"] = json.dumps(payload)
+        if headers:
+            init["headers"] = headers
+
+        try:
+            result = await page.evaluate(self._FETCH_JS, url, init)
+        except Exception as exc:  # noqa: BLE001 — fail-open contract
+            return {
+                "ok": False,
+                "bridge": "evaluate-failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "elapsed_seconds": round(time.time() - started, 3),
+                "via": "browser-bridge",
+            }
+
+        self._state.last_fetch_at = time.time()
+        status = int(result.get("status") or 0)
+        body: Any = result.get("bodyParsed")
+        if body is None:
+            body = result.get("bodyText") or ""
+
+        self._capture_record(
+            {
+                "ts": time.time(),
+                "url": url,
+                "method": method,
+                "status": status,
+                "elapsed_seconds": round(time.time() - started, 3),
+                "via": "browser-bridge",
+            }
+        )
+
+        return {
+            "ok": 200 <= status < 300,
+            "status": status,
+            "body": body,
+            "headers": result.get("headers", {}),
+            "elapsed_seconds": round(time.time() - started, 3),
+            "via": "browser-bridge",
+        }
+
+    async def navigate(self, url: str) -> dict[str, Any]:
+        """Navigate a civitai tab to a URL (visible in the noVNC window)."""
+        ok = await self._ensure_connected()
+        if not ok:
+            return {
+                "ok": False,
+                "bridge": "unavailable",
+                "error": self._state.last_error,
+                "via": "browser-bridge",
+            }
+
+        page = await self._pick_page()
+        if page is None:
+            return {
+                "ok": False,
+                "bridge": "no-page",
+                "error": "No page available",
+                "via": "browser-bridge",
+            }
+
+        try:
+            await page.goto(
+                url, timeout=self._nav_timeout_ms(), wait_until="domcontentloaded"
+            )
+            return {"ok": True, "url": page.url, "via": "browser-bridge"}
+        except Exception as exc:  # noqa: BLE001 — fail-open contract
+            return {
+                "ok": False,
+                "bridge": "navigate-failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "via": "browser-bridge",
+            }
+
+
+# ── Singleton access ────────────────────────────────────────────────────────
+_BRIDGE_SINGLETON: CivitaiBrowserBridge | None = None
+
+
+def get_browser_bridge() -> CivitaiBrowserBridge:
+    """Return the process-wide bridge instance (lazily constructed)."""
+    global _BRIDGE_SINGLETON
+    if _BRIDGE_SINGLETON is None:
+        _BRIDGE_SINGLETON = CivitaiBrowserBridge()
+    return _BRIDGE_SINGLETON

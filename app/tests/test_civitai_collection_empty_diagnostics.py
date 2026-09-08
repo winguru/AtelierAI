@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import main
+
 from atelierai.civitai.civitai import CivitaiPrivateScraper
 from atelierai.civitai.civitai_api import CivitaiAPI
 
@@ -192,3 +193,77 @@ def test_collection_request_decodes_referenced_metadata_flat_array():
         "nextCursor": 93492358,
     }
     assert next_cursor == 93492358
+
+
+def test_flat_array_deserializer_unwraps_date_tuples():
+    """Superjson ["Date", iso] tuples must become plain ISO strings.
+
+    CivitAI's flat-array format serializes timestamps (createdAt, publishedAt,
+    sortAt) as two-element ["Date", "<iso>"] lists. Downstream consumers
+    (datetime.fromisoformat, JS Date) expect plain strings — leaving the list
+    in place surfaced as "Invalid Date" in the Sync Lab items table.
+    """
+    flat_array = [
+        {"nextCursor": -1, "items": 1},
+        [2],
+        {"id": 3, "publishedAt": 4, "createdAt": 5, "sortAt": 6},
+        42,
+        ["Date", "2026-03-17T00:00:00.000Z"],
+        ["Date", "2026-03-04T03:33:10.127Z"],
+        ["Date", "2026-03-20T12:00:00.000Z"],
+    ]
+    result = CivitaiAPI._deserialize_trpc_flat_array(None, {
+        "result": {"data": json.dumps(flat_array)}
+    })
+
+    assert result is not None
+    item = result["items"][0]
+    assert item["publishedAt"] == "2026-03-17T00:00:00.000Z"
+    assert item["createdAt"] == "2026-03-04T03:33:10.127Z"
+    assert item["sortAt"] == "2026-03-20T12:00:00.000Z"
+
+
+def test_flat_array_deserializer_leaves_ordinary_lists_untouched():
+    """Non-tagged lists (e.g. tag arrays) must pass through unchanged."""
+    flat_array = [
+        {"nextCursor": -1, "items": 1},
+        [2],
+        {"id": 3, "tags": 4},
+        42,
+        ["general", "character"],
+    ]
+    result = CivitaiAPI._deserialize_trpc_flat_array(None, {
+        "result": {"data": json.dumps(flat_array)}
+    })
+
+    assert result is not None
+    item = result["items"][0]
+    assert item["tags"] == ["general", "character"]
+
+
+def test_scraper_collection_items_dates_are_strings():
+    """End-to-end through _make_collection_request: dates must be strings."""
+    flat_array = [
+        {"nextCursor": -1, "items": 1},
+        [2],
+        {"id": 3, "publishedAt": 4},
+        139377972,
+        ["Date", "2026-09-01T10:00:00.000Z"],
+    ]
+    api = SimpleNamespace(
+        default_params={"authed": True},
+        base_url="https://civitai.red/api/trpc",
+        _make_raw_request=lambda *_args, **_kwargs: json.dumps(flat_array),
+        _deserialize_trpc_flat_array=lambda response: (
+            CivitaiAPI._deserialize_trpc_flat_array(None, response)
+        ),
+        _build_trpc_payload=lambda payload: json.dumps({"json": payload}),
+    )
+    scraper = object.__new__(CivitaiPrivateScraper)
+    scraper.api = api
+
+    data, next_cursor = scraper._make_collection_request(17582649, None, False)
+
+    assert data["items"][0]["publishedAt"] == "2026-09-01T10:00:00.000Z"
+    # nextCursor of -1 signals "no more pages" and maps to None.
+    assert next_cursor is None

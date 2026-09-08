@@ -720,6 +720,36 @@ _STATUS_FILTERS: dict[str, Callable] = {
     ),
 }
 
+# Included status values that describe rows excluded by the standard
+# active-image filter (CivitAI tombstones carry image_status='placeholder').
+# When one of these is explicitly included, the base query must admit those
+# rows or the status ID-set would intersect with an empty set.
+_INACTIVE_STATUS_VALUES: frozenset[str] = frozenset({"civitai_deleted"})
+
+
+def relaxed_active_image_filter():
+    """Active-image filter relaxed to also admit placeholder rows.
+
+    CivitAI-deleted tombstones keep image_status='placeholder' (they are
+    intentionally hidden from the default gallery).  Queries that filter
+    for such rows via a status term must start from this wider base.
+    """
+    return (
+        (ImageModel.image_status.is_(None))
+        | (ImageModel.image_status == "active")
+        | (ImageModel.image_status == "placeholder")
+    )
+
+
+def status_terms_include_inactive(parsed: ParsedGalleryFilter) -> bool:
+    """Return True when included status terms target inactive rows.
+
+    Only *included* statuses relax the base query: excluded statuses are
+    subtracted from the active set and need no widening.
+    """
+    inc = parsed.included_by_type.get("status") or []
+    return bool(_INACTIVE_STATUS_VALUES.intersection(inc))
+
 
 def _build_status_conditions(
     values: list[str],

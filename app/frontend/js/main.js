@@ -2234,7 +2234,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         TAG_SOURCE_ORDER.forEach((source) => {
             const names = Array.isArray(bySource[source]) ? [...bySource[source]] : [];
-            names.sort((left, right) => left.localeCompare(right));
             names.forEach((name) => {
                 const normalized = normalizeTagName(name);
                 if (!normalized) {
@@ -2243,7 +2242,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (seen.has(normalized)) {
                     return;
                 }
-                if (source === 'civitai' && negativeSet.has(normalized)) {
+                // Negative overrides suppress a tag regardless of which authority reported it.
+                if (negativeSet.has(normalized)) {
                     return;
                 }
                 seen.add(normalized);
@@ -2253,6 +2253,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             });
         });
+
+        // Present one globally alphabetical list; TAG_SOURCE_ORDER only decides
+        // which source a duplicated tag name is attributed to.
+        entries.sort((left, right) => left.name.localeCompare(right.name));
 
         return entries;
     }

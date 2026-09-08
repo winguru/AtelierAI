@@ -498,6 +498,8 @@
     updateScanMissingMetric('sm-metric-tier1', '0');
     updateScanMissingMetric('sm-metric-tier2', '0');
     updateScanMissingMetric('sm-metric-tier3', '0');
+    updateScanMissingMetric('sm-metric-deleted', '0');
+    updateScanMissingMetric('sm-metric-no-tags', '0');
     updateScanMissingMetric('sm-metric-errors', '0');
     // Phase 2 — Tag processing (Rescan Gallery parity)
     updateScanMissingMetric('sm-metric-tags-processed', '0');
@@ -514,20 +516,26 @@
     3: 'Live CivitAI API',
   };
 
-  if (scanMissingBtn) {
-    scanMissingBtn.addEventListener('click', async () => {
+  const scanMissingImportBtn = document.getElementById('scan-missing-import-btn');
+
+  function setScanMissingBusy(busy) {
+    if (scanMissingBtn) scanMissingBtn.disabled = busy;
+    if (scanMissingImportBtn) scanMissingImportBtn.disabled = busy;
+  }
+
+  function startScanMissing(forceApply = false) {
       if (scanMissingEventSource) {
         scanMissingEventSource.close();
         scanMissingEventSource = null;
       }
       resetScanMissingUI();
 
-      const dryRun = scanMissingDryRun ? scanMissingDryRun.checked : true;
+      const dryRun = forceApply ? false : (scanMissingDryRun ? scanMissingDryRun.checked : true);
       const apiLimitParsed = scanMissingApiLimit ? parseInt(scanMissingApiLimit.value, 10) : NaN;
       const apiLimit = Number.isNaN(apiLimitParsed) ? 100 : apiLimitParsed;
-      scanMissingBtn.disabled = true;
+      setScanMissingBusy(true);
       scanMissingCard.classList.add('active');
-      setScanMissingStatus(dryRun ? 'Dry run: scanning for missing tag observations…' : 'Scanning for missing tag observations…', 'info');
+      setScanMissingStatus(dryRun ? 'Dry run: scanning for missing tag observations…' : 'Importing missing tag observations…', 'info');
       if (scanMissingProgressWrap) scanMissingProgressWrap.hidden = false;
       if (scanMissingPhase1Label) scanMissingPhase1Label.hidden = false;
       if (scanMissingPhase1Metrics) scanMissingPhase1Metrics.hidden = false;
@@ -562,6 +570,8 @@
           updateScanMissingMetric('sm-metric-tier1', d.tier1_resolved ?? 0);
           updateScanMissingMetric('sm-metric-tier2', d.tier2_resolved ?? 0);
           updateScanMissingMetric('sm-metric-tier3', d.tier3_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-deleted', d.deleted_from_civitai ?? 0);
+          updateScanMissingMetric('sm-metric-no-tags', d.no_tags_available ?? 0);
           // Phase 2 — Tag processing
           updateScanMissingMetric('sm-metric-tags-processed', d.tags_processed ?? 0);
           updateScanMissingMetric('sm-metric-unique-tags', d.unique_tags ?? 0);
@@ -606,6 +616,8 @@
           updateScanMissingMetric('sm-metric-tier1', d.tier1_resolved ?? 0);
           updateScanMissingMetric('sm-metric-tier2', d.tier2_resolved ?? 0);
           updateScanMissingMetric('sm-metric-tier3', d.tier3_resolved ?? 0);
+          updateScanMissingMetric('sm-metric-deleted', d.deleted_from_civitai ?? 0);
+          updateScanMissingMetric('sm-metric-no-tags', d.no_tags_available ?? 0);
           updateScanMissingMetric('sm-metric-errors', d.errors ?? 0);
           // Phase 2 — Tag processing
           updateScanMissingMetric('sm-metric-tags-processed', d.tags_processed ?? 0);
@@ -616,16 +628,25 @@
           updateScanMissingMetric('sm-metric-obs-skipped', d.observations_skipped ?? 0);
 
           const prefix = d.dry_run ? '[DRY RUN] ' : '';
+          const verb = d.dry_run ? 'Scan complete' : 'Import complete';
+          const deleted = d.deleted_from_civitai ?? 0;
+          const deletedNote = deleted > 0
+            ? ` ${deleted} images marked deleted from CivitAI.`
+            : '';
+          const noTags = d.no_tags_available ?? 0;
+          const noTagsNote = noTags > 0
+            ? ` ${noTags} images have no CivitAI tags.`
+            : '';
           setScanMissingStatus(
-            `${prefix}Scan complete. ${d.total_missing} missing images: T1=${d.tier1_resolved}, T2=${d.tier2_resolved}, T3=${d.tier3_resolved}. ${d.observations_created} observations created.`,
+            `${prefix}${verb}. ${d.total_missing} missing images: T1=${d.tier1_resolved}, T2=${d.tier2_resolved}, T3=${d.tier3_resolved}. ${d.terms_upserted ?? 0} terms upserted, ${d.observations_created} observations created.${deletedNote}${noTagsNote}`,
             d.errors > 0 ? 'warning' : 'success'
           );
-          toast(`${prefix}Scan missing complete.`, d.errors > 0 ? 'warning' : 'success');
+          toast(`${prefix}${verb}.`, d.errors > 0 ? 'warning' : 'success');
         } catch (_) { /* ignore */ }
 
         scanMissingEventSource.close();
         scanMissingEventSource = null;
-        scanMissingBtn.disabled = false;
+        setScanMissingBusy(false);
         scanMissingCard.classList.remove('active');
 
         if (!dryRun) loadTable();
@@ -637,9 +658,44 @@
           scanMissingEventSource.close();
           scanMissingEventSource = null;
         }
-        scanMissingBtn.disabled = false;
+        setScanMissingBusy(false);
         scanMissingCard.classList.remove('active');
       };
+  }
+
+  if (scanMissingBtn) {
+    scanMissingBtn.addEventListener('click', () => startScanMissing(false));
+  }
+  if (scanMissingImportBtn) {
+    scanMissingImportBtn.addEventListener('click', () => startScanMissing(true));
+  }
+
+  // ── Resolve CivitAI Ext IDs from API cache ──
+  const resolveCivitaiIdsBtn = document.getElementById('resolve-civitai-ids-btn');
+  if (resolveCivitaiIdsBtn) {
+    resolveCivitaiIdsBtn.addEventListener('click', async () => {
+      const dryRun = scanMissingDryRun ? scanMissingDryRun.checked : true;
+      if (!dryRun && !confirm('Fill missing CivitAI tag Ext IDs from cached API responses?')) return;
+      resolveCivitaiIdsBtn.disabled = true;
+      try {
+        const q = new URLSearchParams({ dry_run: dryRun ? 'true' : 'false' });
+        const resp = await fetch(`/api/taxonomy/tag-maint/civitai/backfill-tag-ids-from-cache?${q}`, { method: 'POST' });
+        const data = await resp.json();
+        showOutput(scanMissingResults, data);
+        if (!resp.ok) {
+          toast(data.detail || 'Resolve Ext IDs failed', 'error');
+          return;
+        }
+        const prefix = dryRun ? '[DRY RUN] ' : '';
+        toast(`${prefix}Resolved ${data.resolved} of ${data.candidates} missing Ext IDs (${data.missing_ids_after} remaining).`, 'success');
+        if (!dryRun) loadTable();
+      } catch (e) {
+        toast(`Network error: ${e.message}`, 'error');
+      } finally {
+        resolveCivitaiIdsBtn.disabled = false;
+      }
+    });
+  }
 
   // ── Snapshot Export ──
   if (snapshotExportBtn) {

@@ -19,6 +19,7 @@ from models import (
     ImageCollectionMembership,
     ImageConceptObservation,
     ImageModel,
+    TagAuthority,
 )
 
 
@@ -280,6 +281,66 @@ class ImageQueryService:
             "adetailer": features.get("a1111_adetailer", False),
         }
 
+    @staticmethod
+    def _user_negative_override_map(session) -> dict[str, set[int]]:
+        """Map normalized tag name → image IDs with a user negative override.
+
+        User negative tags (the "x" badge in the gallery UI) are stored as
+        user-authority observations with ``is_present=False``.  They coexist
+        with the upstream observation (e.g. civitai), which stays
+        ``is_present=True`` — so honoring the override requires subtracting
+        these image IDs from tag-based matches; filtering on ``is_present``
+        alone is not sufficient.
+        """
+        overrides: dict[str, set[int]] = {}
+        user_authority_ids = [
+            row[0]
+            for row in session.query(TagAuthority.id).filter(
+                TagAuthority.name == "user"
+            )
+        ]
+        if not user_authority_ids:
+            return overrides
+        rows = (
+            session.query(
+                AuthorityTerm.normalized_external_name,
+                ImageConceptObservation.image_id,
+            )
+            .join(
+                ImageConceptObservation,
+                ImageConceptObservation.authority_term_id == AuthorityTerm.id,
+            )
+            .filter(
+                AuthorityTerm.authority_id.in_(user_authority_ids),
+                ImageConceptObservation.authority_id.in_(user_authority_ids),
+                ImageConceptObservation.is_present.is_(False),
+            )
+            .all()
+        )
+        for normalized_name, image_id in rows:
+            name = str(normalized_name or "").strip().lower()
+            if name:
+                overrides.setdefault(name, set()).add(image_id)
+        return overrides
+
+    @classmethod
+    def _image_ids_negated_by_overrides(
+        cls, session, matched_tag_names: set[str]
+    ) -> set[int]:
+        """Return image IDs whose user negative override matches one of *matched_tag_names*.
+
+        Only exact normalized-name hits count, so an override on "furry" does
+        not suppress an image that matched via a different tag such as
+        "furry ears".
+        """
+        if not matched_tag_names:
+            return set()
+        negated: set[int] = set()
+        for tag_name, image_ids in cls._user_negative_override_map(session).items():
+            if tag_name in matched_tag_names:
+                negated |= image_ids
+        return negated
+
     def filter_image_ids_by_tag_names(
         self,
         images_query,
@@ -298,6 +359,10 @@ class ImageQueryService:
              -> ImageConceptObservation.concept_id -> image_id
              (supplementary: concept-branch matching for taxonomy navigation)
 
+        User negative overrides are honored: an image whose user-authority
+        observation marks a tag ``is_present=False`` is treated as not
+        carrying that tag, for both include and exclude semantics.
+
         For include_tags: image must have ALL listed tags (AND semantics).
         For exclude_tags: image must have NONE of the listed tags.
 
@@ -310,6 +375,8 @@ class ImageQueryService:
             return None
 
         session = images_query.session
+
+        negative_overrides = self._user_negative_override_map(session)
 
         def _image_ids_for_tag_name(tag_name: str) -> set[int]:
             """Return image IDs that carry *tag_name* from any tag source."""
@@ -326,7 +393,8 @@ class ImageQueryService:
             ]
             if at_ids:
                 for row in session.query(ImageConceptObservation.image_id).filter(
-                    ImageConceptObservation.authority_term_id.in_(at_ids)
+                    ImageConceptObservation.authority_term_id.in_(at_ids),
+                    ImageConceptObservation.is_present.is_(True),
                 ).distinct():
                     ids.add(row[0])
 
@@ -346,9 +414,14 @@ class ImageQueryService:
 
             if concept_ids:
                 for row in session.query(ImageConceptObservation.image_id).filter(
-                    ImageConceptObservation.concept_id.in_(list(concept_ids))
+                    ImageConceptObservation.concept_id.in_(list(concept_ids)),
+                    ImageConceptObservation.is_present.is_(True),
                 ).distinct():
                     ids.add(row[0])
+
+            # User negative override: the image effectively no longer carries
+            # this tag, regardless of the upstream observation.
+            ids -= negative_overrides.get(tag_name, set())
 
             return ids
 
@@ -790,6 +863,67 @@ class ImageQueryService:
         return all(c in cls._HEX_CHARS for c in value)
 
     @staticmethod
+    def _tag_branch_search(
+        session, like_term: str
+    ) -> tuple[set[int], set[str]]:
+        """Phase-1 tag/concept matching.
+
+        Returns:
+            (image_ids, matched_tag_names) — images matched via
+            Concept/ConceptAlias/AuthorityTerm branches (with is_present
+            filtering), and the normalized names that matched, used later
+            for user negative override subtraction.
+        """
+        matched: set[int] = set()
+        matched_tag_names: set[str] = set()
+
+        # Concepts (canonical_name) + aliases (normalized_alias)
+        matching_concept_ids: set[int] = set()
+        for row in (
+            session.query(Concept.id, Concept.canonical_name)
+            .filter(func.lower(Concept.canonical_name).like(like_term))
+        ):
+            matching_concept_ids.add(row[0])
+            matched_tag_names.add(str(row[1] or "").strip().lower())
+        for row in (
+            session.query(ConceptAlias.concept_id, ConceptAlias.normalized_alias)
+            .filter(func.lower(ConceptAlias.normalized_alias).like(like_term))
+        ):
+            matching_concept_ids.add(row[0])
+            matched_tag_names.add(str(row[1] or "").strip().lower())
+        if matching_concept_ids:
+            for row in (
+                session.query(ImageConceptObservation.image_id)
+                .filter(
+                    ImageConceptObservation.concept_id.in_(matching_concept_ids),
+                    ImageConceptObservation.is_present.is_(True),
+                )
+                .distinct()
+            ):
+                matched.add(row[0])
+
+        # AuthorityTerms (external_name → ImageConceptObservation)
+        matching_auth_rows = session.query(
+            AuthorityTerm.id, AuthorityTerm.normalized_external_name
+        ).filter(func.lower(AuthorityTerm.external_name).like(like_term))
+        matching_auth_ids: list[int] = []
+        for term_id, normalized_name in matching_auth_rows:
+            matching_auth_ids.append(term_id)
+            matched_tag_names.add(str(normalized_name or "").strip().lower())
+        if matching_auth_ids:
+            for row in (
+                session.query(ImageConceptObservation.image_id)
+                .filter(
+                    ImageConceptObservation.authority_term_id.in_(matching_auth_ids),
+                    ImageConceptObservation.is_present.is_(True),
+                )
+                .distinct()
+            ):
+                matched.add(row[0])
+
+        return matched, matched_tag_names
+
+    @staticmethod
     def _search_image_ids_phased(
         session,
         normalized_search: str,
@@ -810,25 +944,10 @@ class ImageQueryService:
 
         # ---- Phase 1: small lookup tables → FK → image IDs ----
 
-        # Concepts (canonical_name) + aliases (normalized_alias)
-        matching_concept_ids: set[int] = set()
-        for row in (
-            session.query(Concept.id)
-            .filter(func.lower(Concept.canonical_name).like(like_term))
-        ):
-            matching_concept_ids.add(row[0])
-        for row in (
-            session.query(ConceptAlias.concept_id)
-            .filter(func.lower(ConceptAlias.normalized_alias).like(like_term))
-        ):
-            matching_concept_ids.add(row[0])
-        if matching_concept_ids:
-            for row in (
-                session.query(ImageConceptObservation.image_id)
-                .filter(ImageConceptObservation.concept_id.in_(matching_concept_ids))
-                .distinct()
-            ):
-                matched.add(row[0])
+        tag_branch_matched, matched_tag_names = ImageQueryService._tag_branch_search(
+            session, like_term
+        )
+        matched |= tag_branch_matched
 
         # Artists (name)
         matching_artist_ids = [
@@ -839,21 +958,6 @@ class ImageQueryService:
             for row in (
                 session.query(ImageModel.id)
                 .filter(ImageModel.artist_id.in_(matching_artist_ids))
-            ):
-                matched.add(row[0])
-
-        # AuthorityTerms (external_name → ImageConceptObservation)
-        matching_auth_ids = [
-            row[0]
-            for row in session.query(AuthorityTerm.id).filter(
-                func.lower(AuthorityTerm.external_name).like(like_term)
-            )
-        ]
-        if matching_auth_ids:
-            for row in (
-                session.query(ImageConceptObservation.image_id)
-                .filter(ImageConceptObservation.authority_term_id.in_(matching_auth_ids))
-                .distinct()
             ):
                 matched.add(row[0])
 
@@ -901,5 +1005,16 @@ class ImageQueryService:
 
         _t2 = _time.perf_counter()
         print(f"[PERF] search phase2 (columns): {_t2-_t1:.3f}s  ids={len(matched)}")
+
+        # ---- User negative overrides ----
+        # Images matching ONLY via tag/concept branches but carrying a user
+        # negative override for a matched tag name no longer count as a tag
+        # match.  Phase-2 column matches (file name, URL, …) are unaffected.
+        if tag_branch_matched:
+            negated_ids = ImageQueryService._image_ids_negated_by_overrides(
+                session, matched_tag_names
+            )
+            if negated_ids:
+                matched -= negated_ids & tag_branch_matched
 
         return matched

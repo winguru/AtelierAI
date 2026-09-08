@@ -111,6 +111,11 @@ class GalleryQuery:
         self._image_resources_path = image_resources_path
         # External callables (injected to avoid importing main.py)
         self._active_image_filter = active_image_filter
+        # Base filter chosen for the most recent _resolve_filter call.
+        # Usually the injected active filter; relaxed to admit placeholder
+        # rows when included status terms target inactive rows (e.g.
+        # status:civitai_deleted tombstones).
+        self._last_base_image_filter = active_image_filter()
         self._apply_image_list_filters = apply_image_list_filters
         self._build_display_items_for_image = build_display_items_for_image
         self._merge_duplicate_grouped_items = merge_duplicate_grouped_items
@@ -209,6 +214,31 @@ class GalleryQuery:
         """
         from utils.cache import _build_search_cache_key, _search_cache_get, _search_cache_put  # noqa: PLC0415
 
+        # ── Decide base filter (before any early return) ─────────────────
+        # Convert structured filter to the flat format parse_gallery_filter
+        # expects, then check whether included status terms target rows the
+        # standard active filter hides (e.g. status:civitai_deleted
+        # tombstones are image_status='placeholder').  Widening must be
+        # decided up-front so cached and uncached paths behave identically.
+        from services.gallery_filter_service import (
+            apply_gallery_filter,
+            parse_gallery_filter,
+            relaxed_active_image_filter,
+            status_terms_include_inactive,
+        )
+
+        included_strs = self._flatten_filter_to_strings(gallery_filter.included)
+        excluded_strs = self._flatten_filter_to_strings(gallery_filter.excluded)
+        hidden_strs = self._flatten_filter_to_strings(gallery_filter.hidden)
+        missing_strs = gallery_filter.missing  # already flat list
+
+        parsed = parse_gallery_filter(included_strs, excluded_strs, hidden_strs, missing_strs)
+        self._last_base_image_filter = (
+            relaxed_active_image_filter()
+            if status_terms_include_inactive(parsed)
+            else self._active_image_filter()
+        )
+
         # ── Check cache ─────────────────────────────────────────────────
         _UNFILTERED_SENTINEL = object()
         fkey = filter_cache_key(gallery_filter, search)
@@ -225,12 +255,6 @@ class GalleryQuery:
             return cached
 
         # ── Compute ─────────────────────────────────────────────────────
-        from services.gallery_filter_service import (
-            apply_gallery_filter,
-            parse_gallery_filter,
-        )
-
-        # Build base query
         images_query = (
             self._db.query(ImageModel)
             .options(
@@ -238,7 +262,7 @@ class GalleryQuery:
                 joinedload(ImageModel.license),
                 joinedload(ImageModel.collections),
             )
-            .filter(self._active_image_filter())
+            .filter(self._last_base_image_filter)
         )
 
         # Text search
@@ -247,13 +271,6 @@ class GalleryQuery:
                 images_query, search=search,
             )
 
-        # Convert structured filter to the flat format parse_gallery_filter expects
-        included_strs = self._flatten_filter_to_strings(gallery_filter.included)
-        excluded_strs = self._flatten_filter_to_strings(gallery_filter.excluded)
-        hidden_strs = self._flatten_filter_to_strings(gallery_filter.hidden)
-        missing_strs = gallery_filter.missing  # already flat list
-
-        parsed = parse_gallery_filter(included_strs, excluded_strs, hidden_strs, missing_strs)
         filtered_query, constrained_ids = apply_gallery_filter(
             images_query, parsed, self._db, self._qs,
         )
@@ -446,7 +463,9 @@ class GalleryQuery:
         db = self._db
         limit = spec.limit
 
-        # Base query
+        # Base query — use the filter chosen by _resolve_filter so pages
+        # match the constrained ID set (relaxed when the filter includes
+        # status terms that target inactive rows).
         images_query = (
             db.query(ImageModel)
             .options(
@@ -454,7 +473,7 @@ class GalleryQuery:
                 joinedload(ImageModel.license),
                 joinedload(ImageModel.collections),
             )
-            .filter(self._active_image_filter())
+            .filter(self._last_base_image_filter)
         )
 
         if search:
@@ -579,7 +598,7 @@ class GalleryQuery:
                             joinedload(ImageModel.collections),
                         )
                         .filter(ImageModel.id.in_(list(missing_ids)))
-                        .filter(self._active_image_filter())
+                        .filter(self._last_base_image_filter)
                     )
                     if constrained_ids is not None:
                         if constrained_ids:

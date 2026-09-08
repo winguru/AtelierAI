@@ -62,6 +62,8 @@
               <input id="scan-missing-api-limit" type="number" value="0" min="0" max="10000" step="10">
             </label>
             <button class="btn primary" id="scan-missing-btn" type="button">Start Scan</button>
+            <button class="btn btn-success" id="scan-missing-import-btn" type="button" title="Run the scan in apply mode: upsert authority terms and create tag observations for all missing images (all tiers)">Import Missing Tags</button>
+            <button class="btn" id="resolve-civitai-ids-btn" type="button" title="Fill missing CivitAI tag Ext IDs from cached tag.getVotableTags responses (no live API calls)">Resolve Ext IDs (cache)</button>
           </div>
         </div>
         <div class="step-body" id="scan-missing-body">
@@ -93,6 +95,10 @@
             <div class="metric-card">
               <span class="metric-value" id="sm-metric-missing">0</span>
               <span class="metric-label">Missing</span>
+            </div>
+            <div class="metric-card metric-deleted">
+              <span class="metric-value" id="sm-metric-deleted">0</span>
+              <span class="metric-label">Deleted</span>
             </div>
             <div class="metric-card metric-tier1">
               <span class="metric-value" id="sm-metric-tier1">0</span>
@@ -132,6 +138,10 @@
             <div class="metric-card metric-new">
               <span class="metric-value" id="sm-metric-new-tags">0</span>
               <span class="metric-label">New Tags</span>
+            </div>
+            <div class="metric-card metric-notags">
+              <span class="metric-value" id="sm-metric-no-tags">0</span>
+              <span class="metric-label">No Tags</span>
             </div>
             <div class="metric-card">
               <span class="metric-value" id="sm-metric-obs-created">0</span>
@@ -427,6 +437,6 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
   <script src="/frontend/js/shared/preferences.js" defer></script>
-  <script src="/frontend/js/tag-maint.js" defer></script>
+  <script src="/frontend/js/tag-maint.js?v=20260906" defer></script>
 </body>
 </html>

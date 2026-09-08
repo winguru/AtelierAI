@@ -158,6 +158,15 @@ body {
   opacity: 0.85;
 }
 
+.btn.btn-success {
+  background: var(--green);
+  color: #fff;
+  border-color: var(--green);
+}
+.btn.btn-success:hover {
+  opacity: 0.85;
+}
+
 .btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
@@ -759,6 +768,14 @@ td.editing input {
 
 .metric-card.metric-tier3 .metric-value {
   color: #db2777;
+}
+
+.metric-card.metric-notags .metric-value {
+  color: var(--text-secondary, #666);
+}
+
+.metric-card.metric-deleted .metric-value {
+  color: #dc2626;
 }
 
 /* ── Inline field (label + input) ── */

@@ -72,11 +72,19 @@ def _ensure_image_lifecycle_columns() -> None:
                 text("ALTER TABLE images ADD COLUMN replaced_by_image_id INTEGER")
             )
 
-        connection.execute(
+        requires_backfill = connection.execute(
             text(
-                "UPDATE images SET image_status = 'active' WHERE image_status IS NULL OR image_status = ''"
+                "SELECT EXISTS(SELECT 1 FROM images "
+                "WHERE image_status IS NULL OR image_status = '')"
             )
-        )
+        ).scalar_one()
+        if requires_backfill:
+            connection.execute(
+                text(
+                    "UPDATE images SET image_status = 'active' "
+                    "WHERE image_status IS NULL OR image_status = ''"
+                )
+            )
 
 
 def _ensure_user_nsfw_columns() -> None:
@@ -1420,6 +1428,15 @@ def rebuild_artist_preference_counters() -> None:
         ).first()
         if has_prefs is None:
             return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_civitai_search_image_links_latest "
+                "ON civitai_search_image_links (image_id, created_at DESC, id DESC)"
+            )
+        )
 
     dup_groups = 0
     with engine.begin() as connection:

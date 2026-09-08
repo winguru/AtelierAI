@@ -30,7 +30,7 @@ from atelierai.utils.prompt_phrases import (
     normalize_prompt_tag_name,
 )
 from image_data import ImageData
-from civitai_enrichment import is_civitai_image_url, fetch_civitai_image_data
+from civitai_enrichment import is_civitai_image_url, fetch_civitai_image_data, CIVITAI_ANY_AGE
 from utils.url_helpers import normalize_civitai_url
 from services.gallery_tag_service import GalleryTagService
 from services.metadata_extraction import extract_civitai_nsfw_level
@@ -657,7 +657,12 @@ class ImageCollection:
         self.results["filename_backfill_attempts"] += 1
 
         try:
-            civitai_data = fetch_civitai_image_data(source_url_value) or {}
+            # Filename backfill only needs the canonical image_name —
+            # immutable once published, so serve from the API response cache
+            # when a row exists and skip the live CivitAI round trip.
+            civitai_data = fetch_civitai_image_data(
+                source_url_value, max_age=CIVITAI_ANY_AGE
+            ) or {}
             expected = self._normalize_expected_filename(
                 civitai_data.get("image_name"),
                 image_path.suffix or (processor.extension or ""),
@@ -719,7 +724,14 @@ class ImageCollection:
         now = datetime.utcnow()
         observations_created = 0
         observations_skipped = 0
-        _seen: set[tuple[int, int, int]] = set()
+        # Dedup keys: (image.id, term.id) and, when the term maps to a
+        # concept, (image.id, concept_id, authority_id). The DB UNIQUE
+        # constraint is (image_id, concept_id, authority_id) — several alias
+        # terms can point at ONE concept, and inserting more than one of them
+        # violates the constraint and poisons the flush. Orphan terms
+        # (concept_id=None) are exempt (NULLs evade the constraint).
+        _seen: set[tuple[int, int]] = set()
+        _seen_concepts: set[tuple[int, int, int]] = set()
 
         try:
             for source, tag_names in tags_by_source.items():
@@ -744,6 +756,26 @@ class ImageCollection:
                     .all()
                 )
 
+                # Batch-load existing observation keys for this image+authority
+                # so alias terms of an already-observed concept are skipped.
+                for obs_term_id, obs_concept_id in (
+                    self.db.query(
+                        ImageConceptObservation.authority_term_id,
+                        ImageConceptObservation.concept_id,
+                    )
+                    .filter(
+                        ImageConceptObservation.image_id == db_record.id,
+                        ImageConceptObservation.authority_id == authority_id,
+                    )
+                    .all()
+                ):
+                    if obs_term_id is not None:
+                        _seen.add((db_record.id, obs_term_id))
+                    if obs_concept_id is not None:
+                        _seen_concepts.add(
+                            (db_record.id, obs_concept_id, authority_id)
+                        )
+
                 for term in terms:
                     concept_id = term.concept_id  # may be None
 
@@ -751,19 +783,15 @@ class ImageCollection:
                     if obs_key in _seen:
                         continue
 
-                    # Check for existing observation keyed by authority_term_id
-                    existing = (
-                        self.db.query(ImageConceptObservation.id)
-                        .filter(
-                            ImageConceptObservation.image_id == db_record.id,
-                            ImageConceptObservation.authority_term_id == term.id,
-                        )
-                        .first()
-                    )
-                    if existing is not None:
-                        _seen.add(obs_key)
-                        observations_skipped += 1
-                        continue
+                    if concept_id is not None:
+                        concept_key = (db_record.id, concept_id, authority_id)
+                        if concept_key in _seen_concepts:
+                            # An alias of this concept is already observed for
+                            # this image — skip to honor the (image, concept,
+                            # authority) UNIQUE constraint.
+                            observations_skipped += 1
+                            continue
+                        _seen_concepts.add(concept_key)
 
                     self.db.add(
                         ImageConceptObservation(
@@ -1819,7 +1847,14 @@ class ImageCollection:
             return {"observations_created": 0}
 
         now = datetime.utcnow()
+        # Dedup keys: (image.id, term.id, authority_id) and, when the term
+        # maps to a concept, (image.id, concept_id, authority_id). The DB
+        # UNIQUE constraint is (image_id, concept_id, authority_id) — several
+        # alias terms can point at ONE concept; inserting more than one of
+        # them violates the constraint and poisons the flush. Orphan terms
+        # (concept_id=None) are exempt (NULLs evade the constraint).
         _seen: set[tuple[int, int, int]] = set()
+        _seen_concepts: set[tuple[int, int, int]] = set()
         observations_created = 0
 
         try:
@@ -1845,6 +1880,26 @@ class ImageCollection:
                     .all()
                 )
 
+                # Batch-load existing observation keys for this image+authority
+                # so alias terms of an already-observed concept are skipped.
+                for obs_term_id, obs_concept_id in (
+                    self.db.query(
+                        ImageConceptObservation.authority_term_id,
+                        ImageConceptObservation.concept_id,
+                    )
+                    .filter(
+                        ImageConceptObservation.image_id == db_record.id,
+                        ImageConceptObservation.authority_id == authority_id,
+                    )
+                    .all()
+                ):
+                    if obs_term_id is not None:
+                        _seen.add((int(db_record.id), int(obs_term_id), authority_id))
+                    if obs_concept_id is not None:
+                        _seen_concepts.add(
+                            (int(db_record.id), int(obs_concept_id), authority_id)
+                        )
+
                 for term in terms:
                     concept_id = term.concept_id  # May be None for orphans
 
@@ -1853,17 +1908,14 @@ class ImageCollection:
                     if obs_key in _seen:
                         continue
 
-                    existing = (
-                        self.db.query(ImageConceptObservation.id)
-                        .filter(
-                            ImageConceptObservation.image_id == db_record.id,
-                            ImageConceptObservation.authority_term_id == term.id,
-                        )
-                        .first()
-                    )
-                    if existing is not None:
-                        _seen.add(obs_key)
-                        continue
+                    if concept_id is not None:
+                        concept_key = (int(db_record.id), int(concept_id), authority_id)
+                        if concept_key in _seen_concepts:
+                            # An alias of this concept is already observed for
+                            # this image — skip to honor the (image, concept,
+                            # authority) UNIQUE constraint.
+                            continue
+                        _seen_concepts.add(concept_key)
 
                     self.db.add(
                         ImageConceptObservation(
@@ -2188,7 +2240,19 @@ class ImageCollection:
 
         self.results["civitai_lookup_attempts"] += 1
 
-        civitai_data = fetch_civitai_image_data(source_url_value)
+        # First-time enrichment (nothing in the DB yet) can be served from
+        # the API response cache — CivitAI metadata is effectively immutable.
+        # A user-forced refresh (sidecar section removed while the DB still
+        # has civitai data, or force_refresh=True) must stay live so the
+        # manual "remove the section to re-fetch" contract keeps working.
+        existing_has_civitai = isinstance(
+            existing_json_metadata.get("civitai"), dict
+        )
+        use_cache = not (force_refresh or existing_has_civitai)
+        civitai_data = fetch_civitai_image_data(
+            source_url_value,
+            max_age=CIVITAI_ANY_AGE if use_cache else None,
+        )
         if not civitai_data:
             self.results["civitai_lookup_failures"] += 1
             return
@@ -2327,14 +2391,28 @@ class ImageCollection:
 
         orphaned_ids = []
         orphaned_json_paths = []
+        placeholder_rows_preserved = 0
         for relative_path, image_id in all_db_images:
             absolute_path_from_db = str(self.library_path / relative_path)
             if absolute_path_from_db not in existing_files_on_disk:
+                # Placeholders are virtual rows (file_path points at a
+                # placeholders/.../*.placeholder path that never exists on
+                # disk by design — e.g. CivitAI remote-unavailable
+                # tombstones). They are not orphans; keep them.
+                if str(relative_path).startswith("placeholders/"):
+                    placeholder_rows_preserved += 1
+                    continue
                 orphaned_ids.append(image_id)
                 # Also track the JSON file for cleanup
                 json_path = Path(absolute_path_from_db).with_suffix(".json")
                 if json_path.exists():
                     orphaned_json_paths.append(json_path)
+
+        if placeholder_rows_preserved:
+            print(
+                f"Preserved {placeholder_rows_preserved} virtual placeholder "
+                "records (no on-disk file by design)."
+            )
 
         if orphaned_ids:
             print(f"Found {len(orphaned_ids)} orphaned records. Deleting them...")

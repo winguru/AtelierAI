@@ -1036,7 +1036,10 @@ def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
             stats["terms_created"] += 1
         else:
             changed = False
-            if getattr(term, "external_tag_id", None) != external_tag_id:
+            # Never clobber an existing external_tag_id with None — id-less
+            # tag payloads (tier-1 sidecars, older imports) must not erase IDs
+            # previously resolved from richer sources (tag.getVotableTags etc.).
+            if external_tag_id is not None and getattr(term, "external_tag_id", None) != external_tag_id:
                 term.external_tag_id = external_tag_id
                 changed = True
             if str(term.external_name or "") != raw_name:
@@ -4508,6 +4511,116 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
         "missing_ids_after": missing_after,
         "resolved": missing_before - missing_after,
         "errors": errors,
+    }
+
+
+@router.post("/tag-maint/civitai/backfill-tag-ids-from-cache")
+def taxonomy_tag_maint_backfill_civitai_tag_ids_from_cache(
+    dry_run: bool = Query(True, description="Preview changes without committing"),
+    db: Session = Depends(get_db),
+):
+    """Backfill missing external_tag_id from cached tag.getVotableTags responses.
+
+    Builds a normalized name -> tag id map from every cached
+    ``tag.getVotableTags`` response in civitai_api_cache, then fills IDs on
+    CivitAI authority_terms that are missing one.  Makes no network calls.
+    """
+    from models import CivitaiApiCacheEntry
+
+    authority = (
+        db.query(TagAuthority)
+        .filter(func.lower(TagAuthority.name) == "civitai")
+        .first()
+    )
+    if authority is None:
+        return {"message": "No CivitAI authority exists yet.", "resolved": 0}
+
+    missing_terms = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.external_tag_id.is_(None),
+        )
+        .all()
+    )
+    missing_before = len(missing_terms)
+    if not missing_terms:
+        return {
+            "dry_run": dry_run,
+            "cache_rows_scanned": 0,
+            "cache_tag_names": 0,
+            "candidates": 0,
+            "resolved": 0,
+            "missing_ids_before": 0,
+            "missing_ids_after": 0,
+            "errors": 0,
+        }
+
+    # Build name -> id map from cached votable-tags responses (no network).
+    name_to_id: dict[str, int] = {}
+    conflicts = 0
+    cache_rows = 0
+    parse_errors = 0
+    cache_query = db.query(CivitaiApiCacheEntry).filter(
+        CivitaiApiCacheEntry.endpoint == "tag.getVotableTags"
+    )
+    for entry in cache_query:
+        cache_rows += 1
+        payload = entry.response_json
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                parse_errors += 1
+                continue
+        if isinstance(payload, dict):
+            # tRPC envelope shape
+            raw = payload.get("result", {}).get("data", {}).get("json")
+            payload = raw if isinstance(raw, list) else []
+        if not isinstance(payload, list):
+            continue
+        for tag in payload:
+            if not isinstance(tag, dict):
+                continue
+            name = str(tag.get("name") or "").strip().lower()
+            tid = tag.get("id")
+            if name and isinstance(tid, int):
+                if name in name_to_id and name_to_id[name] != tid:
+                    conflicts += 1
+                name_to_id[name] = tid
+
+    now = datetime.utcnow()
+    resolved = 0
+    for term in missing_terms:
+        tid = name_to_id.get(term.normalized_external_name or "")
+        if tid is None:
+            continue
+        resolved += 1
+        if not dry_run:
+            term.external_tag_id = tid
+            term.updated_at = now
+    if not dry_run and resolved:
+        db.commit()
+
+    missing_after = (
+        db.query(AuthorityTerm)
+        .filter(
+            AuthorityTerm.authority_id == authority.id,
+            AuthorityTerm.external_tag_id.is_(None),
+        )
+        .count()
+    )
+
+    return {
+        "dry_run": dry_run,
+        "cache_rows_scanned": cache_rows,
+        "cache_tag_names": len(name_to_id),
+        "conflicting_names": conflicts,
+        "candidates": missing_before,
+        "resolved": resolved,
+        "missing_ids_before": missing_before,
+        "missing_ids_after": missing_after if not dry_run else missing_before,
+        "errors": parse_errors,
     }
 
 

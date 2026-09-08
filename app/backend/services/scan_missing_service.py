@@ -120,7 +120,10 @@ def _upsert_authority_terms(db: Session, authority: TagAuthority, tags: list[dic
             stats["terms_created"] += 1
         else:
             changed = False
-            if getattr(term, "external_tag_id", None) != external_tag_id:
+            # Never clobber an existing external_tag_id with None — id-less
+            # tag payloads (tier-1 sidecars, older imports) must not erase IDs
+            # previously resolved from richer sources (tag.getVotableTags etc.).
+            if external_tag_id is not None and getattr(term, "external_tag_id", None) != external_tag_id:
                 term.external_tag_id = external_tag_id
                 changed = True
             if str(term.external_name or "") != raw_name:
@@ -252,12 +255,16 @@ def _extract_sidecar_tags(file_path: str, library_path: Path) -> list[dict]:
 def _build_tag_archive_index(archive_dir: Path) -> dict[int, list[dict]]:
     """Tier 2: Build a lookup of civitai_image_id → tag list from archived files.
 
-    Scans for files matching civitai_image_tag_getVotableTags_*.json.
-    Keys can be UUIDs (imageid_{id} or {uuid}), so we index by imageid_ prefix.
+    Scans for files matching civitai_image_tag_getVotableTags_*.json in both
+    the sharded layout (tag.getVotableTags/<s1>/<s2>/) and the legacy flat
+    root (pre-migration files). Keys can be UUIDs (imageid_{id} or {uuid}),
+    so we index by imageid_ prefix.
     """
     index: dict[int, list[dict]] = {}
     pattern = "civitai_image_tag_getVotableTags_*.json"
-    for f in archive_dir.glob(pattern):
+    candidates = list(archive_dir.glob(pattern))
+    candidates.extend(archive_dir.glob(f"tag.getVotableTags/*/*/{pattern}"))
+    for f in candidates:
         try:
             with open(f, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -285,6 +292,156 @@ def _build_tag_archive_index(archive_dir: Path) -> dict[int, list[dict]]:
             if img_id not in index:
                 index[img_id] = data
     return index
+
+
+def _cached_image_get_status(civitai_image_id) -> Optional[int]:
+    """Return the cached HTTP status for image.get(id), or None if uncached.
+
+    Reads the CivitaiApiCacheEntry table directly so 404 tombstones (rows with
+    response_json=None, http_status=404) are distinguishable from cache misses
+    — get_cached_or_fetch() collapses both to None.
+    """
+    try:
+        from database import SessionLocal
+        from services import civitai_cache_service
+
+        request_key = civitai_cache_service.build_request_key(
+            "image.get", {"id": int(civitai_image_id)}
+        )
+        session = SessionLocal()
+        try:
+            entry = civitai_cache_service.get_latest(
+                session, endpoint="image.get", request_key=request_key
+            )
+            return int(entry.http_status) if entry is not None else None
+        finally:
+            session.close()
+    except Exception:
+        return None
+
+
+def _record_image_get_404_tombstone(civitai_image_id) -> None:
+    """Persist a permanent image.get 404 tombstone in the DB cache.
+
+    Strict live requests raise instead of writing the DB tombstone, so the
+    scan records it explicitly — future scans then skip the live call.
+    Never raises: cache failures must not break the scan.
+    """
+    try:
+        from database import SessionLocal
+        from services import civitai_cache_service
+
+        session = SessionLocal()
+        try:
+            civitai_cache_service.record_response(
+                session,
+                endpoint="image.get",
+                payload={"id": int(civitai_image_id), "authed": True},
+                response_json=None,
+                http_status=404,
+            )
+        finally:
+            session.close()
+    except Exception:
+        pass
+
+
+def _confirm_deleted_from_civitai(api, civitai_image_id) -> bool:
+    """True when CivitAI confirms the image no longer exists (image.get → 404).
+
+    A cached 404 tombstone is permanent truth (deleted images stay deleted)
+    and short-circuits the live check; a cached 200 means the image existed
+    when last fetched.  Transient failures (429/5xx, network) raise so the
+    caller records an error rather than a false "deleted".
+    """
+    from atelierai.civitai.http_client import CivitaiRequestError
+
+    cached_status = _cached_image_get_status(civitai_image_id)
+    if cached_status == 404:
+        return True
+    if cached_status == 200:
+        return False
+    try:
+        api.fetch_basic_info(int(civitai_image_id), strict=True)
+    except CivitaiRequestError as exc:
+        if exc.status_code == 404:
+            _record_image_get_404_tombstone(civitai_image_id)
+            return True
+        raise
+    return False
+
+
+def _import_row_tags(
+    db: Session,
+    authority: TagAuthority,
+    *,
+    img_id: int,
+    tags: list[dict],
+    dry_run: bool,
+    now: datetime,
+    stats: dict,
+    track_metrics,
+) -> None:
+    """Import one image's tags (shared by tier-1 sidecar and tier-2 archive)."""
+    track_metrics(tags)
+    if not dry_run:
+        term_stats = _upsert_authority_terms(db, authority, tags)
+        stats["terms_upserted"] += term_stats["terms_upserted"]
+        stats["terms_created"] += term_stats["terms_created"]
+        stats["terms_updated"] += term_stats["terms_updated"]
+
+        tag_names = [str(t.get("name", "")) for t in tags if isinstance(t, dict)]
+        created, skipped = _create_observations_for_image(
+            db, img_id, authority, tag_names, now
+        )
+        stats["observations_created"] += created
+        stats["observations_skipped"] += skipped
+    else:
+        stats["terms_upserted"] += len([t for t in tags if isinstance(t, dict)])
+
+
+def _classify_no_tags_row(
+    db: Session,
+    api,
+    *,
+    image_id,
+    civitai_image_id,
+    dry_run: bool,
+    now: datetime,
+    stats: dict,
+) -> None:
+    """Deletion-check one zero-tags image and update counters/persistence.
+
+    Deleted images (image.get → 404) increment ``deleted_from_civitai`` and —
+    outside dry runs — get ``civitai_deleted_at`` stamped; surviving images
+    increment ``no_tags_available``.  API failures propagate to the caller's
+    per-row error handling.
+    """
+    if _confirm_deleted_from_civitai(api, civitai_image_id):
+        stats["deleted_from_civitai"] += 1
+        if not dry_run:
+            _mark_image_deleted_from_civitai(db, image_id, now)
+    else:
+        stats["no_tags_available"] += 1
+
+
+def _mark_image_deleted_from_civitai(db: Session, image_id, now: datetime) -> None:
+    """Flag an image as deleted from CivitAI (civitai_deleted_at timestamp).
+
+    Idempotent (only un-flagged rows are updated) and commits immediately so
+    the flag survives later per-row rollbacks during the scan.  Marked images
+    become filterable on the gallery page via the "civitai_deleted" status.
+    """
+    updated = (
+        db.query(ImageModel)
+        .filter(ImageModel.id == image_id, ImageModel.civitai_deleted_at.is_(None))
+        .update(
+            {"civitai_deleted_at": now, "date_modified": now},
+            synchronize_session=False,
+        )
+    )
+    if updated:
+        db.commit()
 
 
 # -- Main SSE generator -------------------------------------------------------
@@ -358,6 +515,8 @@ def scan_missing_civitai(
             "tier1_resolved": 0,
             "tier2_resolved": 0,
             "tier3_resolved": 0,
+            "no_tags_available": 0,
+            "deleted_from_civitai": 0,
             "tier3_api_calls": 0,
             "terms_upserted": 0,
             "observations_created": 0,
@@ -379,6 +538,7 @@ def scan_missing_civitai(
     # -- Categorize images into tiers --------------------------------------------
     tier1_images = []  # (image_row, tags)
     tier2_images = []  # (image_row, tags)
+    tier2_empty_images = []  # image_row — archived response says zero votable tags
     tier3_images = []  # image_row
 
     for row in missing_images:
@@ -390,9 +550,16 @@ def scan_missing_civitai(
             tier1_images.append((row, sidecar_tags))
             continue
 
-        # Tier 2: disk archive
+        # Tier 2: disk archive — only resolvable when it contains at least one
+        # tag.  CivitAI returns an empty list (HTTP 200) for images with no
+        # votable tags (typically deleted images), so an empty archive is NOT
+        # a resolution: it is a definitive "no tags available" answer.
+        archived_tags = tier2_index.get(civitai_image_id)
+        if archived_tags:
+            tier2_images.append((row, archived_tags))
+            continue
         if civitai_image_id in tier2_index:
-            tier2_images.append((row, tier2_index[civitai_image_id]))
+            tier2_empty_images.append(row)
             continue
 
         # Tier 3: live API
@@ -405,6 +572,8 @@ def scan_missing_civitai(
         "tier1_resolved": 0,
         "tier2_resolved": 0,
         "tier3_resolved": 0,
+        "no_tags_available": 0,
+        "deleted_from_civitai": 0,
         "tier3_api_calls": 0,
         "terms_upserted": 0,
         "terms_created": 0,
@@ -460,6 +629,8 @@ def scan_missing_civitai(
             "tier1_resolved": stats["tier1_resolved"],
             "tier2_resolved": stats["tier2_resolved"],
             "tier3_resolved": stats["tier3_resolved"],
+            "no_tags_available": stats["no_tags_available"],
+            "deleted_from_civitai": stats["deleted_from_civitai"],
             "terms_upserted": stats["terms_upserted"],
             "observations_created": stats["observations_created"],
             "observations_skipped": stats["observations_skipped"],
@@ -480,22 +651,12 @@ def scan_missing_civitai(
         img_id, file_path, civitai_image_id, civitai_uuid = row
         processed += 1
         try:
-            _track_tag_metrics(tags)
-            if not dry_run:
-                term_stats = _upsert_authority_terms(db, authority, tags)
-                stats["terms_upserted"] += term_stats["terms_upserted"]
-                stats["terms_created"] += term_stats["terms_created"]
-                stats["terms_updated"] += term_stats["terms_updated"]
-
-                tag_names = [str(t.get("name", "")) for t in tags if isinstance(t, dict)]
-                created, skipped = _create_observations_for_image(
-                    db, img_id, authority, tag_names, now
-                )
-                stats["observations_created"] += created
-                stats["observations_skipped"] += skipped
-            else:
-                stats["terms_upserted"] += len([t for t in tags if isinstance(t, dict)])
-
+            _import_row_tags(
+                db, authority,
+                img_id=img_id, tags=tags,
+                dry_run=dry_run, now=now, stats=stats,
+                track_metrics=_track_tag_metrics,
+            )
             stats["tier1_resolved"] += 1
         except Exception as exc:
             db.rollback()
@@ -515,28 +676,23 @@ def scan_missing_civitai(
     })
 
     # -- Tier 2: Disk archive files ----------------------------------------------
-    yield emit("tier_start", {"tier": 2, "description": "Archived API response files", "count": len(tier2_images)})
+    yield emit("tier_start", {
+        "tier": 2,
+        "description": "Archived API response files",
+        "count": len(tier2_images),
+        "empty_archives": len(tier2_empty_images),
+    })
 
     for row, tags in tier2_images:
         img_id, file_path, civitai_image_id, civitai_uuid = row
         processed += 1
         try:
-            _track_tag_metrics(tags)
-            if not dry_run:
-                term_stats = _upsert_authority_terms(db, authority, tags)
-                stats["terms_upserted"] += term_stats["terms_upserted"]
-                stats["terms_created"] += term_stats["terms_created"]
-                stats["terms_updated"] += term_stats["terms_updated"]
-
-                tag_names = [str(t.get("name", "")) for t in tags if isinstance(t, dict)]
-                created, skipped = _create_observations_for_image(
-                    db, img_id, authority, tag_names, now
-                )
-                stats["observations_created"] += created
-                stats["observations_skipped"] += skipped
-            else:
-                stats["terms_upserted"] += len([t for t in tags if isinstance(t, dict)])
-
+            _import_row_tags(
+                db, authority,
+                img_id=img_id, tags=tags,
+                dry_run=dry_run, now=now, stats=stats,
+                track_metrics=_track_tag_metrics,
+            )
             stats["tier2_resolved"] += 1
         except Exception as exc:
             db.rollback()
@@ -548,9 +704,40 @@ def scan_missing_civitai(
 
         yield emit("progress", _progress(2))
 
+    # Empty-archive images: CivitAI itself reported zero votable tags for
+    # these — typically deleted images.  Confirm deletion via image.get (live
+    # 404, or a cached tombstone) so the image can be flagged and filtered on
+    # the gallery page; alive images with genuinely zero votable tags fall
+    # back to the no_tags_available bucket.
+    api = None  # shared lazy CivitaiAPI handle (deletion checks + tier 3)
+    if tier2_empty_images:
+        from atelierai.civitai.civitai_api import CivitaiAPI
+
+        api = CivitaiAPI.get_instance()
+
+    for row in tier2_empty_images:
+        img_id, file_path, civitai_image_id, civitai_uuid = row
+        processed += 1
+        try:
+            _classify_no_tags_row(
+                db, api,
+                image_id=img_id, civitai_image_id=civitai_image_id,
+                dry_run=dry_run, now=now, stats=stats,
+            )
+        except Exception as exc:
+            db.rollback()
+            stats["errors"] += 1
+            yield emit("error_event", {
+                "tier": 2, "image_id": img_id, "civitai_image_id": civitai_image_id,
+                "error": str(exc),
+            })
+        yield emit("progress", _progress(2))
+
     yield emit("tier_complete", {
         "tier": 2,
         "resolved": stats["tier2_resolved"],
+        "no_tags_available": stats["no_tags_available"],
+        "deleted_from_civitai": stats["deleted_from_civitai"],
         "terms_upserted": stats["terms_upserted"],
         "observations_created": stats["observations_created"],
     })
@@ -569,9 +756,10 @@ def scan_missing_civitai(
     })
 
     if tier3_images:
-        from atelierai.civitai.civitai_api import CivitaiAPI
+        if api is None:
+            from atelierai.civitai.civitai_api import CivitaiAPI
 
-        api = CivitaiAPI.get_instance()
+            api = CivitaiAPI.get_instance()
 
         for i, row in enumerate(tier3_images):
             if api_limit > 0 and i >= api_limit:
@@ -597,23 +785,21 @@ def scan_missing_civitai(
                 stats["tier3_api_calls"] += 1
 
                 if tags:
-                    _track_tag_metrics(tags)
-                    if not dry_run:
-                        term_stats = _upsert_authority_terms(db, authority, tags)
-                        stats["terms_upserted"] += term_stats["terms_upserted"]
-                        stats["terms_created"] += term_stats["terms_created"]
-                        stats["terms_updated"] += term_stats["terms_updated"]
-
-                        tag_names = [str(t.get("name", "")) for t in tags if isinstance(t, dict)]
-                        created, skipped = _create_observations_for_image(
-                            db, img_id, authority, tag_names, now
-                        )
-                        stats["observations_created"] += created
-                        stats["observations_skipped"] += skipped
-                    else:
-                        stats["terms_upserted"] += len([t for t in tags if isinstance(t, dict)])
-
+                    _import_row_tags(
+                        db, authority,
+                        img_id=img_id, tags=tags,
+                        dry_run=dry_run, now=now, stats=stats,
+                        track_metrics=_track_tag_metrics,
+                    )
                     stats["tier3_resolved"] += 1
+                else:
+                    # Live API confirmed zero votable tags — check whether the
+                    # image was deleted from CivitAI (image.get → 404).
+                    _classify_no_tags_row(
+                        db, api,
+                        image_id=img_id, civitai_image_id=civitai_image_id,
+                        dry_run=dry_run, now=now, stats=stats,
+                    )
             except Exception as exc:
                 db.rollback()
                 stats["errors"] += 1
@@ -627,13 +813,19 @@ def scan_missing_civitai(
     yield emit("tier_complete", {
         "tier": 3,
         "resolved": stats["tier3_resolved"],
+        "no_tags_available": stats["no_tags_available"],
+        "deleted_from_civitai": stats["deleted_from_civitai"],
         "api_calls": stats["tier3_api_calls"],
         "terms_upserted": stats["terms_upserted"],
         "observations_created": stats["observations_created"],
     })
 
     # -- Final commit & summary --------------------------------------------------
-    if not dry_run and (stats["observations_created"] > 0 or stats["terms_upserted"] > 0):
+    if not dry_run and (
+        stats["observations_created"] > 0
+        or stats["terms_upserted"] > 0
+        or stats["deleted_from_civitai"] > 0
+    ):
         try:
             db.commit()
         except Exception as exc:
@@ -647,6 +839,8 @@ def scan_missing_civitai(
         "tier1_resolved": stats["tier1_resolved"],
         "tier2_resolved": stats["tier2_resolved"],
         "tier3_resolved": stats["tier3_resolved"],
+        "no_tags_available": stats["no_tags_available"],
+        "deleted_from_civitai": stats["deleted_from_civitai"],
         "tier3_api_calls": stats["tier3_api_calls"],
         "terms_upserted": stats["terms_upserted"],
         "terms_created": stats["terms_created"],

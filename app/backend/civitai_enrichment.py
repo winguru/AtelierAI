@@ -28,6 +28,15 @@ _CIVITAI_WEB_BASE_URL = _get_config_value("CIVITAI_WEB_BASE_URL", "https://civit
 
 _CIVITAI_IMAGE_PATH_RE = re.compile(r"^/images/(?P<image_id>\d+)(?:/.*)?$")
 
+# Sentinel max_age meaning "accept any cached row regardless of age; fall
+# back to a live API call only on a cache miss".  CivitAI image metadata
+# (image.get / image.getGenerationData / tag.getVotableTags) is effectively
+# immutable once published, so re-fetching identical payloads on every scan
+# is wasted rate limit.  Pass this to fetch_civitai_image_data(max_age=...)
+# to make enrichment cache-first.  ``None`` keeps the legacy always-live
+# behaviour for callers that genuinely need fresh data (user-forced refresh).
+CIVITAI_ANY_AGE: timedelta = timedelta.max
+
 
 def _valid_civitai_hosts() -> set[str]:
     """Return the set of valid CivitAI hostnames for URL validation.
@@ -297,7 +306,10 @@ def fetch_civitai_image_data(
         max_age: When provided, serve from cache if a row exists within this
             age and only call the live API when the cache is stale or absent.
             ``None`` (default) always fetches live, preserving prior behaviour
-            for all existing call sites.
+            for all existing call sites.  Pass ``CIVITAI_ANY_AGE`` to accept
+            any cached row regardless of age (cache-first, live on miss) —
+            recommended for backfill/scan paths where CivitAI metadata is
+            effectively immutable.
 
     Returns None when URL is not a CivitAI image URL or when enrichment fails.
     """

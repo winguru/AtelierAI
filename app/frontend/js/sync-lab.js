@@ -57,8 +57,13 @@
   /* ── Timestamp formatter (ISO → relative or short date) ── */
   function fmtTimestamp(iso) {
     if (!iso) return '—';
+    // Superjson-style tagged dates can arrive as ['Date', '<iso>'] arrays.
+    if (Array.isArray(iso) && iso.length === 2 && iso[0] === 'Date' && typeof iso[1] === 'string') {
+      iso = iso[1];
+    }
     try {
       const d = new Date(iso);
+      if (isNaN(d.getTime())) return '—';
       const now = Date.now();
       const diffMs = now - d.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -618,8 +623,13 @@
       const nsfwBadge = renderNsfwBadge(nsfwLevel);
       const mimeType = item.mimeType || '';
       const size = (item.width && item.height) ? `${item.width}×${item.height}` : '';
-      const publishedAt = item.publishedAt || item.createdAt || '';
-      const dateDisplay = publishedAt ? fmtTimestamp(publishedAt) : '—';
+      const publishedRaw = item.publishedAt || item.createdAt || '';
+      // Normalize superjson ['Date', iso] tuples from the tRPC flat-array
+      // format into a plain ISO string for display.
+      const publishedIso = (Array.isArray(publishedRaw) && publishedRaw[0] === 'Date' && typeof publishedRaw[1] === 'string')
+        ? publishedRaw[1]
+        : String(publishedRaw || '');
+      const dateDisplay = publishedIso ? fmtTimestamp(publishedIso) : '—';
       const rawUser = (item.user && item.user.username) || '—';
       const isUserDeleted = !!(item.user && item.user.deletedAt);
       const userDisplay = isUserDeleted && rawUser !== '—'
@@ -634,7 +644,7 @@
         <td class="col-name" title="${escHtml(rawName)}${mimeType ? ' · ' + escHtml(mimeType) : ''}${size ? ' · ' + size : ''}">${escHtml(name)}</td>
         <td class="col-type">${escHtml(type)}</td>
         <td class="col-user" title="${escHtml(rawUser)}">${userDisplay}</td>
-        <td class="col-date" title="${escHtml(publishedAt)}">${escHtml(dateDisplay)}</td>
+        <td class="col-date" title="${escHtml(publishedIso)}">${escHtml(dateDisplay)}</td>
         <td class="col-rating">${nsfwBadge}</td>
       </tr>`;
     }).join('');
@@ -1112,13 +1122,15 @@
         : rawDlResults;
 
       const ok = state.downloadResults.filter(r => r.status === 'downloaded').length;
+      const resumed = state.downloadResults.filter(r => r.resumed).length;
       const failed = state.downloadResults.filter(r => r.error).length;
 
       if (!imageIds.length) {
         setStatus(6, 'info', 'No new items to download.');
       } else {
+        const resumedSuffix = resumed > 0 ? ` (${resumed} reused from previous run)` : '';
         setStatus(6, 'success',
-          `Downloaded: ${ok} OK, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
+          `Downloaded: ${ok} OK${resumedSuffix}, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
         );
       }
 
@@ -1152,7 +1164,9 @@
       const id = r.image_id || '?';
       const cls = r.status === 'downloaded' ? 'existing' : 'failed';
       const size = r.file_size ? ` (${(r.file_size / 1024).toFixed(0)}KB)` : '';
-      html += `<span class="item-chip ${cls}" data-idx="${i}" title="Click to inspect download details${r.error ? ' — ' + escHtml(r.error) : ''}${size}">#${id}</span>`;
+      const resumedTag = r.resumed ? ' ↻' : '';
+      const resumedTitle = r.resumed ? ' — reused temp file from previous run' : '';
+      html += `<span class="item-chip ${cls}" data-idx="${i}" title="Click to inspect download details${resumedTitle}${r.error ? ' — ' + escHtml(r.error) : ''}${size}">#${id}${resumedTag}</span>`;
     });
     html += '</div>';
 

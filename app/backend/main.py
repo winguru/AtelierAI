@@ -4,6 +4,7 @@
 # 📄 docs: app/docs/memories/taxonomy-import.md
 # 📄 docs: app/docs/memories/parity-workbench.md
 # 📄 docs: app/docs/memories/civitai-integration.md
+# 📄 docs: app/docs/memories/civitai-sync-tasks.md
 # ──────────────────────────────────────────────────────────────────────────────
 # pyright: reportArgumentType=false, reportAssignmentType=false
 # pyright: reportAttributeAccessIssue=false, reportOperatorIssue=false
@@ -51,7 +52,7 @@ import requests
 from PIL import Image
 from sqlalchemy import text, func, or_, event
 import sqlalchemy as sa
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, joinedload
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -114,17 +115,25 @@ from civitai_enrichment import (
     is_civitai_image_url,
     extract_civitai_image_id,
     fetch_civitai_image_data,
+    CIVITAI_ANY_AGE,
 )
 from atelierai.civitai.civitai_api import CivitaiAPI
 from atelierai.civitai.civitai_image import CivitaiImage
 from atelierai.civitai.civitai import CivitaiPrivateScraper
 from atelierai.civitai.http_client import CivitaiRequestError
-from atelierai.task_manager import BackgroundTaskManager, TaskContext
+from atelierai.civitai.response_archive import shard_parts
+from atelierai.task_manager import (
+    BackgroundTaskManager,
+    TaskCancelledError,
+    TaskContext,
+)
 from atelierai.utils import PngRepacker, build_prompt_tag_payload
 from utils.url_helpers import build_civitai_url as _build_civitai_url
 from services.gallery_filter_service import (
     apply_gallery_filter,
     parse_gallery_filter,
+    relaxed_active_image_filter,
+    status_terms_include_inactive,
 )
 from services.gallery_query import GalleryQuery
 from services.gallery_tag_service import GalleryTagService
@@ -1249,6 +1258,19 @@ def _main() -> None:
     _configure_uvicorn_access_logging(
         suppress_status_get_logs=args.suppress_status_get_logs
     )
+    # Scope autoreload to code directories only. Watching the whole tree pulls
+    # in image_resources/ (tens of thousands of churn-heavy archive writes per
+    # sync), which wastes CPU and was a contributing factor to the 2026-09-06
+    # OOM kill during a collection sync.
+    app_root = Path(__file__).resolve().parent.parent
+    reload_kwargs: dict = {}
+    if args.reload:
+        reload_kwargs = {
+            "reload_dirs": [
+                str(app_root / "backend"),
+                str(app_root / "src"),
+            ],
+        }
     uvicorn.run(
         "backend.main:app",
         host=args.host,
@@ -1256,6 +1278,7 @@ def _main() -> None:
         reload=args.reload,
         log_level=args.log_level,
         access_log=not args.no_access_log,
+        **reload_kwargs,
     )
 
 
@@ -2139,6 +2162,12 @@ def _build_civitai_video_candidate_urls(target: dict[str, Any]) -> list[str]:
         cdn_alt = getattr(
             app_config, "CIVITAI_CDN_ALT_BASE_URL", "https://image-b2.civitai.com"
         )
+        # Transcode mirror: CivitAI's own player falls back to this B2 path
+        # for pre-transcoded mp4s (".mp4_hm" = transcoded media). It stays
+        # available even while the main CDN serves stale cached 503s for
+        # the webm transcode route (observed 2026-09-08: main CDN 503 with
+        # cf-cache-status STALE while .mp4_hm returned 200).
+        urls.append(f"{cdn_alt}/file/civitai-media-cache/{civitai_uuid}/.mp4_hm")
         urls.append(f"{cdn_alt}/file/civitai-media-cache/{civitai_uuid}/original")
 
     deduped: list[str] = []
@@ -2278,6 +2307,11 @@ def _download_civitai_image_with_validation(
             # one or more direct file URLs. Keep trying fallbacks on 404.
             if exc.status_code == 404:
                 continue
+            # Transient upstream errors (CDN 503, etc.) also warrant trying
+            # the next candidate URL instead of failing the image outright;
+            # the http client already exhausted in-request retries.
+            if exc.retryable and exc.status_code is not None and 500 <= exc.status_code <= 599:
+                continue
             raise
 
         media_category, media_mime = _detect_downloaded_media(temp_path)
@@ -2307,8 +2341,14 @@ def _download_civitai_image_with_validation(
         _cleanup_temp_file(mismatch_temp_path)
 
     if last_download_error is not None:
+        last_status = last_download_error.status_code
+        upstream_temporary = (
+            last_download_error.retryable
+            and last_status is not None
+            and 500 <= last_status <= 599
+        )
         raise HTTPException(
-            status_code=502,
+            status_code=503 if upstream_temporary else 502,
             detail=(
                 f"Could not download CivitAI image {image_id} from any candidate URL. "
                 f"Last error: {last_download_error}"
@@ -2343,12 +2383,26 @@ def _download_civitai_image(
         if parsed_size > 0:
             expected_size_bytes = parsed_size
 
+    # Human-readable context for 503/flag console diagnostics.
+    label_parts = [
+        f"civitai.red/images/{image_id}",
+        normalized_mime or suffix.lstrip(".") or "unknown type",
+    ]
+    if declared_file_size is not None:
+        try:
+            size_int = int(declared_file_size)
+            label_parts.append(f"~{size_int / (1024 * 1024):.1f}MB" if size_int >= 1024 * 1024 else f"~{size_int / 1024:.0f}KB")
+        except (TypeError, ValueError):
+            pass
+    log_label = f"({', '.join(label_parts)})"
+
     return client.download_to_temp(
         image_url,
         output_dir=IMAGE_LIBRARY_PATH,
         prefix=f"temp_civitai_{image_id}_",
         suffix=suffix,
         expected_size_bytes=expected_size_bytes,
+        log_label=log_label,
     )
 
 
@@ -2364,7 +2418,12 @@ def _build_civitai_media_url(
         return None
     transform_segment = "original=true"
     if use_video_transcode and str(mime_type or "").lower().startswith("video/"):
-        transform_segment = "transcode=true,original=true"
+        # quality=90 matches the URL form CivitAI's own web player uses —
+        # it hits a pre-warmed edge-cache variant. Without it, the request
+        # lands on the on-demand transcode path whose origin-side misses
+        # return 503 after ~35s (webm assets: 44% failure rate observed
+        # 2026-09-08; mp4/images: ~0%).
+        transform_segment = "transcode=true,original=true,quality=90"
     return (
         f"{getattr(app_config, 'CIVITAI_CDN_BASE_URL', 'https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA')}"
         f"/{clean_hash}/{transform_segment}/{safe_name}"
@@ -2525,7 +2584,40 @@ def _preserve_civitai_source_variant(
 
     elif actual_mime_type.startswith("video/") and prepared.preview_image_url:
         client = CivitaiAPI.get_instance().http_client
-        response = client.request("GET", prepared.preview_image_url, stream=True)
+        # Fail-open: the preview variant is best-effort enrichment. Its fetch
+        # (the original-resolution webm via use_video_transcode=False) is a
+        # plain CDN GET that can trip the 503 flag cooldown or fail for other
+        # transient reasons — a failure here must NEVER roll back or block
+        # the already-successful library ingest.
+        _preview_label_parts = [f"civitai.red/images/{prepared.image_id}"]
+        _preview_label_parts.append(
+            _normalize_mime_type(prepared.mime_type) or "unknown type"
+        )
+        if prepared.declared_file_size is not None:
+            try:
+                _pv_size = int(prepared.declared_file_size)
+                _preview_label_parts.append(
+                    f"~{_pv_size / (1024 * 1024):.1f}MB"
+                    if _pv_size >= 1024 * 1024
+                    else f"~{_pv_size / 1024:.0f}KB"
+                )
+            except (TypeError, ValueError):
+                pass
+        _preview_label = f"preview variant ({', '.join(_preview_label_parts)})"
+        try:
+            response = client.request(
+                "GET",
+                prepared.preview_image_url,
+                stream=True,
+                log_label=_preview_label,
+                best_effort=True,
+            )
+        except CivitaiRequestError as exc:
+            print(
+                f"Warning: CivitAI preview variant fetch failed for image "
+                f"{prepared.image_id} (continuing without variant): {exc}"
+            )
+            return
         try:
             preview_mime_type = _normalize_mime_type(
                 response.headers.get("Content-Type")
@@ -2906,19 +2998,22 @@ def _save_civitai_api_responses(
         return saved_paths
 
     try:
+        s1, s2 = shard_parts(civitai_uuid)
         if isinstance(raw_basic_info, dict):
             saved_paths["raw_basic_info_path"] = (
-                f"civitai_api_responses/civitai_image_get_{civitai_uuid}.json"
+                f"civitai_api_responses/image.get/{s1}/{s2}/civitai_image_get_{civitai_uuid}.json"
             )
 
         if isinstance(raw_generation_data, dict):
             saved_paths["raw_generation_data_path"] = (
-                f"civitai_api_responses/civitai_image_getGenerationData_{civitai_uuid}.json"
+                f"civitai_api_responses/image.getGenerationData/{s1}/{s2}/"
+                f"civitai_image_getGenerationData_{civitai_uuid}.json"
             )
 
         if isinstance(raw_infinite, dict):
             saved_paths["raw_infinite_path"] = (
-                f"civitai_api_responses/civitai_image_getInfinite_{civitai_uuid}.json"
+                f"civitai_api_responses/image.getInfinite/{s1}/{s2}/"
+                f"civitai_image_getInfinite_{civitai_uuid}.json"
             )
     except Exception as exc:
         print(
@@ -8377,7 +8472,7 @@ def _ensure_civitai_metadata_for_existing_image(
         _hydrate_observations_from_payload(db, image, merged_payload)
         return False
 
-    civitai_data = fetch_civitai_image_data(source_url)
+    civitai_data = fetch_civitai_image_data(source_url, max_age=CIVITAI_ANY_AGE)
     if not civitai_data:
         return False
 
@@ -8506,7 +8601,14 @@ def _hydrate_observations_from_payload(
         return
 
     now = datetime.utcnow()
+    # Dedup keys: (image.id, term.id, authority_id) and, when the term maps
+    # to a concept, (image.id, concept_id, authority_id). The latter matters
+    # because the DB UNIQUE constraint is (image_id, concept_id, authority_id)
+    # — several alias terms can point at ONE concept, and inserting more than
+    # one of them poisons the flush. Orphan terms (concept_id=None) are exempt
+    # (NULLs evade the constraint).
     _seen: set[tuple[int, int, int]] = set()
+    _seen_concepts: set[tuple[int, int, int]] = set()
 
     try:
         for source, tag_names in tags_by_source.items():
@@ -8531,6 +8633,26 @@ def _hydrate_observations_from_payload(
                 .all()
             )
 
+            # Batch-load existing observation keys for this image+authority
+            # so alias terms of an already-observed concept are skipped.
+            for obs_term_id, obs_concept_id in (
+                db.query(
+                    ImageConceptObservation.authority_term_id,
+                    ImageConceptObservation.concept_id,
+                )
+                .filter(
+                    ImageConceptObservation.image_id == image.id,
+                    ImageConceptObservation.authority_id == authority_id,
+                )
+                .all()
+            ):
+                if obs_term_id is not None:
+                    _seen.add((int(image.id), int(obs_term_id), authority_id))
+                if obs_concept_id is not None:
+                    _seen_concepts.add(
+                        (int(image.id), int(obs_concept_id), authority_id)
+                    )
+
             for term in terms:
                 concept_id = term.concept_id  # May be None for orphans
 
@@ -8539,17 +8661,14 @@ def _hydrate_observations_from_payload(
                 if obs_key in _seen:
                     continue
 
-                existing = (
-                    db.query(ImageConceptObservation.id)
-                    .filter(
-                        ImageConceptObservation.image_id == image.id,
-                        ImageConceptObservation.authority_term_id == term.id,
-                    )
-                    .first()
-                )
-                if existing is not None:
-                    _seen.add(obs_key)
-                    continue
+                if concept_id is not None:
+                    concept_key = (int(image.id), int(concept_id), authority_id)
+                    if concept_key in _seen_concepts:
+                        # An alias of this concept is already observed for
+                        # this image — skip to honor the (image, concept,
+                        # authority) UNIQUE constraint.
+                        continue
+                    _seen_concepts.add(concept_key)
 
                 db.add(
                     ImageConceptObservation(
@@ -8568,6 +8687,13 @@ def _hydrate_observations_from_payload(
                 _seen.add(obs_key)
 
         db.flush()
+    except IntegrityError:
+        # A failed flush poisons the session — rollback before reuse.
+        db.rollback()
+        print(
+            f"Warning: observation hydration hit a constraint for image "
+            f"{image.id}; observations skipped (fail-open)."
+        )
     except Exception as exc:
         db.rollback()
         print(f"Warning: observation hydration failed for image {image.id}: {exc}")
@@ -8700,7 +8826,10 @@ def _upsert_civitai_authority_terms(db: Session, civitai_data: dict) -> dict:
             stats["terms_created"] += 1
         else:
             changed = False
-            if getattr(term, "external_tag_id", None) != external_tag_id:
+            # Never clobber an existing external_tag_id with None — id-less
+            # tag payloads (tier-1 sidecars, older imports) must not erase IDs
+            # previously resolved from richer sources (tag.getVotableTags etc.).
+            if external_tag_id is not None and getattr(term, "external_tag_id", None) != external_tag_id:
                 term.external_tag_id = external_tag_id
                 changed = True
             if str(term.external_name or "") != raw_name:
@@ -8776,20 +8905,44 @@ def _insert_tag_observations_for_image(
         return 0
 
     now = datetime.utcnow()
+
+    # Pre-load existing observations for this image under this authority.
+    # NOTE: The UNIQUE constraints on image_concept_observations are keyed by
+    # (image_id, concept_id, authority_id) AND (image_id, authority_term_id)
+    # — several terms can be aliases of ONE concept, so we must dedupe on
+    # BOTH keys, not just the term. (autoflush=False sessions cannot see
+    # pending adds via query, hence the explicit seen-sets below.)
+    existing_terms: set[int] = set()
+    existing_concepts: set[int] = set()
+    for row in (
+        db.query(
+            ImageConceptObservation.authority_term_id,
+            ImageConceptObservation.concept_id,
+        )
+        .filter(
+            ImageConceptObservation.image_id == image_db_id,
+            ImageConceptObservation.authority_id == civitai_authority.id,
+        )
+        .all()
+    ):
+        if row.authority_term_id is not None:
+            existing_terms.add(int(row.authority_term_id))
+        if row.concept_id is not None:
+            existing_concepts.add(int(row.concept_id))
+
     inserted = 0
     for term_id, concept_id in terms:
-        # Check for existing observation to avoid duplicates.
-        existing = (
-            db.query(ImageConceptObservation.id)
-            .filter(
-                ImageConceptObservation.image_id == image_db_id,
-                ImageConceptObservation.authority_id == civitai_authority.id,
-                ImageConceptObservation.authority_term_id == term_id,
-            )
-            .first()
-        )
-        if existing is not None:
+        if term_id in existing_terms:
             continue
+
+        if concept_id is not None:
+            if concept_id in existing_concepts:
+                # Another alias of this concept is already observed for this
+                # image — the (image, concept, authority) row already exists.
+                continue
+            existing_concepts.add(concept_id)
+
+        existing_terms.add(term_id)
 
         db.add(
             ImageConceptObservation(
@@ -8808,7 +8961,16 @@ def _insert_tag_observations_for_image(
         inserted += 1
 
     if inserted:
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError:
+            # Defensive: a concurrent writer (or stale local state) may have
+            # inserted the same key between our SELECT and flush. A failed
+            # flush poisons the session — rollback is required before the
+            # session can be reused. Observations are enrichment; fail open
+            # so the sync can continue without them.
+            db.rollback()
+            return 0
     return inserted
 
 
@@ -9058,8 +9220,6 @@ def _fetch_civitai_user_image_collections(
         with SessionLocal() as db:
             # Join through junction table; fall back to legacy column for
             # rows not yet migrated.
-            from sqlalchemy import or_ as _or_
-
             rows = (
                 db.query(CollectionModel, CollectionCivitaiMapping.civitai_collection_id)
                 .join(
@@ -9080,20 +9240,14 @@ def _fetch_civitai_user_image_collections(
                 if cid not in by_civitai_id
             ]
             if unmigrated:
+                # NOTE: no NOT-IN exclusion against the junction table is
+                # needed here — by construction, an unmigrated civ id has no
+                # junction row pointing at a known collection (any such row
+                # would have been captured by the join above).
                 legacy_rows = (
                     db.query(CollectionModel)
                     .filter(
-                        CollectionModel.civitai_collection_id.in_(unmigrated),
-                        _or_(
-                            ~CollectionModel.id.in_(
-                                db.query(CollectionCivitaiMapping.collection_id)
-                                .filter(
-                                    CollectionCivitaiMapping.civitai_collection_id.in_(unmigrated)
-                                )
-                                .subquery()
-                            ),
-                            True,  # keep all rows; the NOT IN above is sufficient
-                        ),
+                        CollectionModel.civitai_collection_id.in_(unmigrated)
                     )
                     .all()
                 )
@@ -10290,6 +10444,28 @@ def _is_civitai_remote_not_found_error(exc: Exception) -> bool:
     return False
 
 
+def _is_civitai_temporary_upstream_error(exc: Exception) -> bool:
+    """True for transient upstream failures (CDN 5xx) that should be
+    soft-skipped and retried on the next sync instead of hard-failing.
+
+    The http client already exhausted in-request retries for these, so a
+    long in-job retry chain would only stall the sync behind a degraded
+    CDN edge.
+    """
+    if isinstance(exc, CivitaiRequestError):
+        return bool(
+            exc.retryable
+            and exc.status_code is not None
+            and 500 <= exc.status_code <= 599
+        )
+    if isinstance(exc, HTTPException):
+        # _download_civitai_image_with_validation maps exhausted 5xx
+        # candidate-URL failures to HTTP 503; _classify_civitai_upstream_error
+        # likewise maps 5xx/unknown upstream faults to 503.
+        return exc.status_code == 503
+    return False
+
+
 def _apply_civitai_task_result(
     task_context: TaskContext,
     *,
@@ -10733,6 +10909,11 @@ def _prepare_civitai_download(
     # Extract collection listing item BEFORE resolve so we can skip image.get
     collection_item = _collection_context_item(collection_context, image_id)
 
+    # Cooperative-cancel: abort before any network phase begins. Workers
+    # raising TaskCancelledError are mapped to a cancelled result upstream in
+    # the _process_civitai_image_ids drain loop.
+    task_context.check_cancelled()
+
     # ── Phase 4: local DB tag resolution (zero API calls) ──────────────
     raw_tag_records: list[dict[str, Any]] = []
     unresolved_tag_ids: set[int] = set()
@@ -10766,6 +10947,7 @@ def _prepare_civitai_download(
     if not tags_fully_resolved_locally:
         # Tags need API fetch — batch generation_data + tag.getVotableTags
         # into a single HTTP call to reduce API overhead.
+        task_context.check_cancelled()
         task_context.mark_item(item_key, "fetching_metadata", "Fetching CivitAI metadata (batch)")
         try:
             batch_result = api.fetch_batch_for_image(image_id)
@@ -10784,6 +10966,7 @@ def _prepare_civitai_download(
             pass  # Best-effort; fall through to individual fetch in _resolve
 
     # ── Resolve image target (basic_info + generation_data) ────────────
+    task_context.check_cancelled()
     if pre_fetched_generation_data is None:
         task_context.mark_item(item_key, "fetching_metadata", "Fetching CivitAI metadata")
 
@@ -10792,6 +10975,7 @@ def _prepare_civitai_download(
         pre_fetched_generation_data=pre_fetched_generation_data,
     )
     task_context.mark_item(item_key, "downloading", "Downloading media")
+    task_context.check_cancelled()
     download_result = _download_civitai_image_with_validation(
         image_id=image_id,
         target=target,
@@ -12179,12 +12363,19 @@ def _load_filtered_image_keys_unified(
     group_variants: bool = True,
 ) -> list[str]:
     """Unified key generation using parse_gallery_filter / apply_gallery_filter."""
-    images_query = db.query(ImageModel).filter(_active_image_filter())
+    # Parse first: included status terms targeting inactive rows (e.g.
+    # status:civitai_deleted tombstones) require relaxing the base filter.
+    parsed = parse_gallery_filter(included, excluded, hidden, missing)
+    base_clause = (
+        relaxed_active_image_filter()
+        if status_terms_include_inactive(parsed)
+        else _active_image_filter()
+    )
+    images_query = db.query(ImageModel).filter(base_clause)
 
     if search:
         images_query = _apply_image_list_filters(images_query, search=search)
 
-    parsed = parse_gallery_filter(included, excluded, hidden, missing)
     images_query, filter_constrained_ids = apply_gallery_filter(
         images_query, parsed, db, query_service,
     )
@@ -12449,6 +12640,14 @@ def _load_display_image_items_unified(
 
     _t0 = _time.perf_counter()
 
+    # Parse first: included status terms targeting inactive rows (e.g.
+    # status:civitai_deleted tombstones) require relaxing the base filter.
+    parsed = parse_gallery_filter(included, excluded, hidden, missing)
+    base_clause = (
+        relaxed_active_image_filter()
+        if status_terms_include_inactive(parsed)
+        else _active_image_filter()
+    )
     images_query = (
         db.query(ImageModel)
         .options(
@@ -12456,7 +12655,7 @@ def _load_display_image_items_unified(
             joinedload(ImageModel.license),
             joinedload(ImageModel.collections),
         )
-        .filter(_active_image_filter())
+        .filter(base_clause)
     )
 
     # Apply text search filter (not part of the unified filter model).
@@ -12466,8 +12665,6 @@ def _load_display_image_items_unified(
             search=search,
         )
 
-    # Parse and apply the unified gallery filter.
-    parsed = parse_gallery_filter(included, excluded, hidden, missing)
     images_query, filter_constrained_ids = apply_gallery_filter(
         images_query, parsed, db, query_service,
     )
@@ -13213,6 +13410,39 @@ def _collect_repair_result(
     }
 
 
+def _format_civitai_pipeline_progress_suffix(
+    started_at: Optional[float],
+    completed_count: int,
+    total_count: int,
+    baseline_completed: int = 0,
+) -> str:
+    """Format a throughput/ETA suffix for CivitAI pipeline heartbeat messages.
+
+    ``baseline_completed`` excludes items finished before the executor phase
+    (fast DB-only checks) so the rate reflects actual network throughput.
+    Returns "" until at least one item has completed so early heartbeats
+    (dominated by metadata fetch latency) don't show a misleading rate.
+    """
+    network_completed = max(0, completed_count - baseline_completed)
+    if started_at is None or total_count <= 0 or network_completed <= 0:
+        return ""
+    elapsed = time.monotonic() - started_at
+    if elapsed <= 0:
+        return ""
+    rate_per_second = network_completed / elapsed
+    if rate_per_second <= 0:
+        return ""
+    remaining_count = max(0, total_count - completed_count)
+    eta_seconds = int(remaining_count / rate_per_second)
+    if eta_seconds >= 3600:
+        eta_text = (
+            f"{eta_seconds // 3600}:{(eta_seconds // 60) % 60:02d}:{eta_seconds % 60:02d}"
+        )
+    else:
+        eta_text = f"{eta_seconds // 60:02d}:{eta_seconds % 60:02d}"
+    return f" ({rate_per_second * 60:.1f}/min, ETA {eta_text})"
+
+
 def _update_civitai_pipeline_heartbeat(
     task_context: TaskContext,
     *,
@@ -13220,15 +13450,26 @@ def _update_civitai_pipeline_heartbeat(
     completed_count: int,
     total_count: int,
     waiting: bool = False,
+    started_at: Optional[float] = None,
+    baseline_completed: int = 0,
 ) -> None:
+    if task_context.cancel_requested:
+        task_context.heartbeat(
+            f"Cancelling — waiting on {futures_count} in-flight CivitAI request(s) "
+            f"to finish; completed {completed_count}/{total_count}"
+        )
+        return
+    progress_suffix = _format_civitai_pipeline_progress_suffix(
+        started_at, completed_count, total_count, baseline_completed=baseline_completed
+    )
     if waiting:
         task_context.heartbeat(
-            f"Waiting on {futures_count} active CivitAI request(s); completed {completed_count}/{total_count}"
+            f"Waiting on {futures_count} active CivitAI request(s); completed {completed_count}/{total_count}{progress_suffix}"
         )
         return
 
     task_context.heartbeat(
-        f"Processing CivitAI import: active {futures_count}, completed {completed_count}/{total_count}"
+        f"Processing CivitAI import: active {futures_count}, completed {completed_count}/{total_count}{progress_suffix}"
     )
 
 
@@ -13256,7 +13497,16 @@ def _process_civitai_image_ids(
     download_candidates: list[tuple[int, bool]] = []
 
     with SessionLocal() as db:
-        for image_id in image_ids:
+        for image_index, image_id in enumerate(image_ids):
+            if task_context.cancel_requested:
+                for remaining_id in image_ids[image_index:]:
+                    results.append(_build_cancelled_civitai_import_result(remaining_id))
+                    task_context.mark_item(
+                        _task_item_key(item_key_prefix, remaining_id),
+                        "cancelled",
+                        "Cancelled",
+                    )
+                break
             item_key = _task_item_key(item_key_prefix, image_id)
             task_context.mark_item(
                 item_key, "checking_existing", "Checking local library"
@@ -13341,12 +13591,29 @@ def _process_civitai_image_ids(
     if not download_candidates:
         return results, desired_image_db_ids
 
+    if task_context.cancel_requested:
+        # Cancelled during the existing-check loop: queued candidates were
+        # never submitted to the executor. Record them as cancelled so every
+        # image gets a result, and skip all network work.
+        for image_id, _ in download_candidates:
+            result = _build_cancelled_civitai_import_result(image_id)
+            results.append(result)
+            _apply_civitai_task_result(
+                task_context,
+                item_key=_task_item_key(item_key_prefix, image_id),
+                image_id=image_id,
+                result=result,
+            )
+        return results, desired_image_db_ids
+
     max_workers = max(
         1, min(_CIVITAI_IMPORT_NETWORK_CONCURRENCY, len(download_candidates))
     )
     next_index = 0
     futures: dict[Any, tuple[int, bool, str]] = {}
     last_heartbeat_at = time.monotonic()
+    pipeline_started_at = time.monotonic()
+    pipeline_baseline_completed = len(results)
     total_count = len(image_ids)
 
     def submit_available(executor: ThreadPoolExecutor) -> None:
@@ -13374,6 +13641,8 @@ def _process_civitai_image_ids(
             futures_count=len(futures),
             completed_count=len(results),
             total_count=total_count,
+            started_at=pipeline_started_at,
+            baseline_completed=pipeline_baseline_completed,
         )
 
     with ThreadPoolExecutor(
@@ -13408,6 +13677,8 @@ def _process_civitai_image_ids(
                         completed_count=len(results),
                         total_count=total_count,
                         waiting=True,
+                        started_at=pipeline_started_at,
+                        baseline_completed=pipeline_baseline_completed,
                     )
                     last_heartbeat_at = now
                 continue
@@ -13436,6 +13707,10 @@ def _process_civitai_image_ids(
                             image_db_id = result.get("image_db_id")
                             if isinstance(image_db_id, int):
                                 desired_image_db_ids.add(image_db_id)
+                except TaskCancelledError:
+                    # Worker aborted cooperatively between network phases.
+                    result = _build_cancelled_civitai_import_result(image_id)
+                    _maybe_add_desired_image_db_id(result, desired_image_db_ids)
                 except Exception as exc:
                     if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
                         import traceback
@@ -13471,6 +13746,17 @@ def _process_civitai_image_ids(
                                 )
                         else:
                             result = cached_result
+                    elif _is_civitai_temporary_upstream_error(exc):
+                        # Transient CDN/upstream 5xx: soft-skip and let the
+                        # next sync retry rather than hard-failing the image.
+                        result = _build_skipped_civitai_import_result(
+                            image_id,
+                            "upstream_temporarily_unavailable",
+                            skip_message=(
+                                f"CivitAI upstream temporarily unavailable "
+                                f"({exc}); will retry on next sync"
+                            ),
+                        )
                     else:
                         result = _build_failed_civitai_import_result(image_id, str(exc))
                     _maybe_add_desired_image_db_id(result, desired_image_db_ids)
@@ -13572,6 +13858,8 @@ def _run_civitai_post_import_pipeline(
     """
     task_context.set_message(f"Fetching CivitAI post {post_id}")
 
+    task_context.check_cancelled()
+
     # 1. Fetch post metadata for title / context
     post_data = api.fetch_post(post_id)
     post_title = None
@@ -13588,6 +13876,8 @@ def _run_civitai_post_import_pipeline(
 
     label = post_title or f"Post {post_id}"
     task_context.set_message(f"Fetching images for CivitAI post: {label}")
+
+    task_context.check_cancelled()
 
     # 2. Fetch all images belonging to this post
     raw_images = api.fetch_post_images(post_id)
@@ -13881,6 +14171,10 @@ def _run_civitai_post_collection_import_pipeline(
             # Collect DB image IDs for membership tracking
             all_image_db_ids.update(post_summary.get("image_db_ids", []))
 
+        except TaskCancelledError:
+            # Cancellation must propagate to the sync job, which finalizes
+            # the collection state and stops processing further posts.
+            raise
         except Exception as exc:
             logging.getLogger(__name__).warning(
                 "Failed to import post %s from collection %s: %s",
@@ -14030,6 +14324,7 @@ def _run_civitai_collection_import_pipeline(
         collection_name=collection_name,
         initial_items=_probe_items,
         initial_cursor=_probe_cursor,
+        should_stop=lambda: task_context.cancel_requested,
     )
     if isinstance(collection_items, list):
         normalized_items = [item for item in collection_items if isinstance(item, dict)]
@@ -14491,6 +14786,33 @@ def _run_civitai_collection_sync_job(
                     "completed",
                     f"Synced {posts_total} posts ({post_summary.get('images_added', 0)} images)",
                 )
+            except TaskCancelledError:
+                # Record the cancellation, then stop processing further
+                # collections. The sync job's tail builds the final summary
+                # and marks the task cancelled.
+                cp_entry["status"] = "cancelled"
+                cp_entry["message"] = "Cancelled"
+                task_context.set_metadata("pending_activities", [])
+                task_context.mark_item(collection_item_key, "cancelled", "Cancelled")
+                collection_summaries.append(
+                    {
+                        "civitai_collection_id": collection_id,
+                        "civitai_collection_name": collection_name,
+                        "local_collection": None,
+                        "requested": 0,
+                        "images_added": 0,
+                        "images_skipped": 0,
+                        "images_recovered": 0,
+                        "images_cancelled": 0,
+                        "json_files_created": 0,
+                        "memberships_removed": 0,
+                        "errors": [],
+                        "unavailable_items": [],
+                        "results": [],
+                        "sync_state": "cancelled",
+                    }
+                )
+                break
             except Exception as exc:
                 error_text = str(exc)
                 cp_entry["status"] = "failed"
@@ -14668,6 +14990,33 @@ def _run_civitai_collection_sync_job(
                     else f"Synced {summary.get('requested', 0)} items"
                 ),
             )
+        except TaskCancelledError:
+            # Record the cancellation, then stop processing further
+            # collections. The sync job's tail builds the final summary
+            # and marks the task cancelled.
+            cp_entry["status"] = "cancelled"
+            cp_entry["message"] = "Cancelled"
+            task_context.set_metadata("pending_activities", [])
+            task_context.mark_item(collection_item_key, "cancelled", "Cancelled")
+            collection_summaries.append(
+                {
+                    "civitai_collection_id": collection_id,
+                    "civitai_collection_name": collection_name,
+                    "local_collection": None,
+                    "requested": 0,
+                    "images_added": 0,
+                    "images_skipped": 0,
+                    "images_recovered": 0,
+                    "images_cancelled": 0,
+                    "json_files_created": 0,
+                    "memberships_removed": 0,
+                    "errors": [],
+                    "unavailable_items": [],
+                    "results": [],
+                    "sync_state": "cancelled",
+                }
+            )
+            break
         except Exception as exc:
             error_text = str(exc)
             cp_entry["status"] = "failed"
@@ -19231,10 +19580,22 @@ def read_images_state(
     and legacy ``nsfw_rating`` params.
     """
     _has_unified = bool(included or excluded or hidden or missing)
-    base_query = db.query(ImageModel).filter(_active_image_filter())
+    # Parse first: included status terms targeting inactive rows (e.g.
+    # status:civitai_deleted tombstones) require relaxing the base filter.
+    parsed_unified = (
+        parse_gallery_filter(included or [], excluded or [], hidden or [], missing or [])
+        if _has_unified
+        else None
+    )
+    base_clause = (
+        relaxed_active_image_filter()
+        if parsed_unified is not None and status_terms_include_inactive(parsed_unified)
+        else _active_image_filter()
+    )
+    base_query = db.query(ImageModel).filter(base_clause)
 
     if _has_unified:
-        parsed = parse_gallery_filter(included or [], excluded or [], hidden or [], missing or [])
+        parsed = parsed_unified
         filtered_query, constrained_ids = apply_gallery_filter(
             base_query, parsed, db, image_query_service,
         )
@@ -19243,7 +19604,7 @@ def read_images_state(
             total_count = len(visible_ids)
             latest_row = (
                 db.query(ImageModel.id)
-                .filter(_active_image_filter(), ImageModel.id.in_(visible_ids))
+                .filter(base_clause, ImageModel.id.in_(visible_ids))
                 .order_by(ImageModel.id.desc())
                 .first()
             )
@@ -24142,6 +24503,66 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
 _sync_lab_prepared: dict[int, _PreparedCivitaiImport] = {}
 
 
+def _restore_sync_lab_prepared_from_session(session_id: Optional[str]) -> int:
+    """Restore prepared imports from a persisted sync session into memory.
+
+    Returns the number of entries restored. Restores only entries whose
+    temp file still exists on disk — entries with vanished temp files are
+    skipped so the download step re-fetches them.
+    """
+    if not session_id:
+        return 0
+    restored = 0
+    try:
+        db = SessionLocal()
+        try:
+            sess = db.query(SyncSession).filter(SyncSession.id == session_id).first()
+            prepared_imports = (
+                getattr(sess, "prepared_imports", None) if sess is not None else None
+            )
+            if not prepared_imports:
+                return 0
+            for _k, _v in prepared_imports.items():
+                if int(_v["image_id"]) in _sync_lab_prepared:
+                    continue  # already in memory — keep the fresher copy
+                temp_path = (
+                    Path(_v["temp_path"]) if _v.get("temp_path") else None
+                )
+                if temp_path is not None and not temp_path.exists():
+                    continue  # temp file vanished (crash/cleanup) — re-download
+                _restored = _PreparedCivitaiImport(
+                    image_id=_v["image_id"],
+                    image_url=_v.get("image_url"),
+                    mime_type=_v.get("mime_type"),
+                    declared_file_size=_v.get("declared_file_size"),
+                    preview_image_url=_v.get("preview_image_url"),
+                    original_filename=_v.get(
+                        "original_filename", f"civitai_{_v['image_id']}"
+                    ),
+                    artist_name=_v.get("artist_name"),
+                    source_url=_v.get("source_url"),
+                    temp_path=temp_path,
+                    civitai_uuid=_v.get("civitai_uuid"),
+                    civitai_hash=_v.get("civitai_hash"),
+                    raw_basic_info=_v.get("raw_basic_info"),
+                    raw_generation_data=_v.get("raw_generation_data"),
+                    author_id=_v.get("author_id"),
+                    author_deleted=_v.get("author_deleted", False),
+                    author_original_name=_v.get("author_original_name"),
+                    civitai_post_id=_v.get("civitai_post_id"),
+                    civitai_post_title=_v.get("civitai_post_title"),
+                    civitai_post_index=_v.get("civitai_post_index"),
+                    raw_tag_records=_v.get("raw_tag_records"),
+                )
+                _sync_lab_prepared[int(_k)] = _restored
+                restored += 1
+        finally:
+            db.close()
+    except Exception:
+        pass  # Restore is best-effort
+    return restored
+
+
 # ---------------------------------------------------------------------------
 # Sync Session CRUD — resumable workflow persistence
 # ---------------------------------------------------------------------------
@@ -24870,6 +25291,11 @@ def sync_lab_download(
 
     _checkpoint_sync_step(session_id, 6, "in_progress")
 
+    # Resume support: restore prepared imports persisted by a previous
+    # download run (e.g. interrupted by an app restart before ingest).
+    # Restored entries with intact temp files skip re-downloading.
+    _restore_sync_lab_prepared_from_session(session_id)
+
     def _sse(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
 
@@ -24890,6 +25316,26 @@ def sync_lab_download(
                     "timing_ms": 0,
                     "error": None,
                 }
+                # ── Resume fast-path ─────────────────────────────────────────
+                # A prior download run already fetched this image and its
+                # temp file is still on disk — reuse it instead of hitting
+                # the CDN again (avoids re-downloading after app restarts
+                # and prevents feeding the 503 flag with redundant traffic).
+                resumed = _sync_lab_prepared.get(img_id)
+                if (
+                    resumed is not None
+                    and resumed.temp_path is not None
+                    and resumed.temp_path.exists()
+                ):
+                    result["status"] = "downloaded"
+                    result["temp_path"] = str(resumed.temp_path)
+                    result["mime_type"] = resumed.mime_type
+                    result["selected_url"] = resumed.image_url
+                    result["resumed"] = True
+                    result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                    results[str(img_id)] = result
+                    q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
+                    continue
                 try:
                     # Resolve metadata
                     target = _resolve_civitai_image_target(api, img_id)
@@ -25086,44 +25532,7 @@ def sync_lab_ingest(
 
     # Restore prepared imports from session if in-memory store is empty (server restart recovery)
     if session_id and not _sync_lab_prepared:
-        try:
-            _restore_db = SessionLocal()
-            try:
-                _restore_sess = _restore_db.query(SyncSession).filter(SyncSession.id == session_id).first()
-                prepared_imports = (
-                    getattr(_restore_sess, "prepared_imports", None)
-                    if _restore_sess is not None
-                    else None
-                )
-                if prepared_imports:
-                    for _k, _v in prepared_imports.items():
-                        _restored = _PreparedCivitaiImport(
-                            image_id=_v["image_id"],
-                            image_url=_v.get("image_url"),
-                            mime_type=_v.get("mime_type"),
-                            declared_file_size=_v.get("declared_file_size"),
-                            preview_image_url=_v.get("preview_image_url"),
-                            original_filename=_v.get("original_filename", f"civitai_{_v['image_id']}"),
-                            artist_name=_v.get("artist_name"),
-                            source_url=_v.get("source_url"),
-                            temp_path=Path(_v["temp_path"]) if _v.get("temp_path") else None,
-                            civitai_uuid=_v.get("civitai_uuid"),
-                            civitai_hash=_v.get("civitai_hash"),
-                            raw_basic_info=_v.get("raw_basic_info"),
-                            raw_generation_data=_v.get("raw_generation_data"),
-                            author_id=_v.get("author_id"),
-                            author_deleted=_v.get("author_deleted", False),
-                            author_original_name=_v.get("author_original_name"),
-                            civitai_post_id=_v.get("civitai_post_id"),
-                            civitai_post_title=_v.get("civitai_post_title"),
-                            civitai_post_index=_v.get("civitai_post_index"),
-                            raw_tag_records=_v.get("raw_tag_records"),
-                        )
-                        _sync_lab_prepared[int(_k)] = _restored
-            finally:
-                _restore_db.close()
-        except Exception:
-            pass  # Restore is best-effort
+        _restore_sync_lab_prepared_from_session(session_id)
 
     _checkpoint_sync_step(session_id, 7, "in_progress")
 

@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Any
 
 
 from .http_client import CivitaiHttpClient, CivitaiRequestError
-from .response_archive import CivitaiResponseArchive
+from .response_archive import CivitaiResponseArchive, shard_root
 
 
 def _get_config_value(name: str) -> Optional[str]:
@@ -601,10 +601,10 @@ class CivitaiAPI:
             return first
         return None
 
-    def _archive_json_file(self, filename: str, payload: Any) -> None:
-        root = self._archive_root()
-        root.mkdir(parents=True, exist_ok=True)
-        path = root / filename
+    def _archive_json_file(self, endpoint: str, filename: str, key: str, payload: Any) -> None:
+        root = self._archive_root() / endpoint
+        path = shard_root(root, key) / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
@@ -637,7 +637,7 @@ class CivitaiAPI:
                         self._image_uuid_index[int(image_id)] = uuid_value
 
                     self._archive_json_file(
-                        f"civitai_image_get_{key}.json", response_json
+                        "image.get", f"civitai_image_get_{key}.json", key, response_json
                     )
                     return
 
@@ -654,7 +654,10 @@ class CivitaiAPI:
                     if key is None:
                         return
                     self._archive_json_file(
-                        f"civitai_image_getGenerationData_{key}.json", response_json
+                        "image.getGenerationData",
+                        f"civitai_image_getGenerationData_{key}.json",
+                        key,
+                        response_json,
                     )
                     return
 
@@ -675,7 +678,10 @@ class CivitaiAPI:
                         if item_id is not None and uuid_value:
                             self._image_uuid_index[int(item_id)] = uuid_value
                         self._archive_json_file(
-                            f"civitai_image_getInfinite_{key}.json", item
+                            "image.getInfinite",
+                            f"civitai_image_getInfinite_{key}.json",
+                            key,
+                            item,
                         )
 
                 if endpoint == "tag.getVotableTags" and isinstance(
@@ -683,8 +689,11 @@ class CivitaiAPI:
                 ):
                     image_id = payload_data.get("id")
                     if image_id is not None:
+                        tag_key = str(int(image_id))
                         self._archive_json_file(
+                            "tag.getVotableTags",
                             f"civitai_image_tag_getVotableTags_{int(image_id)}.json",
+                            tag_key,
                             response_json,
                         )
         except Exception:
@@ -1829,6 +1838,17 @@ class CivitaiAPI:
             """Recursively resolve positional references in the flat array."""
             if depth > 20:
                 return val
+            # Superjson-style tagged values: CivitAI serializes dates as
+            # ["Date", "<ISO string>"] two-element lists. Unwrap them to the
+            # plain ISO string so downstream consumers (datetime.fromisoformat,
+            # JS Date) see the expected scalar shape.
+            if (
+                isinstance(val, list)
+                and len(val) == 2
+                and val[0] == "Date"
+                and isinstance(val[1], str)
+            ):
+                return val[1]
             if isinstance(val, dict):
                 return {
                     k: _resolve(flat_array[v] if isinstance(v, int) and 0 <= v < len(flat_array) else v, depth + 1)

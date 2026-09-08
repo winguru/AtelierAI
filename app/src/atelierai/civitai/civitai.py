@@ -3,6 +3,10 @@ import json
 import time
 from typing import Callable, Dict, List, Optional
 
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-sync-tasks.md
+# ──────────────────────────────────────────────────────────────────────────────
+
 from .http_client import CivitaiRequestError
 
 from .civitai_api import CivitaiAPI
@@ -124,6 +128,7 @@ class CivitaiPrivateScraper:
         collection_type: Optional[str] = None,
         initial_items: Optional[List[Dict]] = None,
         initial_cursor: Optional[str] = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> List[Dict]:
         """Fetch collection items with full pagination support.
 
@@ -136,6 +141,9 @@ class CivitaiPrivateScraper:
                 avoiding a redundant first-page fetch.
             initial_cursor: Cursor to resume pagination from (skips page 1
                 when ``initial_items`` contains those results already).
+            should_stop: Optional predicate polled between pages; when it
+                returns True, pagination stops early and items collected so
+                far are returned. Used for cooperative task cancellation.
 
         Returns:
             List of collection items
@@ -153,6 +161,14 @@ class CivitaiPrivateScraper:
         self._debug_session_token(debug)
 
         while True:
+            # Cooperative cancellation: stop paginating when the caller
+            # requests it (e.g. a background task cancel was requested).
+            if should_stop is not None and should_stop():
+                print(
+                    f"  Stop requested after {len(items)} items; halting pagination."
+                )
+                break
+
             # Check if we've hit the limit
             if limit is not None and len(items) >= limit:
                 print(f"  Reached limit of {limit} items.")

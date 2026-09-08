@@ -1,3 +1,6 @@
+# ── Memory ───────────────────────────────────────────────────────────────────
+# 📄 docs: app/docs/memories/civitai-integration.md
+# ──────────────────────────────────────────────────────────────────────────────
 from __future__ import annotations
 
 import os
@@ -265,11 +268,44 @@ class CivitaiHttpClient:
 
     # ── 503 / rate-at-failure tracking ──────────────────────────────────────
     _TYPE_503_COUNTS: dict[RequestType, int] = {}  # 503s by type
+    _ENDPOINT_503_COUNTS: dict[str, int] = {}  # 503s by endpoint name
     _RATE_LIMITED_503: int = 0  # lifetime 503 responses received
     _LAST_RPM_AT_429: Optional[int] = None  # observed RPM when last 429 hit
     _LAST_RPM_AT_503: Optional[int] = None  # observed RPM when last 503 hit
     _LAST_429_TIME: Optional[float] = None  # wall-clock of last 429
     _LAST_503_TIME: Optional[float] = None  # wall-clock of last 503
+
+    # ── CDN 503 flag detection (Cloudflare edge flagging) ──────────────────
+    # Transport-log analysis (2026-09-05/06) showed two 503 modes:
+    #   1. Morning bursts at high CDN rates (22-37+/min CDN-local) —
+    #      rate-cap territory, addressed by CIVITAI_CDN_MIN_INTERVAL.
+    #   2. Evening "sticky flag" mode: instant (p50 ~0.2s) 503 edge
+    #      rejections at near-zero request rates that persist 20-40 min
+    #      while retry probes keep the flag alive. Global rate never
+    #      mattered here, and tRPC kept working while the CDN was flagged.
+    # Mode 2 is handled by a CDN-scoped cooldown: N consecutive CDN 503s
+    # pause CDN downloads only (tRPC continues), with escalating durations
+    # matching the observed 20-40 min flag lifetime.
+    _CDN_503_CONSECUTIVE: int = 0  # consecutive CDN 503s (reset on success)
+    _CDN_FLAG_STRIKE_COUNT: int = 0  # cooldown activations this session
+    _CDN_FLAG_COOLDOWN_UNTIL: float = 0.0  # wall-clock epoch; past/0 = inactive
+    _CDN_FLAG_REASON: str = ""
+    _CDN_503_FLAG_THRESHOLD: int = int(
+        os.environ.get("CIVITAI_CDN_FLAG_THRESHOLD", "3")
+    )
+    # Escalating cooldown schedule (seconds), indexed by strike count.
+    _CDN_FLAG_COOLDOWN_SCHEDULE: tuple[float, ...] = (300.0, 600.0, 1200.0)
+    # 503s slower than this are per-asset origin failures (on-demand
+    # transcode timeouts), not edge rejections — excluded from flag streaks.
+    _CDN_SLOW_503_ELAPSED_SECONDS: float = float(
+        os.environ.get("CIVITAI_CDN_SLOW_503_SECONDS", "10.0")
+    )
+    # Cap on Retry-After honoring for slow 503s (seconds). The origin's
+    # Retry-After: 120 targets rate-limited clients, not transcode-in-progress
+    # waits — re-probing sooner lets us catch the moment the cache warms.
+    _CDN_SLOW_503_RETRY_CAP_SECONDS: float = float(
+        os.environ.get("CIVITAI_CDN_SLOW_503_RETRY_CAP", "15.0")
+    )
 
     # ── 403 Cloudflare tracking ─────────────────────────────────────────────
     # CivitAI rate-limits via Cloudflare challenges (HTTP 403 with
@@ -300,8 +336,11 @@ class CivitaiHttpClient:
     # ── CDN download pacing ─────────────────────────────────────────────────
     # CDN (image.civitai.com) triggers 503s at high concurrency.
     # A per-download minimum interval keeps the CDN rate manageable.
+    # Default 2.0s (30/min sustained): 2026-09-06 transport logs showed
+    # morning 503 bursts starting at 22-37 CDN requests/min; the previous
+    # 1.0s default (60/min sustained) sat well inside that zone.
     _CDN_DOWNLOAD_MIN_INTERVAL: float = float(
-        os.environ.get("CIVITAI_CDN_MIN_INTERVAL", "1.0")
+        os.environ.get("CIVITAI_CDN_MIN_INTERVAL", "2.0")
     )
     _NEXT_CDN_ALLOWED_TIME: Optional[float] = None  # monotonic; CDN token bucket
     # ── Last-request debug info ──────────────────────────────────────────────
@@ -347,6 +386,8 @@ class CivitaiHttpClient:
             "fqdn",
             "endpoint",
             "enqueued_at",
+            "log_label",
+            "best_effort",
         )
 
         def __init__(
@@ -358,6 +399,8 @@ class CivitaiHttpClient:
             request_type: RequestType,
             fqdn: str,
             endpoint: str,
+            log_label: str = "",
+            best_effort: bool = False,
         ):
             self.method = method
             self.url = url
@@ -366,6 +409,8 @@ class CivitaiHttpClient:
             self.request_type = request_type
             self.fqdn = fqdn
             self.endpoint = endpoint
+            self.log_label = log_label
+            self.best_effort = best_effort
             self.enqueued_at = time.monotonic()
 
     @classmethod
@@ -430,6 +475,15 @@ class CivitaiHttpClient:
                         timing["backoff_reason"] = (
                             str(cls._GLOBAL_BACKOFF_REASON or "rate-limit") or None
                         )
+                elif envelope.request_type == RequestType.CDN_DOWNLOAD:
+                    # Surface the CDN flag cooldown in the transport log's
+                    # backoff fields (CDN envelopes only; tRPC unaffected).
+                    with cls._REQUEST_COUNTER_LOCK:
+                        if time.time() < cls._CDN_FLAG_COOLDOWN_UNTIL:
+                            timing["backoff_active_at_dequeue"] = True
+                            timing["backoff_reason"] = (
+                                str(cls._CDN_FLAG_REASON or "") or "cdn_503_flag"
+                            )
 
                 # Wait out any active global backoff (reactive — only
                 # triggered after an actual 429 response).
@@ -439,6 +493,19 @@ class CivitaiHttpClient:
                     instance._wait_for_global_backoff()
                 timing["backoff_wait_seconds"] = round(
                     time.monotonic() - backoff_wait_started, 4
+                )
+
+                # Wait out any active CDN flag cooldown (CDN-scoped). Only
+                # CDN downloads pause; tRPC requests dispatch normally —
+                # the observed flagging targets the CDN edge, not the API host.
+                cdn_flag_wait_started = time.monotonic()
+                if (
+                    envelope.request_type == RequestType.CDN_DOWNLOAD
+                    and instance is not None
+                ):
+                    instance._wait_for_cdn_flag_cooldown()
+                timing["cdn_flag_wait_seconds"] = round(
+                    time.monotonic() - cdn_flag_wait_started, 4
                 )
 
                 # Per-type / per-FQDN / per-endpoint counters
@@ -708,16 +775,87 @@ class CivitaiHttpClient:
                         self._increment_type_counter(
                             self.__class__._TYPE_503_COUNTS, envelope.request_type
                         )
+                        self._increment_type_counter(
+                            self.__class__._ENDPOINT_503_COUNTS, envelope.endpoint
+                        )
                         with self.__class__._REQUEST_COUNTER_LOCK:
                             self.__class__._RATE_LIMITED_503 += 1
                             self.__class__._LAST_RPM_AT_503 = rpm_now
                             self.__class__._LAST_503_TIME = time.time()
+                        _label_suffix = (
+                            f" — {envelope.log_label}"
+                            if envelope.log_label
+                            else ""
+                        )
                         print(
                             f"🚫 CivitAI 503 ({envelope.request_type.value} "
-                            f"{envelope.endpoint}) at {rpm_now} RPM\n"
+                            f"{envelope.endpoint}) at {rpm_now} RPM"
+                            f"{_label_suffix}\n"
                             f"{self.__class__._format_tpm_table()}"
                         )
+                        # ── CDN flag detection ─────────────────────────
+                        # Count consecutive CDN 503 responses. Once the
+                        # threshold is reached (and no cooldown is already
+                        # running), trip a CDN-scoped cooldown.
+                        #
+                        # Slow 503s (>10s elapsed) are per-asset ORIGIN
+                        # failures — CivitAI's on-demand transcoder timing
+                        # out on raw webm assets — NOT edge rejections of
+                        # our traffic pattern. They must not feed the
+                        # "sticky flag" streak (observed 2026-09-08: 44%
+                        # webm failure rate at near-zero rpm vs ~0% for
+                        # mp4/images; browser traffic to the same assets
+                        # succeeds via pre-warmed quality=90 variants).
+                        _slow_503 = (
+                            attempt_started is not None
+                            and (
+                                time.monotonic() - attempt_started
+                                > self.__class__._CDN_SLOW_503_ELAPSED_SECONDS
+                            )
+                        )
+                        if (
+                            envelope.request_type == RequestType.CDN_DOWNLOAD
+                            and not _slow_503
+                            and not envelope.best_effort
+                        ):
+                            trip = False
+                            consecutive = 0
+                            with self.__class__._REQUEST_COUNTER_LOCK:
+                                self.__class__._CDN_503_CONSECUTIVE += 1
+                                consecutive = self.__class__._CDN_503_CONSECUTIVE
+                                trip = (
+                                    consecutive
+                                    >= self.__class__._CDN_503_FLAG_THRESHOLD
+                                    and time.time()
+                                    >= self.__class__._CDN_FLAG_COOLDOWN_UNTIL
+                                )
+                            if trip:
+                                cooldown_s = (
+                                    self.__class__.activate_cdn_flag_cooldown()
+                                )
+                                if timing is not None:
+                                    timing["cdn_flag_tripped"] = True
+                                print(
+                                    f"🚩 CivitAI CDN flag suspected after "
+                                    f"{consecutive} consecutive 503s on "
+                                    f"{envelope.endpoint}{_label_suffix}; pausing CDN "
+                                    f"downloads for {cooldown_s:.0f}s "
+                                    f"(strike {self.__class__._CDN_FLAG_STRIKE_COUNT}) "
+                                    f"— tRPC requests continue\n"
+                                    f"{self.__class__._format_tpm_table()}"
+                                )
                     if attempt >= self._max_attempts:
+                        raise last_error
+                    # While the CDN flag cooldown is active, stop probing —
+                    # retry hammering a flagged host keeps the flag alive
+                    # (observed 20+ min 503 streaks at near-zero rates).
+                    if (
+                        response.status_code == 503
+                        and envelope.request_type == RequestType.CDN_DOWNLOAD
+                        and self.__class__.is_cdn_flag_active()
+                    ):
+                        if timing is not None:
+                            timing["cdn_flag_abort"] = True
                         raise last_error
                     time.sleep(self._retry_delay(attempt, response=response))
                     continue
@@ -782,6 +920,19 @@ class CivitaiHttpClient:
                     started=attempt_started,
                     status_code=response.status_code,
                 )
+                # Successful CDN request: reset the consecutive-503 streak.
+                # If the flag cooldown has expired and this probe succeeded,
+                # escalation resets too (next trip starts at the base cooldown).
+                if envelope.request_type == RequestType.CDN_DOWNLOAD:
+                    with self.__class__._REQUEST_COUNTER_LOCK:
+                        if (
+                            self.__class__._CDN_FLAG_STRIKE_COUNT > 0
+                            and time.time()
+                            >= self.__class__._CDN_FLAG_COOLDOWN_UNTIL
+                        ):
+                            self.__class__._CDN_FLAG_STRIKE_COUNT = 0
+                            self.__class__._CDN_FLAG_REASON = ""
+                        self.__class__._CDN_503_CONSECUTIVE = 0
                 try:
                     base_url = (response.url or envelope.url).split("?")[0]
                     self.__class__._LAST_REQUEST_INFO = {
@@ -857,6 +1008,11 @@ class CivitaiHttpClient:
             type_403_cloudflare_counts: Cloudflare 403 challenges by RequestType
             fqdn_counts: lifetime requests broken down by FQDN
             endpoint_counts: lifetime requests broken down by endpoint name
+            endpoint_503_counts: 503 responses broken down by endpoint name
+            cdn_503_consecutive: current consecutive-CDN-503 streak length
+            cdn_flag_active: whether a CDN flag cooldown is currently active
+            cdn_flag_remaining_seconds: seconds remaining in the CDN flag cooldown
+            cdn_flag_strikes: number of CDN flag cooldowns activated this session
         """
         now = time.time()
         with cls._REQUEST_COUNTER_LOCK:
@@ -890,6 +1046,17 @@ class CivitaiHttpClient:
             last_403_cf_time = cls._LAST_403_CF_TIME
             type_403_cf_counts = dict(cls._TYPE_403_CLOUDFLARE_COUNTS)
             cdn_min_interval = cls._CDN_DOWNLOAD_MIN_INTERVAL
+            endpoint_503_counts = dict(cls._ENDPOINT_503_COUNTS)
+            cdn_503_consecutive = cls._CDN_503_CONSECUTIVE
+            cdn_flag_strikes = cls._CDN_FLAG_STRIKE_COUNT
+            cdn_flag_until = float(cls._CDN_FLAG_COOLDOWN_UNTIL or 0.0)
+
+        # CDN flag cooldown state — derived from the raw snapshot above
+        # (the is_* classmethods take the counter lock, so they must not
+        # be called while it is held).
+        now_wall = time.time()
+        cdn_flag_active = cdn_flag_until > now_wall
+        cdn_flag_remaining = round(max(0.0, cdn_flag_until - now_wall), 1)
 
         # Observed requests-per-second (across the sliding window)
         observed_rps = round(rpm_window / cls._RATE_LIMIT_WINDOW, 2) if rpm_window else 0.0
@@ -933,6 +1100,11 @@ class CivitaiHttpClient:
                 rt.value: type_403_cf_counts.get(rt, 0) for rt in RequestType
             },
             "cdn_min_interval": cdn_min_interval,
+            "endpoint_503_counts": endpoint_503_counts,
+            "cdn_503_consecutive": cdn_503_consecutive,
+            "cdn_flag_active": cdn_flag_active,
+            "cdn_flag_remaining_seconds": cdn_flag_remaining,
+            "cdn_flag_strikes": cdn_flag_strikes,
             "fqdn_counts": fqdn_counts,
             "endpoint_counts": endpoint_counts,
             "tpm_breakdown": tpm_breakdown,
@@ -1009,12 +1181,14 @@ class CivitaiHttpClient:
         Returns::
             {
                 "aggregate_rpm": int,       # 60s sliding-window RPM across all endpoints
-                "endpoints": {name: {"60s_rpm": int, "total": int, "cached": int}},
+                "endpoints": {name: {"60s_rpm": int, "total": int,
+                                     "cached": int, "503s": int}},
                                             # per-endpoint detail (top 10 by RPM)
                 "session_total": int,        # lifetime request count
                 "session_duration_s": float, # seconds since first request
                 "session_avg_tpm": float,    # lifetime average TPM
                 "session_cached": int,       # total cache hits
+                "session_503s": int,         # total 503 responses received
             }
         """
         now = time.time()
@@ -1026,19 +1200,23 @@ class CivitaiHttpClient:
             total = cls._REQUEST_TOTAL
             first_time = cls._FIRST_REQUEST_TIME
             endpoint_totals = dict(cls._ENDPOINT_COUNTS)
+            endpoint_503_counts = dict(cls._ENDPOINT_503_COUNTS)
+            endpoint_503s_total = sum(endpoint_503_counts.values())
             cache_counts = dict(cls._CACHE_HIT_COUNTS)
             cache_total = cls._CACHE_HIT_TOTAL
             # Per-endpoint 60s window RPM from per-endpoint sliding windows.
-            # Include endpoints with active requests.
+            # Include endpoints with active requests, cache hits, or 503s.
             ep_detail: dict[str, dict[str, int]] = {}
             for ep_name, ep_ts in cls._ENDPOINT_TIMESTAMPS.items():
                 rpm_60s = sum(1 for ts in ep_ts if ts >= window_start)
                 ep_cached = cache_counts.get(ep_name, 0)
-                if rpm_60s > 0 or ep_cached > 0:
+                ep_503s = endpoint_503_counts.get(ep_name, 0)
+                if rpm_60s > 0 or ep_cached > 0 or ep_503s > 0:
                     ep_detail[ep_name] = {
                         "60s_rpm": rpm_60s,
                         "total": endpoint_totals.get(ep_name, 0),
                         "cached": ep_cached,
+                        "503s": ep_503s,
                     }
             # Also include endpoints that were purely cache-served (no HTTP
             # requests).  These won't appear in _ENDPOINT_TIMESTAMPS at all.
@@ -1048,6 +1226,17 @@ class CivitaiHttpClient:
                         "60s_rpm": 0,
                         "total": 0,
                         "cached": ep_cached,
+                        "503s": endpoint_503_counts.get(ep_name, 0),
+                    }
+            # Endpoints with 503s but no recent activity or cache hits still
+            # surface — a recently flagged CDN endpoint matters even at 0 RPM.
+            for ep_name, ep_503s in endpoint_503_counts.items():
+                if ep_name not in ep_detail and ep_503s > 0:
+                    ep_detail[ep_name] = {
+                        "60s_rpm": 0,
+                        "total": endpoint_totals.get(ep_name, 0),
+                        "cached": cache_counts.get(ep_name, 0),
+                        "503s": ep_503s,
                     }
 
         duration_s = 0.0
@@ -1061,7 +1250,11 @@ class CivitaiHttpClient:
         top_eps = dict(
             sorted(
                 ep_detail.items(),
-                key=lambda item: (item[1]["60s_rpm"], item[1]["cached"]),
+                key=lambda item: (
+                    item[1]["60s_rpm"],
+                    item[1]["cached"],
+                    item[1].get("503s", 0),
+                ),
                 reverse=True,
             )[:10]
         )
@@ -1073,6 +1266,7 @@ class CivitaiHttpClient:
             "session_duration_s": round(duration_s, 1),
             "session_avg_tpm": avg_tpm,
             "session_cached": cache_total,
+            "session_503s": endpoint_503s_total,
         }
 
     @classmethod
@@ -1098,7 +1292,7 @@ class CivitaiHttpClient:
     def _format_tpm_table(cls) -> str:
         """Format endpoint stats as a readable table for backoff log messages.
 
-        Columns: API Endpoint | Cached | Total Reqs | Total Time | RPM | 60s RPM
+        Columns: API Endpoint | Cached | 503s | Total Reqs | Total Time | RPM | 60s RPM
         Rows: one per active endpoint (top 10 by 60s RPM) + Total Aggregate.
 
         Uses console_utils helpers for Unicode-aware display width.
@@ -1112,6 +1306,7 @@ class CivitaiHttpClient:
         breakdown = cls._build_tpm_breakdown()
         session_total = breakdown["session_total"]
         session_cached = breakdown["session_cached"]
+        session_503s = breakdown.get("session_503s", 0)
         session_s = breakdown["session_duration_s"]
         aggregate_rpm = breakdown["aggregate_rpm"]
         ep_items = breakdown.get("endpoints", {})
@@ -1124,6 +1319,7 @@ class CivitaiHttpClient:
         # Column widths
         col_ep = 25
         col_cached = 8
+        col_503 = 6
         col_n = 11
         col_t = 11
         col_rpm = 8
@@ -1132,6 +1328,7 @@ class CivitaiHttpClient:
         headers = [
             pad_to_width("API Endpoint", col_ep),
             rpad_to_width("Cached", col_cached),
+            rpad_to_width("503s", col_503),
             rpad_to_width("Total Reqs", col_n),
             rpad_to_width("Total Time", col_t),
             rpad_to_width("RPM", col_rpm),
@@ -1145,6 +1342,7 @@ class CivitaiHttpClient:
         for ep_name, detail in ep_items.items():
             ep_total = detail["total"]
             ep_cached = detail.get("cached", 0)
+            ep_503s = detail.get("503s", 0)
             rpm_60s = detail["60s_rpm"]
             # Per-endpoint session time is the global session time
             ep_session_rpm = 0.0
@@ -1156,6 +1354,7 @@ class CivitaiHttpClient:
                 " ".join([
                     pad_to_width(display_name, col_ep),
                     rpad_to_width(str(ep_cached), col_cached),
+                    rpad_to_width(str(ep_503s), col_503),
                     rpad_to_width(str(ep_total), col_n),
                     rpad_to_width(f"{session_s:.0f}s", col_t),
                     rpad_to_width(str(ep_session_rpm), col_rpm),
@@ -1169,6 +1368,7 @@ class CivitaiHttpClient:
             " ".join([
                 pad_to_width("Total Aggregate", col_ep),
                 rpad_to_width(str(session_cached), col_cached),
+                rpad_to_width(str(session_503s), col_503),
                 rpad_to_width(str(session_total), col_n),
                 rpad_to_width(f"{session_s:.0f}s", col_t),
                 rpad_to_width(str(aggregate_lifetime_rpm), col_rpm),
@@ -1217,6 +1417,56 @@ class CivitaiHttpClient:
             time.sleep(min(1.0, remaining))
             remaining = self.get_global_backoff_remaining_seconds()
 
+    # ── CDN flag cooldown (CDN-scoped; tRPC unaffected) ────────────────
+
+    @classmethod
+    def activate_cdn_flag_cooldown(cls, *, reason: str = "cdn_503_flag") -> float:
+        """Pause CDN downloads after repeated consecutive 503s.
+
+        Escalates with each activation (300 s → 600 s → 1200 s, then capped)
+        to match the observed 20-40 minute Cloudflare flag lifetime. Unlike
+        ``activate_global_backoff`` this never pauses tRPC traffic and does
+        not touch global backoff state.
+
+        Returns the enforced cooldown duration in seconds.
+        """
+        idx = min(
+            cls._CDN_FLAG_STRIKE_COUNT, len(cls._CDN_FLAG_COOLDOWN_SCHEDULE) - 1
+        )
+        cooldown = cls._CDN_FLAG_COOLDOWN_SCHEDULE[idx]
+        now = time.time()
+        with cls._REQUEST_COUNTER_LOCK:
+            cls._CDN_FLAG_STRIKE_COUNT += 1
+            cls._CDN_FLAG_COOLDOWN_UNTIL = now + cooldown
+            cls._CDN_FLAG_REASON = str(reason or "cdn_503_flag")
+        return cooldown
+
+    @classmethod
+    def get_cdn_flag_remaining_seconds(cls) -> float:
+        with cls._REQUEST_COUNTER_LOCK:
+            return max(
+                0.0, float(cls._CDN_FLAG_COOLDOWN_UNTIL or 0.0) - time.time()
+            )
+
+    @classmethod
+    def is_cdn_flag_active(cls) -> bool:
+        return cls.get_cdn_flag_remaining_seconds() > 0.0
+
+    def _wait_for_cdn_flag_cooldown(self) -> None:
+        """Sleep until the CDN flag cooldown expires (CDN requests only)."""
+        remaining = self.get_cdn_flag_remaining_seconds()
+        if remaining <= 0.0:
+            return
+        with self._REQUEST_COUNTER_LOCK:
+            reason = str(self._CDN_FLAG_REASON or "cdn_503_flag")
+        print(
+            f"🚩 CivitAI CDN flag cooldown ({reason}); holding CDN downloads "
+            f"{remaining:.1f}s (tRPC requests continue)"
+        )
+        while remaining > 0.0:
+            time.sleep(min(1.0, remaining))
+            remaining = self.get_cdn_flag_remaining_seconds()
+
     def request(
         self,
         method: str,
@@ -1226,12 +1476,24 @@ class CivitaiHttpClient:
         headers: Optional[dict[str, str]] = None,
         timeout: Optional[tuple[float, float]] = None,
         stream: bool = False,
+        log_label: str = "",
+        best_effort: bool = False,
     ) -> requests.Response:
         """Enqueue an HTTP request through the FIFO queue and block until done.
 
         The actual HTTP send happens on the consumer daemon thread, which
         enforces minimum interval pacing and sliding-window ceiling checks.
         Retries are handled entirely within the consumer thread.
+
+        ``log_label`` is an optional human-readable context string (e.g.
+        ``civitai.red/images/123 (image/jpeg, ~2.1MB)``) surfaced in 503 /
+        flag console diagnostics.
+
+        ``best_effort`` marks enrichment requests whose failure is
+        non-critical (e.g. preview variant fetches). Their 503s still log
+        and count toward per-endpoint stats, but do NOT feed the CDN flag
+        streak — best-effort traffic must never trip a cooldown that
+        pauses primary downloads.
         """
         # Early exit: if global backoff is very long, fail fast so callers
         # don't sit in the queue for ages.
@@ -1255,6 +1517,8 @@ class CivitaiHttpClient:
             request_type=request_type,
             fqdn=fqdn,
             endpoint=endpoint,
+            log_label=log_label,
+            best_effort=best_effort,
         )
 
         # Ensure the consumer daemon is running, then enqueue
@@ -1299,9 +1563,24 @@ class CivitaiHttpClient:
         timeout: Optional[tuple[float, float]] = None,
         chunk_size: int = 1024 * 1024,
         expected_size_bytes: Optional[int] = None,
+        max_attempts: Optional[int] = None,
+        log_label: str = "",
     ) -> Path:
+        """Download ``url`` to a temp file under ``output_dir``.
+
+        ``max_attempts`` optionally overrides ``self._max_attempts`` for the
+        outer retry loop (the inner ``_send_with_retries`` loop still applies
+        its own per-request retries). Upstream 5xx failures (e.g. CDN 503)
+        are never retried by the outer loop: the inner loop already retried
+        them with backoff and Retry-After, so re-running the whole download
+        here would multiply attempts per URL and stall sync jobs behind
+        dead endpoints.
+        """
         output_root = Path(output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
+        effective_max_attempts = (
+            self._max_attempts if max_attempts is None else max(1, int(max_attempts))
+        )
 
         normalized_expected_size: Optional[int] = None
         if expected_size_bytes is not None:
@@ -1312,7 +1591,7 @@ class CivitaiHttpClient:
             if parsed_expected > 0:
                 normalized_expected_size = parsed_expected
 
-        for attempt in range(1, self._max_attempts + 1):
+        for attempt in range(1, effective_max_attempts + 1):
             response: Optional[requests.Response] = None
             temp_path: Optional[Path] = None
             try:
@@ -1322,6 +1601,7 @@ class CivitaiHttpClient:
                     headers=headers,
                     timeout=timeout or self._download_timeout,
                     stream=True,
+                    log_label=log_label,
                 )
 
                 content_length_header = response.headers.get("Content-Length")
@@ -1393,7 +1673,13 @@ class CivitaiHttpClient:
                     except OSError:
                         pass
 
-                if attempt >= self._max_attempts or not exc.retryable:
+                status = exc.status_code
+                if status is not None and 500 <= status <= 599:
+                    # Inner request loop already exhausted retries for upstream
+                    # 5xx (with backoff + Retry-After); do not multiply attempts.
+                    raise
+
+                if attempt >= effective_max_attempts or not exc.retryable:
                     raise
 
                 time.sleep(self._retry_delay(attempt, response=response))
@@ -1420,7 +1706,25 @@ class CivitaiHttpClient:
             retry_after = response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    return max(0.0, float(retry_after))
+                    delay = max(0.0, float(retry_after))
+                    # Slow 503s (>10s elapsed) are per-asset origin transcode
+                    # timeouts, not client rate-limiting. CivitAI sends
+                    # Retry-After: 120 on them, but the origin keeps
+                    # transcoding server-side regardless of when we re-probe
+                    # — honoring it just triples wall-clock time (observed
+                    # 490s downloads that were ~130s of real work). Cap the
+                    # wait; instant edge 503s still honor the full header.
+                    if (
+                        response.status_code == 503
+                        and getattr(response, "elapsed", None) is not None
+                        and response.elapsed.total_seconds()
+                        > self.__class__._CDN_SLOW_503_ELAPSED_SECONDS
+                    ):
+                        delay = min(
+                            delay,
+                            self.__class__._CDN_SLOW_503_RETRY_CAP_SECONDS,
+                        )
+                    return delay
                 except ValueError:
                     pass
         jitter = random.uniform(0.0, 0.35)

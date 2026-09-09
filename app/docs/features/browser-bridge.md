@@ -35,7 +35,10 @@ flowchart LR
 - **Sidecar** (`docker/chrome-sidecar/`): Debian trixie + `chromium` package
   (multi-arch: works on amd64 and arm64 — google-chrome-stable has no Linux
   ARM64 builds), Xvfb display, x11vnc, noVNC. CDP on `:9222` (compose-internal),
-  noVNC UI on `:6080` (host loopback only).
+  noVNC UI on `:6080` (host loopback only). Runs Chromium with `--no-sandbox`
+  (root-in-container; compensating controls are the internal-only port
+  bindings and the isolated container). The entrypoint clears stale
+  `/tmp/.X99-lock` files so `restart: unless-stopped` always recovers.
 - **Bridge** (`app/src/atelierai/civitai/browser_bridge.py`): process-wide
   singleton owning the CDP connection. `fetch()` runs `fetch()` **inside a
   civitai tab's page context** — same-origin, profile cookies, Chromium's TLS
@@ -55,6 +58,9 @@ docker compose --profile browser up -d chrome-sidecar
 # Watch it boot:
 docker logs -f chrome-sidecar
 # → "CDP ready on :9222 ..."
+#
+# NOTE: after pulling this change, rebuild so the fixed entrypoint is baked in:
+#   docker compose --profile browser up -d --build chrome-sidecar
 
 # Open the browser UI (noVNC) in your host browser:
 #   http://localhost:6080/vnc.html

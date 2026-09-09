@@ -33,7 +33,10 @@ services:
     profiles: ["browser"]
     build:
       context: ./docker/chrome-sidecar
-    init: true
+    # No `init: true` here: the image already uses tini as ENTRYPOINT.
+    # Docker's own init would become PID 1 and demote tini (the "Tini is not
+    # running as PID 1" warning), disabling zombie reaping for the X/VNC/Chrome
+    # process tree the entrypoint spawns.
     ports:
       - "127.0.0.1:6080:6080"   # noVNC web UI (localhost-only, no auth — see docs)
     environment:

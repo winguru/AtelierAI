@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         x11vnc \
         novnc \
         websockify \
+        socat \
         tini \
         procps \
         ca-certificates \

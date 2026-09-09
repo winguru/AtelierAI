@@ -34,12 +34,24 @@ from typing import Any
 # breaks backend startup (fail-open contract).
 
 
+def _is_ip_literal(host: str) -> bool:
+    """True when ``host`` is already an IPv4/IPv6 literal (no DNS needed)."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 @dataclass
 class BridgeSessionState:
     """Snapshot of bridge connectivity for status endpoints."""
 
     connected: bool = False
     cdp_url: str = ""
+    connect_url: str = ""
     browser_version: str = ""
     last_error: str = ""
     last_connected_at: float | None = None
@@ -86,6 +98,36 @@ class CivitaiBrowserBridge:
             )
         except Exception:  # noqa: BLE001 — fail-open contract
             return "http://chrome-sidecar:9222"
+
+    def _connectable_cdp_url(self) -> str:
+        """Return a CDP URL whose Host header DevTools will accept.
+
+        Chromium's DevTools HTTP server rejects requests whose ``Host`` is
+        neither an IP literal nor ``localhost`` (DNS-rebinding protection).
+        A compose service name (``chrome-sidecar``) therefore gets HTTP 500
+        even though the port is reachable. Resolve the hostname to its IP
+        and rewrite the URL; when ``/json/version`` answers, Chromium echoes
+        the IP into ``webSocketDebuggerUrl``, so the WebSocket upgrade rides
+        the same acceptable Host. Returns the original URL when resolution
+        fails — the connect attempt then surfaces a clear error.
+        """
+        import socket
+        from urllib.parse import urlparse, urlunparse
+
+        base = self._resolve_cdp_url()
+        try:
+            parsed = urlparse(base)
+            host = parsed.hostname or ""
+            if not host or _is_ip_literal(host):
+                return base
+            ip = socket.getaddrinfo(
+                host, parsed.port or 80, proto=socket.IPPROTO_TCP
+            )[0][4][0]
+            # Replace ONLY the hostname; keep scheme/port/path untouched.
+            netloc = f"{ip}:{parsed.port}" if parsed.port else ip
+            return urlunparse(parsed._replace(netloc=netloc))
+        except Exception:  # noqa: BLE001 — resolution failure falls back
+            return base
 
     def _nav_timeout_ms(self) -> int:
         try:
@@ -145,16 +187,18 @@ class CivitaiBrowserBridge:
                 return True
 
             cdp_url = self._resolve_cdp_url()
+            connect_url = self._connectable_cdp_url()
             try:
                 from playwright.async_api import async_playwright
 
                 if self._playwright is None:
                     self._playwright = await async_playwright().start()
                 self._browser = await self._playwright.chromium.connect_over_cdp(
-                    cdp_url
+                    connect_url
                 )
                 self._state.connected = True
                 self._state.cdp_url = cdp_url
+                self._state.connect_url = connect_url
                 self._state.browser_version = self._browser.version
                 self._state.last_error = ""
                 self._state.last_connected_at = time.time()
@@ -196,6 +240,7 @@ class CivitaiBrowserBridge:
         return {
             "connected": self._state.connected,
             "cdp_url": self._state.cdp_url or self._resolve_cdp_url(),
+            "connect_url": self._state.connect_url,
             "browser_version": self._state.browser_version,
             "civitai_pages": pages,
             "last_error": self._state.last_error,

@@ -99,6 +99,36 @@ persists cookies across container restarts, so this is a one-time step.
 | `POST /api/browser-bridge/navigate` | Drive the civitai tab to a URL |
 | `POST /api/browser-bridge/fetch` | Page-context fetch through the browser |
 | `GET /api/browser-bridge/config` | Effective lane configuration |
+| `POST /api/browser-bridge/harvest/install` | Attach the passive tRPC capture wrapper |
+| `POST /api/browser-bridge/harvest/drain` | Drain captured responses into the archive |
+| `POST /api/browser-bridge/harvest/once` | Install + drain in one call |
+
+## The tRPC Harvester
+
+The harvester makes browsing self-archiving: it wraps `window.fetch` and XHR
+in the civitai tab so every tRPC response the page loads — feed pages,
+collections, post details — is captured with **zero additional requests** to
+CivitAI.
+
+1. **Install** — `POST /api/browser-bridge/harvest/install` injects the wrapper
+   (via `add_init_script`, so it survives SPA navigations) into all civitai
+   tabs. Browsing proceeds normally; captures queue in the page.
+2. **Browse** — scroll the feed, open posts, whatever the session needs.
+3. **Drain** — `POST /api/browser-bridge/harvest/drain` pulls queued records
+   and writes each into the existing sharded `CivitaiResponseArchive` as
+   `kind="harvested"`, keyed by the same request-hash the direct lane uses —
+   browser captures and direct-lane captures land in the same shards.
+
+Filtering: only requests to `civitai.red` / `civitai.com` hosts under
+`/api/trpc/` or `/api/v1/` are captured. Ad beacons
+(`advertising.civitai.com`) and CDN binaries (`image.civitai.com`) are
+excluded. Bodies are capped at 256 KB per record.
+
+Verify captures on disk:
+
+```bash
+ls app/image_resources/civitai_api_responses/latest/ | head
+```
 
 ## Security notes
 

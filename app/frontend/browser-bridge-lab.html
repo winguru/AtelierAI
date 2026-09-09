@@ -113,6 +113,21 @@
         <pre class="response-block" id="navigate-response">Idle.</pre>
       </section>
 
+      <section class="bridge-card" id="harvest-card">
+        <h2 style="margin-top:0;">tRPC Harvester</h2>
+        <p class="step-desc" style="margin-top:0;">
+          Wraps the page's own <span class="mono">fetch</span>/XHR so every tRPC response
+          loaded while browsing is captured — zero extra requests to CivitAI.
+          Drained records are archived as <span class="mono">kind=harvested</span>.
+        </p>
+        <div class="actions-row">
+          <button class="btn primary" id="btn-harvest-install">Install wrapper</button>
+          <button class="btn primary" id="btn-harvest-drain">Drain + archive</button>
+          <button class="btn ghost" id="btn-harvest-once">Install &amp; drain</button>
+        </div>
+        <pre class="response-block" id="harvest-response">Harvester idle.</pre>
+      </section>
+
     </main>
   </div>
 
@@ -203,6 +218,50 @@
 
     // Default the noVNC link to the standard sidecar port.
     $('novnc-link').href = `${location.protocol}//${location.hostname}:6080/vnc.html`;
+
+    // ── Harvester ─────────────────────────────────────────────
+    $('btn-harvest-install').onclick = async () => {
+      $('harvest-response').textContent = 'Installing wrapper…';
+      try {
+        const out = await api('harvest/install', { method: 'POST' });
+        $('harvest-response').textContent = JSON.stringify(out, null, 2);
+      } catch (e) {
+        $('harvest-response').textContent = `Error: ${e.message}`;
+      }
+    };
+
+    $('btn-harvest-drain').onclick = async () => {
+      $('harvest-response').textContent = 'Draining…';
+      try {
+        const out = await api('harvest/drain', {
+          method: 'POST',
+          body: JSON.stringify({ archive: true }),
+        });
+        const summary = {
+          ok: out.ok, drained: out.drained, archived: out.archived,
+          archive_errors: out.archive_errors,
+          endpoints: (out.records || []).map(r => `${r.status} ${(r.url||'').split('?')[0]}`),
+        };
+        $('harvest-response').textContent = JSON.stringify(summary, null, 2);
+      } catch (e) {
+        $('harvest-response').textContent = `Error: ${e.message}`;
+      }
+    };
+
+    $('btn-harvest-once').onclick = async () => {
+      $('harvest-response').textContent = 'Install + drain…';
+      try {
+        const out = await api('harvest/once', { method: 'POST' });
+        const summary = {
+          ok: out.ok, drained: out.drained, archived: out.archived,
+          archive_errors: out.archive_errors,
+          endpoints: (out.records || []).map(r => `${r.status} ${(r.url||'').split('?')[0]}`),
+        };
+        $('harvest-response').textContent = JSON.stringify(summary, null, 2);
+      } catch (e) {
+        $('harvest-response').textContent = `Error: ${e.message}`;
+      }
+    };
 
     refreshStatus();
     setInterval(refreshStatus, 15000);

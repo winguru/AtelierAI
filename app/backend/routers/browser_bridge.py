@@ -10,6 +10,9 @@ Routes (all async, all fail-open):
   POST /browser-bridge/navigate    drive the sidecar tab to a URL
   POST /browser-bridge/fetch       page-context fetch through the browser
   GET  /browser-bridge/config      effective lane configuration
+  POST /browser-bridge/harvest/install   attach the tRPC capture wrapper
+  POST /browser-bridge/harvest/drain     drain + archive captured responses
+  POST /browser-bridge/harvest/once      install + drain in one call
 """
 
 from __future__ import annotations
@@ -95,3 +98,43 @@ async def browser_bridge_config():
             getattr(app_config, "BROWSER_BRIDGE_CAPTURE_PATH", "")
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Harvester — passive capture of the page's own tRPC responses
+# ---------------------------------------------------------------------------
+
+
+class HarvestDrainRequest(BaseModel):
+    """Options for a harvest drain.
+
+    ``archive`` (default true) writes drained records into the CivitAI
+    response archive as ``kind="harvested"``.
+    """
+
+    archive: bool = True
+
+
+@router.post("/harvest/install")
+async def browser_bridge_harvest_install():
+    """Install the fetch/XHR capture wrapper on all civitai tabs."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    return await get_page_harvester().install()
+
+
+@router.post("/harvest/drain")
+async def browser_bridge_harvest_drain(req: HarvestDrainRequest | None = None):
+    """Drain captured tRPC responses and archive them."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    archive = req.archive if req is not None else True
+    return await get_page_harvester().drain(archive=archive)
+
+
+@router.post("/harvest/once")
+async def browser_bridge_harvest_once():
+    """Install (if needed) and drain in a single call."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    return await get_page_harvester().harvest_once()

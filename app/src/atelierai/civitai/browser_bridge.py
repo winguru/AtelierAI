@@ -285,9 +285,10 @@ class CivitaiBrowserBridge:
             return None
 
     # JS executed inside the page context. Keep the return shape in sync
-    # with the response handling in fetch() below.
+    # with the response handling in fetch() below. Playwright's evaluate()
+    # takes exactly ONE argument — url/init are packed into a single object.
     _FETCH_JS = """
-    async (url, init) => {
+    async ({url, init}) => {
         const resp = await fetch(url, init);
         const text = await resp.text();
         let parsed = null;
@@ -344,7 +345,7 @@ class CivitaiBrowserBridge:
             init["headers"] = headers
 
         try:
-            result = await page.evaluate(self._FETCH_JS, url, init)
+            result = await page.evaluate(self._FETCH_JS, {"url": url, "init": init})
         except Exception as exc:  # noqa: BLE001 — fail-open contract
             return {
                 "ok": False,

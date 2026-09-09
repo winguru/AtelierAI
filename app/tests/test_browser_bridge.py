@@ -120,7 +120,19 @@ class TestFetchHappyPath:
         )
         page = MagicMock()
         page.url = "https://civitai.red/images"
-        page.evaluate = AsyncMock(return_value=fetch_result)
+
+        async def _evaluate(expression, arg=None):
+            # Mirror Playwright's real signature: evaluate(expression, arg)
+            # — exactly one optional argument. A bridge call passing url and
+            # init separately must fail here, exactly like production.
+            assert isinstance(arg, dict) and "url" in arg and "init" in arg, (
+                f"evaluate() arg must be a single packed object, got: {arg!r}"
+            )
+            _evaluate.calls += 1
+            return fetch_result
+
+        _evaluate.calls = 0
+        page.evaluate = _evaluate
         page.goto = AsyncMock()
 
         browser = MagicMock()
@@ -132,7 +144,7 @@ class TestFetchHappyPath:
         browser.contexts = [ctx]
 
         bridge._browser = browser
-        return bridge, page
+        return bridge, page, _evaluate
 
     def test_fetch_roundtrip_json(self, tmp_path: Path) -> None:
         result_payload = {
@@ -141,7 +153,7 @@ class TestFetchHappyPath:
             "bodyText": '{"result":{"data":{"json":[1,2,3]}}}',
             "bodyParsed": {"result": {"data": {"json": [1, 2, 3]}}},
         }
-        bridge, page = self._make_bridge_with_page(tmp_path, result_payload)
+        bridge, _, _evaluate = self._make_bridge_with_page(tmp_path, result_payload)
 
         out = asyncio.run(bridge.fetch("https://civitai.red/api/trpc/fake"))
 
@@ -150,7 +162,7 @@ class TestFetchHappyPath:
         assert out["body"] == {"result": {"data": {"json": [1, 2, 3]}}}
         assert out["via"] == "browser-bridge"
         # Page-context evaluate was used (not a Python-side fetch).
-        page.evaluate.assert_awaited_once()
+        assert _evaluate.calls == 1
 
     def test_fetch_capture_recorded(self, tmp_path: Path) -> None:
         result_payload = {
@@ -159,7 +171,7 @@ class TestFetchHappyPath:
             "bodyText": None,
             "bodyParsed": None,
         }
-        bridge, _ = self._make_bridge_with_page(tmp_path, result_payload)
+        bridge, _, _ = self._make_bridge_with_page(tmp_path, result_payload)
 
         out = asyncio.run(bridge.fetch("https://civitai.red/api/trpc/fake"))
 
@@ -172,11 +184,15 @@ class TestFetchHappyPath:
         assert rec["via"] == "browser-bridge"
 
     def test_fetch_evaluate_failure_is_fail_open(self, tmp_path: Path) -> None:
-        bridge, page = self._make_bridge_with_page(
+        bridge, page, _ = self._make_bridge_with_page(
             tmp_path,
             {"status": 200, "headers": {}, "bodyText": "", "bodyParsed": None},
         )
-        page.evaluate = AsyncMock(side_effect=RuntimeError("detached frame"))
+
+        async def _raise(expression, arg=None):
+            raise RuntimeError("detached frame")
+
+        page.evaluate = _raise
 
         out = asyncio.run(bridge.fetch("https://civitai.red/api/trpc/fake"))
 

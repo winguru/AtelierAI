@@ -197,6 +197,15 @@ BROWSER_BRIDGE_NAVIGATE_TIMEOUT = _env_float(
 # Empty disables capture-to-disk.
 BROWSER_BRIDGE_CAPTURE_PATH = os.getenv("BROWSER_BRIDGE_CAPTURE_PATH", "").strip()
 
+# Auto-drain loop for the page harvester: when true, the backend starts a
+# background task that periodically installs the capture wrapper (idempotent)
+# and drains/archived captured tRPC responses while the sidecar is connected.
+# The loop is fail-open — sidecar downtime is recorded in stats, never fatal.
+BROWSER_BRIDGE_HARVEST_AUTO = _env_bool("BROWSER_BRIDGE_HARVEST_AUTO", default=False)
+BROWSER_BRIDGE_HARVEST_INTERVAL = _env_float(
+    "BROWSER_BRIDGE_HARVEST_INTERVAL", 30.0
+)
+
 # --- ComfyUI Configuration ---
 ATELIER_COMFYUI_BASE_URL = os.getenv("ATELIER_COMFYUI_BASE_URL", "").strip()
 ATELIER_COMFY_MATCH_THRESHOLD = max(

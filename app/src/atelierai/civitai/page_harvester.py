@@ -23,7 +23,9 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any
 
 from atelierai.civitai.browser_bridge import CivitaiBrowserBridge
@@ -185,6 +187,20 @@ class CivitaiPageHarvester:
         self._bridge = bridge
         self._installed_pages: set[int] = set()
         self._archive = None
+        # Auto-drain loop state
+        self._auto_task: asyncio.Task | None = None
+        self._auto_interval: float = 30.0
+        self._auto_stop = asyncio.Event()
+        self._auto_stats: dict[str, Any] = {
+            "running": False,
+            "interval_seconds": 30.0,
+            "ticks": 0,
+            "total_drained": 0,
+            "total_archived": 0,
+            "last_tick_at": None,
+            "last_result": None,
+            "last_error": None,
+        }
 
     def _get_bridge(self) -> CivitaiBrowserBridge:
         if self._bridge is None:
@@ -313,6 +329,82 @@ class CivitaiPageHarvester:
         if not install_status.get("ok"):
             return install_status
         return await self.drain()
+
+    # ------------------------------------------------------------------
+    # Auto-drain loop
+    # ------------------------------------------------------------------
+
+    async def _auto_loop_tick(self) -> None:
+        """One drain+archive cycle. Records results into stats, never raises."""
+        try:
+            result = await self.harvest_once()
+            self._auto_stats["ticks"] += 1
+            self._auto_stats["last_tick_at"] = time.time()
+            if result.get("ok"):
+                self._auto_stats["total_drained"] += result.get("drained", 0)
+                self._auto_stats["total_archived"] += result.get("archived", 0)
+                self._auto_stats["last_error"] = None
+            else:
+                # Unavailable bridge is expected when the sidecar is down;
+                # keep it quiet but visible in stats.
+                self._auto_stats["last_error"] = result.get("error") or result.get(
+                    "bridge"
+                )
+            self._auto_stats["last_result"] = {
+                k: result.get(k)
+                for k in ("ok", "drained", "archived", "archive_errors")
+            }
+        except Exception as exc:  # noqa: BLE001 — loop must never die
+            self._auto_stats["last_error"] = f"{type(exc).__name__}: {exc}"
+
+    async def _auto_loop(self) -> None:
+        """Periodically install (idempotent) + drain while connected.
+
+        Fail-open by design: any error is recorded in stats and the loop
+        continues; the loop never raises into the task scheduler.
+        """
+        while not self._auto_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._auto_stop.wait(), timeout=self._auto_interval
+                )
+                break  # stop requested
+            except asyncio.TimeoutError:
+                pass
+
+            await self._auto_loop_tick()
+
+    async def start_auto(self, interval_seconds: float = 30.0) -> dict[str, Any]:
+        """Start the auto-drain loop (no-op if already running)."""
+        if self._auto_task is not None and not self._auto_task.done():
+            return {
+                "ok": True,
+                "already_running": True,
+                "stats": dict(self._auto_stats),
+            }
+        self._auto_interval = max(5.0, float(interval_seconds))
+        self._auto_stats.update(
+            {"running": True, "interval_seconds": self._auto_interval}
+        )
+        self._auto_stop.clear()
+        self._auto_task = asyncio.get_running_loop().create_task(self._auto_loop())
+        return {"ok": True, "already_running": False, "stats": dict(self._auto_stats)}
+
+    def stop_auto(self) -> dict[str, Any]:
+        """Stop the auto-drain loop (drains are best-effort flushed)."""
+        was_running = self._auto_task is not None and not self._auto_task.done()
+        self._auto_stop.set()
+        if self._auto_task is not None:
+            self._auto_task.cancel()
+            self._auto_task = None
+        self._auto_stats["running"] = False
+        return {"ok": True, "was_running": was_running}
+
+    def auto_status(self) -> dict[str, Any]:
+        """Current auto-drain loop stats."""
+        running = self._auto_task is not None and not self._auto_task.done()
+        self._auto_stats["running"] = running
+        return dict(self._auto_stats)
 
 
 # ── Singleton ───────────────────────────────────────────────────────────────

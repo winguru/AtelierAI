@@ -124,6 +124,13 @@
           <button class="btn primary" id="btn-harvest-install">Install wrapper</button>
           <button class="btn primary" id="btn-harvest-drain">Drain + archive</button>
           <button class="btn ghost" id="btn-harvest-once">Install &amp; drain</button>
+          <button class="btn ghost" id="btn-harvest-auto-start">Auto-drain on</button>
+          <button class="btn ghost" id="btn-harvest-auto-stop">Auto-drain off</button>
+        </div>
+        <div class="kv-table" style="margin-top:8px;">
+          <tr><td>Auto-drain</td><td class="mono" id="kv-auto-state">—</td></tr>
+          <tr><td>Loop totals</td><td class="mono" id="kv-auto-totals">—</td></tr>
+          <tr><td>Last tick</td><td class="mono" id="kv-auto-last">—</td></tr>
         </div>
         <pre class="response-block" id="harvest-response">Harvester idle.</pre>
       </section>
@@ -263,8 +270,37 @@
       }
     };
 
+    // ── Auto-drain loop ─────────────────────────────
+    function renderAuto(s) {
+      $('kv-auto-state').textContent = s.running
+        ? `running (every ${s.interval_seconds}s)` : 'stopped';
+      $('kv-auto-totals').textContent =
+        `${s.ticks} ticks · ${s.total_drained} drained · ${s.total_archived} archived`;
+      const last = s.last_tick_at ? new Date(s.last_tick_at * 1000).toLocaleTimeString() : '—';
+      const err = s.last_error ? ` · err: ${s.last_error}` : '';
+      $('kv-auto-last').textContent = `${last}${err}`;
+    }
+
+    async function refreshAuto() {
+      try { renderAuto(await api('harvest/auto/status')); } catch (e) { /* idle */ }
+    }
+
+    $('btn-harvest-auto-start').onclick = async () => {
+      const out = await api('harvest/auto/start', {
+        method: 'POST', body: JSON.stringify({ interval_seconds: 30 }),
+      });
+      renderAuto(out.stats || {});
+    };
+
+    $('btn-harvest-auto-stop').onclick = async () => {
+      await api('harvest/auto/stop', { method: 'POST' });
+      await refreshAuto();
+    };
+
     refreshStatus();
     setInterval(refreshStatus, 15000);
+    refreshAuto();
+    setInterval(refreshAuto, 10000);
   </script>
 </body>
 </html>

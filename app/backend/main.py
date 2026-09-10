@@ -15869,11 +15869,36 @@ async def lifespan(app: FastAPI):
 
     set_clip_provider(clip_provider)
 
+    # --- Browser-bridge harvester auto-drain (opt-in) ---
+    # When the sidecar is configured/running, start the passive harvest loop
+    # so browsing is archived without manual drains. Fail-open: sidecar down
+    # is recorded in loop stats, never fatal.
+    if _read_env_flag("BROWSER_BRIDGE_HARVEST_AUTO", False):
+        try:
+            from atelierai.civitai.page_harvester import get_page_harvester
+
+            interval = float(os.getenv("BROWSER_BRIDGE_HARVEST_INTERVAL", "30") or 30)
+            status = await get_page_harvester().start_auto(interval_seconds=interval)
+            print(
+                f"[browser-bridge] harvest auto-drain started "
+                f"(interval={interval}s, already_running={status.get('already_running')})"
+            )
+        except Exception as exc:  # noqa: BLE001 — optional feature
+            print(f"[browser-bridge] harvest auto-drain failed to start: {exc}")
+
     print("AtelierAI API is ready to go!")
 
     yield
 
     print("Shutting down AtelierAI API...")
+
+    # Stop the harvester auto-drain loop if it was started.
+    try:
+        from atelierai.civitai.page_harvester import get_page_harvester
+
+        get_page_harvester().stop_auto()
+    except Exception:  # noqa: BLE001, S110 — best-effort shutdown
+        pass
 
     # Cleanup CLIP provider
     from services.clip_provider import get_clip_provider

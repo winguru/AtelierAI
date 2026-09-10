@@ -115,6 +115,15 @@ class HarvestDrainRequest(BaseModel):
     archive: bool = True
 
 
+class HarvestAutoRequest(BaseModel):
+    """Options for the auto-drain loop.
+
+    ``interval_seconds`` clamps to a 5s minimum.
+    """
+
+    interval_seconds: float = 30.0
+
+
 @router.post("/harvest/install")
 async def browser_bridge_harvest_install():
     """Install the fetch/XHR capture wrapper on all civitai tabs."""
@@ -138,3 +147,28 @@ async def browser_bridge_harvest_once():
     from atelierai.civitai.page_harvester import get_page_harvester
 
     return await get_page_harvester().harvest_once()
+
+
+@router.post("/harvest/auto/start")
+async def browser_bridge_harvest_auto_start(req: HarvestAutoRequest | None = None):
+    """Start the background auto-drain loop (install + drain each tick)."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    interval = req.interval_seconds if req is not None else 30.0
+    return await get_page_harvester().start_auto(interval_seconds=interval)
+
+
+@router.post("/harvest/auto/stop")
+async def browser_bridge_harvest_auto_stop():
+    """Stop the background auto-drain loop."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    return get_page_harvester().stop_auto()
+
+
+@router.get("/harvest/auto/status")
+async def browser_bridge_harvest_auto_status():
+    """Auto-drain loop stats (running, totals, last result)."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    return get_page_harvester().auto_status()

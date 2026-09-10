@@ -203,3 +203,65 @@ class TestRecordShape:
         assert back is not None
         assert back["status_code"] == 200
         assert back["response"]["result"]["data"]["json"]["id"] == 9
+
+
+class TestAutoDrainLoop:
+    def test_start_stop_lifecycle(self) -> None:
+        async def run():
+            harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+            out = await harvester.start_auto(interval_seconds=5)
+            assert out["ok"] is True and out["already_running"] is False
+
+            status = harvester.auto_status()
+            assert status["running"] is True
+            assert status["interval_seconds"] == 5.0
+
+            # Starting again is a no-op that keeps the loop.
+            out2 = await harvester.start_auto(interval_seconds=10)
+            assert out2["already_running"] is True
+            assert harvester.auto_status()["interval_seconds"] == 5.0
+
+            stop = harvester.stop_auto()
+            assert stop["ok"] is True and stop["was_running"] is True
+            assert harvester.auto_status()["running"] is False
+
+        asyncio.run(run())
+
+    def test_interval_clamps_to_minimum(self) -> None:
+        async def run():
+            harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+            await harvester.start_auto(interval_seconds=0.1)
+            try:
+                assert harvester.auto_status()["interval_seconds"] == 5.0
+            finally:
+                harvester.stop_auto()
+
+        asyncio.run(run())
+
+    def test_loop_tick_records_unavailable_bridge(self) -> None:
+        """With no sidecar, each tick records the error and keeps looping."""
+        harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+
+        async def run():
+            await harvester.start_auto(interval_seconds=5)
+            try:
+                # Run exactly one tick manually (the loop task is sleeping).
+                await harvester._auto_loop_tick()
+                stats = harvester.auto_status()
+                assert stats["ticks"] == 1
+                assert stats["last_error"]  # bridge unavailable surfaced
+            finally:
+                harvester.stop_auto()
+
+        asyncio.run(run())
+
+    def test_stop_when_never_started(self) -> None:
+        harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+        out = harvester.stop_auto()
+        assert out["ok"] is True and out["was_running"] is False
+
+
+def _disconnected_bridge():
+    from atelierai.civitai.browser_bridge import CivitaiBrowserBridge
+
+    return CivitaiBrowserBridge(cdp_url="http://127.0.0.1:1")

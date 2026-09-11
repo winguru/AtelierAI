@@ -172,3 +172,23 @@ async def browser_bridge_harvest_auto_status():
     from atelierai.civitai.page_harvester import get_page_harvester
 
     return get_page_harvester().auto_status()
+
+
+# ---------------------------------------------------------------------------
+# Browsed staging — feed harvested captures into the search-lab review tables
+# ---------------------------------------------------------------------------
+
+
+@router.post("/stage")
+async def browser_bridge_stage_browsed():
+    """Stage harvested feed captures into the search-lab review tables.
+
+    Reads harvested ``image.getInfinite`` records from the response archive,
+    upserts ``CivitaiSearchImage`` rows + unrated standalone links, and
+    returns counts. Idempotent; zero requests to CivitAI.
+    """
+    from database import SessionLocal
+    from services.browsed_stager import stage_harvested_feeds
+
+    with SessionLocal() as db:
+        return stage_harvested_feeds(db)

@@ -124,11 +124,32 @@ Filtering: only requests to `civitai.red` / `civitai.com` hosts under
 (`advertising.civitai.com`) and CDN binaries (`image.civitai.com`) are
 excluded. Bodies are capped at 256 KB per record.
 
-Verify captures on disk:
+**Auto-drain** — `POST /api/browser-bridge/harvest/auto/start` runs a
+background loop (default 30s, min 5s; env `BROWSER_BRIDGE_HARVEST_AUTO=1` +
+`BROWSER_BRIDGE_HARVEST_INTERVAL` for boot-time start). Each tick drains,
+archives, and **stages** new feed captures into the search-lab review tables.
 
-```bash
-ls app/image_resources/civitai_api_responses/latest/ | head
-```
+## Browsed → Review → Import (two-stage ingestion)
+
+Browsing civitai.red in the sidecar now feeds the same review pipeline the
+search lab uses:
+
+1. **Stage** — `POST /api/browser-bridge/stage` (also run automatically after
+   each auto-drain tick) reads harvested `image.getInfinite` captures from
+   the archive, decodes them with the existing flat-array deserializer, and
+   upserts `CivitaiSearchImage` rows + standalone unrated links
+   (`search_id=NULL, rating=NULL`). Zero requests to CivitAI. Idempotent;
+   images that already have rating links keep their ratings.
+2. **Review** — in the Search Lab's review mode, the **Unrated** tab shows
+   browsed-but-not-reviewed images. Use the **Preset: Seen** button (hides
+   saved/keep/skip/discard/identical) for incoming review, or **Preset:
+   Keep** for the curated view. Rate keep/skip/discard exactly as in search
+   sessions; discard excludes the image from future searches.
+3. **Import** — kept images import via the existing search-lab import flow
+   (library-status → `/api/import_civitai/batch`), unchanged.
+
+Live first-run: 3 archived feed pages → 300 images staged → 298 unrated,
+2 already rated — visible in the review grid with CDN thumbnails.
 
 ## Security notes
 

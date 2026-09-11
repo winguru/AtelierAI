@@ -335,7 +335,7 @@ class CivitaiPageHarvester:
     # ------------------------------------------------------------------
 
     async def _auto_loop_tick(self) -> None:
-        """One drain+archive cycle. Records results into stats, never raises."""
+        """One drain+archive+stage cycle. Records results into stats, never raises."""
         try:
             result = await self.harvest_once()
             self._auto_stats["ticks"] += 1
@@ -354,8 +354,23 @@ class CivitaiPageHarvester:
                 k: result.get(k)
                 for k in ("ok", "drained", "archived", "archive_errors")
             }
+            # Stage any newly harvested feed captures into review tables.
+            # Best-effort: staging failures don't affect the drain stats.
+            if result.get("ok"):
+                self._auto_stats["last_stage"] = await self._stage_new_captures()
         except Exception as exc:  # noqa: BLE001 — loop must never die
             self._auto_stats["last_error"] = f"{type(exc).__name__}: {exc}"
+
+    async def _stage_new_captures(self) -> dict[str, Any] | None:
+        """Run the browsed stager; return counts or None when unavailable."""
+        try:
+            from database import SessionLocal
+            from services.browsed_stager import stage_harvested_feeds
+
+            with SessionLocal() as db:
+                return stage_harvested_feeds(db)
+        except Exception as exc:  # noqa: BLE001 — staging is best-effort
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     async def _auto_loop(self) -> None:
         """Periodically install (idempotent) + drain while connected.

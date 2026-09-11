@@ -1845,7 +1845,10 @@ _RATED_SORT_MAP: dict[str, tuple[Any, Any]] = {
 def get_rated_images(
     rating: str = Query(
         ...,
-        description="Rating filter: 'keep', 'skip', 'discard', or 'any'.",
+        description=(
+            "Rating filter: 'keep', 'skip', 'discard', 'any', or 'unrated' "
+            "(browsed-but-not-yet-reviewed images)."
+        ),
     ),
     q: str | None = Query(
         None,
@@ -1884,7 +1887,7 @@ def get_rated_images(
     The response shape mirrors the live search endpoint so the frontend
     can render results without mode-specific branching.
     """
-    valid_ratings = {"keep", "skip", "discard", "any"}
+    valid_ratings = {"keep", "skip", "discard", "any", "unrated"}
     if rating not in valid_ratings:
         raise HTTPException(
             status_code=400,
@@ -1903,7 +1906,9 @@ def get_rated_images(
 
     # Rank link rows per image by created_at DESC so we only consider the
     # most recent rating for each image (an image may have been rated in
-    # multiple sessions).
+    # multiple sessions). For 'unrated' the base filter drops the
+    # rating-is-not-null requirement so browsed/staged (NULL-rating) links
+    # are visible; the latest link per image decides.
     ranked = (
         db.query(
             CivitaiSearchImageLink.image_id.label("img_id"),
@@ -1916,12 +1921,15 @@ def get_rated_images(
             )
             .label("rn"),
         )
-        .filter(CivitaiSearchImageLink.rating.isnot(None))
-        .subquery()
     )
+    if rating != "unrated":
+        ranked = ranked.filter(CivitaiSearchImageLink.rating.isnot(None))
+    ranked = ranked.subquery()
 
-    # Apply rating filter on the ranked subquery (latest rating per image).
-    rating_filter = ranked.c.rating == rating if rating != "any" else None
+    if rating == "unrated":
+        rating_filter = ranked.c.rating.is_(None)
+    else:
+        rating_filter = ranked.c.rating == rating if rating != "any" else None
 
     # ── Text search (q): AND-match all whitespace-separated terms ──
     # Each term is matched (case-insensitive) against the tags JSON,
@@ -2058,7 +2066,7 @@ def get_rated_artist_facets(
 
     Artists with a NULL/empty name are grouped under ``"(Unknown)"``.
     """
-    valid_ratings = {"keep", "skip", "discard", "any"}
+    valid_ratings = {"keep", "skip", "discard", "any", "unrated"}
     if rating not in valid_ratings:
         raise HTTPException(
             status_code=400,
@@ -2066,7 +2074,8 @@ def get_rated_artist_facets(
         )
 
     # Reuse the same ranked-link subquery pattern as /rated so we only
-    # count each image's most recent rating.
+    # count each image's most recent rating. As in /rated, 'unrated' needs
+    # NULL-rating links visible in the base query.
     ranked = (
         db.query(
             CivitaiSearchImageLink.image_id.label("img_id"),
@@ -2078,11 +2087,15 @@ def get_rated_artist_facets(
             )
             .label("rn"),
         )
-        .filter(CivitaiSearchImageLink.rating.isnot(None))
-        .subquery()
     )
+    if rating != "unrated":
+        ranked = ranked.filter(CivitaiSearchImageLink.rating.isnot(None))
+    ranked = ranked.subquery()
 
-    rating_filter = ranked.c.rating == rating if rating != "any" else None
+    if rating == "unrated":
+        rating_filter = ranked.c.rating.is_(None)
+    else:
+        rating_filter = ranked.c.rating == rating if rating != "any" else None
 
     terms = [t for t in (q or "").split() if t]
     text_filters: list[Any] = []

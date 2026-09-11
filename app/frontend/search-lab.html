@@ -69,6 +69,7 @@
             <button type="button" class="review-rating-btn active" data-rating="keep" role="tab" aria-selected="true">Keep</button>
             <button type="button" class="review-rating-btn" data-rating="skip" role="tab" aria-selected="false">Skip</button>
             <button type="button" class="review-rating-btn" data-rating="discard" role="tab" aria-selected="false">Discard</button>
+            <button type="button" class="review-rating-btn" data-rating="unrated" role="tab" aria-selected="false">Unrated</button>
             <button type="button" class="review-rating-btn" data-rating="any" role="tab" aria-selected="false">All</button>
           </div>
 
@@ -159,6 +160,8 @@
           <label class="hide-filter-opt"><input type="checkbox" id="hide-discard" data-hide="discard" checked> Discard</label>
           <label class="hide-filter-opt"><input type="checkbox" id="hide-identical" data-hide="identical" checked> Identical</label>
           <span class="hide-filter-spacer"></span>
+          <button type="button" id="preset-seen-btn" class="btn ghost preset-btn" title="Show only unrated/unseen images: hide saved, keep, skip, discard, identical">Preset: Seen</button>
+          <button type="button" id="preset-keep-btn" class="btn ghost preset-btn" title="Show keep-rated images: hide saved, skip, discard, identical">Preset: Keep</button>
           <button type="button" id="nsfw-backfill-btn" class="btn ghost nsfw-backfill-btn hidden" title="Fetch missing CivitAI NSFW levels for imported images (runs in background)">↻ Backfill NSFW metadata</button>
         </div>
 

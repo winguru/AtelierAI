@@ -1517,6 +1517,12 @@
       }
     });
 
+    // Filter presets (Seen / Keep)
+    const presetSeenBtn = document.getElementById('preset-seen-btn');
+    if (presetSeenBtn) presetSeenBtn.addEventListener('click', () => applyFilterPreset('seen'));
+    const presetKeepBtn = document.getElementById('preset-keep-btn');
+    if (presetKeepBtn) presetKeepBtn.addEventListener('click', () => applyFilterPreset('keep'));
+
     // Tile clicks (delegated) — shift-click range, ctrl/cmd-click toggle, plain click single
     els.gallery_grid.addEventListener('click', (e) => {
       const tile = e.target.closest('.tile');
@@ -1774,6 +1780,32 @@
    * A hit is hidden if it matches ANY checked filter category, or if an
    * earlier hit with the same perceptual `hash` is already visible.
    */
+  /** Apply a named preset to the hide filters.
+   *
+   * 'seen'  — review incoming: hide saved/keep/skip/discard/identical,
+   *           show unrated (freshly browsed/searched) images.
+   * 'keep'  — curated view: hide saved/skip/discard/identical, show keep.
+   * Both leave 'seen' itself unhidden (per design: seen stays shown).
+   */
+  function applyFilterPreset(preset) {
+    if (preset === 'seen') {
+      state.hideFilters = { seen: false, saved: true, keep: true, skip: true, discard: true, identical: true };
+    } else if (preset === 'keep') {
+      state.hideFilters = { seen: false, saved: true, keep: false, skip: true, discard: true, identical: true };
+    } else {
+      return;
+    }
+    // Sync checkbox UI with the new state
+    for (const key of Object.keys(state.hideFilters)) {
+      const cb = document.querySelector(`#hide-filter-bar input[data-hide="${key}"]`);
+      if (cb) cb.checked = state.hideFilters[key];
+    }
+    applyHideFilters();
+    ensureVisibleSelection();
+    checkAutoLoadIfAllHidden();
+    saveStateToUrl();
+  }
+
   function isHiddenByFilter(hit, idx) {
     if (!hit || !hit.id) return false;
 

@@ -3519,6 +3519,13 @@
     return request;
   }
 
+  // NOTE: preserve is intentionally NOT auto-triggered anymore.
+  // Auto-preserve-on-view (+neighbors) caused 503 floods against the
+  // shared CDN queue (up to 9 candidate URLs per image) and starved
+  // fullscreen at the thumbnail tier while it retried. Preserve is now
+  // an explicit archival action, while fullscreen display uses the CDN
+  // original directly (browser-fetched, no server round-trip).
+
   async function _drainPreserveQueue() {
     if (_preserveQueueRunning) return;
     _preserveQueueRunning = true;
@@ -3534,24 +3541,11 @@
   }
 
   function _preloadAdjacent(index) {
-    if (document.hidden || navigator.connection?.saveData) return;
-    const resultSet = state.hits;
-    if (_preserveResultSet !== resultSet) {
-      _preserveResultSet = resultSet;
-      _preserveQueue.length = 0;
-    }
-    for (let distance = 1; distance <= PRELOAD_RANGE; distance++) {
-      for (const d of [distance, -distance]) {
-      const i = index + d;
-      if (i < 0 || i >= state.hits.length) continue;
-      const hit = state.hits[i];
-      if (!hit?.id || isVideoHit(hit) || _preloadCache.has(hit.id) || _preserveRequests.has(hit.id)) continue;
-      if (!_preserveQueue.some(candidate => candidate.hit.id === hit.id)) {
-        _preserveQueue.push({ hit, resultSet });
-      }
-      }
-    }
-    void _drainPreserveQueue();
+    // Adjacent-original preloading is disabled: it fed the preserve queue
+    // (server-side original downloads) for images the user merely scrolled
+    // past. Fullscreen now uses CDN originals client-side, which the browser
+    // HTTP cache handles well enough on its own.
+    return;
   }
 
   function _setFullscreenImage(hit) {
@@ -3617,15 +3611,13 @@
     if (localUrl) {
       _applySource('original', localUrl, 2);
     } else {
-      _preserveOriginal(hit).then((preservedUrl) => {
-        if (
-          preservedUrl
-          && loadGeneration === _fullscreenLoadGeneration
-          && state.hits[state.selectedHitIndex]?.id === hit.id
-        ) {
-          _applySource('original', preservedUrl, 2);
-        }
-      });
+      // Display the CDN original directly (browser-side fetch — no server
+      // round-trip, no queue contention, no 503 coupling). Preserve remains
+      // available as an explicit archival action elsewhere in the UI.
+      const cdnOriginal = hit.mid_res_url || hit.url || '';
+      if (cdnOriginal && !isVideoHit(hit)) {
+        _applySource('original', cdnOriginal, 2);
+      }
     }
 
     // Keep the placeholder visible until the thumbnail has actually loaded.

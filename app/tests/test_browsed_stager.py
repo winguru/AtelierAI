@@ -74,12 +74,14 @@ ITEM_A = {
     "hash": "UJEcqQWV",
     "nsfwLevel": 1,
     "type": "image",
-    "username": "someartist",
+    "name": "photo.jpeg",
+    "user": {"id": 999, "username": "someartist"},
     "reactionCount": 42,
     "stats": {"likeCountAllTime": 40, "collectedCountAllTime": 2},
     "baseModel": "Pony",
     "prompt": None,
-    "tags": [],
+    "tagIds": [251, 308],
+    "tags": -1,
 }
 ITEM_B = {
     "id": 333,
@@ -90,12 +92,14 @@ ITEM_B = {
     "hash": "BBBBhash",
     "nsfwLevel": 2,
     "type": "image",
-    "username": "otherartist",
+    "name": "other.png",
+    "user": {"id": 777, "username": "otherartist"},
     "reactionCount": 7,
     "stats": {"likeCountAllTime": 6},
     "baseModel": "SDXL 1.0",
     "prompt": None,
-    "tags": [],
+    "tagIds": [],
+    "tags": -1,
 }
 
 
@@ -135,14 +139,28 @@ class TestUpsertBrowsedImage:
         from models import CivitaiSearchImage
         from services.browsed_stager import _upsert_browsed_image
 
+        # Seed a concept alias so tag 251 resolves to a name locally
+        from sqlalchemy import text
+
+        db_session.execute(
+            text(
+                "INSERT INTO concept_aliases (concept_id, alias, normalized_alias, alias_type, is_preferred, external_tag_id) "
+                "VALUES (1, 'thighs', 'thighs', 'name', 1, 251)"
+            )
+        )
+        db_session.commit()
+
         img = _upsert_browsed_image(db_session, ITEM_A)
         assert img is not None
         assert img.civitai_image_id == 111
         assert img.post_id == 222
         assert img.uuid == ITEM_A["url"]
+        assert img.file_name == "photo.jpeg"
+        assert img.artist_id == 999
         assert img.artist_name == "someartist"
         assert img.reactions == 42
         assert img.likes == 40
+        assert img.tags == ["thighs"]  # 251 resolved, 308 unmapped → skipped
         assert db_session.query(CivitaiSearchImage).count() == 1
 
     def test_fill_if_absent_never_clobbers(self, db_session) -> None:

@@ -179,8 +179,19 @@ async def browser_bridge_harvest_auto_status():
 # ---------------------------------------------------------------------------
 
 
+class HarvestStageRequest(BaseModel):
+    """Options for browsed staging.
+
+    ``re_enrich`` reprocesses all archived captures so improved field
+    mappings can fill gaps on previously staged rows (fill-if-absent;
+    nothing populated is clobbered).
+    """
+
+    re_enrich: bool = False
+
+
 @router.post("/stage")
-async def browser_bridge_stage_browsed():
+async def browser_bridge_stage_browsed(req: HarvestStageRequest | None = None):
     """Stage harvested feed captures into the search-lab review tables.
 
     Reads harvested ``image.getInfinite`` records from the response archive,
@@ -190,5 +201,6 @@ async def browser_bridge_stage_browsed():
     from database import SessionLocal
     from services.browsed_stager import stage_harvested_feeds
 
+    re_enrich = req.re_enrich if req is not None else False
     with SessionLocal() as db:
-        return stage_harvested_feeds(db)
+        return stage_harvested_feeds(db, re_enrich=re_enrich)

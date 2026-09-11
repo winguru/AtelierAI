@@ -29,9 +29,36 @@ from pathlib import Path
 from typing import Any
 
 from models import CivitaiSearchImage, CivitaiSearchImageLink
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 _STAGE_LOCK = threading.Lock()
+
+
+def _resolve_tag_names(db: Session, tag_ids: list[int]) -> list[str]:
+    """Resolve civitai tag ids to names via concept_aliases (local, no network).
+
+    Browse feeds send numeric ``tagIds`` with ``tags: -1`` (CivitAI's null
+    encoding). The concept-alias table already maps thousands of civitai tag
+    ids to names from past taxonomy imports; unmatched ids are skipped
+    silently — names appear later when taxonomy knowledge grows.
+    """
+    names: list[str] = []
+    for tid in tag_ids:
+        if not isinstance(tid, int) or tid < 0:
+            continue
+        row = (
+            db.execute(
+                text(
+                    "SELECT alias FROM concept_aliases WHERE external_tag_id = :tid LIMIT 1"
+                ),
+                {"tid": tid},
+            )
+            .fetchone()
+        )
+        if row and row[0]:
+            names.append(row[0])
+    return names
 
 
 def _stager_state_path() -> Path:
@@ -105,23 +132,49 @@ def _upsert_browsed_image(db: Session, item: dict[str, Any]) -> CivitaiSearchIma
         img.uuid = item.get("url")  # feed 'url' is the bare uuid/url-hash
     if img.blurhash is None or not img.blurhash:
         img.blurhash = item.get("hash")
+    if img.file_name is None or not img.file_name:
+        img.file_name = item.get("name")
+    # Artist identity lives in a nested user object in browse feeds
+    # (item["user"]["username"]); some captures also carry a legacy
+    # top-level username.
+    user_obj = item.get("user")
+    if img.artist_id is None or not img.artist_id:
+        img.artist_id = user_obj.get("id") if isinstance(user_obj, dict) else None
     if img.artist_name is None or not img.artist_name:
-        img.artist_name = item.get("username")
+        img.artist_name = (
+            user_obj.get("username")
+            if isinstance(user_obj, dict)
+            else item.get("username")
+        )
     stats = item.get("stats")
     if isinstance(stats, dict):
         if img.reactions is None:
             img.reactions = item.get("reactionCount")
         if img.likes is None:
             img.likes = stats.get("likeCountAllTime")
+    # Tags: browse feeds carry tagIds (numbers), tags resolves to -1/null.
+    # Resolve via local concept-aliases; store as plain name strings (the
+    # same shape the search-lab rate flow stores).
+    if not img.tags:
+        tag_ids = item.get("tagIds")
+        if isinstance(tag_ids, list) and tag_ids:
+            img.tags = _resolve_tag_names(db, tag_ids)
     db.flush()
     return img
 
 
-def stage_harvested_feeds(db: Session, *, limit_files: int = 200) -> dict[str, Any]:
+def stage_harvested_feeds(
+    db: Session, *, limit_files: int = 200, re_enrich: bool = False
+) -> dict[str, Any]:
     """Scan the archive for unstaged harvested feed captures and stage them.
 
     Returns counts: files scanned/staged, images upserted, links created,
     errors. Safe to run repeatedly; errors never abort the batch.
+
+    ``re_enrich=True`` reprocesses ALL archive files (clearing the staged-
+    files state) so improved field mappings can fill gaps on rows staged by
+    an older version — the upsert is fill-if-absent, so nothing already
+    populated gets clobbered.
     """
     from atelierai.civitai.response_archive import CivitaiResponseArchive
 
@@ -131,7 +184,7 @@ def stage_harvested_feeds(db: Session, *, limit_files: int = 200) -> dict[str, A
         return {"ok": True, "files_staged": 0, "images_upserted": 0, "links_created": 0, "errors": []}
 
     with _STAGE_LOCK:
-        staged_paths = _load_staged_paths()
+        staged_paths = set() if re_enrich else _load_staged_paths()
         files = sorted(feed_dir.rglob("harvested_*.json"))
 
         files_staged = 0

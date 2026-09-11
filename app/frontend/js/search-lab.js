@@ -263,8 +263,8 @@
     currentSearchId: null,     // DB id of the current search record
     imageLoadErrors: new Map(), // civitaiId → { attempts, permanent }
     artistAvatars: new Map(),   // artist key → inline data URI
-    artistAvatarRequests: new Map(), // civitai image id → metadata request Promise
-    artistAvatarMisses: new Set(),   // image ids with no available avatar
+    artistAvatarRequests: new Map(), // artist key → metadata request Promise
+    artistAvatarMisses: new Set(),   // artist keys with no available avatar
     dedupeHashes: new Set(),   // perceptual hashes seen so far (for visual-dup hiding)
     hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true, identical: true },
     // NSFW level facet pills.  These supplement the NSFW dropdown: the
@@ -419,14 +419,23 @@
   }
 
   function fetchInlineArtistAvatar(hit) {
-    if (!hit?.id || state.artistAvatarMisses.has(hit.id)) return;
+    if (!hit?.id) return;
     const artistKey = artistAvatarKey(hit);
-    if (artistKey && state.artistAvatars.has(artistKey)) return;
-    if (state.artistAvatarRequests.has(hit.id)) return;
+    // Dedupe by ARTIST, not image: the single-image endpoint makes 3 tRPC
+    // calls per request, and per-image dedup meant every image of the same
+    // uncached artist re-fetched everything (503 storms during review).
+    if (!artistKey || state.artistAvatarMisses.has(artistKey)) return;
+    if (state.artistAvatars.has(artistKey)) return;
+    if (state.artistAvatarRequests.has(artistKey)) return;
 
     const request = fetch(API_SINGLE_IMAGE(hit.id))
       .then(async (res) => {
-        if (!res.ok) return null;
+        if (!res.ok) {
+          // Record the failure per-artist so a 503-ing endpoint isn't
+          // retried for every image/rating of the same artist this session.
+          state.artistAvatarMisses.add(artistKey);
+          return null;
+        }
         const data = await res.json();
         mergeArtistAvatars(data.artist_avatars);
         const idx = state.hits.findIndex(candidate => candidate.id === hit.id);
@@ -444,7 +453,7 @@
         }
         const resolvedKey = artistAvatarKey(data.hit || hit);
         if (!resolvedKey || !state.artistAvatars.has(resolvedKey)) {
-          state.artistAvatarMisses.add(hit.id);
+          state.artistAvatarMisses.add(resolvedKey || artistKey);
           return null;
         }
         if (state.hits[state.selectedHitIndex]?.id === hit.id) {
@@ -452,9 +461,12 @@
         }
         return resolvedKey;
       })
-      .catch(() => null)
-      .finally(() => state.artistAvatarRequests.delete(hit.id));
-    state.artistAvatarRequests.set(hit.id, request);
+      .catch(() => {
+        state.artistAvatarMisses.add(artistKey);
+        return null;
+      })
+      .finally(() => state.artistAvatarRequests.delete(artistKey));
+    state.artistAvatarRequests.set(artistKey, request);
   }
 
   /* ── Initialise ── */
@@ -3614,9 +3626,16 @@
       // Display the CDN original directly (browser-side fetch — no server
       // round-trip, no queue contention, no 503 coupling). Preserve remains
       // available as an explicit archival action elsewhere in the UI.
+      // Verify-then-upgrade: only apply the tier once the image actually
+      // loads — deleted/rotated assets 404 at the CDN, and a blind src
+      // assignment wedged the viewer at a dead original while the working
+      // 450px thumbnail (rank 1) could never take over.
       const cdnOriginal = hit.mid_res_url || hit.url || '';
       if (cdnOriginal && !isVideoHit(hit)) {
-        _applySource('original', cdnOriginal, 2);
+        retryImageLoad(cdnOriginal, `full_${hit.id}`).then((ok) => {
+          if (!ok || loadGeneration !== _fullscreenLoadGeneration) return;
+          _applySource('original', cdnOriginal, 2);
+        });
       }
     }
 

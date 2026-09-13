@@ -19,6 +19,13 @@ SCREEN_DEPTH="${SCREEN_DEPTH:-24}"
 CDP_PORT="${CDP_PORT:-9222}"
 CDP_LOOPBACK_PORT="${CDP_LOOPBACK_PORT:-9221}"
 NOVNC_PORT="${NOVNC_PORT:-6080}"
+# VNC password for remote access. Generate the obfuscated password file
+# contents with:  x11vnc -storepasswd <password> <outfile>
+# then pass the file's contents via VNC_PASSWORD_DATA (or mount the file
+# and set VNC_PASSWORD_FILE). x11vnc only accepts an obfuscated-password
+# FILE, so when only the data is provided we write it to a runtime file.
+VNC_PASSWORD_FILE="${VNC_PASSWORD_FILE:-/run/vncpasswd}"
+VNC_PASSWORD_DATA="${VNC_PASSWORD_DATA:-}"
 CHROME_USER_DATA_DIR="${CHROME_USER_DATA_DIR:-/data/profile}"
 
 mkdir -p "$CHROME_USER_DATA_DIR" /captured
@@ -63,8 +70,19 @@ fi
 echo "Xvfb ready on :99 (${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH})"
 
 # -------------------------------------------------------------------- VNC --
-# Loopback-only VNC server on the internal display.
-x11vnc -display :99 -forever -shared -rfbport 5900 -nopw -quiet &
+# VNC server on the internal display.
+# When a password is configured, require it for every connection. Without
+# a password the server must stay loopback-only — the sidecar browser holds
+# authenticated CivitAI/Google sessions, so unauthenticated remote control
+# is not acceptable.
+VNC_AUTH_ARGS=(-nopw)
+if [ -n "$VNC_PASSWORD_DATA" ]; then
+    printf '%s' "$VNC_PASSWORD_DATA" > "$VNC_PASSWORD_FILE"
+    chmod 600 "$VNC_PASSWORD_FILE"
+    VNC_AUTH_ARGS=(-rfbauth "$VNC_PASSWORD_FILE")
+    echo "VNC auth enabled (password file $VNC_PASSWORD_FILE)"
+fi
+x11vnc -display :99 -forever -shared -rfbport 5900 -quiet "${VNC_AUTH_ARGS[@]}" &
 X11VNC_PID=$!
 
 # ------------------------------------------------------------------ noVNC --

@@ -62,8 +62,10 @@ docker logs -f chrome-sidecar
 # NOTE: after pulling this change, rebuild so the fixed entrypoint is baked in:
 #   docker compose --profile browser up -d --build chrome-sidecar
 
-# Open the browser UI (noVNC) in your host browser:
-#   http://localhost:6080/vnc.html
+# Open the browser UI (noVNC) from this machine OR the LAN:
+#   http://<host-ip>:6080/vnc.html
+# Optional transparent auth: append ?password=<pw> to the URL (noVNC
+# supports the query param) or just bookmark the full link.
 ```
 
 Then in AtelierAI (devcontainer or any backend run):
@@ -156,9 +158,22 @@ Live first-run: 3 archived feed pages → 300 images staged → 298 unrated,
 - **CDP port 9222 is full profile control** (cookies included). It is bound
   to the compose network only — never publish it with `ports:`, and never
   enable `--remote-debugging-address=0.0.0.0` on a host network.
-- noVNC on 6080 is published to `127.0.0.1` only. It currently has **no
-  password** — fine on a single-user dev box, but put it behind auth or an
-  SSH tunnel before any shared-host deployment.
+- noVNC on 6080 is published on **all interfaces** so the Bridge Lab's
+  noVNC link works from LAN browsers. It is unauthenticated by default
+  (trusted-network convenience) — the sidecar browser holds authenticated
+  CivitAI/Google sessions, so set a password on shared networks:
+
+  ```bash
+  # Generate the obfuscated password file contents:
+  docker compose --profile browser run --rm chrome-sidecar \
+      x11vnc -storepasswd <your-password> /dev/stdout   # copy output
+  # Put it in .env next to docker-compose.yml:
+  #   VNC_PASSWORD_DATA=<pasteed-file-contents>
+  docker compose --profile browser up -d chrome-sidecar
+  ```
+
+  With a password set, noVNC prompts on connect — or embed it in the URL
+  (`/vnc.html?password=<pw>`) for transparent one-click access.
 - The bridge module never reads or exports cookies — requests simply ride
   the browser's own jar.
 

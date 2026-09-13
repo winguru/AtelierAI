@@ -38,13 +38,22 @@ services:
     # running as PID 1" warning), disabling zombie reaping for the X/VNC/Chrome
     # process tree the entrypoint spawns.
     ports:
-      - "127.0.0.1:6080:6080"   # noVNC web UI (localhost-only, no auth — see docs)
+      # noVNC web UI, reachable from the LAN by default (the Bridge Lab's
+      # noVNC link uses location.hostname, so remote browsers need this).
+      # Optional auth: put the contents of an `x11vnc -storepasswd <pw>` file
+      # into VNC_PASSWORD_DATA (.env or shell env). Empty = no password
+      # (trusted-LAN convenience; set one on shared networks — the browser
+      # holds authenticated CivitAI/Google sessions).
+      - "6080:6080"
+      # Native VNC clients (optional): uncomment to expose raw RFB.
+      # - "5900:5900"
     environment:
       SCREEN_WIDTH: ${CHROME_SCREEN_WIDTH:-1440}
       SCREEN_HEIGHT: ${CHROME_SCREEN_HEIGHT:-900}
       # Bind CDP into the host loopback for devcontainer-less local dev.
       # In compose networks the backend reaches the sidecar by service name.
       CDP_PORT: 9222
+      VNC_PASSWORD_DATA: ${VNC_PASSWORD_DATA:-}
     volumes:
       - chrome-profile:/data/profile
     healthcheck:

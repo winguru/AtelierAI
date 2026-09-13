@@ -129,6 +129,7 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
 - `app/backend/routers/civitai/` — CivitAI-related API endpoints
 
 ## Gotchas
+- **Expired server token looks like a content filter**: CivitAI serves anonymous traffic an SFW-only view — `image.getInfinite?username=X` returns just the artist's PG images with NO cursor, indistinguishable from "artist has 21 images" unless you check `auth/status`. Symptom signature: small all-nsfwLevel-1 result set, `nextCursor: null`. Recovery: `POST /api/browser-bridge/refresh-session` pulls the live cookie from the sidecar browser (Playwright reads httpOnly cookies) into the API singleton + cache. REST v1 API needs a real API key — a session cookie gets 403, so it can't be used as a fallback probe.
 - Chrome CDP port must be available; if already in use, auth fails
 - CivitAI API rate limits apply — batch operations should include delays
 - Artist avatars: `image.civitai.com` 301-redirects newer avatars to

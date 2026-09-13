@@ -414,6 +414,76 @@ class CivitaiBrowserBridge:
                 "via": "browser-bridge",
             }
 
+    _COOKIE_NAMES = ("__Secure-civ-token", "__Secure-civitai-token")
+
+    async def _find_session_cookie(self) -> dict[str, Any] | None:
+        """Return the freshest civitai session cookie across sidecar contexts."""
+        from urllib.parse import urlparse
+
+        domain = urlparse(self._web_base_url()).hostname or "civitai.red"
+        best: dict[str, Any] | None = None
+        for ctx in self._browser.contexts:
+            try:
+                for cookie in await ctx.cookies(f"https://{domain}"):
+                    if cookie.get("name") not in self._COOKIE_NAMES:
+                        continue
+                    if not cookie.get("value"):
+                        continue
+                    if best is None or (cookie.get("expires") or 0) > (
+                        best.get("expires") or 0
+                    ):
+                        best = cookie
+            except Exception:  # noqa: BLE001, S112 — per-context
+                continue
+        return best
+
+    async def pull_session_cookie(self) -> dict[str, Any]:
+        """Pull the live CivitAI session cookie from the sidecar browser.
+
+        Reads the browser context's cookie jar (Playwright exposes httpOnly
+        cookies that ``document.cookie`` cannot see) for the configured base
+        domain, then pushes the freshest ``__Secure-civ-token`` (or legacy
+        names) into the CivitaiAPI singleton via ``update_session_cookie`` —
+        which also persists it to the session cache file.
+
+        Use case: the server-side token expired (auth/status → 401, API
+        degrades to anonymous → SFW-only results); the sidecar browser still
+        holds a valid logged-in session. This closes the loop without manual
+        DevTools cookie copying.
+
+        Returns a fail-open dict; ``updated`` is True when the singleton was
+        refreshed with a token that differs from the current one.
+        """
+        ok = await self._ensure_connected()
+        if not ok:
+            return {"ok": False, "bridge": "unavailable",
+                    "error": self._state.last_error}
+
+        if self._browser is None:
+            return {"ok": False, "bridge": "unavailable", "error": "no browser"}
+        try:
+            best = await self._find_session_cookie()
+        except Exception as exc:  # noqa: BLE001 — fail-open contract
+            return {"ok": False, "bridge": "cookie-read-failed",
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+        if not best:
+            return {"ok": True, "updated": False,
+                    "reason": "no civitai session cookie in sidecar browser"}
+
+        try:
+            from atelierai.civitai.civitai_api import CivitaiAPI
+
+            api = CivitaiAPI.get_instance()
+            new_token = best["value"]
+            if api.session_cookie == new_token:
+                return {"ok": True, "updated": False, "reason": "token unchanged"}
+            api.update_session_cookie(new_token)
+            return {"ok": True, "updated": True, "cookie_name": best.get("name")}
+        except Exception as exc:  # noqa: BLE001 — fail-open contract
+            return {"ok": False, "bridge": "cookie-apply-failed",
+                    "error": f"{type(exc).__name__}: {exc}"}
+
 
 # ── Singleton access ────────────────────────────────────────────────────────
 _BRIDGE_SINGLETON: CivitaiBrowserBridge | None = None

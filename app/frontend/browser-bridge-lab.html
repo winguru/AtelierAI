@@ -78,6 +78,7 @@
           <button class="btn primary" id="btn-connect">Connect</button>
           <button class="btn ghost" id="btn-disconnect">Disconnect</button>
           <button class="btn ghost" id="btn-refresh">Refresh</button>
+          <button class="btn primary" id="btn-refresh-session" title="Pull the live civitai session cookie from the sidecar browser into the server (fixes SFW-only results after token expiry)">↻ Refresh session</button>
           <a class="btn ghost" id="novnc-link" href="#" target="_blank" rel="noreferrer">Open noVNC ↗</a>
         </div>
       </section>
@@ -186,6 +187,11 @@
 
     $('btn-connect').onclick = async () => {
       renderStatus((await api('connect', { method: 'POST' })).status);
+    };
+    $('btn-refresh-session').onclick = async () => {
+      const out = await api('refresh-session', { method: 'POST' });
+      alert(JSON.stringify(out, null, 2));
+      await refreshStatus();
     };
     $('btn-disconnect').onclick = async () => {
       await api('disconnect', { method: 'POST' });

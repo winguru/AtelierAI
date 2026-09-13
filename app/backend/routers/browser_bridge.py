@@ -68,6 +68,33 @@ async def browser_bridge_navigate(req: NavigateRequest):
     return await bridge.navigate(req.url)
 
 
+@router.post("/refresh-session")
+async def browser_bridge_refresh_session():
+    """Pull the live civitai session cookie from the sidecar browser and
+    update the server-side CivitaiAPI singleton + session cache.
+
+    Recovers from server-token expiry without manual DevTools cookie
+    copying — the sidecar browser is the durable logged-in session.
+    """
+    bridge = get_browser_bridge()
+    result = await bridge.pull_session_cookie()
+    if result.get("updated"):
+        # Validate the refreshed token against CivitAI.
+        try:
+            from atelierai.civitai.civitai_api import CivitaiAPI
+            from atelierai.civitai.civitai_auth import _validate_token_with_civitai
+
+            is_valid, _definitive, message = _validate_token_with_civitai(
+                CivitaiAPI.get_instance().session_cookie
+            )
+            result["validated"] = is_valid
+            result["validation_message"] = message
+        except Exception as exc:  # noqa: BLE001 — validation is best-effort
+            result["validated"] = None
+            result["validation_message"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
 @router.post("/fetch")
 async def browser_bridge_fetch(req: FetchRequest):
     """Fetch a URL from inside the civitai page context."""

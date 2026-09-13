@@ -146,10 +146,17 @@ class CivitaiAPI:
     def get_instance(cls) -> "CivitaiAPI":
         """Get the singleton instance of CivitaiAPI.
 
+        Self-heals a partially-initialized singleton: calling
+        ``CivitaiAPI.__new__(CivitaiAPI)`` directly registers an uninitialized
+        instance (the custom ``__new__`` sets ``_initialized = False`` without
+        running ``__init__``), which poisoned later callers with AttributeError
+        ('no attribute default_params'). If the registered instance never
+        completed initialization, build a real one now.
+
         Returns:
             CivitaiAPI instance
         """
-        if cls._instance is None:
+        if cls._instance is None or not getattr(cls._instance, "_initialized", False):
             cls._instance = cls(auto_authenticate=True)
         return cls._instance
 
@@ -1768,7 +1775,8 @@ class CivitaiAPI:
 
     # ===== Helper Methods =====
 
-    def _deserialize_trpc_flat_array(self, response: Dict) -> Optional[Dict]:
+    @staticmethod
+    def _deserialize_trpc_flat_array(response: Dict) -> Optional[Dict]:
         """Deserialize CivitAI's column-oriented flat-array serialization format.
 
         As of mid-2026, CivitAI's ``image.getInfinite`` tRPC endpoint returns

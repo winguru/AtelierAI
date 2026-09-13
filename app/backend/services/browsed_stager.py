@@ -94,8 +94,11 @@ def _decode_feed_items(response: Any) -> list[dict[str, Any]]:
     from atelierai.civitai.civitai_api import CivitaiAPI
 
     try:
-        api = CivitaiAPI.__new__(CivitaiAPI)  # pure function, no auth state
-        parsed = api._deserialize_trpc_flat_array(response)
+        # Static pure function — no instance state needed. (A previous version
+        # called CivitaiAPI.__new__ directly, which registers the singleton
+        # WITHOUT running __init__ and poisoned get_instance() for the whole
+        # process — see the self-heal note in CivitaiAPI.get_instance.)
+        parsed = CivitaiAPI._deserialize_trpc_flat_array(response)
     except Exception:  # noqa: BLE001 — malformed capture, skip it
         return []
     if not isinstance(parsed, dict):

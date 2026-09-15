@@ -159,6 +159,17 @@ async def browser_bridge_harvest_install():
     return await get_page_harvester().install()
 
 
+@router.get("/harvest/status")
+async def browser_bridge_harvest_status():
+    """Per-page harvest wrapper state + queued capture counts + loop stats."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    harvester = get_page_harvester()
+    probe = await harvester.probe()
+    probe["auto"] = harvester.auto_status()
+    return probe
+
+
 @router.post("/harvest/drain")
 async def browser_bridge_harvest_drain(req: HarvestDrainRequest | None = None):
     """Drain captured tRPC responses and archive them."""

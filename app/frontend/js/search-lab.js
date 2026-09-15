@@ -265,6 +265,9 @@
     artistAvatars: new Map(),   // artist key → inline data URI
     artistAvatarRequests: new Map(), // artist key → metadata request Promise
     artistAvatarMisses: new Set(),   // artist keys with no available avatar
+    unratedLoadedTotal: null,        // total unrated when the view was loaded
+    unratedFirstLoaded: null,        // newest unrated hit id at load time
+    unratedPollTimer: null,          // setInterval handle for the banner poll
     dedupeHashes: new Set(),   // perceptual hashes seen so far (for visual-dup hiding)
     hideFilters: { seen: false, saved: false, keep: false, skip: false, discard: true, identical: true },
     // NSFW level facet pills.  These supplement the NSFW dropdown: the
@@ -1432,6 +1435,7 @@
       if (rating === state.reviewRating) return;
       state.reviewRating = rating;
       updateReviewRatingUI();
+      _syncUnratedPolling();
       if (state.mode === 'review') {
         state.offset = 0;
         state.hits = [];
@@ -2521,7 +2525,78 @@
     } else {
       setStatus('Enter a search query to get started.', '');
     }
+    _syncUnratedPolling();
     executeSearch();
+  }
+
+  /* ── Unrated refresh banner ─────────────────────────────
+   * While viewing the Unrated review tab, poll the unrated total. When it
+   * grows beyond what was loaded (new browsed images staged by the
+   * harvester auto-drain), show a banner offering a one-click refresh —
+   * instead of the user wondering whether capture is working.
+   */
+  function _syncUnratedPolling() {
+    const active = state.mode === 'review' && state.reviewRating === 'unrated';
+    if (active && !state.unratedPollTimer) {
+      state.unratedPollTimer = setInterval(_pollUnratedTotal, 20000);
+      _pollUnratedTotal();
+    } else if (!active && state.unratedPollTimer) {
+      clearInterval(state.unratedPollTimer);
+      state.unratedPollTimer = null;
+      _hideUnratedBanner();
+    }
+  }
+
+  async function _pollUnratedTotal() {
+    if (state.unratedLoadedTotal == null) return; // view not loaded yet
+    try {
+      const res = await fetch(`${API_RATED}?rating=unrated&limit=1`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const current = data.total ?? 0;
+      if (current > state.unratedLoadedTotal) {
+        _showUnratedBanner(current - state.unratedLoadedTotal);
+      } else {
+        _hideUnratedBanner();
+      }
+    } catch { /* poll is best-effort */ }
+  }
+
+  function _unratedBannerEl() {
+    let el = document.getElementById('unrated-refresh-banner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'unrated-refresh-banner';
+      el.style.cssText = 'display:none;position:sticky;top:0;z-index:60;' +
+        'background:var(--accent,#e06830);color:#fff;padding:8px 14px;' +
+        'border-radius:8px;margin:8px 0;align-items:center;justify-content:space-between;';
+      const btn = document.createElement('button');
+      btn.textContent = '↻ Show new images';
+      btn.style.cssText = 'padding:4px 12px;border:none;border-radius:6px;cursor:pointer;font-weight:600;';
+      btn.onclick = () => {
+        state.offset = 0;
+        executeSearch();
+        _hideUnratedBanner();
+      };
+      const label = document.createElement('span');
+      label.id = 'unrated-refresh-label';
+      el.append(label, btn);
+      const grid = document.getElementById('gallery-grid');
+      (grid ? grid.parentNode : document.body).insertBefore(el, grid);
+    }
+    return el;
+  }
+
+  function _showUnratedBanner(count) {
+    const el = _unratedBannerEl();
+    const label = el.querySelector('#unrated-refresh-label');
+    if (label) label.textContent = `🌱 ${count} new browsed image${count === 1 ? '' : 's'} staged since this view loaded.`;
+    el.style.display = 'flex';
+  }
+
+  function _hideUnratedBanner() {
+    const el = document.getElementById('unrated-refresh-banner');
+    if (el) el.style.display = 'none';
   }
 
   /* ── Review mode search ── */
@@ -2555,6 +2630,13 @@
         throw new Error(errData?.detail || `HTTP ${res.status}`);
       }
       const data = await res.json();
+
+      // Track the unrated total so the refresh banner knows when new
+      // browsed images have been staged since this view was loaded.
+      if (state.reviewRating === 'unrated') {
+        state.unratedLoadedTotal = data.total ?? 0;
+        state.unratedFirstLoaded = (data.hits || [])[0]?.id ?? null;
+      }
 
       // Merge ratings from the backend response into our local map so
       // badges render correctly on first paint.

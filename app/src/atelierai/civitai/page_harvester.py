@@ -216,6 +216,54 @@ class CivitaiPageHarvester:
             self._archive = CivitaiResponseArchive()
         return self._archive
 
+    # JS probe: does the page have the harvest wrapper, and how many
+    # captures are queued? Cheap to evaluate on any civitai page.
+    _PROBE_JS = """
+    () => {
+        const h = window.__atelierai_harvest;
+        return {
+            wrapped: !!h,
+            queued: h && Array.isArray(h.queue) ? h.queue.length : 0,
+        };
+    }
+    """
+
+    async def probe(self) -> dict[str, Any]:
+        """Report harvest-wrapper state + queued counts per civitai page."""
+        bridge = self._get_bridge()
+        ok = await bridge._ensure_connected()
+        if not ok:
+            return {"ok": False, "bridge": "unavailable", "error": bridge._state.last_error}
+
+        pages: list[dict[str, Any]] = []
+        try:
+            for ctx in bridge._browser.contexts:
+                for page in ctx.pages:
+                    url = page.url or ""
+                    if "civitai" not in url:
+                        continue
+                    try:
+                        result = await page.evaluate(self._PROBE_JS)
+                        pages.append({
+                            "url": url.split("?")[0],
+                            "wrapped": bool(result.get("wrapped")),
+                            "queued": int(result.get("queued") or 0),
+                        })
+                    except Exception as exc:  # noqa: BLE001 — per-page
+                        pages.append({
+                            "url": url.split("?")[0],
+                            "wrapped": False,
+                            "queued": 0,
+                            "error": f"{type(exc).__name__}",
+                        })
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            return {"ok": False, "bridge": "probe-failed", "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ok": True,
+            "pages": pages,
+            "all_wrapped": bool(pages) and all(p.get("wrapped") for p in pages),
+        }
+
     async def install(self) -> dict[str, Any]:
         """Install (or confirm) the harvester on all civitai pages.
 

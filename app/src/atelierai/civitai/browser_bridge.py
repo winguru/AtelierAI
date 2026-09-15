@@ -177,7 +177,14 @@ class CivitaiBrowserBridge:
     # ------------------------------------------------------------------
 
     async def _ensure_connected(self) -> bool:
-        """Connect to the sidecar if not already. Returns True when usable."""
+        """Connect to the sidecar if not already. Returns True when usable.
+
+        Self-heals dead transports: when the sidecar restarts, the cached
+        Playwright connection's unix-socket transport closes and every call
+        raises ``RuntimeError: ... WriteUnixTransport ... the handler is
+        closed`` (``is_connected()`` can lag behind). On any error we tear
+        down the cached connection + playwright runtime and reconnect fresh.
+        """
         if self._browser is not None and self._browser.is_connected():
             return True
 
@@ -185,6 +192,13 @@ class CivitaiBrowserBridge:
             # Double-check after acquiring the lock.
             if self._browser is not None and self._browser.is_connected():
                 return True
+
+            # A non-None but disconnected browser means the transport died
+            # (sidecar restart). Reset fully so we rebuild both the playwright
+            # runtime and the CDP connection — reusing the dead runtime keeps
+            # hitting 'handler is closed'.
+            if self._browser is not None or self._playwright is not None:
+                await self._reset_connection_locked()
 
             cdp_url = self._resolve_cdp_url()
             connect_url = self._connectable_cdp_url()
@@ -206,7 +220,25 @@ class CivitaiBrowserBridge:
             except Exception as exc:  # noqa: BLE001 — fail-open contract
                 self._state.connected = False
                 self._state.last_error = f"{type(exc).__name__}: {exc}"
+                # Failed connect with a half-started runtime — reset so the
+                # next attempt starts clean instead of stacking dead state.
+                await self._reset_connection_locked()
                 return False
+
+    async def _reset_connection_locked(self) -> None:
+        """Tear down browser + playwright runtime (caller holds the lock)."""
+        if self._browser is not None:
+            try:
+                await self._browser.close()
+            except Exception:  # noqa: BLE001, S110 — best-effort teardown
+                pass
+            self._browser = None
+        if self._playwright is not None:
+            try:
+                await self._playwright.stop()
+            except Exception:  # noqa: BLE001, S110 — best-effort teardown
+                pass
+            self._playwright = None
 
     async def disconnect(self) -> None:
         """Close the CDP connection (the sidecar browser keeps running)."""

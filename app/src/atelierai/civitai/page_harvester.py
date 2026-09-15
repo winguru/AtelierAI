@@ -45,6 +45,33 @@ _INSTALL_JS = """
     const cap = (s) => (typeof s === 'string' && s.length > MAX_BODY)
         ? null : s;
 
+    // ── Post-traffic drain beacon ─────────────────────────────
+    // After API traffic settles (DRAIN_DEBOUNCE_MS of quiet), POST the
+    // queued captures straight to the backend — no 30s tick wait, and the
+    // send happens while the page is still alive (before tab close).
+    // Failures are silent: the poll drain remains the safety net.
+    const DRAIN_DEBOUNCE_MS = 2000;
+    const BEACON_URL = '__BEACON_ORIGIN__/api/browser-bridge/harvest/beacon';
+    let drainTimer = null;
+    const notifyBackend = () => {
+        const batch = window.__atelierai_harvest.queue.splice(0, window.__atelierai_harvest.queue.length);
+        if (!batch.length) return;
+        fetch(BEACON_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ page_url: location.href, records: batch }),
+            keepalive: true,  // survives tab close in-flight
+        }).catch(() => {
+            // Beacon failed (backend restarting etc.) — requeue for the poll drain.
+            window.__atelierai_harvest.queue.push(...batch);
+        });
+    };
+    const scheduleDrain = () => {
+        if (drainTimer) clearTimeout(drainTimer);
+        drainTimer = setTimeout(notifyBackend, DRAIN_DEBOUNCE_MS);
+    };
+    window.__atelierai_harvest.scheduleDrain = scheduleDrain;
+
     // Only capture the main API hosts — civitai.red / civitai.com — NOT
     // subdomains like advertising.civitai.com (ad beacons) or
     // image.civitai.com (CDN; binaries, not tRPC).
@@ -89,6 +116,7 @@ _INSTALL_JS = """
                     elapsedMs: Math.round(performance.now() - started),
                     source: 'fetch',
                 });
+                scheduleDrain();
             }
         }
         return resp;
@@ -120,6 +148,7 @@ _INSTALL_JS = """
                     elapsedMs: Math.round(performance.now() - started),
                     source: 'xhr',
                 });
+                scheduleDrain();
             } catch (e) {}
         });
         return OrigXHRSend.apply(this, args);
@@ -136,6 +165,22 @@ _DRAIN_JS = """
     return out;
 })();
 """
+
+
+def _beacon_origin() -> str:
+    """Origin for the in-page drain beacon (config-overridable)."""
+    try:
+        import atelierai.config as app_config
+
+        origin = getattr(app_config, "BROWSER_BRIDGE_BEACON_ORIGIN", "")
+        return origin.rstrip("/") if origin else "http://localhost:8000"
+    except Exception:  # noqa: BLE001
+        return "http://localhost:8000"
+
+
+def _install_js() -> str:
+    """Wrapper JS with the beacon origin templated in."""
+    return _INSTALL_JS.replace("__BEACON_ORIGIN__", _beacon_origin())
 
 
 def _image_id_from_url(url: str) -> int | None:
@@ -260,7 +305,7 @@ class CivitaiPageHarvester:
         if id(page) in self._init_scripted_pages:
             return True
         try:
-            await page.add_init_script(_INSTALL_JS)
+            await page.add_init_script(_install_js())
             self._init_scripted_pages.add(id(page))
             return True
         except Exception:  # noqa: BLE001 — page may be closing
@@ -269,7 +314,7 @@ class CivitaiPageHarvester:
     async def _wrap_page_now(self, page: Any) -> bool:
         """Install the wrapper on one page immediately (fail-open)."""
         try:
-            await page.evaluate(_INSTALL_JS)
+            await page.evaluate(_install_js())
             self._installed_pages.add(id(page))
             return True
         except Exception:  # noqa: BLE001 — page may not be ready yet
@@ -456,7 +501,7 @@ class CivitaiPageHarvester:
         try:
             for ctx in bridge._browser.contexts:
                 try:
-                    await ctx.add_init_script(_INSTALL_JS)
+                    await ctx.add_init_script(_install_js())
                 except Exception:  # noqa: BLE001, S110 — per-context best-effort
                     pass
                 for page in ctx.pages:
@@ -473,7 +518,7 @@ class CivitaiPageHarvester:
                             True,
                         )
                         # Evaluate the installer directly for immediate effect.
-                        await page.evaluate(_INSTALL_JS)
+                        await page.evaluate(_install_js())
                         installed.append(url)
                         self._installed_pages.add(id(page))
                     except Exception as exc:  # noqa: BLE001 — per-page
@@ -529,33 +574,7 @@ class CivitaiPageHarvester:
         if browsed_image_ids:
             url_staged = await self._stage_browsed_image_ids(browsed_image_ids)
 
-        archived = 0
-        archive_errors: list[str] = []
-        if archive and records:
-            arch = self._get_archive()
-            for rec in records:
-                try:
-                    _input_repr, parsed_input = _parse_superjson_envelope(rec.get("url"))
-                    endpoint = _endpoint_from_url(rec.get("url", ""))
-                    method = rec.get("method") or "GET"
-                    body = rec.get("bodyParsed")
-                    if body is None:
-                        body = rec.get("bodyText")
-                    arch.record(
-                        kind="harvested",
-                        endpoint=endpoint,
-                        request=parsed_input if parsed_input is not None else {"url": rec.get("url")},
-                        response=body,
-                        method=method,
-                        url=rec.get("url"),
-                        status_code=rec.get("status"),
-                        elapsed_seconds=(rec.get("elapsedMs") or 0) / 1000.0,
-                        error=rec.get("error"),
-                    )
-                    archived += 1
-                except Exception as exc:  # noqa: BLE001 — per-record
-                    archive_errors.append(f"{type(exc).__name__}: {exc}")
-
+        archived, archive_errors = self._archive_records(records, archive=archive)
         return {
             "ok": True,
             "drained": len(records),
@@ -646,6 +665,38 @@ class CivitaiPageHarvester:
                 return stage_harvested_feeds(db)
         except Exception as exc:  # noqa: BLE001 — staging is best-effort
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def _archive_records(
+        self, records: list[dict[str, Any]], *, archive: bool = True
+    ) -> tuple[int, list[str]]:
+        """Write drained records to the response archive. Returns (count, errors)."""
+        archived = 0
+        archive_errors: list[str] = []
+        if archive and records:
+            arch = self._get_archive()
+            for rec in records:
+                try:
+                    _repr, parsed_input = _parse_superjson_envelope(rec.get("url"))
+                    endpoint = _endpoint_from_url(rec.get("url", ""))
+                    method = rec.get("method") or "GET"
+                    body = rec.get("bodyParsed")
+                    if body is None:
+                        body = rec.get("bodyText")
+                    arch.record(
+                        kind="harvested",
+                        endpoint=endpoint,
+                        request=parsed_input if parsed_input is not None else {"url": rec.get("url")},
+                        response=body,
+                        method=method,
+                        url=rec.get("url"),
+                        status_code=rec.get("status"),
+                        elapsed_seconds=(rec.get("elapsedMs") or 0) / 1000.0,
+                        error=rec.get("error"),
+                    )
+                    archived += 1
+                except Exception as exc:  # noqa: BLE001 — per-record
+                    archive_errors.append(f"{type(exc).__name__}: {exc}")
+        return archived, archive_errors
 
     async def _stage_browsed_image_ids(self, image_ids: set[int]) -> int:
         """Stage bare image ids (from /images/{id} tab URLs) into review.

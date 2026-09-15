@@ -185,6 +185,13 @@ CIVITAI_CHROME_PROFILE_DIRECTORY = os.getenv(
 # bridge-unavailable, callers fall back to the direct lane) so the sidecar
 # being down never blocks syncs.
 BROWSER_BRIDGE_CDP_URL = os.getenv("BROWSER_BRIDGE_CDP_URL", "").strip()
+# Origin the wrapped civitai pages POST capture beacons to (a relative URL
+# inside the civitai page would hit civitai, not us). Default covers
+# compose/devcontainer/host-browser access patterns; override when the
+# sidecar browser resolves the backend differently.
+BROWSER_BRIDGE_BEACON_ORIGIN = os.getenv(
+    "BROWSER_BRIDGE_BEACON_ORIGIN", "http://localhost:8000"
+).strip()
 # Default points at the compose service name; override for host-local Chrome:
 #   BROWSER_BRIDGE_CDP_URL=http://127.0.0.1:9222
 BROWSER_BRIDGE_DEFAULT_CDP_URL = "http://chrome-sidecar:9222"

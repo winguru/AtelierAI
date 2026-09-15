@@ -15955,7 +15955,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "HEAD", "OPTIONS"],
+    # POST is needed by the harvester beacon: wrapped civitai pages POST
+    # captured tRPC records cross-origin to /api/browser-bridge/harvest/beacon
+    # after traffic settles (2s debounce). No credentials are ever sent.
+    allow_methods=["GET", "HEAD", "OPTIONS", "POST"],
     allow_headers=["*"],
 )
 

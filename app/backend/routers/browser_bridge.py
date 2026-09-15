@@ -168,6 +168,50 @@ async def browser_bridge_harvest_watch():
     return await get_page_harvester().watch()
 
 
+class HarvestBeaconRequest(BaseModel):
+    """In-page drain beacon payload (POSTed by the wrapper JS itself).
+
+    Fires ~2s after API traffic settles on a wrapped page — proactive
+    draining without waiting for the 30s poll tick, and while the page is
+    still alive (pre-tab-close). ``page_url`` enables image-detail URL
+    staging for RSC pages that emit no tRPC.
+    """
+
+    page_url: str = ""
+    records: list[dict[str, Any]] = []
+
+
+@router.post("/harvest/beacon")
+async def browser_bridge_harvest_beacon(req: HarvestBeaconRequest):
+    """Receive proactive capture batches from wrapped pages (CORS-enabled)."""
+    from atelierai.civitai.page_harvester import (
+        _image_id_from_url,
+        get_page_harvester,
+    )
+
+    harvester = get_page_harvester()
+    harvester._ensure_auto_loop()
+    records = req.records or []
+    archived, archive_errors = harvester._archive_records(records, archive=True)
+
+    # Image-detail pages: stage from URL (no tRPC records exist for them).
+    url_staged = 0
+    img_id = _image_id_from_url(req.page_url or "")
+    if img_id is not None:
+        url_staged = await harvester._stage_browsed_image_ids({img_id})
+
+    # Stage any feed captures included in this batch immediately too.
+    stage = await harvester._stage_new_captures()
+    return {
+        "ok": True,
+        "received": len(records),
+        "archived": archived,
+        "url_staged": url_staged,
+        "stage": stage if isinstance(stage, dict) else None,
+        "archive_errors": archive_errors,
+    }
+
+
 @router.get("/harvest/status")
 async def browser_bridge_harvest_status():
     """Per-page harvest wrapper state + queued capture counts + loop stats."""

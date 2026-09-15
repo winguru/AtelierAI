@@ -138,6 +138,14 @@ _DRAIN_JS = """
 """
 
 
+def _image_id_from_url(url: str) -> int | None:
+    """Extract the image id from a civitai /images/{id} tab URL."""
+    import re
+
+    m = re.search(r"civitai\.[a-z]+/images/(\d+)", url)
+    return int(m.group(1)) if m else None
+
+
 def _endpoint_from_url(url: str) -> str:
     """Extract a stable endpoint slug from a civitai API URL.
 
@@ -493,12 +501,19 @@ class CivitaiPageHarvester:
             return {"ok": False, "bridge": "unavailable", "error": bridge._state.last_error}
 
         records: list[dict[str, Any]] = []
+        browsed_image_ids: set[int] = set()
         try:
             for ctx in bridge._browser.contexts:
                 for page in ctx.pages:
                     url = page.url or ""
                     if "civitai" not in url:
                         continue
+                    # Image-detail tabs (/images/{id}) hydrate via RSC data,
+                    # NOT tRPC — nothing to harvest from them. Stage directly
+                    # from the URL so browsed images enter Unrated review.
+                    img_id = _image_id_from_url(url)
+                    if img_id is not None:
+                        browsed_image_ids.add(img_id)
                     try:
                         drained = await page.evaluate(_DRAIN_JS)
                         if drained:
@@ -507,6 +522,12 @@ class CivitaiPageHarvester:
                         continue
         except Exception as exc:  # noqa: BLE001 — fail-open contract
             return {"ok": False, "bridge": "drain-failed", "error": f"{type(exc).__name__}: {exc}"}
+
+        # Stage image-detail URLs visited since the last drain (no tRPC data
+        # exists for them; the URL id is the only signal).
+        url_staged = 0
+        if browsed_image_ids:
+            url_staged = await self._stage_browsed_image_ids(browsed_image_ids)
 
         archived = 0
         archive_errors: list[str] = []
@@ -539,6 +560,7 @@ class CivitaiPageHarvester:
             "ok": True,
             "drained": len(records),
             "archived": archived,
+            "url_staged": url_staged,
             "archive_errors": archive_errors,
             "records": records,
         }
@@ -624,6 +646,66 @@ class CivitaiPageHarvester:
                 return stage_harvested_feeds(db)
         except Exception as exc:  # noqa: BLE001 — staging is best-effort
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def _stage_browsed_image_ids(self, image_ids: set[int]) -> int:
+        """Stage bare image ids (from /images/{id} tab URLs) into review.
+
+        Image-detail tabs hydrate via RSC data — the tRPC harvester sees
+        nothing from them — so the only capture signal is the URL itself.
+        Upserts a minimal CivitaiSearchImage row + unrated link when the
+        image is unknown; known images keep their existing state. The
+        single-image metadata endpoint (used by the search lab's 'r'
+        reload) backfills tags/artist asynchronously on first review.
+        """
+        if not image_ids:
+            return 0
+
+        import asyncio
+
+        def _work() -> int:
+            try:
+                from database import SessionLocal
+                from models import CivitaiSearchImage, CivitaiSearchImageLink
+
+                staged = 0
+                with SessionLocal() as db:
+                    for image_id in image_ids:
+                        try:
+                            img = (
+                                db.query(CivitaiSearchImage)
+                                .filter(
+                                    CivitaiSearchImage.civitai_image_id == image_id
+                                )
+                                .first()
+                            )
+                            if img is None:
+                                img = CivitaiSearchImage(civitai_image_id=image_id)
+                                db.add(img)
+                                db.flush()
+                            existing = (
+                                db.query(CivitaiSearchImageLink)
+                                .filter(CivitaiSearchImageLink.image_id == img.id)
+                                .first()
+                            )
+                            if existing is None:
+                                db.add(
+                                    CivitaiSearchImageLink(
+                                        image_id=img.id,
+                                        search_id=None,
+                                        rating=None,
+                                        is_excluded=False,
+                                    )
+                                )
+                                staged += 1
+                        except Exception:  # noqa: BLE001, S112 — per-id
+                            continue
+                    db.commit()
+                return staged
+            except Exception:  # noqa: BLE001 — staging is best-effort
+                return 0
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _work)
 
     async def _auto_loop(self) -> None:
         """Periodically install (idempotent) + drain while connected.

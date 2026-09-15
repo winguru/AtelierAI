@@ -657,14 +657,60 @@ class CivitaiPageHarvester:
 
     async def _stage_new_captures(self) -> dict[str, Any] | None:
         """Run the browsed stager; return counts or None when unavailable."""
+        result: dict[str, Any] | None = None
         try:
             from database import SessionLocal
             from services.browsed_stager import stage_harvested_feeds
 
             with SessionLocal() as db:
-                return stage_harvested_feeds(db)
+                result = stage_harvested_feeds(db)
         except Exception as exc:  # noqa: BLE001 — staging is best-effort
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        # Self-heal pass: backfill a bounded number of stuck bare rows
+        # (URL-staged images whose tabs closed before metadata arrived).
+        # Unrated-view tiles without a uuid render as forever-loading.
+        try:
+            backfilled = await self._backfill_bare_rows(limit=3)
+            if isinstance(result, dict):
+                result["bare_rows_backfilled"] = backfilled
+        except Exception:  # noqa: BLE001, S110 — best-effort
+            pass
+        return result
+
+    async def _backfill_bare_rows(self, limit: int = 3) -> int:
+        """Metadata-backfill up to ``limit`` stuck bare unrated rows per tick.
+
+        Bounded so the shared tRPC budget (25 RPM) stays mostly available
+        for real browsing; 3/tick clears the current backlog in ~5 ticks.
+        """
+        import asyncio
+
+        def _ids() -> set[int]:
+            try:
+                from database import SessionLocal
+                from sqlalchemy import text
+
+                with SessionLocal() as db:
+                    rows = db.execute(
+                        text(
+                            "SELECT i.civitai_image_id FROM civitai_search_images i "
+                            "JOIN civitai_search_image_links l ON l.image_id = i.id "
+                            "WHERE (i.uuid IS NULL OR i.uuid = '') "
+                            "AND l.rating IS NULL AND l.search_id IS NULL "
+                            "LIMIT :n"
+                        ),
+                        {"n": limit},
+                    ).fetchall()
+                    return {r[0] for r in rows}
+            except Exception:  # noqa: BLE001 — best-effort
+                return set()
+
+        ids = await asyncio.get_running_loop().run_in_executor(None, _ids)
+        if not ids:
+            return 0
+        await self._stage_browsed_image_ids(ids)  # backfills metadata
+        return len(ids)
 
     def _archive_records(
         self, records: list[dict[str, Any]], *, archive: bool = True
@@ -703,10 +749,14 @@ class CivitaiPageHarvester:
 
         Image-detail tabs hydrate via RSC data — the tRPC harvester sees
         nothing from them — so the only capture signal is the URL itself.
-        Upserts a minimal CivitaiSearchImage row + unrated link when the
-        image is unknown; known images keep their existing state. The
-        single-image metadata endpoint (used by the search lab's 'r'
-        reload) backfills tags/artist asynchronously on first review.
+        Creates the row + unrated link, then BACKFILLS metadata via one
+        ``image.get`` tRPC call per image (uuid→thumbnails, blurhash,
+        artist, dimensions, postId) — bare rows render as forever-loading
+        tiles because a missing uuid means no CDN thumbnail URL exists.
+
+        Rows already carrying a uuid are skipped (previously staged /
+        rated); fetch failures leave the bare row for the search lab's
+        lazy single-image reload to fill later.
         """
         if not image_ids:
             return 0
@@ -718,6 +768,9 @@ class CivitaiPageHarvester:
                 from database import SessionLocal
                 from models import CivitaiSearchImage, CivitaiSearchImageLink
 
+                from atelierai.civitai.civitai_api import CivitaiAPI
+
+                api = CivitaiAPI.get_instance()
                 staged = 0
                 with SessionLocal() as db:
                     for image_id in image_ids:
@@ -748,6 +801,22 @@ class CivitaiPageHarvester:
                                     )
                                 )
                                 staged += 1
+                            # Metadata backfill: bare rows (no uuid) fetch one
+                            # image.get so tiles have thumbnails + identity.
+                            if not img.uuid:
+                                info = api.fetch_basic_info(image_id) or {}
+                                if isinstance(info, dict) and info.get("url"):
+                                    user = info.get("user") or {}
+                                    img.uuid = info.get("url")
+                                    img.blurhash = img.blurhash or info.get("hash")
+                                    img.post_id = img.post_id or info.get("postId")
+                                    img.file_name = img.file_name or info.get("name")
+                                    img.artist_id = (
+                                        img.artist_id or user.get("id")
+                                    )
+                                    img.artist_name = (
+                                        img.artist_name or user.get("username")
+                                    )
                         except Exception:  # noqa: BLE001, S112 — per-id
                             continue
                     db.commit()

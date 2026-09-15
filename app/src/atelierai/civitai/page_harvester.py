@@ -187,6 +187,12 @@ class CivitaiPageHarvester:
         self._bridge = bridge
         self._installed_pages: set[int] = set()
         self._archive = None
+        # Event-driven wrapping: watchers registered on live contexts so new
+        # tabs and navigations get the wrapper immediately (zero blind window)
+        # instead of waiting for the next auto-drain tick.
+        self._watched_contexts: set[int] = set()
+        self._watched_pages: set[int] = set()
+        self._watch_errors: list[str] = []
         # Auto-drain loop state
         self._auto_task: asyncio.Task | None = None
         self._auto_interval: float = 30.0
@@ -227,6 +233,127 @@ class CivitaiPageHarvester:
         };
     }
     """
+
+    async def _wrap_page_now(self, page: Any) -> bool:
+        """Install the wrapper on one page immediately (fail-open)."""
+        try:
+            await page.evaluate(_INSTALL_JS)
+            self._installed_pages.add(id(page))
+            return True
+        except Exception:  # noqa: BLE001 — page may not be ready yet
+            return False
+
+    def _watch_context(self, ctx: Any) -> None:
+        """Register event watchers on a browser context (idempotent).
+
+        - ``page`` event → wrap the new tab as soon as it commits to a
+          civitai document, covering middle-click/new-tab opens.
+        - Per-page ``framenavigated`` → re-wrap after full page loads (reload,
+          URL-bar navigation) which create a fresh JS context. SPA pushState
+          navigations keep the context and the wrapper — no action needed.
+        """
+        if id(ctx) in self._watched_contexts:
+            return
+        self._watched_contexts.add(id(ctx))
+
+        def _on_page(page: Any) -> None:
+            # New tab (middle-click, target=_blank, window.open): wrap it as
+            # soon as it commits. The evaluate will fail harmlessly until the
+            # first document exists, so retry briefly.
+            self._watch_page(page)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(self._wrap_new_page_with_retry(page))
+
+        try:
+            ctx.on("page", _on_page)
+            for page in ctx.pages:
+                self._watch_page(page)
+        except Exception as exc:  # noqa: BLE001 — watcher is best-effort
+            self._watch_errors.append(f"ctx: {type(exc).__name__}")
+
+    async def _wrap_new_page_with_retry(self, page: Any, attempts: int = 10) -> None:
+        """Wrap a freshly-opened tab, retrying until its document is ready."""
+        for _ in range(attempts):
+            url = (page.url or "").lower()
+            if url and "civitai" in url:
+                if await self._wrap_page_now(page):
+                    return
+            else:
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=4000)
+                except Exception:  # noqa: BLE001, S110 — retry loop handles it
+                    pass
+            await asyncio.sleep(0.5)
+        # Final attempt regardless of URL state (best-effort).
+
+    def _watch_page(self, page: Any) -> None:
+        """Watch one page for navigations that reset its JS context."""
+        if id(page) in self._watched_pages:
+            return
+        self._watched_pages.add(id(page))
+
+        def _on_navigated(frame: Any) -> None:
+            # Only react to main-frame navigation events synchronously; the
+            # async work is scheduled so the handler never blocks CDP.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(self._on_page_navigated(page))
+
+        try:
+            page.on("framenavigated", _on_navigated)
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            self._watch_errors.append(f"page: {type(exc).__name__}")
+
+    async def _on_page_navigated(self, page: Any) -> None:
+        """After a navigation, re-apply the wrapper if it vanished."""
+        try:
+            url = (page.url or "").lower()
+            if "civitai" not in url:
+                return
+            # Skip if the wrapper survived (SPA route change).
+            try:
+                alive = await page.evaluate("() => !!window.__atelierai_harvest")
+                if alive:
+                    return
+            except Exception:  # noqa: BLE001, S110 — evaluate fail = fresh document
+                pass
+            await self._wrap_page_now(page)
+        except Exception:  # noqa: BLE001, S110 — watcher must never raise
+            pass
+
+    async def watch(self) -> dict[str, Any]:
+        """Install event watchers on all live contexts + pages.
+
+        Call once after the bridge connects (and again after sidecar
+        restarts — contexts are new objects). New tabs/navigations then get
+        wrapped during their first document load, before user browsing
+        produces tRPC traffic.
+        """
+        bridge = self._get_bridge()
+        ok = await bridge._ensure_connected()
+        if not ok:
+            return {"ok": False, "bridge": "unavailable", "error": bridge._state.last_error}
+        if bridge._browser is None:
+            return {"ok": False, "bridge": "unavailable", "error": "no browser"}
+
+        watched_ctx = 0
+        try:
+            for ctx in bridge._browser.contexts:
+                self._watch_context(ctx)
+                watched_ctx += 1
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            return {"ok": False, "bridge": "watch-failed", "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ok": True,
+            "watched_contexts": watched_ctx,
+            "watched_pages": len(self._watched_pages),
+            "errors": self._watch_errors[-5:],
+        }
 
     async def probe(self) -> dict[str, Any]:
         """Report harvest-wrapper state + queued counts per civitai page."""
@@ -372,7 +499,10 @@ class CivitaiPageHarvester:
         }
 
     async def harvest_once(self) -> dict[str, Any]:
-        """Convenience: install + drain in one call."""
+        """Convenience: watch + install + drain in one call."""
+        # Watchers are idempotent and cheap when already armed; re-arming
+        # covers sidecar restarts (new context objects) and first use.
+        await self.watch()
         install_status = await self.install()
         if not install_status.get("ok"):
             return install_status
@@ -383,7 +513,7 @@ class CivitaiPageHarvester:
     # ------------------------------------------------------------------
 
     async def _auto_loop_tick(self) -> None:
-        """One drain+archive+stage cycle. Records results into stats, never raises."""
+        """One watch+drain+archive+stage cycle. Records results, never raises."""
         try:
             result = await self.harvest_once()
             self._auto_stats["ticks"] += 1

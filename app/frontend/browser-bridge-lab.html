@@ -125,6 +125,7 @@
           <button class="btn primary" id="btn-harvest-install">Install wrapper</button>
           <button class="btn primary" id="btn-harvest-drain">Drain + archive</button>
           <button class="btn ghost" id="btn-harvest-once">Install &amp; drain</button>
+          <button class="btn ghost" id="btn-harvest-watch" title="Arm event watchers so new tabs and page loads are wrapped instantly — no waiting for the next drain tick">👁 Watch tabs</button>
           <button class="btn ghost" id="btn-harvest-auto-start">Auto-drain on</button>
           <button class="btn ghost" id="btn-harvest-auto-stop">Auto-drain off</button>
         </div>
@@ -324,6 +325,12 @@
 
     $('btn-harvest-auto-stop').onclick = async () => {
       await api('harvest/auto/stop', { method: 'POST' });
+      await refreshAuto();
+    };
+
+    $('btn-harvest-watch').onclick = async () => {
+      const out = await api('harvest/watch', { method: 'POST' });
+      alert(JSON.stringify(out, null, 2));
       await refreshAuto();
     };
 

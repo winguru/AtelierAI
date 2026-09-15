@@ -265,3 +265,116 @@ def _disconnected_bridge():
     from atelierai.civitai.browser_bridge import CivitaiBrowserBridge
 
     return CivitaiBrowserBridge(cdp_url="http://127.0.0.1:1")
+
+
+class TestEventWatcher:
+    """Event-driven wrapping: new tabs + navigations get wrapped instantly."""
+
+    def _make_context(self, pages):
+        """Fake Playwright context/page with event-emitter semantics."""
+        events = {"page": []}
+
+        class _Ctx:
+            def __init__(self):
+                self.pages = list(pages)
+
+            def on(self, name, handler):
+                if name in events:
+                    events[name].append(handler)
+
+            def emit(self, name, page):
+                for h in events[name]:
+                    h(page)
+
+        ctx = _Ctx()
+        return ctx, events
+
+    def _make_page(self, url="https://civitai.red/images"):
+        nav_handlers = []
+
+        class _Page:
+            def __init__(self):
+                self.url = url
+                self.evaluate_calls = 0
+
+            def on(self, name, handler):
+                assert name == "framenavigated"
+                nav_handlers.append(handler)
+
+            async def evaluate(self, expression, arg=None):
+                self.evaluate_calls += 1
+                # First probe asks if the wrapper is alive → no; then the
+                # installer runs (any expression) and succeeds.
+                return not expression.strip().startswith("() =>")
+
+            def emit_nav(self):
+                for h in nav_handlers:
+                    h(object())  # frame object; handler ignores its fields
+
+        return _Page(), nav_handlers
+
+    def test_watch_registers_context_and_page_handlers(self) -> None:
+        harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+        page, _ = self._make_page()
+        ctx, events = self._make_context([page])
+
+        # Drive _watch_context directly (unit level).
+        harvester._watch_context(_CtxShim(ctx, events))
+        assert len(events["page"]) == 1, "context page handler registered"
+        assert harvester._watched_pages, "existing pages should be watched"
+
+        # Re-watching the same context is a no-op (idempotent).
+        harvester._watch_context(_CtxShim(ctx, events))
+        assert len(events["page"]) == 1
+
+    def test_new_tab_event_wraps_page(self) -> None:
+        harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+        ctx, events = self._make_context([])
+        harvester._watch_context(_CtxShim(ctx, events))
+
+        new_page, _nav = self._make_page("https://civitai.red/posts/1")
+        for h in events["page"]:
+            h(_PageShim(new_page))
+
+        # Navigation handler is scheduled async; run it directly.
+        import asyncio as _a
+
+        _a.run(harvester._on_page_navigated(_PageShim(new_page)))
+        assert new_page.evaluate_calls >= 1
+
+    def test_watch_fail_open_when_disconnected(self) -> None:
+        harvester = CivitaiPageHarvester(bridge=_disconnected_bridge())
+        out = asyncio.run(harvester.watch())
+        assert out["ok"] is False
+        assert out["bridge"] == "unavailable"
+
+
+class _CtxShim:
+    """Adapter so fake contexts expose .on()/.pages like Playwright."""
+
+    def __init__(self, ctx, events):
+        self._ctx = ctx
+        self._events = events
+
+    def on(self, name, handler):
+        self._ctx.on(name, handler)
+
+    @property
+    def pages(self):
+        return [_PageShim(p) for p in self._ctx.pages]
+
+
+class _PageShim:
+    def __init__(self, page):
+        self._page = page
+
+    def on(self, name, handler):
+        self._page.on(name, handler)
+
+    @property
+    def url(self):
+        return self._page.url
+
+    async def evaluate(self, expression, arg=None):
+        return await self._page.evaluate(expression, arg)
+

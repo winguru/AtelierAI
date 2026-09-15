@@ -159,6 +159,15 @@ async def browser_bridge_harvest_install():
     return await get_page_harvester().install()
 
 
+@router.post("/harvest/watch")
+async def browser_bridge_harvest_watch():
+    """Arm event-driven wrapping: new tabs and navigations get the wrapper
+    immediately instead of waiting for the next drain tick."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    return await get_page_harvester().watch()
+
+
 @router.get("/harvest/status")
 async def browser_bridge_harvest_status():
     """Per-page harvest wrapper state + queued capture counts + loop stats."""

@@ -471,15 +471,21 @@ class CivitaiPageHarvester:
                     url = page.url or ""
                     if "civitai" not in url:
                         continue
-                    # Track activity for the idle-close janitor.
-                    self._page_last_active[id(page)] = time.monotonic()
                     try:
                         result = await page.evaluate(self._PROBE_JS)
+                        queued = int(result.get("queued") or 0)
                         pages.append({
                             "url": url.split("?")[0],
                             "wrapped": bool(result.get("wrapped")),
-                            "queued": int(result.get("queued") or 0),
+                            "queued": queued,
                         })
+                        # Activity = pending captures (real work), NOT mere
+                        # visibility — stamping every poll made the idle-close
+                        # window never elapse. New pages get an initial stamp
+                        # so they aren't closed before their first traffic.
+                        self._page_last_active.setdefault(id(page), time.monotonic())
+                        if queued > 0:
+                            self._page_last_active[id(page)] = time.monotonic()
                     except Exception as exc:  # noqa: BLE001 — per-page
                         pages.append({
                             "url": url.split("?")[0],
@@ -898,6 +904,32 @@ class CivitaiPageHarvester:
 
                 api = CivitaiAPI.get_instance()
                 staged = 0
+
+                # PHASE 1 — network (NO DB session held): fetch metadata for
+                # bare rows up front. Doing this inside the write transaction
+                # held the SQLite write lock across rate-limited HTTP calls
+                # (seconds each) and starved every other writer
+                # ("database is locked" storm in the search endpoints).
+                metadata: dict[int, dict] = {}
+                needs_meta: set[int] = set()
+                with SessionLocal() as db:
+                    for image_id in image_ids:
+                        row = (
+                            db.query(CivitaiSearchImage.uuid)
+                            .filter(CivitaiSearchImage.civitai_image_id == image_id)
+                            .first()
+                        )
+                        if row is None or not row[0]:
+                            needs_meta.add(image_id)
+                for image_id in needs_meta:
+                    try:
+                        info = api.fetch_basic_info(image_id) or {}
+                        if isinstance(info, dict) and info.get("url"):
+                            metadata[image_id] = info
+                    except Exception:  # noqa: BLE001, S112 — per-id fetch
+                        continue
+
+                # PHASE 2 — short write transaction (no network inside).
                 with SessionLocal() as db:
                     for image_id in image_ids:
                         try:
@@ -927,22 +959,10 @@ class CivitaiPageHarvester:
                                     )
                                 )
                                 staged += 1
-                            # Metadata backfill: bare rows (no uuid) fetch one
-                            # image.get so tiles have thumbnails + identity.
-                            if not img.uuid:
-                                info = api.fetch_basic_info(image_id) or {}
-                                if isinstance(info, dict) and info.get("url"):
-                                    user = info.get("user") or {}
-                                    img.uuid = info.get("url")
-                                    img.blurhash = img.blurhash or info.get("hash")
-                                    img.post_id = img.post_id or info.get("postId")
-                                    img.file_name = img.file_name or info.get("name")
-                                    img.artist_id = (
-                                        img.artist_id or user.get("id")
-                                    )
-                                    img.artist_name = (
-                                        img.artist_name or user.get("username")
-                                    )
+                            # Metadata backfill: bare rows (no uuid) get the
+                            # pre-fetched image.get data so tiles render.
+                            if not img.uuid and image_id in metadata:
+                                _apply_image_meta(img, metadata[image_id])
                         except Exception:  # noqa: BLE001, S112 — per-id
                             continue
                     db.commit()
@@ -1002,6 +1022,17 @@ class CivitaiPageHarvester:
         self._auto_stats["running"] = running
         return dict(self._auto_stats)
 
+
+
+def _apply_image_meta(img: Any, info: dict) -> None:
+    """Fill-if-absent metadata fields from an image.get response (no clobber)."""
+    user = info.get("user") or {}
+    img.uuid = info.get("url")
+    img.blurhash = img.blurhash or info.get("hash")
+    img.post_id = img.post_id or info.get("postId")
+    img.file_name = img.file_name or info.get("name")
+    img.artist_id = img.artist_id or user.get("id")
+    img.artist_name = img.artist_name or user.get("username")
 
 # ── Singleton ───────────────────────────────────────────────────────────────
 _HARVESTER_SINGLETON: CivitaiPageHarvester | None = None

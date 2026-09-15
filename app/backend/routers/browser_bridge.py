@@ -223,6 +223,38 @@ async def browser_bridge_harvest_status():
     return probe
 
 
+class HarvestSettingsRequest(BaseModel):
+    """Harvester convenience settings.
+
+    auto_scrape_posts: navigate a hidden tab to an open image's post page
+    so the post's tRPC burst (full metadata for every image in the post)
+    is captured and staged.
+
+    auto_close_seconds: close idle /posts/ and /images/ tabs after this
+    many seconds (0 disables; search/other pages are never closed).
+    """
+
+    auto_scrape_posts: bool | None = None
+    auto_close_seconds: float | None = None
+
+
+@router.post("/harvest/settings")
+async def browser_bridge_harvest_settings(req: HarvestSettingsRequest):
+    """Update harvester convenience settings (auto-scrape / auto-close)."""
+    from atelierai.civitai.page_harvester import get_page_harvester
+
+    harvester = get_page_harvester()
+    if req.auto_scrape_posts is not None:
+        harvester.set_auto_scrape_posts(req.auto_scrape_posts)
+    if req.auto_close_seconds is not None:
+        harvester.set_auto_close_seconds(req.auto_close_seconds)
+    return {
+        "ok": True,
+        "auto_scrape_posts": harvester._auto_scrape_posts,
+        "auto_close_seconds": harvester._auto_close_seconds,
+    }
+
+
 @router.post("/harvest/drain")
 async def browser_bridge_harvest_drain(req: HarvestDrainRequest | None = None):
     """Drain captured tRPC responses and archive them."""

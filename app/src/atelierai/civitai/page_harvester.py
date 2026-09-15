@@ -254,6 +254,16 @@ class CivitaiPageHarvester:
         self._auto_task: asyncio.Task | None = None
         self._auto_interval: float = 30.0
         self._auto_stop = asyncio.Event()
+        # Auto-scrape related posts: when an /images/{id} tab is seen, also
+        # navigate a hidden tab to the image's POST page so the post's tRPC
+        # burst (image.getInfinite?postId=) is captured and staged with full
+        # metadata for every image in that post.
+        self._auto_scrape_posts: bool = False
+        self._scraped_post_ids: set[int] = set()
+        # Auto-close idle post/image tabs: free sidecar resources when the
+        # user ctrl-clicks many tabs. Only /posts/ and /images/ URLs.
+        self._auto_close_seconds: float = 0.0  # 0 = disabled
+        self._page_last_active: dict[int, float] = {}  # id(page) → monotonic
         self._auto_stats: dict[str, Any] = {
             "running": False,
             "interval_seconds": 30.0,
@@ -461,6 +471,8 @@ class CivitaiPageHarvester:
                     url = page.url or ""
                     if "civitai" not in url:
                         continue
+                    # Track activity for the idle-close janitor.
+                    self._page_last_active[id(page)] = time.monotonic()
                     try:
                         result = await page.evaluate(self._PROBE_JS)
                         pages.append({
@@ -477,11 +489,125 @@ class CivitaiPageHarvester:
                         })
         except Exception as exc:  # noqa: BLE001 — fail-open
             return {"ok": False, "bridge": "probe-failed", "error": f"{type(exc).__name__}: {exc}"}
+
+        # Janitor duties ride the probe cycle (10s dashboard poll / 30s tick).
+        await self._maybe_scrape_related_posts(pages)
+        await self._maybe_close_idle_pages(bridge)
         return {
             "ok": True,
             "pages": pages,
             "all_wrapped": bool(pages) and all(p.get("wrapped") for p in pages),
+            "auto_scrape_posts": self._auto_scrape_posts,
+            "auto_close_seconds": self._auto_close_seconds,
         }
+
+    def set_auto_scrape_posts(self, enabled: bool) -> None:
+        """Enable/disable auto-navigation to related post pages."""
+        self._auto_scrape_posts = bool(enabled)
+
+    def set_auto_close_seconds(self, seconds: float) -> None:
+        """Set idle-tab close timeout (0 disables; clamped to >=5s)."""
+        self._auto_close_seconds = max(0.0, float(seconds))
+
+    async def _maybe_scrape_related_posts(self, pages: list[dict[str, Any]]) -> None:
+        """For open image-detail tabs, open the owning post page (once).
+
+        The post page's tRPC burst (image.getInfinite?postId=X) carries full
+        metadata for every image in the post — richer than URL-staging alone.
+        Navigations happen in the sidecar browser (real session); the opened
+        tab is marked scraper-owned so the janitor can close it promptly.
+        """
+        if not self._auto_scrape_posts:
+            return
+        try:
+            from database import SessionLocal
+            from sqlalchemy import text as _sa_text
+
+            img_urls = [p["url"] for p in pages if "/images/" in p["url"]]
+            ids: set[int] = set()
+            with SessionLocal() as db:
+                for u in img_urls:
+                    iid = _image_id_from_url(u)
+                    if iid is None:
+                        continue
+                    row = db.execute(
+                        _sa_text(
+                            "SELECT post_id FROM civitai_search_images "
+                            "WHERE civitai_image_id = :iid"
+                        ),
+                        {"iid": iid},
+                    ).fetchone()
+                    if row and row[0]:
+                        ids.add(int(row[0]))
+            bridge = self._get_bridge()
+            if bridge._browser is None:
+                return
+            ctx = bridge._browser.contexts[0] if bridge._browser.contexts else None
+            if ctx is None:
+                return
+            base = self._web_base_url()
+            for post_id in sorted(ids):
+                if post_id in self._scraped_post_ids:
+                    continue
+                self._scraped_post_ids.add(post_id)
+                try:
+                    page = await ctx.new_page()
+                    await page.goto(
+                        f"{base}/posts/{post_id}",
+                        timeout=self._nav_timeout_ms(),
+                        wait_until="domcontentloaded",
+                    )
+                    # Give the post's tRPC burst time to fire + beacon out.
+                    await asyncio.sleep(4)
+                    await page.close()
+                    self._auto_stats["posts_scraped"] = (
+                        self._auto_stats.get("posts_scraped", 0) + 1
+                    )
+                except Exception:  # noqa: BLE001 — per-post
+                    self._scraped_post_ids.discard(post_id)
+        except Exception:  # noqa: BLE001 — fail-open
+            return
+
+    async def _maybe_close_idle_pages(self, bridge: Any) -> None:
+        """Close /posts/ and /images/ tabs idle beyond the configured window.
+
+        Frees sidecar memory when the user ctrl-clicks many tabs. Search and
+        other page types are never closed.
+        """
+        if self._auto_close_seconds <= 0 or bridge._browser is None:
+            return
+        now = time.monotonic()
+        closed = 0
+        try:
+            for ctx in bridge._browser.contexts:
+                for page in list(ctx.pages):
+                    last = self._page_last_active.get(id(page))
+                    if last is None:
+                        continue
+                    url = (page.url or "").lower()
+                    if "/posts/" not in url and "/images/" not in url:
+                        continue
+                    # Never close while captures are pending (beacon debounce
+                    # is 2s; the window >> that in practice).
+                    try:
+                        probe = await page.evaluate(self._PROBE_JS)
+                        if int(probe.get("queued") or 0) > 0:
+                            self._page_last_active[id(page)] = now
+                            continue
+                    except Exception:  # noqa: BLE001, S110 — page gone/unready
+                        pass
+                    if now - last >= self._auto_close_seconds:
+                        try:
+                            await page.close()
+                            closed += 1
+                        except Exception:  # noqa: BLE001, S110 — best-effort
+                            pass
+        except Exception:  # noqa: BLE001, S110 — fail-open
+            pass
+        if closed:
+            self._auto_stats["tabs_auto_closed"] = (
+                self._auto_stats.get("tabs_auto_closed", 0) + closed
+            )
 
     async def install(self) -> dict[str, Any]:
         """Install (or confirm) the harvester on all civitai pages.

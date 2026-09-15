@@ -129,6 +129,15 @@
           <button class="btn ghost" id="btn-harvest-auto-start">Auto-drain on</button>
           <button class="btn ghost" id="btn-harvest-auto-stop">Auto-drain off</button>
         </div>
+        <div class="actions-row" style="margin-top:8px;">
+          <label style="display:flex; align-items:center; gap:6px;" title="When an image tab is open, also visit its post page so the whole post (every image + full metadata) is captured">
+            <input type="checkbox" id="opt-auto-scrape"> Auto-scrape related posts
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;" title="Close idle /posts/ and /images/ tabs after this many seconds (0 = off; search pages are never closed)">
+            Auto-close idle tabs after
+            <input type="number" id="opt-auto-close" min="0" max="600" step="1" value="0" style="width:64px;"> s
+          </label>
+        </div>
         <table class="kv-table" style="margin-top:8px;">
           <tr><td>Auto-drain</td><td class="mono" id="kv-auto-state">—</td></tr>
           <tr><td>Loop totals</td><td class="mono" id="kv-auto-totals">—</td></tr>
@@ -309,6 +318,7 @@
       } catch (e) { /* idle */ }
       try {
         const h = await api('harvest/status');
+        applySettingsToUI(h);
         const ul = $('harvest-pages');
         ul.innerHTML = '';
         if (!h.ok) {
@@ -343,6 +353,28 @@
       alert(JSON.stringify(out, null, 2));
       await refreshAuto();
     };
+
+    // ── Harvester settings (auto-scrape / auto-close) ────────
+    function applySettingsToUI(h) {
+      if (h && typeof h.auto_scrape_posts === 'boolean') {
+        $('opt-auto-scrape').checked = h.auto_scrape_posts;
+      }
+      if (h && typeof h.auto_close_seconds === 'number') {
+        $('opt-auto-close').value = h.auto_close_seconds;
+      }
+    }
+
+    async function pushSettings(partial) {
+      try {
+        const out = await api('harvest/settings', {
+          method: 'POST', body: JSON.stringify(partial),
+        });
+        applySettingsToUI(out);
+      } catch (e) { /* best-effort */ }
+    }
+
+    $('opt-auto-scrape').onchange = (e) => pushSettings({ auto_scrape_posts: e.target.checked });
+    $('opt-auto-close').onchange = (e) => pushSettings({ auto_close_seconds: parseFloat(e.target.value) || 0 });
 
     refreshStatus();
     setInterval(refreshStatus, 15000);

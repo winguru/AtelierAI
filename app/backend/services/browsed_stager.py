@@ -204,10 +204,18 @@ def stage_harvested_feeds(
         # browsable feed items; request-hash keying means identical inputs
         # map to the same archive file, and fill-if-absent upserts keep
         # richer existing data safe.
-        files = sorted(
+        candidates = sorted(
             set(feed_dir.rglob("harvested_*.json"))
             | set(feed_dir.rglob("trpc_*.json"))
         )
+        # NEWEST-FIRST processing: fresh browsing must stage immediately.
+        # Alphabetical ordering starved new captures behind the untracked
+        # backlog (old shards consumed the 200-file cap every pass — a new
+        # post capture at sorted-index 354 never got its turn). Sorting by
+        # mtime desc also drains the backlog from its newest end.
+        untracked = [f for f in candidates if _norm(f) not in staged_paths]
+        untracked.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        files = untracked
 
         files_staged = 0
         images_upserted = 0
@@ -217,6 +225,8 @@ def stage_harvested_feeds(
         errors: list[str] = []
 
         for fp in files[:limit_files]:
+            # Files are pre-filtered to untracked above; skip-guard kept for
+            # safety if the staged set mutated mid-scan.
             rel = _norm(fp)
             if rel in staged_paths:
                 continue

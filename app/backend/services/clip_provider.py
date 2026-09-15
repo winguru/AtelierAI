@@ -29,6 +29,7 @@ from __future__ import annotations
 import io
 import logging
 import struct
+import threading
 from typing import Optional, Protocol, runtime_checkable
 
 import httpx
@@ -146,26 +147,71 @@ class LocalCLIPProvider:
 
     Works on GPU (fast) or CPU (slow but functional).  Proves the pipeline
     works on a single device during development.
+
+    Model weights load lazily (on first inference or explicit ``ensure``):
+    importing torch + open_clip and loading ViT-B/32 weights takes multiple
+    seconds, which used to block application startup behind the lifespan
+    handler.  The constructor only records configuration; ``_ensure_loaded``
+    performs the one-time load under a lock so concurrent requests wait
+    rather than race.  Scripts that want eager loading can call
+    ``ensure_loaded()`` directly after construction.
     """
 
     def __init__(self, model_name: str, pretrained: str, force_cpu: bool = False):
+        self._torch = None
+        self._model_name = model_name
+        self._pretrained = pretrained
+
+        # Populated by _ensure_loaded(); kept as attributes so scripts that
+        # introspect ``provider._device`` keep working.
+        self._device = None
+        self._model = None
+        self._preprocess = None
+        self._tokenizer = None
+
+        self._force_cpu = force_cpu
+        self._load_lock = threading.Lock()
+        self._load_error: Optional[BaseException] = None
+
+    # -- lazy loading -------------------------------------------------------
+
+    def _ensure_loaded(self) -> None:
+        """Load torch/open_clip and model weights exactly once.
+
+        Re-raises a recorded load failure so callers observe the same error
+        on every attempt instead of repeatedly retrying a broken model.
+        """
+        if self._model is not None:
+            return
+        with self._load_lock:
+            if self._model is not None:
+                return
+            if self._load_error is not None:
+                raise self._load_error
+            try:
+                self._load_model()
+            except BaseException as exc:  # noqa: BLE001 — recorded and re-raised
+                self._load_error = exc
+                raise
+
+    def _load_model(self) -> None:
         import open_clip
         import torch
 
         self._torch = torch
-        self._model_name = model_name
-        self._pretrained = pretrained
 
-        device_str = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+        device_str = (
+            "cpu" if self._force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
         self._device = torch.device(device_str)
 
         self._model, _, self._preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
+            self._model_name, pretrained=self._pretrained
         )
         self._model.to(self._device)
         self._model.eval()
 
-        self._tokenizer = open_clip.get_tokenizer(model_name)
+        self._tokenizer = open_clip.get_tokenizer(self._model_name)
 
         vram_gb: Optional[float] = None
         if self._device.type == "cuda":
@@ -173,17 +219,27 @@ class LocalCLIPProvider:
 
         logger.info(
             "LocalCLIPProvider ready: model=%s pretrained=%s device=%s vram=%.2fGB",
-            model_name,
-            pretrained,
+            self._model_name,
+            self._pretrained,
             device_str,
             vram_gb or 0,
         )
+
+    def ensure_loaded(self) -> None:
+        """Public eager-load hook for scripts and health checks."""
+        self._ensure_loaded()
+
+    @property
+    def loaded(self) -> bool:
+        """Whether model weights are resident in memory."""
+        return self._model is not None
 
     # -- image encoding -----------------------------------------------------
 
     async def encode_image_urls(self, urls: list[str]) -> np.ndarray:
         """Download images and encode them in a single batch."""
-        import torch
+        self._ensure_loaded()
+        torch = self._torch
 
         images: list[Image.Image] = []
         for url in urls:
@@ -205,7 +261,8 @@ class LocalCLIPProvider:
 
     async def encode_image_paths(self, paths: list[str]) -> np.ndarray:
         """Load images from local file paths and encode them in a single batch."""
-        import torch
+        self._ensure_loaded()
+        torch = self._torch
 
         _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 
@@ -236,7 +293,8 @@ class LocalCLIPProvider:
 
     async def encode_text(self, texts: list[str]) -> np.ndarray:
         """Encode text strings into L2-normalised embeddings."""
-        import torch
+        self._ensure_loaded()
+        torch = self._torch
 
         if not texts:
             return np.empty((0, EMBEDDING_DIM), dtype=np.float32)
@@ -252,6 +310,22 @@ class LocalCLIPProvider:
     # -- health -------------------------------------------------------------
 
     async def health(self) -> dict:
+        if self._model is None:
+            # Do not force a load from a health probe — report deferred state.
+            if self._load_error is not None:
+                return {
+                    "status": "error",
+                    "mode": "local",
+                    "model": self._model_name,
+                    "pretrained": self._pretrained,
+                    "error": f"{type(self._load_error).__name__}: {self._load_error}",
+                }
+            return {
+                "status": "loading",
+                "mode": "local",
+                "model": self._model_name,
+                "pretrained": self._pretrained,
+            }
         gpu_mem: Optional[float] = None
         if self._device.type == "cuda":
             gpu_mem = self._torch.cuda.memory_allocated(self._device) / 1e9

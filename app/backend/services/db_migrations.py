@@ -74,6 +74,9 @@ def _ensure_image_lifecycle_columns() -> None:
 
         requires_backfill = connection.execute(
             text(
+                # Covered by ix_images_image_status below — the probe is a
+                # sub-millisecond index lookup instead of a full table scan
+                # of the (very wide) images table on every startup.
                 "SELECT EXISTS(SELECT 1 FROM images "
                 "WHERE image_status IS NULL OR image_status = '')"
             )
@@ -85,6 +88,12 @@ def _ensure_image_lifecycle_columns() -> None:
                     "WHERE image_status IS NULL OR image_status = ''"
                 )
             )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_images_image_status "
+                "ON images (image_status)"
+            )
+        )
 
 
 def _ensure_user_nsfw_columns() -> None:
@@ -210,6 +219,15 @@ def _ensure_user_tags_column() -> None:
 
         if "user_tags" not in existing:
             connection.execute(text("ALTER TABLE images ADD COLUMN user_tags JSON"))
+        # Partial index so the observation-backfill lookup doesn't full-scan
+        # the wide images table on every startup (see
+        # _backfill_user_tags_to_observations).
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_images_user_tags_notnull "
+                "ON images (id) WHERE user_tags IS NOT NULL"
+            )
+        )
 
 
 def _ensure_user_negative_tags_column() -> None:
@@ -224,6 +242,13 @@ def _ensure_user_negative_tags_column() -> None:
             connection.execute(
                 text("ALTER TABLE images ADD COLUMN user_negative_tags JSON")
             )
+        # Partial index — companion to ix_images_user_tags_notnull.
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_images_user_neg_tags_notnull "
+                "ON images (id) WHERE user_negative_tags IS NOT NULL"
+            )
+        )
 
 
 def _ensure_observation_authority_term_unique_index() -> None:
@@ -820,6 +845,10 @@ def _backfill_user_tags_to_observations() -> None:
         user_authority_id = user_authority.id
 
         # Collect all images with user_tags or user_negative_tags JSON.
+        # UNION over two partial-indexed probes (ix_images_user_tags_notnull /
+        # ix_images_user_neg_tags_notnull) — SQLite will not use them for an
+        # OR across columns, which full-scanned the wide images table every
+        # startup (~1.5s on a 1.3GB database).
         images = (
             db.query(
                 ImageModel.id,
@@ -827,9 +856,14 @@ def _backfill_user_tags_to_observations() -> None:
                 ImageModel.user_negative_tags,
             )
             .filter(
-                sa.or_(
-                    ImageModel.user_tags.isnot(None),
-                    ImageModel.user_negative_tags.isnot(None),
+                ImageModel.id.in_(
+                    sa.select(ImageModel.id)
+                    .where(ImageModel.user_tags.isnot(None))
+                    .union(
+                        sa.select(ImageModel.id).where(
+                            ImageModel.user_negative_tags.isnot(None)
+                        )
+                    )
                 )
             )
             .all()
@@ -1507,62 +1541,53 @@ def rebuild_artist_preference_counters() -> None:
     # A link "points at" a preference row via the image's artist identity
     # (image.artist_name, falling back to the 'artist-<id>' convention used
     # by the rating endpoints).
+    #
+    # Aggregate per-artist counts once, then apply them by primary key.
+    # The previous correlated-subquery UPDATE rescanned the links×images
+    # join once per preference row per rating (~12s on a 1.3GB database);
+    # this form is O(links) and produces identical results in milliseconds.
     with engine.begin() as connection:
+        rating_counts: dict[str, dict[str, int]] = {}
+        latest_rows = connection.execute(
+            text(
+                "SELECT COALESCE(NULLIF(csi.artist_name, ''), "
+                "'artist-' || csi.artist_id) AS artist,\n"
+                "       csil.rating\n"
+                "FROM civitai_search_image_links csil\n"
+                "JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
+                "WHERE csil.id = (\n"
+                "    SELECT csil2.id\n"
+                "    FROM civitai_search_image_links csil2\n"
+                "    WHERE csil2.image_id = csil.image_id\n"
+                "    ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
+                ")"
+            )
+        )
+        for artist, rating in latest_rows:
+            counts = rating_counts.setdefault(
+                artist, {"keeps": 0, "skips": 0, "discards": 0}
+            )
+            if rating == "keep":
+                counts["keeps"] += 1
+            elif rating == "skip":
+                counts["skips"] += 1
+            elif rating == "discard":
+                counts["discards"] += 1
+
+        pref_rows = connection.execute(
+            text("SELECT id, artist_name FROM civitai_artist_preferences")
+        ).fetchall()
+        zero = {"keeps": 0, "skips": 0, "discards": 0}
         connection.execute(
             text(
-                "UPDATE civitai_artist_preferences\n"
-                "SET keeps = COALESCE((\n"
-                "    SELECT COUNT(*) FROM (\n"
-                "        SELECT csil.image_id\n"
-                "        FROM civitai_search_image_links csil\n"
-                "        JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
-                "        WHERE csil.rating = 'keep'\n"
-                "          AND csil.id = (\n"
-                "              SELECT csil2.id\n"
-                "              FROM civitai_search_image_links csil2\n"
-                "              WHERE csil2.image_id = csil.image_id\n"
-                "              ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
-                "          )\n"
-                "          AND COALESCE(NULLIF(csi.artist_name, ''), "
-                "               'artist-' || csi.artist_id) = "
-                "civitai_artist_preferences.artist_name\n"
-                "    )\n"
-                "), 0),\n"
-                "skips = COALESCE((\n"
-                "    SELECT COUNT(*) FROM (\n"
-                "        SELECT csil.image_id\n"
-                "        FROM civitai_search_image_links csil\n"
-                "        JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
-                "        WHERE csil.rating = 'skip'\n"
-                "          AND csil.id = (\n"
-                "              SELECT csil2.id\n"
-                "              FROM civitai_search_image_links csil2\n"
-                "              WHERE csil2.image_id = csil.image_id\n"
-                "              ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
-                "          )\n"
-                "          AND COALESCE(NULLIF(csi.artist_name, ''), "
-                "               'artist-' || csi.artist_id) = "
-                "civitai_artist_preferences.artist_name\n"
-                "    )\n"
-                "), 0),\n"
-                "discards = COALESCE((\n"
-                "    SELECT COUNT(*) FROM (\n"
-                "        SELECT csil.image_id\n"
-                "        FROM civitai_search_image_links csil\n"
-                "        JOIN civitai_search_images csi ON csi.id = csil.image_id\n"
-                "        WHERE csil.rating = 'discard'\n"
-                "          AND csil.id = (\n"
-                "              SELECT csil2.id\n"
-                "              FROM civitai_search_image_links csil2\n"
-                "              WHERE csil2.image_id = csil.image_id\n"
-                "              ORDER BY csil2.created_at DESC, csil2.id DESC LIMIT 1\n"
-                "          )\n"
-                "          AND COALESCE(NULLIF(csi.artist_name, ''), "
-                "               'artist-' || csi.artist_id) = "
-                "civitai_artist_preferences.artist_name\n"
-                "    )\n"
-                "), 0)\n"
-            )
+                "UPDATE civitai_artist_preferences "
+                "SET keeps = :keeps, skips = :skips, discards = :discards "
+                "WHERE id = :id"
+            ),
+            [
+                {"id": pref_id, **rating_counts.get(artist_name, zero)}
+                for pref_id, artist_name in pref_rows
+            ],
         )
 
         # Drop preference rows that no longer have any ratings and are not

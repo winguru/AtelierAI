@@ -50,6 +50,7 @@ async def _ensure_clip_provider():
             force_cpu=True,  # scripts default to CPU for safety
         )
         set_clip_provider(provider)
+        provider.ensure_loaded()  # scripts run to completion — load eagerly
         print(f"CLIP provider ready: {provider._device}")
         return True
     except Exception as exc:

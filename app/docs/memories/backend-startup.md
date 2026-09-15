@@ -23,10 +23,22 @@ Do not rely on global shell/profile PYTHONPATH for this project.
 Runtime DB configuration comes from `atelierai.config` (backed by `app/backend/config.py`). `IMAGE_LIBRARY_PATH` and DB directories must be writable. Sidecar metadata is merged into `/images` responses.
 
 ### Lifecycle migration lock avoidance
-`_ensure_image_lifecycle_columns()` must only run its status backfill `UPDATE` when stale/null `image_status` rows exist. On schema-current databases this keeps the startup check read-only and avoids needless SQLite write-lock contention.
+`_ensure_image_lifecycle_columns()` must only run its status backfill `UPDATE` when stale/null `image_status` rows exist. On schema-current databases this keeps the startup check read-only and avoids needless SQLite write-lock contention. The stale-row probe is served by `ix_images_image_status` (created idempotently by the same migration) — without it, `EXISTS(... WHERE image_status IS NULL OR image_status='')` full-scans the wide `images` table (~2s on a 1.3GB DB; ~0.5ms with the index).
 
 ### Artist preference counter rebuild
 `rebuild_artist_preference_counters()` identifies each image's latest rating with `(image_id, created_at DESC, id DESC)`. Keep the `ix_civitai_search_image_links_latest` index for this lookup; without it, startup repeatedly scans and sorts the link table for every artist preference.
+
+### Set-based recompute (2026-09)
+the recompute step must aggregate per-artist counts once (single pass over latest links joined to images) and apply them by preference-row primary key. The original correlated-subquery `UPDATE` rescanned the links×images join once per preference row per rating (~12s startup on a 1.3GB DB); the set-based form produces byte-identical results in ~0.01s (~750–1000x). Verified by diffing all 1851 rows old-vs-new on a production DB copy.
+
+### User-tags observation backfill partial indexes (2026-09)
+`_backfill_user_tags_to_observations()` must use the UNION form (`id IN (SELECT id WHERE user_tags IS NOT NULL UNION SELECT id WHERE user_negative_tags IS NOT NULL)`), not `OR` across the two columns. SQLite will not use a partial index for a multi-column OR predicate — the OR form full-scans the wide `images` table every startup (~1.5s on 1.3GB). The partial indexes `ix_images_user_tags_notnull` / `ix_images_user_neg_tags_notnull` (on `(id) WHERE col IS NOT NULL`) are created idempotently by `_ensure_user_tags_column()` / `_ensure_user_negative_tags_column()`. UNION form: ~0.06s, verified idempotent.
+
+### Startup timing probe
+`app/dev/startup_timing.py` wraps each lifespan migration with `perf_counter` timings and prints a per-step report. Run with `cd app && PYTHONPATH=src:backend python -m dev.startup_timing`. Note: the probe runs on the real DB (read-mostly, migrations are idempotent) and its "TOTAL" includes an eager `ensure_loaded()` CLIP warm-up that the real server now performs in a background thread — use the uvicorn time-to-first-request measurement for true readiness numbers.
+
+### CLIP provider loads lazily (2026-09)
+`LocalCLIPProvider.__init__` only records config; torch/open_clip imports and ViT-B/32 weight loading happen under a lock on first use (`_ensure_loaded`), with `ensure_loaded()` as the eager hook for scripts. Lifespan spawns a daemon `clip-warmup` thread so weights load in the background without blocking readiness. `/api/clip/health` reports `status: "loading"` until weights are resident (never forces a load). Net effect: ~4s removed from startup; first inference waits only if it beats the warm-up thread.
 
 ## Key Files
 - `start.sh` — root launcher

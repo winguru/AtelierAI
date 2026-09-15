@@ -15851,12 +15851,18 @@ async def lifespan(app: FastAPI):
     clip_provider = None
     if CLIP_LOCAL_ENABLED:
         try:
+            # Constructor is cheap — model weights load lazily (on first
+            # inference) or in the warm-up thread below, so readiness is
+            # not blocked by torch imports + multi-second weight loads.
             clip_provider = LocalCLIPProvider(
                 model_name=CLIP_MODEL_NAME,
                 pretrained=CLIP_PRETRAINED,
                 force_cpu=CLIP_FORCE_CPU,
             )
-            print(f"[CLIP] Local provider ready (model={CLIP_MODEL_NAME})")
+            print(
+                f"[CLIP] Local provider configured (model={CLIP_MODEL_NAME}, "
+                "weights load lazily)"
+            )
         except Exception as exc:
             print(f"[CLIP] Local provider failed: {exc}")
 
@@ -15868,6 +15874,20 @@ async def lifespan(app: FastAPI):
         print("[CLIP] No provider available — CLIP features disabled")
 
     set_clip_provider(clip_provider)
+
+    # Warm CLIP weights in the background so the first real request doesn't
+    # pay the one-time load cost. Optional feature: if the warm-up fails,
+    # lazy loading in the provider surfaces the error at first use instead.
+    if clip_provider is not None and hasattr(clip_provider, "ensure_loaded"):
+        def _warm_clip() -> None:
+            try:
+                clip_provider.ensure_loaded()  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 — fail-open warm-up
+                print(f"[CLIP] Background warm-up failed: {exc}")
+
+        threading.Thread(
+            target=_warm_clip, name="clip-warmup", daemon=True
+        ).start()
 
     # --- Browser-bridge harvester auto-drain (opt-in) ---
     # When the sidecar is configured/running, start the passive harvest loop

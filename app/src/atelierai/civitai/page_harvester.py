@@ -429,6 +429,7 @@ class CivitaiPageHarvester:
 
         Returns a fail-open status dict, like the bridge itself.
         """
+        self._ensure_auto_loop()
         bridge = self._get_bridge()
         ok = await bridge._ensure_connected()
         if not ok:
@@ -475,10 +476,11 @@ class CivitaiPageHarvester:
     async def drain(self, *, archive: bool = True) -> dict[str, Any]:
         """Drain queued captures from all civitai pages.
 
-        Returns counts and (optionally) the drained records themselves.
-        When ``archive=True`` each record is written to the response archive
-        as ``kind="harvested"`` before returning.
+        Any manual drain also promotes the harvester to self-driving so
+        captures can never pile up silently again (uvicorn --reload restarts
+        killed the old env-flag-only loop).
         """
+        self._ensure_auto_loop()
         bridge = self._get_bridge()
         ok = await bridge._ensure_connected()
         if not ok:
@@ -544,6 +546,30 @@ class CivitaiPageHarvester:
         if not install_status.get("ok"):
             return install_status
         return await self.drain()
+
+    def _ensure_auto_loop(self) -> None:
+        """Start the auto-drain loop on first use if not running.
+
+        The loop is the harvester's default operating mode — watchers keep
+        pages wrapped, but without the tick nothing drains/stages them, and
+        browsed captures pile up until a manual action. Manual install/drain
+        calls and the env-flag boot path both funnel through here, so any
+        harvester activity promotes the singleton to self-driving. Requires
+        a running event loop (all harvester entry points are async).
+        """
+        if self._auto_task is not None and not self._auto_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        # Reuse start_auto's logic without its async signature (loop exists).
+        self._auto_interval = max(5.0, self._auto_interval)
+        self._auto_stats.update(
+            {"running": True, "interval_seconds": self._auto_interval}
+        )
+        self._auto_stop.clear()
+        self._auto_task = loop.create_task(self._auto_loop())
 
     # ------------------------------------------------------------------
     # Auto-drain loop

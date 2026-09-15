@@ -389,7 +389,13 @@ class CivitaiPageHarvester:
         }
 
     async def probe(self) -> dict[str, Any]:
-        """Report harvest-wrapper state + queued counts per civitai page."""
+        """Report harvest-wrapper state + queued counts per civitai page.
+
+        Also re-arms the auto-drain loop: the Bridge Lab polls this every
+        10s, so any open dashboard self-heals the loop after uvicorn
+        --reload restarts (which drop it).
+        """
+        self._ensure_auto_loop()
         bridge = self._get_bridge()
         ok = await bridge._ensure_connected()
         if not ok:

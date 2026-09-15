@@ -186,6 +186,10 @@ class CivitaiPageHarvester:
     def __init__(self, bridge: CivitaiBrowserBridge | None = None):
         self._bridge = bridge
         self._installed_pages: set[int] = set()
+        # Pages whose add_init_script is registered (CDP addScriptToEvaluate-
+        # OnNewDocument): the wrapper runs before page scripts on every
+        # future navigation — no race with the app's own fetches.
+        self._init_scripted_pages: set[int] = set()
         self._archive = None
         # Event-driven wrapping: watchers registered on live contexts so new
         # tabs and navigations get the wrapper immediately (zero blind window)
@@ -203,8 +207,10 @@ class CivitaiPageHarvester:
             "ticks": 0,
             "total_drained": 0,
             "total_archived": 0,
+            "total_staged_new": 0,
             "last_tick_at": None,
             "last_result": None,
+            "last_stage": None,
             "last_error": None,
         }
 
@@ -233,6 +239,24 @@ class CivitaiPageHarvester:
         };
     }
     """
+
+    async def _arm_page_init_script(self, page: Any) -> bool:
+        """Register the wrapper as a new-document init script on one page.
+
+        ``page.add_init_script`` maps to CDP ``Page.addScriptToEvaluateOnNewDocument``:
+        the installer runs BEFORE page scripts on every subsequent navigation,
+        so the app's first fetch is already wrapped — unlike evaluate-after-load,
+        which races the page's initial tRPC burst. Idempotent per page object;
+        the installer itself is also guarded (``window.__atelierai_harvest``).
+        """
+        if id(page) in self._init_scripted_pages:
+            return True
+        try:
+            await page.add_init_script(_INSTALL_JS)
+            self._init_scripted_pages.add(id(page))
+            return True
+        except Exception:  # noqa: BLE001 — page may be closing
+            return False
 
     async def _wrap_page_now(self, page: Any) -> bool:
         """Install the wrapper on one page immediately (fail-open)."""
@@ -275,7 +299,14 @@ class CivitaiPageHarvester:
             self._watch_errors.append(f"ctx: {type(exc).__name__}")
 
     async def _wrap_new_page_with_retry(self, page: Any, attempts: int = 10) -> None:
-        """Wrap a freshly-opened tab, retrying until its document is ready."""
+        """Wrap a freshly-opened tab: init-script first, then evaluate.
+
+        The init script eliminates the race for every navigation this page
+        makes from here on; the retry-evaluate below additionally covers the
+        document that is loading right now (the init script may have missed
+        the initial navigation if the page object surfaced after commit).
+        """
+        await self._arm_page_init_script(page)
         for _ in range(attempts):
             url = (page.url or "").lower()
             if url and "civitai" in url:
@@ -310,12 +341,14 @@ class CivitaiPageHarvester:
             self._watch_errors.append(f"page: {type(exc).__name__}")
 
     async def _on_page_navigated(self, page: Any) -> None:
-        """After a navigation, re-apply the wrapper if it vanished."""
+        """After a navigation, ensure init-script + wrapper are in place."""
         try:
             url = (page.url or "").lower()
             if "civitai" not in url:
                 return
-            # Skip if the wrapper survived (SPA route change).
+            # Belt and suspenders: the init script covers future navigations;
+            # the live probe covers the current document if it wasn't armed.
+            await self._arm_page_init_script(page)
             try:
                 alive = await page.evaluate("() => !!window.__atelierai_harvest")
                 if alive:
@@ -416,6 +449,10 @@ class CivitaiPageHarvester:
                     if "civitai" not in url:
                         continue
                     try:
+                        # Per-page init script: race-free for this page's future
+                        # navigations even if the context-level script missed
+                        # (e.g. page created before context arming).
+                        await self._arm_page_init_script(page)
                         await page.evaluate(
                             "((flag) => { window.__atelierai_harvest = window.__atelierai_harvest || { queue: [] }; return flag; })",
                             True,
@@ -535,7 +572,13 @@ class CivitaiPageHarvester:
             # Stage any newly harvested feed captures into review tables.
             # Best-effort: staging failures don't affect the drain stats.
             if result.get("ok"):
-                self._auto_stats["last_stage"] = await self._stage_new_captures()
+                stage = await self._stage_new_captures()
+                self._auto_stats["last_stage"] = stage
+                if isinstance(stage, dict) and stage.get("ok"):
+                    self._auto_stats["total_staged_new"] = (
+                        self._auto_stats.get("total_staged_new", 0)
+                        + (stage.get("images_new") or 0)
+                    )
         except Exception as exc:  # noqa: BLE001 — loop must never die
             self._auto_stats["last_error"] = f"{type(exc).__name__}: {exc}"
 

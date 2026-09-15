@@ -68,11 +68,22 @@ def _stager_state_path() -> Path:
     return root / ".." / "browsed_staging_state.json"
 
 
+def _norm(path: Path | str) -> str:
+    """Canonical staging key for an archive file (absolute, resolved).
+
+    Early state files stored absolute /workspace/... paths while the scan
+    produced relative ones (cwd-dependent) — the mismatch made every pass
+    re-decode all files. Normalizing both sides keeps the state file stable
+    regardless of process cwd.
+    """
+    return str(Path(path).resolve())
+
+
 def _load_staged_paths() -> set[str]:
     path = _stager_state_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return set(data.get("staged_files", []))
+        return {_norm(p) for p in data.get("staged_files", [])}
     except (OSError, json.JSONDecodeError):
         return set()
 
@@ -188,15 +199,25 @@ def stage_harvested_feeds(
 
     with _STAGE_LOCK:
         staged_paths = set() if re_enrich else _load_staged_paths()
-        files = sorted(feed_dir.rglob("harvested_*.json"))
+        # Stage from ALL image.getInfinite captures — browser-harvested
+        # (harvested_*) AND direct-lane (trpc_*) records. Both contain
+        # browsable feed items; request-hash keying means identical inputs
+        # map to the same archive file, and fill-if-absent upserts keep
+        # richer existing data safe.
+        files = sorted(
+            set(feed_dir.rglob("harvested_*.json"))
+            | set(feed_dir.rglob("trpc_*.json"))
+        )
 
         files_staged = 0
         images_upserted = 0
         links_created = 0
+        images_new = 0
+        images_already_reviewed = 0
         errors: list[str] = []
 
         for fp in files[:limit_files]:
-            rel = str(fp)
+            rel = _norm(fp)
             if rel in staged_paths:
                 continue
             try:
@@ -229,6 +250,9 @@ def stage_harvested_feeds(
                         )
                     )
                     links_created += 1
+                    images_new += 1
+                else:
+                    images_already_reviewed += 1
 
             staged_paths.add(rel)
             files_staged += 1
@@ -241,5 +265,7 @@ def stage_harvested_feeds(
         "files_staged": files_staged,
         "images_upserted": images_upserted,
         "links_created": links_created,
+        "images_new": images_new,
+        "images_already_reviewed": images_already_reviewed,
         "errors": errors,
     }

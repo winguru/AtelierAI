@@ -285,11 +285,21 @@
     function renderAuto(s) {
       $('kv-auto-state').textContent = s.running
         ? `running (every ${s.interval_seconds}s)` : 'stopped';
+      const newCount = s.total_staged_new ?? 0;
       $('kv-auto-totals').textContent =
-        `${s.ticks} ticks · ${s.total_drained} drained · ${s.total_archived} archived`;
+        `${s.ticks} ticks · ${s.total_drained} drained · ${s.total_archived} archived · ${newCount} new staged`;
       const last = s.last_tick_at ? new Date(s.last_tick_at * 1000).toLocaleTimeString() : '—';
+      let stageInfo = '';
+      const st = s.last_stage;
+      if (st && st.ok) {
+        stageInfo = st.images_new > 0
+          ? ` · staged ${st.images_new} new`
+          : (st.images_already_reviewed || 0) > 0
+            ? ` · ${st.images_already_reviewed} already reviewed`
+            : '';
+      }
       const err = s.last_error ? ` · err: ${s.last_error}` : '';
-      $('kv-auto-last').textContent = `${last}${err}`;
+      $('kv-auto-last').textContent = `${last}${stageInfo}${err}`;
     }
 
     async function refreshAuto() {

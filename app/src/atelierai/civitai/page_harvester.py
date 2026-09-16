@@ -302,6 +302,9 @@ class CivitaiPageHarvester:
         # not consume a self-heal slot (or spam the console) forever.
         self._backfill_fails: dict[int, int] = {}
         self._BACKFILL_MAX_ATTEMPTS = 2
+        # Max tab recoveries per duty run (probe poll or loop tick) — a
+        # fleet of erroring tabs must not fire one synchronized tRPC burst.
+        self._RETRY_MAX_PER_CYCLE = 3
         self._auto_stats: dict[str, Any] = {
             "running": False,
             "interval_seconds": 30.0,
@@ -555,10 +558,8 @@ class CivitaiPageHarvester:
         except Exception as exc:  # noqa: BLE001 — fail-open
             return {"ok": False, "bridge": "probe-failed", "error": f"{type(exc).__name__}: {exc}"}
 
-        # Janitor duties ride the probe cycle (10s dashboard poll / 30s tick).
-        await self._maybe_scrape_related_posts(pages)
-        await self._retry_error_pages(bridge)
-        await self._maybe_close_idle_pages(bridge)
+        # Janitor duties ride the probe cycle AND the auto-drain tick.
+        await self._run_janitor_duties(bridge)
         return {
             "ok": True,
             "pages": pages,
@@ -575,7 +576,18 @@ class CivitaiPageHarvester:
         """Set idle-tab close timeout (0 disables; clamped to >=5s)."""
         self._auto_close_seconds = max(0.0, float(seconds))
 
-    async def _maybe_scrape_related_posts(self, pages: list[dict[str, Any]]) -> None:
+    async def _run_janitor_duties(self, bridge: Any) -> None:
+        """Scrape + retry + idle-close duties (idempotent).
+
+        Rides BOTH the probe cycle (dashboard poll) and the auto-drain
+        tick, so error recovery never depends on the Bridge Lab being
+        open (a uvicorn --reload or closed dashboard must not stall it).
+        """
+        await self._maybe_scrape_related_posts()
+        await self._retry_error_pages(bridge)
+        await self._maybe_close_idle_pages(bridge)
+
+    async def _maybe_scrape_related_posts(self) -> None:
         """Navigate open image-detail tabs to their owning post page (once).
 
         In-place navigation instead of scratch tabs: the existing tab is
@@ -709,21 +721,26 @@ class CivitaiPageHarvester:
         return now - last >= self._auto_close_seconds
 
     async def _retry_error_pages(self, bridge: Any) -> int:
-        """Reload tabs whose last API outcome was a temporary error (5xx/429).
+        """Recover tabs whose last API outcome was a temporary error.
 
-        Exponential backoff per page: reload → 2^attempt × 5s, capped at
-        60s. A successful response flips health to ok (via the wrapper's
-        apiOkAt timestamp), clears the backoff, and the janitor resumes
-        normal auto-close. Image tabs are left to the scrape path (their
-        navigation is scrape-owned); both tab types keep close-suspension.
-        Fail-open: duty errors never break the probe cycle.
+        /posts/ tabs reload in place; /images/ tabs navigate to their
+        owning post page (recovery + scraping in one step). Exponential
+        backoff per page: 2^attempt × 5s, capped at 60s. A successful
+        response flips health to ok (wrapper apiOkAt), clears the backoff,
+        and normal auto-close resumes. Capped at _RETRY_MAX_PER_CYCLE
+        recoveries per run so a fleet of erroring tabs doesn't fire one
+        synchronized tRPC burst. Fail-open: never breaks the duty cycle.
         """
         if bridge._browser is None:
             return 0
         retried = 0
         try:
             for ctx in bridge._browser.contexts:
+                if retried >= self._RETRY_MAX_PER_CYCLE:
+                    break
                 for page in list(ctx.pages):
+                    if retried >= self._RETRY_MAX_PER_CYCLE:
+                        break
                     retried += await self._retry_one_page(page)
         except Exception:  # noqa: BLE001, S110 — fail-open
             pass
@@ -750,12 +767,15 @@ class CivitaiPageHarvester:
             return 0
         # Erroring tab: suspend auto-close while unhealthy.
         self._page_last_active[id(page)] = time.monotonic()
-        if "/images/" in url:
-            return 0  # retry via scrape navigation path
         now = time.monotonic()
         attempt = self._retry_backoff.get(id(page), 0)
         if now < self._retry_next.get(id(page), 0.0):
             return 0
+        if "/images/" in url:
+            # Image tabs recover by navigating to their owning post page:
+            # the post's tRPC burst re-fires through the wrapper — recovery
+            # AND scraping in one step.
+            return await self._recover_image_page(page, now, attempt)
         self._retry_backoff[id(page)] = attempt + 1
         self._retry_next[id(page)] = now + min(2**attempt * 5, 60)
         try:
@@ -763,6 +783,57 @@ class CivitaiPageHarvester:
             return 1
         except Exception:  # noqa: BLE001 — best-effort reload
             return 0
+
+    async def _recover_image_page(
+        self, page: Any, now: float, attempt: int
+    ) -> int:
+        """Navigate an erroring image tab to its owning post page.
+
+        The post page's tRPC burst (image.getInfinite?postId=X) re-fires
+        through the wrapper — recovery and scraping in one step. Falls
+        back to a plain reload when the DB has no post_id for the image
+        yet. Shares the per-page backoff schedule with /posts/ retries.
+        """
+        image_id = _image_id_from_url(page.url or "")
+        post_id = self._post_id_for_image(image_id) if image_id is not None else None
+        self._retry_backoff[id(page)] = attempt + 1
+        self._retry_next[id(page)] = now + min(2**attempt * 5, 60)
+        try:
+            if post_id is not None:
+                bridge = self._get_bridge()
+                await page.goto(
+                    f"{bridge._web_base_url()}/posts/{post_id}",
+                    timeout=bridge._nav_timeout_ms(),
+                    wait_until="domcontentloaded",
+                )
+                self._scraped_post_ids.add(post_id)
+                self._auto_stats["posts_scraped"] = (
+                    self._auto_stats.get("posts_scraped", 0) + 1
+                )
+            else:
+                await page.reload(wait_until="domcontentloaded")
+            self._page_last_active[id(page)] = time.monotonic()
+            return 1
+        except Exception:  # noqa: BLE001 — best-effort navigation
+            return 0
+
+    def _post_id_for_image(self, image_id: int) -> int | None:
+        """Owning post id for a browsed image id (search DB), or None."""
+        try:
+            from database import SessionLocal
+            from sqlalchemy import text as _sa_text
+
+            with SessionLocal() as db:
+                row = db.execute(
+                    _sa_text(
+                        "SELECT post_id FROM civitai_search_images "
+                        "WHERE civitai_image_id = :iid"
+                    ),
+                    {"iid": int(image_id)},
+                ).fetchone()
+                return int(row[0]) if row and row[0] else None
+        except Exception:  # noqa: BLE001 — best-effort lookup
+            return None
 
     async def install(self) -> dict[str, Any]:
         """Install (or confirm) the harvester on all civitai pages.
@@ -795,7 +866,7 @@ class CivitaiPageHarvester:
                         # (e.g. page created before context arming).
                         await self._arm_page_init_script(page)
                         await page.evaluate(
-                            "((flag) => { window.__atelierai_harvest = window.__atelierai_harvest || { queue: [] }; return flag; })",
+                            "((flag) => { window.__atelierai_harvest = window.__atelierai_harvest || { queue: [], apiOkAt: 0, apiErrAt: 0, apiLastStatus: null }; return flag; })",
                             True,
                         )
                         # Evaluate the installer directly for immediate effect.
@@ -933,6 +1004,10 @@ class CivitaiPageHarvester:
                         self._auto_stats.get("total_staged_new", 0)
                         + (stage.get("images_new") or 0)
                     )
+                # Janitor duties also ride the loop tick: error recovery,
+                # post scraping, and idle-close must not depend on the
+                # Bridge Lab dashboard being open.
+                await self._run_janitor_duties(self._get_bridge())
         except Exception as exc:  # noqa: BLE001 — loop must never die
             self._auto_stats["last_error"] = f"{type(exc).__name__}: {exc}"
 

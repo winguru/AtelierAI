@@ -474,17 +474,61 @@ class TestRetryErrorPages:
         assert asyncio.run(h._retry_error_pages(h._bridge)) == 0
         page.reload.assert_not_awaited()
 
-    def test_image_tabs_are_left_to_scrape_path(self) -> None:
+    def test_image_tab_recovers_via_post_navigation(self) -> None:
+        """Erroring /images/ tabs navigate to their owning post page.
+
+        The post's tRPC burst re-fires through the wrapper — recovery and
+        scraping in one step. The old behavior (skip image tabs entirely,
+        wait for the separately-gated scrape duty) left them stuck when
+        auto_scrape_posts reset on reload.
+        """
         h = self._make_harvester()
+        h._post_id_for_image = MagicMock(return_value=12345)
         page = self._error_page("https://civitai.red/images/999")
+        page.goto = AsyncMock()
         ctx = MagicMock()
         ctx.pages = [page]
         h._bridge._browser.contexts = [ctx]
 
-        assert asyncio.run(h._retry_error_pages(h._bridge)) == 0
+        assert asyncio.run(h._retry_error_pages(h._bridge)) == 1
+        page.goto.assert_awaited_once()
+        nav_url = page.goto.call_args.args[0]
+        assert "/posts/12345" in nav_url
         page.reload.assert_not_awaited()
-        # ...but the tab is protected from auto-close while erroring.
+        # Recovery counts as a scrape and restarts the idle window.
+        assert h._auto_stats.get("posts_scraped") == 1
         assert id(page) in h._page_last_active
+
+    def test_image_tab_falls_back_to_reload_without_post_id(self) -> None:
+        h = self._make_harvester()
+        h._post_id_for_image = MagicMock(return_value=None)
+        page = self._error_page("https://civitai.red/images/999")
+        page.goto = AsyncMock()
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+
+        assert asyncio.run(h._retry_error_pages(h._bridge)) == 1
+        page.reload.assert_awaited_once()
+        page.goto.assert_not_awaited()
+
+    def test_retry_capped_per_cycle(self) -> None:
+        """A fleet of erroring tabs must not fire one synchronized burst."""
+        h = self._make_harvester()
+        h._RETRY_MAX_PER_CYCLE = 3
+        pages = [self._error_page(f"https://civitai.red/posts/{i}") for i in range(6)]
+        ctx = MagicMock()
+        ctx.pages = pages
+        h._bridge._browser.contexts = [ctx]
+
+        retried = asyncio.run(h._retry_error_pages(h._bridge))
+
+        assert retried == 3
+        reloads = sum(p.reload.await_count for p in pages)
+        assert reloads == 3
+        # Capped-out pages weren't touched this cycle; they're protected
+        # from close via the last-is-None guard and the error-health gate
+        # (see TestCloseSuspendedWhileErroring), and retried next cycle.
 
     def test_non_civitai_and_non_target_urls_skipped(self) -> None:
         h = self._make_harvester()

@@ -43,6 +43,22 @@ checks the cache before making a live call. Convenience wrappers:
 `signals.getToken` and `multi-search` are never stored — both are transient
 and carry no historical value.
 
+## Uncached call-site audit (2026-09-16)
+Live validation recipe: call an endpoint twice, watch
+`/api/civitai/auth/rate-limit-status` → `tpm_breakdown.endpoints[*].cached`
+and the transport-log line count. Cached reads add ZERO transport lines.
+
+Findings & fixes:
+- `/api/civitai-search/image/{id}` used UNCACHED fetch_basic_info /
+  fetch_generation_data / fetch_image_tag_records on every view — tags
+  had 29k stored responses never read. Fixed to `*_cached` with 7-day
+  TTL (bcc17b4): repeat view 4.05s → 0.105s, fully cache-served.
+- `metrics session_cached` is a process-lifetime classvar — resets on
+  every uvicorn --reload; a zero there does NOT mean the cache is idle.
+- Cache hits still pay the global rate-limiter queue when a request
+  mixes cached + live endpoints — 3-4s waits are queue latency, not
+  CivitAI. Keep hot paths fully cache-first to avoid the queue entirely.
+
 ## Call-Site Migration (Phase 4)
 Scripts using `_make_raw_request + _extract_trpc_result` have been migrated
 to `api.get_cached_or_fetch(endpoint, payload)`.  The tRPC envelope extraction

@@ -113,6 +113,19 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   contract everywhere: never raises, returns `{"ok": false, "bridge": ...}`.
   Tests: `app/tests/test_browser_bridge.py` (offline, mocked browser).
 
+### Browsed-id re-staging must be quarantined (fixed 2026-09-16)
+- Open `/images/{id}` tabs are re-staged on EVERY 30s drain tick; any staging
+  fetch keyed on "row lacks uuid" re-fetches dead (404) or rate-limited ids
+  forever — measured 616 wire requests/day for one deleted image, which
+  self-inflicted the 429s we blamed on CivitAI. Before diagnosing CivitAI
+  rate errors, grep transport logs for repeated ids: the caller is often us.
+- Fix shape: `_fetch_bare_metadata` = `fetch_basic_info_cached` (7-day TTL —
+  metadata basics are immutable per id; tombstoned 404s count as cache hits)
+  + `_backfill_fails` quarantine shared with the janitor backfill.
+- The DB cache (`civitai_api_cache`) DOES absorb repeats when callers use the
+  `*_cached` variants; uncached call sites bypass it entirely. Prefer
+  `fetch_basic_info_cached` for anything reachable from a periodic loop.
+
 ### API-health-aware retry + auto-close suspension (added 2026-09-07)
 - The in-page wrapper tracks `apiOkAt`/`apiErrAt`/`apiLastStatus`; `_page_health()` classifies `pending`/`ok`/`error`.
 - Retryable statuses: `409`, `429`, `5xx`, network-fail (`0`). Other 4xx (404) count as **ok** — dead resources must not be retried/held forever (mirrors the backfill-quarantine lesson).

@@ -26,9 +26,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import timedelta
 from typing import Any
 
 from atelierai.civitai.browser_bridge import CivitaiBrowserBridge
+
+# Metadata backfill freshness: browsed-image tiles only need uuid/blurhash/
+# artist basics, which never change for a given image id — a week-old cached
+# image.get is fine and avoids redundant tRPC budget burn.
+_META_MAX_AGE = timedelta(days=7)
 
 # JS injected before page scripts. Keep the record shape in sync with
 # _drain_js below. The queue lives on window; navigation replaces the document
@@ -1105,13 +1111,7 @@ class CivitaiPageHarvester:
                         for image_id in image_ids
                         if not _row_has_uuid(db, image_id)
                     }
-                for image_id in needs_meta:
-                    try:
-                        info = api.fetch_basic_info(image_id) or {}
-                        if isinstance(info, dict) and info.get("url"):
-                            metadata[image_id] = info
-                    except Exception:  # noqa: BLE001, S112 — per-id fetch
-                        continue
+                metadata = self._fetch_bare_metadata(api, needs_meta)
 
                 # PHASE 2 — short write transaction (no network inside).
                 with SessionLocal() as db:
@@ -1156,6 +1156,44 @@ class CivitaiPageHarvester:
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _work)
+
+    def _fetch_bare_metadata(
+        self, api: Any, needs_meta: set[int]
+    ) -> dict[int, dict]:
+        """Fetch image.get metadata for bare ids, cache-first + quarantined.
+
+        Tabs stay open across many drain ticks — a dead image (404 forever,
+        uuid never fills) must not be re-fetched every 30s for as long as
+        its tab exists. Two guards:
+        1. per-id quarantine (same caps as _backfill_bare_rows)
+        2. cache-first fetch — tombstoned 404s and cached 200s are served
+           from the DB cache without touching the wire.
+        """
+        metadata: dict[int, dict] = {}
+        for image_id in needs_meta:
+            if (
+                self._backfill_fails.get(image_id, 0)
+                >= self._BACKFILL_MAX_ATTEMPTS
+            ):
+                continue
+            try:
+                info = (
+                    api.fetch_basic_info_cached(image_id, max_age=_META_MAX_AGE)
+                    or {}
+                )
+                if isinstance(info, dict) and info.get("url"):
+                    metadata[image_id] = info
+                    self._backfill_fails.pop(image_id, None)
+                else:
+                    self._backfill_fails[image_id] = (
+                        self._backfill_fails.get(image_id, 0) + 1
+                    )
+            except Exception:  # noqa: BLE001 — per-id fetch
+                self._backfill_fails[image_id] = (
+                    self._backfill_fails.get(image_id, 0) + 1
+                )
+                continue
+        return metadata
 
     async def _auto_loop(self) -> None:
         """Periodically install (idempotent) + drain while connected.

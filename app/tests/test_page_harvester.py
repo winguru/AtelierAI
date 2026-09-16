@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from atelierai.civitai.page_harvester import (
+    _META_MAX_AGE,
     CivitaiPageHarvester,
     _endpoint_from_url,
     _parse_superjson_envelope,
@@ -590,3 +591,72 @@ class TestCloseSuspendedWhileErroring:
             ph.time.monotonic = orig_monotonic
 
         page.close.assert_awaited_once()
+
+
+class TestBareMetadataQuarantine:
+    """_fetch_bare_metadata: cache-first + dead-id quarantine.
+
+    Regression: open /images/{id} tabs re-staged every 30s drain tick used
+    uncached fetch_basic_info, so a dead (404) or rate-limited id was
+    re-fetched indefinitely for as long as its tab stayed open —
+    self-inflicted 429s from the harvester itself.
+    """
+
+    def _harvester(self):
+        h = CivitaiPageHarvester(bridge=MagicMock())
+        h._BACKFILL_MAX_ATTEMPTS = 2
+        return h
+
+    def test_uses_cached_variant_with_ttl(self) -> None:
+        h = self._harvester()
+        api = MagicMock()
+        api.fetch_basic_info_cached = MagicMock(
+            return_value={"url": "https://cdn/abc.webp", "id": 1}
+        )
+
+        meta = h._fetch_bare_metadata(api, {1})
+
+        assert meta == {1: {"url": "https://cdn/abc.webp", "id": 1}}
+        api.fetch_basic_info_cached.assert_called_once()
+        # Stale-but-fresh-enough cache lookups must be bounded by the TTL.
+        _args, kwargs = api.fetch_basic_info_cached.call_args
+        assert kwargs.get("max_age") == _META_MAX_AGE
+
+    def test_dead_id_quarantined_after_max_attempts(self) -> None:
+        h = self._harvester()
+        api = MagicMock()
+        api.fetch_basic_info_cached = MagicMock(return_value=None)
+
+        h._fetch_bare_metadata(api, {42})  # fail 1
+        h._fetch_bare_metadata(api, {42})  # fail 2 → at cap
+        count_after_two = api.fetch_basic_info_cached.call_count
+        h._fetch_bare_metadata(api, {42})  # quarantined → no call
+
+        assert count_after_two == 2
+        assert api.fetch_basic_info_cached.call_count == 2
+        assert h._backfill_fails[42] == 2
+
+    def test_success_resets_failure_count(self) -> None:
+        h = self._harvester()
+        fail_api = MagicMock()
+        fail_api.fetch_basic_info_cached = MagicMock(return_value=None)
+        ok_api = MagicMock()
+        ok_api.fetch_basic_info_cached = MagicMock(
+            return_value={"url": "https://cdn/x.webp"}
+        )
+
+        h._fetch_bare_metadata(fail_api, {7})
+        h._fetch_bare_metadata(ok_api, {7})
+
+        assert h._backfill_fails.get(7) is None
+        assert 7 in h._fetch_bare_metadata(ok_api, {7})
+
+    def test_exception_counts_as_failure_not_crash(self) -> None:
+        h = self._harvester()
+        api = MagicMock()
+        api.fetch_basic_info_cached = MagicMock(side_effect=RuntimeError("boom"))
+
+        meta = h._fetch_bare_metadata(api, {9})
+
+        assert meta == {}
+        assert h._backfill_fails[9] == 1

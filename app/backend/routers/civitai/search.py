@@ -1179,8 +1179,17 @@ def civitai_search_single_image(image_id: int):
     generation_data: dict = {}
     tag_records: list[dict] = []
 
+    # Cache-first with 7-day TTL: all three payloads are immutable for a
+    # published image id, so repeat detail views are served from the DB
+    # cache without wire requests (rate-limited tRPC budget stays free for
+    # genuinely new images).
+    from datetime import timedelta as _td
+
+    _detail_max_age = _td(days=7)
     try:
-        basic_info = api.fetch_basic_info(image_id) or {}
+        basic_info = (
+            api.fetch_basic_info_cached(image_id, max_age=_detail_max_age) or {}
+        )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)
     except Exception as exc:
@@ -1197,14 +1206,20 @@ def civitai_search_single_image(image_id: int):
 
     # Generation data and tags are best-effort (fail-open per AGENTS.md).
     try:
-        generation_data = api.fetch_generation_data(image_id) or {}
+        generation_data = (
+            api.fetch_generation_data_cached(image_id, max_age=_detail_max_age)
+            or {}
+        )
     except CivitaiRequestError as exc:
         raise _classify_civitai_upstream_error(exc)
     except Exception:
         pass  # fail-open
 
     try:
-        tag_records = api.fetch_image_tag_records(image_id) or []
+        tag_records = (
+            api.fetch_image_tag_records_cached(image_id, max_age=_detail_max_age)
+            or []
+        )
     except Exception:
         pass  # fail-open
 

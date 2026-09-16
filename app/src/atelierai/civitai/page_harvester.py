@@ -556,16 +556,23 @@ class CivitaiPageHarvester:
             ctx = bridge._browser.contexts[0] if bridge._browser.contexts else None
             if ctx is None:
                 return
-            base = self._web_base_url()
+            # _web_base_url is a BRIDGE helper (config-backed) — call it there.
+            # Calling self._web_base_url() raised AttributeError on every
+            # duty run, silently swallowed by the fail-open except.
+            base = bridge._web_base_url()
             for post_id in sorted(ids):
                 if post_id in self._scraped_post_ids:
                     continue
                 self._scraped_post_ids.add(post_id)
                 try:
                     page = await ctx.new_page()
+                    # _nav_timeout_ms is a BRIDGE helper (config-backed) —
+                    # call it there. self._nav_timeout_ms() raised
+                    # AttributeError after navigation started, silently
+                    # discarding the post-id and retrying forever.
                     await page.goto(
                         f"{base}/posts/{post_id}",
-                        timeout=self._nav_timeout_ms(),
+                        timeout=bridge._nav_timeout_ms(),
                         wait_until="domcontentloaded",
                     )
                     # Give the post's tRPC burst time to fire + beacon out.

@@ -126,6 +126,15 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   `*_cached` variants; uncached call sites bypass it entirely. Prefer
   `fetch_basic_info_cached` for anything reachable from a periodic loop.
 
+### Janitor settings persist in app_settings (added 2026-09-16)
+- `harvester.auto_scrape_posts` / `harvester.auto_close_seconds` live in the
+  `app_settings` KV table (`AppSetting` model) — loaded fail-open in the
+  harvester `__init__`, upserted on every setter. Missing table/row or
+  unimportable backend ⇒ defaults, never an error (standalone-safe).
+- Any new user-facing toggle reachable from a periodic loop should use the
+  same table — per-process settings reset on every uvicorn --reload and
+  silently stall whatever depended on them.
+
 ### Error-tab recovery must be self-driving (fixed 2026-09-16)
 - An idle error page makes NO API calls, so its health can never flip back to
   ok on its own — recovery requires an action (reload or navigation).

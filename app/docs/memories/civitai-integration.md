@@ -126,6 +126,19 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   `*_cached` variants; uncached call sites bypass it entirely. Prefer
   `fetch_basic_info_cached` for anything reachable from a periodic loop.
 
+### Error-tab recovery must be self-driving (fixed 2026-09-16)
+- An idle error page makes NO API calls, so its health can never flip back to
+  ok on its own — recovery requires an action (reload or navigation).
+- Never gate recovery behind a per-process setting (auto_scrape_posts resets
+  on every uvicorn --reload). Erroring /images/ tabs now navigate to their
+  owning post page as their retry action (`_recover_image_page`) — recovery
+  and scraping in one step; plain-reload fallback when no post_id yet.
+- Janitor duties must ride BOTH probe() and the auto-drain tick
+  (`_run_janitor_duties`); anything only on the dashboard poll stalls when
+  the Bridge Lab is closed.
+- Cap recoveries per cycle (`_RETRY_MAX_PER_CYCLE=3`) — a fleet of erroring
+  tabs firing one synchronized tRPC burst re-trips the rate limit.
+
 ### API-health-aware retry + auto-close suspension (added 2026-09-07)
 - The in-page wrapper tracks `apiOkAt`/`apiErrAt`/`apiLastStatus`; `_page_health()` classifies `pending`/`ok`/`error`.
 - Retryable statuses: `409`, `429`, `5xx`, network-fail (`0`). Other 4xx (404) count as **ok** — dead resources must not be retried/held forever (mirrors the backfill-quarantine lesson).

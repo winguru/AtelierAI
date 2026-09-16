@@ -113,6 +113,13 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   contract everywhere: never raises, returns `{"ok": false, "bridge": ...}`.
   Tests: `app/tests/test_browser_bridge.py` (offline, mocked browser).
 
+### API-health-aware retry + auto-close suspension (added 2026-09-07)
+- The in-page wrapper tracks `apiOkAt`/`apiErrAt`/`apiLastStatus`; `_page_health()` classifies `pending`/`ok`/`error`.
+- Retryable statuses: `409`, `429`, `5xx`, network-fail (`0`). Other 4xx (404) count as **ok** — dead resources must not be retried/held forever (mirrors the backfill-quarantine lesson).
+- Auto-close only reaps **healthy, drained** tabs (`_should_close_page`); erroring tabs get `_page_last_active` restamped (suspension), never closed.
+- `_retry_error_pages` rides the probe cycle: `/posts/` tabs reload with backoff `2^attempt × 5s` cap 60s (`_retry_backoff`/`_retry_next`, cleared on recovery). `/images/` tabs are scrape-owned — protected from close but not reloaded here.
+- Ruff complexity cap 15 keeps biting janitor loops — per-page decisions are extracted (`_should_close_page`, `_retry_one_page`, `_lookup_post_pages`).
+
 ## Key Files
 - `app/src/atelierai/civitai/civitai_auth.py` — `_launch_chrome_cdp()`, `_launch_context()`, `_terminate_chrome()`
 - `app/src/atelierai/civitai/browser_bridge.py` — CDP browser bridge singleton (`get_browser_bridge()`), fail-open `fetch()`/`navigate()`/`status()`

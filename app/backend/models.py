@@ -4,9 +4,13 @@
 # ──────────────────────────────────────────────────────────────────────────────
 import enum
 
+from database import Base
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
+    DateTime,
+    Enum,
     Float,
     ForeignKey,
     Index,
@@ -14,16 +18,11 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
-    DateTime,
-    JSON,
-    Enum,
     UniqueConstraint,
     func,
     text,
 )
 from sqlalchemy.orm import relationship
-from database import Base
-
 
 # ---------------------------------------------------------------------------
 # IntEnum types for ImageConceptObservation compact storage
@@ -958,6 +957,23 @@ class GenerationMatchAttempt(Base):
 class SchemaVersion(Base):
     __tablename__ = "schema_version"
     version_num = Column(String, primary_key=True)
+
+
+class AppSetting(Base):
+    """Persisted application setting (simple key/value store).
+
+    Used for per-process conveniences that must survive restarts/reloads —
+    e.g. harvester auto-scrape/auto-close. Written fail-open; readers
+    treat a missing table/row as "use the default".
+    """
+
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class VariantGroup(Base):

@@ -704,3 +704,67 @@ class TestBareMetadataQuarantine:
 
         assert meta == {}
         assert h._backfill_fails[9] == 1
+
+
+class TestSettingsPersistence:
+    """Janitor settings survive process restarts via the app_settings table.
+
+    Regression: auto_scrape_posts/auto_close_seconds were per-process and
+    silently reset on every uvicorn --reload, stalling recovery flows.
+    """
+
+    @staticmethod
+    def _fake_database_module(tmp_path, monkeypatch, with_table: bool):
+        """Swap sys.modules['database'] for a real sqlite/SQLAlchemy engine."""
+        import sys
+        import types
+
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'settings.sqlite3'}")
+        if with_table:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "CREATE TABLE app_settings ("
+                    "key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL, "
+                    "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+                ))
+        SessionLocal = sessionmaker(bind=engine)
+
+        fake_db = types.ModuleType("database")
+        fake_db.SessionLocal = SessionLocal
+        monkeypatch.setitem(sys.modules, "database", fake_db)
+        return SessionLocal
+
+    def test_setters_persist_and_reload_restores(self, tmp_path, monkeypatch) -> None:
+        self._fake_database_module(tmp_path, monkeypatch, with_table=True)
+
+        h1 = CivitaiPageHarvester(bridge=MagicMock())
+        h1.set_auto_scrape_posts(True)
+        h1.set_auto_close_seconds(300)
+
+        # Simulated reload: fresh harvester, same persisted settings.
+        h2 = CivitaiPageHarvester(bridge=MagicMock())
+        assert h2._auto_scrape_posts is True
+        assert h2._auto_close_seconds == 300.0
+
+        # Toggling off also persists.
+        h2.set_auto_scrape_posts(False)
+        h2.set_auto_close_seconds(0)
+        h3 = CivitaiPageHarvester(bridge=MagicMock())
+        assert h3._auto_scrape_posts is False
+        assert h3._auto_close_seconds == 0.0
+
+    def test_missing_table_means_defaults(self, tmp_path, monkeypatch) -> None:
+        # Fresh DB, no app_settings table yet (pre-startup): fail-open to
+        # defaults and never raise — persistence must not break construction.
+        self._fake_database_module(tmp_path, monkeypatch, with_table=False)
+
+        h = CivitaiPageHarvester(bridge=MagicMock())
+        assert h._auto_scrape_posts is False
+        assert h._auto_close_seconds == 0.0
+
+        # Setters on a missing table must not raise either.
+        h.set_auto_scrape_posts(True)
+        h.set_auto_close_seconds(120)

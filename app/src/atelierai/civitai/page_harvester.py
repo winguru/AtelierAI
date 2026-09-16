@@ -292,6 +292,9 @@ class CivitaiPageHarvester:
         # Auto-close idle post/image tabs: free sidecar resources when the
         # user ctrl-clicks many tabs. Only /posts/ and /images/ URLs.
         self._auto_close_seconds: float = 0.0  # 0 = disabled
+        # Both janitor settings persist in app_settings so a uvicorn
+        # --reload (new process, fresh harvester) keeps user intent.
+        self._load_persisted_settings()
         self._page_last_active: dict[int, float] = {}  # id(page) → monotonic
         # API-error retry state: attempt count per page (backoff exponent)
         # and monotonic time of next permitted reload. Cleared on recovery.
@@ -568,13 +571,79 @@ class CivitaiPageHarvester:
             "auto_close_seconds": self._auto_close_seconds,
         }
 
+    # Persisted-setting keys (app_settings table).
+    _SETTING_AUTO_SCRAPE = "harvester.auto_scrape_posts"
+    _SETTING_AUTO_CLOSE = "harvester.auto_close_seconds"
+
     def set_auto_scrape_posts(self, enabled: bool) -> None:
-        """Enable/disable auto-navigation to related post pages."""
+        """Enable/disable auto-navigation to related post pages (persisted)."""
         self._auto_scrape_posts = bool(enabled)
+        self._persist_setting(
+            self._SETTING_AUTO_SCRAPE, "1" if self._auto_scrape_posts else "0"
+        )
 
     def set_auto_close_seconds(self, seconds: float) -> None:
-        """Set idle-tab close timeout (0 disables; clamped to >=5s)."""
+        """Set idle-tab close timeout (0 disables; persisted)."""
         self._auto_close_seconds = max(0.0, float(seconds))
+        self._persist_setting(
+            self._SETTING_AUTO_CLOSE, repr(self._auto_close_seconds)
+        )
+
+    def _load_persisted_settings(self) -> None:
+        """Restore janitor settings from app_settings (fail-open defaults)."""
+        scrape = self._read_persisted_setting(self._SETTING_AUTO_SCRAPE)
+        if scrape is not None:
+            self._auto_scrape_posts = scrape == "1"
+        close = self._read_persisted_setting(self._SETTING_AUTO_CLOSE)
+        if close is not None:
+            try:
+                self._auto_close_seconds = max(0.0, float(close))
+            except (TypeError, ValueError):
+                pass
+
+    @staticmethod
+    def _read_persisted_setting(key: str) -> str | None:
+        """Read one app_settings value; None on any failure (missing table,
+        missing row, backend not importable — e.g. standalone civitai runs).
+        """
+        try:
+            from database import SessionLocal
+            from sqlalchemy import text as _sa_text
+
+            with SessionLocal() as db:
+                row = db.execute(
+                    _sa_text("SELECT value FROM app_settings WHERE key = :k"),
+                    {"k": key},
+                ).fetchone()
+                return str(row[0]) if row else None
+        except Exception:  # noqa: BLE001 — fail-open
+            return None
+
+    @staticmethod
+    def _persist_setting(key: str, value: str) -> None:
+        """Upsert one app_settings row (fire-and-forget; never raises).
+
+        The table is created by backend startup (Base.metadata.create_all);
+        before it exists (fresh DB) writes are silently dropped.
+        """
+        try:
+            from database import SessionLocal
+            from sqlalchemy import text as _sa_text
+
+            with SessionLocal() as db:
+                db.execute(
+                    _sa_text(
+                        "INSERT INTO app_settings (key, value, updated_at) "
+                        "VALUES (:k, :v, CURRENT_TIMESTAMP) "
+                        "ON CONFLICT(key) DO UPDATE SET "
+                        "value = excluded.value, "
+                        "updated_at = CURRENT_TIMESTAMP"
+                    ),
+                    {"k": key, "v": value},
+                )
+                db.commit()
+        except Exception:  # noqa: BLE001, S110 — fail-open
+            pass
 
     async def _run_janitor_duties(self, bridge: Any) -> None:
         """Scrape + retry + idle-close duties (idempotent).

@@ -521,24 +521,37 @@ class CivitaiPageHarvester:
         self._auto_close_seconds = max(0.0, float(seconds))
 
     async def _maybe_scrape_related_posts(self, pages: list[dict[str, Any]]) -> None:
-        """For open image-detail tabs, open the owning post page (once).
+        """Navigate open image-detail tabs to their owning post page (once).
 
-        The post page's tRPC burst (image.getInfinite?postId=X) carries full
-        metadata for every image in the post — richer than URL-staging alone.
-        Navigations happen in the sidecar browser (real session); the opened
-        tab is marked scraper-owned so the janitor can close it promptly.
+        In-place navigation instead of scratch tabs: the existing tab is
+        reused, its init-script wrapper captures the post's tRPC burst
+        (image.getInfinite?postId=X — full metadata for every image in the
+        post), the page beacon delivers it, and the idle-close janitor
+        reclaims the tab afterward. Navigating counts as activity, so the
+        auto-close window restarts naturally.
         """
         if not self._auto_scrape_posts:
+            return
+        bridge = self._get_bridge()
+        if bridge._browser is None:
             return
         try:
             from database import SessionLocal
             from sqlalchemy import text as _sa_text
 
-            img_urls = [p["url"] for p in pages if "/images/" in p["url"]]
-            ids: set[int] = set()
+            # Map image ids from open image tabs to their owning post ids.
+            # Work from bridge page objects (not the probe URL list) so we
+            # can navigate the actual tabs.
+            img_pages = []
+            for ctx in bridge._browser.contexts:
+                for page in ctx.pages:
+                    url = page.url or ""
+                    if "/images/" in url and "civitai" in url:
+                        img_pages.append((page, _image_id_from_url(url)))
+            ids_to_pages: dict[int, Any] = {}
+            post_ids: set[int] = set()
             with SessionLocal() as db:
-                for u in img_urls:
-                    iid = _image_id_from_url(u)
+                for page, iid in img_pages:
                     if iid is None:
                         continue
                     row = db.execute(
@@ -549,35 +562,27 @@ class CivitaiPageHarvester:
                         {"iid": iid},
                     ).fetchone()
                     if row and row[0]:
-                        ids.add(int(row[0]))
-            bridge = self._get_bridge()
-            if bridge._browser is None:
-                return
-            ctx = bridge._browser.contexts[0] if bridge._browser.contexts else None
-            if ctx is None:
-                return
-            # _web_base_url is a BRIDGE helper (config-backed) — call it there.
-            # Calling self._web_base_url() raised AttributeError on every
-            # duty run, silently swallowed by the fail-open except.
+                        pid = int(row[0])
+                        ids_to_pages[pid] = page
+                        post_ids.add(pid)
             base = bridge._web_base_url()
-            for post_id in sorted(ids):
+            for post_id in sorted(post_ids):
                 if post_id in self._scraped_post_ids:
+                    continue
+                page = ids_to_pages.get(post_id)
+                if page is None:
                     continue
                 self._scraped_post_ids.add(post_id)
                 try:
-                    page = await ctx.new_page()
-                    # _nav_timeout_ms is a BRIDGE helper (config-backed) —
-                    # call it there. self._nav_timeout_ms() raised
-                    # AttributeError after navigation started, silently
-                    # discarding the post-id and retrying forever.
                     await page.goto(
                         f"{base}/posts/{post_id}",
                         timeout=bridge._nav_timeout_ms(),
                         wait_until="domcontentloaded",
                     )
-                    # Give the post's tRPC burst time to fire + beacon out.
-                    await asyncio.sleep(4)
-                    await page.close()
+                    # Navigation = activity: restart the idle-close window so
+                    # the janitor doesn't reclaim the tab before the post's
+                    # tRPC burst is captured and beaconed.
+                    self._page_last_active[id(page)] = time.monotonic()
                     self._auto_stats["posts_scraped"] = (
                         self._auto_stats.get("posts_scraped", 0) + 1
                     )

@@ -264,6 +264,11 @@ class CivitaiPageHarvester:
         # user ctrl-clicks many tabs. Only /posts/ and /images/ URLs.
         self._auto_close_seconds: float = 0.0  # 0 = disabled
         self._page_last_active: dict[int, float] = {}  # id(page) → monotonic
+        # Failed-backfill attempts per image id (dead upstream assets). After
+        # _BACKFILL_MAX_ATTEMPTS the id is quarantined — a permanent 404 must
+        # not consume a self-heal slot (or spam the console) forever.
+        self._backfill_fails: dict[int, int] = {}
+        self._BACKFILL_MAX_ATTEMPTS = 2
         self._auto_stats: dict[str, Any] = {
             "running": False,
             "interval_seconds": 30.0,
@@ -815,6 +820,8 @@ class CivitaiPageHarvester:
 
         Bounded so the shared tRPC budget (25 RPM) stays mostly available
         for real browsing; 3/tick clears the current backlog in ~5 ticks.
+        Ids that failed backfill twice are quarantined (dead upstream —
+        deleted images 404 permanently) and never retried in-process.
         """
         import asyncio
 
@@ -832,9 +839,14 @@ class CivitaiPageHarvester:
                             "AND l.rating IS NULL AND l.search_id IS NULL "
                             "LIMIT :n"
                         ),
-                        {"n": limit},
+                        {"n": limit + len(self._backfill_fails)},
                     ).fetchall()
-                    return {r[0] for r in rows}
+                    return {
+                        r[0]
+                        for r in rows
+                        if self._backfill_fails.get(r[0], 0)
+                        < self._BACKFILL_MAX_ATTEMPTS
+                    }
             except Exception:  # noqa: BLE001 — best-effort
                 return set()
 
@@ -842,7 +854,45 @@ class CivitaiPageHarvester:
         if not ids:
             return 0
         await self._stage_browsed_image_ids(ids)  # backfills metadata
+        # Record which ids STILL lack a uuid after the attempt — those were
+        # fetch failures (404/rate-limit); dead ones hit the cap next time.
+        after_meta = await self._meta_uuid_snapshot(ids)
+        for image_id in ids:
+            if not after_meta.get(image_id):
+                self._backfill_fails[image_id] = (
+                    self._backfill_fails.get(image_id, 0) + 1
+                )
+            else:
+                self._backfill_fails.pop(image_id, None)  # succeeded — reset
         return len(ids)
+
+    async def _meta_uuid_snapshot(self, ids: set[int]) -> dict[int, str]:
+        """Return {image_id: uuid} for the given ids (bare = missing key)."""
+        import asyncio
+
+        def _snap() -> dict[int, str]:
+            try:
+                from database import SessionLocal
+                from models import CivitaiSearchImage
+
+                out: dict[int, str] = {}
+                with SessionLocal() as db:
+                    rows = (
+                        db.query(
+                            CivitaiSearchImage.civitai_image_id,
+                            CivitaiSearchImage.uuid,
+                        )
+                        .filter(CivitaiSearchImage.civitai_image_id.in_(ids))
+                        .all()
+                    )
+                    for cid, uuid in rows:
+                        if uuid:
+                            out[cid] = uuid
+                return out
+            except Exception:  # noqa: BLE001 — best-effort
+                return {}
+
+        return await asyncio.get_running_loop().run_in_executor(None, _snap)
 
     def _archive_records(
         self, records: list[dict[str, Any]], *, archive: bool = True
@@ -911,16 +961,12 @@ class CivitaiPageHarvester:
                 # (seconds each) and starved every other writer
                 # ("database is locked" storm in the search endpoints).
                 metadata: dict[int, dict] = {}
-                needs_meta: set[int] = set()
                 with SessionLocal() as db:
-                    for image_id in image_ids:
-                        row = (
-                            db.query(CivitaiSearchImage.uuid)
-                            .filter(CivitaiSearchImage.civitai_image_id == image_id)
-                            .first()
-                        )
-                        if row is None or not row[0]:
-                            needs_meta.add(image_id)
+                    needs_meta = {
+                        image_id
+                        for image_id in image_ids
+                        if not _row_has_uuid(db, image_id)
+                    }
                 for image_id in needs_meta:
                     try:
                         info = api.fetch_basic_info(image_id) or {}
@@ -1023,6 +1069,16 @@ class CivitaiPageHarvester:
         return dict(self._auto_stats)
 
 
+def _row_has_uuid(db: Any, image_id: int) -> bool:
+    """True when the civitai_search_images row exists and carries a uuid."""
+    from models import CivitaiSearchImage
+
+    row = (
+        db.query(CivitaiSearchImage.uuid)
+        .filter(CivitaiSearchImage.civitai_image_id == image_id)
+        .first()
+    )
+    return bool(row and row[0])
 
 def _apply_image_meta(img: Any, info: dict) -> None:
     """Fill-if-absent metadata fields from an image.get response (no clobber)."""

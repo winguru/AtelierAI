@@ -295,8 +295,12 @@
       $('kv-auto-state').textContent = s.running
         ? `running (every ${s.interval_seconds}s)` : 'stopped';
       const newCount = s.total_staged_new ?? 0;
+      const retried = s.pages_retried ?? 0;
+      const closed = s.tabs_auto_closed ?? 0;
+      const scraped = s.posts_scraped ?? 0;
       $('kv-auto-totals').textContent =
-        `${s.ticks} ticks · ${s.total_drained} drained · ${s.total_archived} archived · ${newCount} new staged`;
+        `${s.ticks} ticks · ${s.total_drained} drained · ${s.total_archived} archived · ${newCount} new staged` +
+        `${scraped ? ` · ${scraped} posts scraped` : ''}${retried ? ` · ${retried} retried` : ''}${closed ? ` · ${closed} tabs closed` : ''}`;
       const last = s.last_tick_at ? new Date(s.last_tick_at * 1000).toLocaleTimeString() : '—';
       let stageInfo = '';
       const st = s.last_stage;
@@ -328,7 +332,12 @@
         } else {
           for (const p of h.pages) {
             const li = document.createElement('li');
-            const state = p.wrapped ? `✅ wrapped · ${p.queued} queued` : `⚠️ NOT wrapped`;
+            let state = p.wrapped ? `✅ wrapped · ${p.queued} queued` : `⚠️ NOT wrapped`;
+            if (p.health === 'error') {
+              state += ` · ⚠️ API error (${p.api_status ?? 'network'}) — retrying, auto-close suspended`;
+            } else if (p.health === 'pending') {
+              state += ` · ⏳ awaiting API data`;
+            }
             li.textContent = `${state} — ${p.url}`;
             ul.appendChild(li);
           }

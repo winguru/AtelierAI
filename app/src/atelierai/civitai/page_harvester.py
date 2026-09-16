@@ -39,7 +39,16 @@ _INSTALL_JS = """
 (() => {
     if (window.__atelierai_harvest) return;  // idempotent
     const queue = [];
-    window.__atelierai_harvest = { queue, wrapFetch: true };
+    window.__atelierai_harvest = {
+        queue,
+        wrapFetch: true,
+        // API health for the janitor: 2xx-4xx (excl 429) = valid data;
+        // 5xx/429/network-fail = temporary trouble → retry + suspend
+        // auto-close until the page has at least one OK response.
+        apiOkAt: 0,
+        apiErrAt: 0,
+        apiLastStatus: null,
+    };
 
     const MAX_BODY = 262144;  // match Python-side cap; JS-side guard only
     const cap = (s) => (typeof s === 'string' && s.length > MAX_BODY)
@@ -97,6 +106,20 @@ _INSTALL_JS = """
                 : (args[0] && args[0].url) || '';
             const init = args[1] || {};
             if (isApiCall(url)) {
+                const status = resp ? resp.status : 0;
+                const health = window.__atelierai_harvest;
+                health.apiLastStatus = status;
+                // Retryable: 409 conflict, 429 rate-limit, 5xx, and
+                // network-level failure (status 0). Other 4xx (404 etc.)
+                // are permanent — count as a valid response so the tab
+                // isn't held open retrying a dead resource forever.
+                const retryable = status === 0 || status === 409
+                    || status === 429 || status >= 500;
+                if (retryable) {
+                    health.apiErrAt = Date.now();
+                } else {
+                    health.apiOkAt = Date.now();
+                }
                 let bodyText = null, bodyParsed = null;
                 if (resp) {
                     try {
@@ -264,6 +287,10 @@ class CivitaiPageHarvester:
         # user ctrl-clicks many tabs. Only /posts/ and /images/ URLs.
         self._auto_close_seconds: float = 0.0  # 0 = disabled
         self._page_last_active: dict[int, float] = {}  # id(page) → monotonic
+        # API-error retry state: attempt count per page (backoff exponent)
+        # and monotonic time of next permitted reload. Cleared on recovery.
+        self._retry_backoff: dict[int, int] = {}
+        self._retry_next: dict[int, float] = {}
         # Failed-backfill attempts per image id (dead upstream assets). After
         # _BACKFILL_MAX_ATTEMPTS the id is quarantined — a permanent 404 must
         # not consume a self-heal slot (or spam the console) forever.
@@ -296,17 +323,33 @@ class CivitaiPageHarvester:
             self._archive = CivitaiResponseArchive()
         return self._archive
 
-    # JS probe: does the page have the harvest wrapper, and how many
-    # captures are queued? Cheap to evaluate on any civitai page.
+    # JS probe: wrapper state, queued count, and API health timestamps.
     _PROBE_JS = """
     () => {
         const h = window.__atelierai_harvest;
         return {
             wrapped: !!h,
             queued: h && Array.isArray(h.queue) ? h.queue.length : 0,
+            apiOkAt: h ? h.apiOkAt : 0,
+            apiErrAt: h ? h.apiErrAt : 0,
+            apiLastStatus: h ? h.apiLastStatus : null,
         };
     }
     """
+
+    @staticmethod
+    def _page_health(result: dict[str, Any]) -> str:
+        """Classify a page's API health from probe data.
+
+        pending - no API traffic observed yet (too new to judge)
+        error   - temporary error seen and no OK since (5xx/429/network)
+        ok      - valid data received at some point
+        """
+        ok_at = int(result.get("apiOkAt") or 0)
+        err_at = int(result.get("apiErrAt") or 0)
+        if ok_at == 0 and err_at == 0:
+            return "pending"
+        return "ok" if ok_at >= err_at else "error"
 
     async def _arm_page_init_script(self, page: Any) -> bool:
         """Register the wrapper as a new-document init script on one page.
@@ -479,10 +522,13 @@ class CivitaiPageHarvester:
                     try:
                         result = await page.evaluate(self._PROBE_JS)
                         queued = int(result.get("queued") or 0)
+                        health = self._page_health(result)
                         pages.append({
                             "url": url.split("?")[0],
                             "wrapped": bool(result.get("wrapped")),
                             "queued": queued,
+                            "health": health,
+                            "api_status": result.get("apiLastStatus"),
                         })
                         # Activity = pending captures (real work), NOT mere
                         # visibility — stamping every poll made the idle-close
@@ -496,6 +542,8 @@ class CivitaiPageHarvester:
                             "url": url.split("?")[0],
                             "wrapped": False,
                             "queued": 0,
+                            "health": "unknown",
+                            "api_status": None,
                             "error": f"{type(exc).__name__}",
                         })
         except Exception as exc:  # noqa: BLE001 — fail-open
@@ -503,6 +551,7 @@ class CivitaiPageHarvester:
 
         # Janitor duties ride the probe cycle (10s dashboard poll / 30s tick).
         await self._maybe_scrape_related_posts(pages)
+        await self._retry_error_pages(bridge)
         await self._maybe_close_idle_pages(bridge)
         return {
             "ok": True,
@@ -536,10 +585,6 @@ class CivitaiPageHarvester:
         if bridge._browser is None:
             return
         try:
-            from database import SessionLocal
-            from sqlalchemy import text as _sa_text
-
-            # Map image ids from open image tabs to their owning post ids.
             # Work from bridge page objects (not the probe URL list) so we
             # can navigate the actual tabs.
             img_pages = []
@@ -548,23 +593,7 @@ class CivitaiPageHarvester:
                     url = page.url or ""
                     if "/images/" in url and "civitai" in url:
                         img_pages.append((page, _image_id_from_url(url)))
-            ids_to_pages: dict[int, Any] = {}
-            post_ids: set[int] = set()
-            with SessionLocal() as db:
-                for page, iid in img_pages:
-                    if iid is None:
-                        continue
-                    row = db.execute(
-                        _sa_text(
-                            "SELECT post_id FROM civitai_search_images "
-                            "WHERE civitai_image_id = :iid"
-                        ),
-                        {"iid": iid},
-                    ).fetchone()
-                    if row and row[0]:
-                        pid = int(row[0])
-                        ids_to_pages[pid] = page
-                        post_ids.add(pid)
+            ids_to_pages, post_ids = self._lookup_post_pages(img_pages)
             base = bridge._web_base_url()
             for post_id in sorted(post_ids):
                 if post_id in self._scraped_post_ids:
@@ -591,11 +620,43 @@ class CivitaiPageHarvester:
         except Exception:  # noqa: BLE001 — fail-open
             return
 
+    def _lookup_post_pages(
+        self, img_pages: list[tuple[Any, int | None]]
+    ) -> tuple[dict[int, Any], set[int]]:
+        """Map open image tabs to owning post ids via the search-images DB.
+
+        Returns (post_id → page, post_ids). Rows without a post_id (or
+        image ids not yet staged) are skipped.
+        """
+        ids_to_pages: dict[int, Any] = {}
+        post_ids: set[int] = set()
+        from database import SessionLocal
+        from sqlalchemy import text as _sa_text
+
+        with SessionLocal() as db:
+            for page, iid in img_pages:
+                if iid is None:
+                    continue
+                row = db.execute(
+                    _sa_text(
+                        "SELECT post_id FROM civitai_search_images "
+                        "WHERE civitai_image_id = :iid"
+                    ),
+                    {"iid": iid},
+                ).fetchone()
+                if row and row[0]:
+                    pid = int(row[0])
+                    ids_to_pages[pid] = page
+                    post_ids.add(pid)
+        return ids_to_pages, post_ids
+
     async def _maybe_close_idle_pages(self, bridge: Any) -> None:
         """Close /posts/ and /images/ tabs idle beyond the configured window.
 
         Frees sidecar memory when the user ctrl-clicks many tabs. Search and
-        other page types are never closed.
+        other page types are never closed. Tabs with pending captures or
+        degraded API health are suspended (never closed) — the retry duty
+        owns them until valid data arrives.
         """
         if self._auto_close_seconds <= 0 or bridge._browser is None:
             return
@@ -604,22 +665,7 @@ class CivitaiPageHarvester:
         try:
             for ctx in bridge._browser.contexts:
                 for page in list(ctx.pages):
-                    last = self._page_last_active.get(id(page))
-                    if last is None:
-                        continue
-                    url = (page.url or "").lower()
-                    if "/posts/" not in url and "/images/" not in url:
-                        continue
-                    # Never close while captures are pending (beacon debounce
-                    # is 2s; the window >> that in practice).
-                    try:
-                        probe = await page.evaluate(self._PROBE_JS)
-                        if int(probe.get("queued") or 0) > 0:
-                            self._page_last_active[id(page)] = now
-                            continue
-                    except Exception:  # noqa: BLE001, S110 — page gone/unready
-                        pass
-                    if now - last >= self._auto_close_seconds:
+                    if await self._should_close_page(page, now):
                         try:
                             await page.close()
                             closed += 1
@@ -631,6 +677,86 @@ class CivitaiPageHarvester:
             self._auto_stats["tabs_auto_closed"] = (
                 self._auto_stats.get("tabs_auto_closed", 0) + closed
             )
+
+    async def _should_close_page(self, page: Any, now: float) -> bool:
+        """True when a tab is a closeable URL, idle, healthy, and drained."""
+        last = self._page_last_active.get(id(page))
+        if last is None:
+            return False
+        url = (page.url or "").lower()
+        if "/posts/" not in url and "/images/" not in url:
+            return False
+        # Never close while captures are pending (beacon debounce is 2s;
+        # the window >> that in practice), and never close while the page's
+        # API health is degraded — the reload/refresh strategy owns those
+        # tabs until data is valid.
+        try:
+            probe = await page.evaluate(self._PROBE_JS)
+            if int(probe.get("queued") or 0) > 0:
+                self._page_last_active[id(page)] = now
+                return False
+            if self._page_health(probe) == "error":
+                self._page_last_active[id(page)] = now
+                return False
+        except Exception:  # noqa: BLE001, S110 — page gone/unready
+            pass
+        return now - last >= self._auto_close_seconds
+
+    async def _retry_error_pages(self, bridge: Any) -> int:
+        """Reload tabs whose last API outcome was a temporary error (5xx/429).
+
+        Exponential backoff per page: reload → 2^attempt × 5s, capped at
+        60s. A successful response flips health to ok (via the wrapper's
+        apiOkAt timestamp), clears the backoff, and the janitor resumes
+        normal auto-close. Image tabs are left to the scrape path (their
+        navigation is scrape-owned); both tab types keep close-suspension.
+        Fail-open: duty errors never break the probe cycle.
+        """
+        if bridge._browser is None:
+            return 0
+        retried = 0
+        try:
+            for ctx in bridge._browser.contexts:
+                for page in list(ctx.pages):
+                    retried += await self._retry_one_page(page)
+        except Exception:  # noqa: BLE001, S110 — fail-open
+            pass
+        if retried:
+            self._auto_stats["pages_retried"] = (
+                self._auto_stats.get("pages_retried", 0) + retried
+            )
+        return retried
+
+    async def _retry_one_page(self, page: Any) -> int:
+        """Retry decision for one tab. Returns 1 when a reload was issued."""
+        url = (page.url or "").lower()
+        if "civitai" not in url or (
+            "/posts/" not in url and "/images/" not in url
+        ):
+            return 0
+        try:
+            result = await page.evaluate(self._PROBE_JS)
+        except Exception:  # noqa: BLE001 — page gone/unready
+            return 0
+        if self._page_health(result) != "error":
+            self._retry_backoff.pop(id(page), None)
+            self._retry_next.pop(id(page), None)
+            return 0
+        # Erroring tab: suspend auto-close while unhealthy.
+        self._page_last_active[id(page)] = time.monotonic()
+        if "/images/" in url:
+            return 0  # retry via scrape navigation path
+        now = time.monotonic()
+        attempt = self._retry_backoff.get(id(page), 0)
+        if now < self._retry_next.get(id(page), 0.0):
+            return 0
+        self._retry_backoff[id(page)] = attempt + 1
+        self._retry_next[id(page)] = now + min(2**attempt * 5, 60)
+        try:
+            await page.reload(wait_until="domcontentloaded")
+            return 1
+        except Exception:  # noqa: BLE001 — best-effort reload
+            return 0
 
     async def install(self) -> dict[str, Any]:
         """Install (or confirm) the harvester on all civitai pages.
@@ -1092,6 +1218,7 @@ def _row_has_uuid(db: Any, image_id: int) -> bool:
     )
     return bool(row and row[0])
 
+
 def _apply_image_meta(img: Any, info: dict) -> None:
     """Fill-if-absent metadata fields from an image.get response (no clobber)."""
     user = info.get("user") or {}
@@ -1101,6 +1228,7 @@ def _apply_image_meta(img: Any, info: dict) -> None:
     img.file_name = img.file_name or info.get("name")
     img.artist_id = img.artist_id or user.get("id")
     img.artist_name = img.artist_name or user.get("username")
+
 
 # ── Singleton ───────────────────────────────────────────────────────────────
 _HARVESTER_SINGLETON: CivitaiPageHarvester | None = None

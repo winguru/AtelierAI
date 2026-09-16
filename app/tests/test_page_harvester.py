@@ -378,3 +378,215 @@ class _PageShim:
     async def evaluate(self, expression, arg=None):
         return await self._page.evaluate(expression, arg)
 
+
+class TestPageHealth:
+    """_page_health classifies probe results from the wrapper's timestamps."""
+
+    def test_pending_when_no_traffic(self) -> None:
+        assert CivitaiPageHarvester._page_health({"apiOkAt": 0, "apiErrAt": 0}) == "pending"
+
+    def test_ok_after_success(self) -> None:
+        assert (
+            CivitaiPageHarvester._page_health({"apiOkAt": 100, "apiErrAt": 0}) == "ok"
+        )
+
+    def test_error_when_only_failure(self) -> None:
+        assert (
+            CivitaiPageHarvester._page_health({"apiOkAt": 0, "apiErrAt": 100})
+            == "error"
+        )
+
+    def test_ok_wins_when_success_is_newer(self) -> None:
+        assert (
+            CivitaiPageHarvester._page_health({"apiOkAt": 200, "apiErrAt": 100})
+            == "ok"
+        )
+
+    def test_error_when_failure_is_newer(self) -> None:
+        assert (
+            CivitaiPageHarvester._page_health({"apiOkAt": 100, "apiErrAt": 200})
+            == "error"
+        )
+
+    def test_missing_fields_are_pending(self) -> None:
+        assert CivitaiPageHarvester._page_health({}) == "pending"
+
+
+class TestRetryErrorPages:
+    """_retry_error_pages reloads /posts/ tabs in error with backoff."""
+
+    def _make_harvester(self):
+        h = CivitaiPageHarvester(bridge=MagicMock())
+        h._bridge = MagicMock()
+        h._bridge._browser = MagicMock()
+        return h
+
+    def _error_page(self, url: str):
+        page = MagicMock()
+        page.url = url
+        page.evaluate = AsyncMock(
+            return_value={"apiOkAt": 0, "apiErrAt": 9_000, "apiLastStatus": 503}
+        )
+        page.reload = AsyncMock()
+        return page
+
+    def _ok_page(self, url: str):
+        page = MagicMock()
+        page.url = url
+        page.evaluate = AsyncMock(
+            return_value={"apiOkAt": 9_000, "apiErrAt": 0, "apiLastStatus": 200}
+        )
+        page.reload = AsyncMock()
+        return page
+
+    def test_error_post_page_gets_reloaded(self) -> None:
+        h = self._make_harvester()
+        page = self._error_page("https://civitai.red/posts/12345")
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+
+        retried = asyncio.run(h._retry_error_pages(h._bridge))
+
+        assert retried == 1
+        page.reload.assert_awaited_once()
+        assert h._auto_stats["pages_retried"] == 1
+
+    def test_backoff_delays_second_reload(self) -> None:
+        h = self._make_harvester()
+        page = self._error_page("https://civitai.red/posts/12345")
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+
+        asyncio.run(h._retry_error_pages(h._bridge))  # attempt 1 → reload
+        asyncio.run(h._retry_error_pages(h._bridge))  # within 5s backoff → skip
+        page.reload.assert_awaited_once()
+
+    def test_healthy_pages_are_not_reloaded(self) -> None:
+        h = self._make_harvester()
+        page = self._ok_page("https://civitai.red/posts/12345")
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+
+        assert asyncio.run(h._retry_error_pages(h._bridge)) == 0
+        page.reload.assert_not_awaited()
+
+    def test_image_tabs_are_left_to_scrape_path(self) -> None:
+        h = self._make_harvester()
+        page = self._error_page("https://civitai.red/images/999")
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+
+        assert asyncio.run(h._retry_error_pages(h._bridge)) == 0
+        page.reload.assert_not_awaited()
+        # ...but the tab is protected from auto-close while erroring.
+        assert id(page) in h._page_last_active
+
+    def test_non_civitai_and_non_target_urls_skipped(self) -> None:
+        h = self._make_harvester()
+        ctx = MagicMock()
+        ctx.pages = [
+            self._error_page("https://example.com/posts/1"),
+            self._error_page("https://civitai.red/search?query=x"),
+        ]
+        h._bridge._browser.contexts = [ctx]
+
+        assert asyncio.run(h._retry_error_pages(h._bridge)) == 0
+
+    def test_recovery_clears_backoff_state(self) -> None:
+        h = self._make_harvester()
+        page = self._error_page("https://civitai.red/posts/12345")
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+
+        asyncio.run(h._retry_error_pages(h._bridge))
+        assert h._retry_backoff.get(id(page)) == 1
+
+        # Page recovers: next probe reports ok → state cleared.
+        page.evaluate = AsyncMock(
+            return_value={"apiOkAt": 99_000, "apiErrAt": 9_000, "apiLastStatus": 200}
+        )
+        asyncio.run(h._retry_error_pages(h._bridge))
+        assert id(page) not in h._retry_backoff
+        assert id(page) not in h._retry_next
+
+    def test_probe_reports_health_fields(self) -> None:
+        h = self._make_harvester()
+        page = self._ok_page("https://civitai.red/posts/12345")
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+        h._bridge._ensure_connected = AsyncMock(return_value=True)
+        h._maybe_scrape_related_posts = AsyncMock()
+        h._maybe_close_idle_pages = AsyncMock()
+        h._retry_error_pages = AsyncMock(return_value=0)
+        h._ensure_auto_loop = MagicMock()
+
+        result = asyncio.run(h.probe())
+
+        assert result["ok"] is True
+        assert result["pages"][0]["health"] == "ok"
+        assert result["pages"][0]["api_status"] == 200
+
+
+class TestCloseSuspendedWhileErroring:
+    """Auto-close must not reap tabs whose API health is degraded."""
+
+    def test_error_page_not_closed_even_when_idle(self) -> None:
+        h = CivitaiPageHarvester(bridge=MagicMock())
+        h._bridge = MagicMock()
+        h._bridge._browser = MagicMock()
+        h.set_auto_close_seconds(5.0)
+
+        page = MagicMock()
+        page.url = "https://civitai.red/posts/12345"
+        page.evaluate = AsyncMock(
+            return_value={"apiOkAt": 0, "apiErrAt": 9_000, "apiLastStatus": 503}
+        )
+        page.close = AsyncMock()
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+        # Tab idle far beyond the window.
+        h._page_last_active[id(page)] = 100.0
+        import atelierai.civitai.page_harvester as ph
+
+        orig_monotonic = ph.time.monotonic
+        ph.time.monotonic = lambda: 10_000.0
+        try:
+            asyncio.run(h._maybe_close_idle_pages(h._bridge))
+        finally:
+            ph.time.monotonic = orig_monotonic
+
+        page.close.assert_not_awaited()
+
+    def test_healthy_idle_page_still_closed(self) -> None:
+        h = CivitaiPageHarvester(bridge=MagicMock())
+        h._bridge = MagicMock()
+        h._bridge._browser = MagicMock()
+        h.set_auto_close_seconds(5.0)
+
+        page = MagicMock()
+        page.url = "https://civitai.red/posts/12345"
+        page.evaluate = AsyncMock(
+            return_value={"apiOkAt": 9_000, "apiErrAt": 0, "apiLastStatus": 200}
+        )
+        page.close = AsyncMock()
+        ctx = MagicMock()
+        ctx.pages = [page]
+        h._bridge._browser.contexts = [ctx]
+        h._page_last_active[id(page)] = 100.0
+        import atelierai.civitai.page_harvester as ph
+
+        orig_monotonic = ph.time.monotonic
+        ph.time.monotonic = lambda: 10_000.0
+        try:
+            asyncio.run(h._maybe_close_idle_pages(h._bridge))
+        finally:
+            ph.time.monotonic = orig_monotonic
+
+        page.close.assert_awaited_once()

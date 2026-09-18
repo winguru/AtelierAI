@@ -117,6 +117,18 @@ def _summarize_civitai_batch_results(
         ):
             existing_ids.append(int(image_id))
             continue
+        # Hash-duplicate cross-posts (same file under a different CivitAI
+        # id) skip with existing_file_hash.  The existing gallery image is
+        # backfilled with civitai metadata and attached to the target
+        # collection during ingest, so the image truly is in the library.
+        if (
+            not error
+            and not cancelled
+            and skip_reason == "existing_file_hash"
+            and existing_image_id is not None
+        ):
+            existing_ids.append(int(image_id))
+            continue
 
         failed_ids.append(int(image_id))
         failures.append(

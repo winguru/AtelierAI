@@ -909,6 +909,28 @@
     }
   }
 
+  /* ── Import feature: build readable failure reason summary ── */
+  function summarizeImportFailures(failures) {
+    if (!Array.isArray(failures)) return '';
+    const labels = {
+      tombstoned_source_url: 'previously removed in this library',
+      tombstoned_file_hash: 'previously removed in this library',
+      placeholder_source_url: 'not found on CivitAI',
+      remote_not_found: 'not found on CivitAI',
+      cancelled: 'cancelled',
+    };
+    const counts = new Map();
+    for (const f of failures) {
+      const reason = f && f.reason ? String(f.reason) : '';
+      if (!reason) continue;
+      const label = labels[reason] || reason;
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([label, n]) => (n > 1 ? `${n}× ${label}` : label))
+      .join(', ');
+  }
+
   /* ── Import feature: poll task for completion ── */
   async function pollImportTasks(civitaiIds, taskId) {
     if (!taskId) return;
@@ -950,9 +972,14 @@
               updateImportButtonState(state.hits[state.selectedHitIndex]);
             }
             const summary = `${importedIds.length} imported, ${existingIds.length} already saved, ${failedIds.length} failed or unavailable.`;
-            setStatus(summary, failedIds.length ? 'is-error' : '');
             if (failedIds.length && importedIds.length === 0 && existingIds.length === 0) {
-              setStatus(`Import failed: ${failedIds.length} image(s) unavailable on CivitAI.`, 'is-error');
+              const detail = summarizeImportFailures(result.failures);
+              setStatus(
+                `Import failed: ${failedIds.length} image(s) unavailable on CivitAI${detail ? ` (${detail})` : ''}.`,
+                'is-error'
+              );
+            } else {
+              setStatus(summary, failedIds.length ? 'is-error' : '');
             }
           } else {
             for (const id of civitaiIds) {

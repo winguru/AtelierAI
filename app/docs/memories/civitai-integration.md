@@ -301,6 +301,17 @@ only active images, never placeholder rows. Frontend library-status refreshes
 must merge task-confirmed IDs before applying Hide Saved so an older concurrent
 status response cannot erase a successful import.
 
+`existing_file_hash` skips (cross-post duplicates: same file already in the
+library under a different CivitAI id) count as `existing`, not failed. The
+ingest path backfills civitai metadata on the existing image and attaches it to
+the target collection, so the image genuinely is in the library. Hash-dedup is
+why Search Lab's "Saved" filter (which matches by `civitai_image_id`) can miss
+these: the UI looks up by the requested id while the library already holds the
+identical file under another id. `tombstoned_file_hash` / `tombstoned_source_url`
+remain failed and retryable by design. Search Lab derives its failure message
+from `result.failures[].reason` (`summarizeImportFailures`); never reintroduce a
+hardcoded "unavailable on CivitAI" reason string.
+
 ### Search Lab artist avatar cache
 Fullscreen artist avatars are cached once per CivitAI artist in the
 `civitai_artist_profiles` table. Store a 96x96 WebP (maximum 16 KiB) as a

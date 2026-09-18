@@ -88,3 +88,56 @@ def test_batch_summary_counts_cached_import_as_imported():
     assert summary["imported_ids"] == [20]
     assert summary["failed_ids"] == []
     assert summary["imported"] == 1
+
+
+def test_batch_summary_counts_hash_duplicates_as_existing():
+    """Cross-post duplicates (same file, different CivitAI id) skip with
+    existing_file_hash; the existing gallery image is attached to the
+    target collection, so the outcome is "existing", not a failure."""
+    summary = _summarize_civitai_batch_results(
+        [30, 31],
+        [
+            {
+                "image_id": 30,
+                "images_skipped": 1,
+                "skip_reason": "existing_file_hash",
+                "existing_image_id": 330,
+                "error": None,
+                "cancelled": False,
+            },
+            {
+                "image_id": 31,
+                "images_skipped": 1,
+                "skip_reason": "tombstoned_file_hash",
+                "existing_image_id": 331,
+                "error": None,
+                "cancelled": False,
+            },
+        ],
+    )
+
+    assert summary["existing_ids"] == [30]
+    assert summary["failed_ids"] == [31]
+    assert summary["existing"] == 1
+    assert summary["failed"] == 1
+
+
+def test_batch_summary_keeps_hash_dup_with_error_failed():
+    """existing_file_hash with an error must NOT be classified existing."""
+    summary = _summarize_civitai_batch_results(
+        [40],
+        [
+            {
+                "image_id": 40,
+                "images_skipped": 1,
+                "skip_reason": "existing_file_hash",
+                "existing_image_id": 340,
+                "error": "metadata backfill failed",
+                "cancelled": False,
+            }
+        ],
+    )
+
+    assert summary["existing_ids"] == []
+    assert summary["failed_ids"] == [40]
+    assert summary["failures"][0]["reason"] == "metadata backfill failed"

@@ -1611,9 +1611,13 @@ def rate_civitai_image(
 
     is_excluded = payload.rating == "discard"
 
-    # Find or create the link row for this search+image pair.
-    # When search_id is None we look for a standalone link (search_id IS NULL)
-    # so we don't create duplicates on repeated ratings.
+    # Find the link row to rate. Exact (search_id, image_id) match first —
+    # a rating from an active search session belongs to that session's link.
+    # Fallback: the image's LATEST link of any search_id. Review mode rates
+    # staged images whose links carry search_id=None; a stale search session
+    # id in the payload must not fork a duplicate row — the latest link is
+    # the rating surface the unrated view ranks on.
+    link = None
     if payload.search_id is not None:
         link = (
             db.query(CivitaiSearchImageLink)
@@ -1623,13 +1627,11 @@ def rate_civitai_image(
             )
             .first()
         )
-    else:
+    if link is None:
         link = (
             db.query(CivitaiSearchImageLink)
-            .filter(
-                CivitaiSearchImageLink.search_id.is_(None),
-                CivitaiSearchImageLink.image_id == img.id,
-            )
+            .filter(CivitaiSearchImageLink.image_id == img.id)
+            .order_by(CivitaiSearchImageLink.created_at.desc(), CivitaiSearchImageLink.id.desc())
             .first()
         )
 

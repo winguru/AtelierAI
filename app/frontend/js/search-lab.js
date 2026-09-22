@@ -1730,7 +1730,10 @@
       reactions: hit.stats?.reactionCount ?? null,
       likes: hit.stats?.likeCount ?? null,
       position: idx,
-      search_id: state.currentSearchId,
+      // Review mode rates staged images whose links carry search_id=None;
+      // sending a stale SEARCH-mode session id misses the link lookup and
+      // creates duplicate link rows. Only search mode has a real session.
+      search_id: state.mode === 'search' ? state.currentSearchId : null,
     };
 
     // Optimistic update — reflect rating immediately in the UI.
@@ -1944,7 +1947,15 @@
       // Keep loading pages while:
       //   • we haven't reached a full page of visible tiles, AND
       //   • there are more pages available
-      while (countVisibleTiles() < state.limit && _hasMorePages()) {
+      // NOTE: for review/unrated the goal is to surface every remaining
+      // image — a lone remainder page (total % limit == 1) must still be
+      // fetched even when some tiles are already visible, otherwise the
+      // final item can never be reached (grid doesn't scroll when full).
+      const chaseRemainder = state.mode === 'review' && state.reviewRating === 'unrated';
+      while (
+        (countVisibleTiles() < state.limit || (chaseRemainder && countVisibleTiles() < state.total))
+        && _hasMorePages()
+      ) {
         const prevHitCount = state.hits.length;
         // Gallery mode uses cursor-based pagination (no offset increment)
         if (state.mode !== 'gallery') {
@@ -2530,6 +2541,9 @@
   function switchMode(mode) {
     if (mode === state.mode) return;
     state.mode = mode;
+    // Leaving search mode invalidates its session id — review/gallery
+    // ratings must not reference a search they don't belong to.
+    if (mode !== 'search') state.currentSearchId = null;
     updateModeUI();
 
     // Reset result state and re-search

@@ -85,9 +85,15 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
 - All calls in the analyzed window were live (no cached hits).
 
 ### CDN 503 flag cooldown (added 2026-09-06)
-- **Detection:** `_CDN_503_CONSECUTIVE` counts consecutive CDN 503s (any CDN
-  endpoint); threshold `CIVITAI_CDN_FLAG_THRESHOLD` (default 3); tRPC 503s are
-  ignored. A CDN success resets the streak.
+- **Detection:** `_CDN_503_CONSECUTIVE` counts consecutive FAILING CDN
+  requests (any CDN endpoint); threshold `CIVITAI_CDN_FLAG_THRESHOLD`
+  (default 3); tRPC 503s are ignored. A CDN success resets the streak.
+- **Per-request counting (fixed 2026-09-17):** only the FIRST qualifying
+  503 of each request (envelope) counts — inner-loop retries hit the same
+  URL, so one permanently-dead asset (edge-cached FAST 503 on a culled
+  filename-keyed route, defeating the >10s slow-503 heuristic) previously
+  reached the threshold alone and paused ALL CDN downloads for 300s
+  mid-sync at 35 RPM. Logic lives in `_record_cdn_503_for_flag_streak`.
 - **Cooldown:** CDN-scoped only — tRPC continues normally (unlike the global
   429/403-CF backoff). Escalating schedule 300 → 600 → 1200s (capped) via
   `activate_cdn_flag_cooldown()`. Strikes reset only after cooldown expiry AND
@@ -95,6 +101,20 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
 - **Retry abort:** while the flag is active, the inner retry loop aborts
   immediately on a CDN 503 (raises retryable error → `main.py` soft-skips →
   retried next sync) instead of burning attempts as flag-feeding probes.
+- **Dead filename-keyed routes (observed 2026-09-17):** assets whose
+  original filename contains spaces can have a permanently-dead primary
+  route (`original=true/…%20copy.jpeg` 503s even in a browser — CivitAI's
+  own page shows the broken image). These are per-asset outages, not rate
+  limiting: downloads must fall through to width-based/UUID candidates
+  (see `_build_civitai_image_candidate_urls`), and one such asset must not
+  trip the CDN flag (per-request counting above).
+- **Spec-invalid PNGs on fallback routes (fixed 2026-09-17):** a fallback
+  route served a PNG with `tEXt` BEFORE `IHDR` — PIL ingests it, browsers
+  refuse to render it (broken-image icon) until a manual Repair repacks
+  it. `_download_civitai_image_with_validation` now runs
+  `_repack_downloaded_png_if_needed` (PngRepacker) on every PNG download
+  and rewrites damaged files in place BEFORE ingest. Tests:
+  `app/tests/test_civitai_png_download_repair.py`.
 - **Observability:** `get_request_metrics()` exposes `endpoint_503_counts`,
   `cdn_503_consecutive`, `cdn_flag_active`, `cdn_flag_remaining_seconds`,
   `cdn_flag_strikes`; the TPM stats table gained a "503s" column
@@ -112,6 +132,29 @@ via `atelierai.civitai.transport_log` (buffered daemon-thread writer; flush at
   (auth once by hand via noVNC `:6080`; profile volume persists it). Fail-open
   contract everywhere: never raises, returns `{"ok": false, "bridge": ...}`.
   Tests: `app/tests/test_browser_bridge.py` (offline, mocked browser).
+
+### CivitAI artist identity collisions (fixed 2026-09-20)
+- **Incident**: image 18140614's ingest rolled back with
+  `UNIQUE constraint failed: artists.civitai_user_id`. Cause: a CivitAI
+  user RENAMED themselves ('VeryDumb' → 'iamabot000'), leaving two artist
+  rows — the id-owner (old name) and the name-matched row (new name, no
+  id). Ingest name-matched the new-name row, then blindly assigned the
+  already-owned user id onto it → IntegrityError.
+- **Fixes**: (1) `ImageProcessor.find_or_update_civitai_artist` returns
+  the canonical owner when the incoming id is already claimed by another
+  row (never re-assigns); (2) `_ingest_prepared_civitai_import`'s
+  artist-update branch re-points `image.artist_id` to the canonical owner
+  instead of assigning the id. Both preserve the UNIQUE constraint.
+- **Merge recipe** (for existing duplicates): SQLite flushes UNIQUE
+  column updates BEFORE deletes in one transaction — release the id from
+  the stale row and COMMIT first, then claim it on the canonical row +
+  delete the stale row. Direction: canonical = row matching CivitAI's
+  CURRENT username (verify via cached image.get user data), keep majority
+  images, preserve the old name in `civitai_user_original_name`.
+- Tests: `app/tests/test_civitai_artist_collision.py` (6). Tombstone-test
+  note: patch `api._record_to_db_cache` on the INSTANCE (not the class)
+  — class-level monkeypatches get clobbered by suite-mate singleton
+  initialization.
 
 ### Browsed-id re-staging must be quarantined (fixed 2026-09-16)
 - Open `/images/{id}` tabs are re-staged on EVERY 30s drain tick; any staging
@@ -288,6 +331,23 @@ Gallery mode is a third Search Lab mode (`state.mode === 'gallery'`) that browse
 - `app/backend/schemas.py` — `CivitaiGalleryRequest`
 - `app/frontend/js/search-lab.js` — `executeGallerySearch()`, gallery state fields, mode switching
 - `app/frontend/search-lab.html` — Gallery mode button in mode-bar
+
+### Review-mode rating must target the staging link (fixed 2026-09-22)
+- Staging links are (search_id=None); review-mode ratings used to send the
+  stale SEARCH-mode session id → (search_id, image_id) lookup missed →
+  duplicate rated row per image per cycle. unrated-view "latest link wins"
+  masked it, but links doubled every review pass.
+- Fix trio (8a0ac9b): frontend sends search_id only in search mode AND
+  clears it on mode switch; backend rate endpoint falls back to the image's
+  LATEST link when no exact (search_id, image_id) match — rating updates in
+  place regardless of which client calls.
+- Unrated-view pagination trap: total % limit == 1 leaves a lone remainder
+  page. checkAutoLoadIfAllHidden stops at >=1 visible tile and infinite
+  scroll needs scroll events (never fire with all-hidden grid) — the last
+  image was unreachable. Unrated auto-load now chases the remainder.
+- Forensics recipe for "unrated count grew" reports: compare rated-but-
+  latest-link-NULL overlap (resurrection) vs distinct-id sets (new staging)
+  vs sort-rank placement (pagination overlook). All three present here.
 
 ### Search Lab batch import reconciliation
 A batch task reaching `completed` only means every requested ID finished

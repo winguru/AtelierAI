@@ -332,6 +332,24 @@ Gallery mode is a third Search Lab mode (`state.mode === 'gallery'`) that browse
 - `app/frontend/js/search-lab.js` — `executeGallerySearch()`, gallery state fields, mode switching
 - `app/frontend/search-lab.html` — Gallery mode button in mode-bar
 
+### Unrated auto-load stampede (fixed 2026-09-23)
+- `checkAutoLoadIfAllHidden` is called re-entrantly from inside its own
+  awaited `executeSearch(true)` (renderResults → fetchLibraryStatus →
+  applyHideFilters). A boolean `autoLoading` guard released across `await`
+  does NOT protect the loop — nested calls see it free and start a second
+  interleaved loader (double-fetches offsets, skips pages). Use a
+  generation token (`state._autoLoadToken`) and break when superseded.
+- Never gate an auto-loader on `countVisibleTiles() < state.total` — with a
+  large unrated queue that is always true and the loader marches through
+  EVERY page on view entry (27 fetches / 1300+ tiles before first paint).
+  Bound "chase the remainder" to fewer than one page remaining.
+- Symptom signature: "N new browsed images staged" banner + blank view after
+  Show-new-images/Search = fresh search interleaved with a still-running
+  append march resetting hits mid-loop.
+- Debug recipe: wrap window.fetch in-page, record offset sequence + 6-frame
+  stacks per /rated call — duplicate or missing offsets = concurrent
+  loaders; a single marching sequence = unbounded loop condition.
+
 ### Review-mode rating must target the staging link (fixed 2026-09-22)
 - Staging links are (search_id=None); review-mode ratings used to send the
   stale SEARCH-mode session id → (search_id, image_id) lookup missed →

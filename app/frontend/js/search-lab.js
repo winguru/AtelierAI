@@ -2839,6 +2839,28 @@
       checkAutoLoadIfAllHidden();
       fetchLibraryStatus();
 
+      // Fullscreen was parked at the last visible tile waiting for this
+      // page (navigation or post-rating advance) — move to the first new
+      // visible tile. Mirrors the search-mode append path; without this,
+      // gallery fullscreen stalled at page boundaries forever.
+      if (append && state.fullscreenAdvanceOnLoad) {
+        state.fullscreenAdvanceOnLoad = false;
+        const firstNew = nextVisibleIndex(savedHits.length, 1);
+        if (firstNew >= 0) {
+          selectTile(firstNew);
+          const hit = state.hits[firstNew];
+          _setFullscreenImage(hit);
+          updateFullscreenCounter();
+          renderFullscreenArtist(hit);
+          renderFullscreenTags(hit);
+        } else if (_hasMorePages()) {
+          // New page was entirely hidden — keep going.
+          navigateFullscreen(1);
+        } else {
+          closeFullscreen();
+        }
+      }
+
       const count = newHits.length;
       if (count === 0 && !append) {
         setStatus(`No images found in ${state.galleryUsername}'s gallery. Check the username spelling.`, '');
@@ -3481,9 +3503,17 @@
       : `Image #${hit.id}`;
     const userName = hit.user?.username || '';
     const userDeleted = !!(hit.user?.deletedAt);
+    // baseModel may be a string OR an array (gallery hits carry arrays,
+    // sometimes of non-string entries) — normalize to a plain string before
+    // .replace or every selectTile throws in gallery mode, killing
+    // fullscreen navigation and post-rating advance.
+    const rawBaseModel = hit.baseModel;
+    const baseModelLabel = Array.isArray(rawBaseModel)
+      ? rawBaseModel.map(m => (typeof m === 'string' ? m : (m && m.name) || '')).filter(Boolean).join(', ')
+      : (typeof rawBaseModel === 'string' ? rawBaseModel : '');
     els.detail_subtitle.innerHTML = [
       userName ? (userDeleted ? `by <span class="deleted-user">${userName.replace(/</g,'&lt;')}</span>` : `by ${userName.replace(/</g,'&lt;')}`) : '',
-      (hit.baseModel || '').replace(/</g,'&lt;'),
+      baseModelLabel.replace(/</g,'&lt;'),
       hit.createdAt ? new Date(hit.createdAt).toLocaleDateString() : '',
     ].filter(Boolean).join(' · ');
 

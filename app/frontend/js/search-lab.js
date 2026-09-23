@@ -1970,9 +1970,13 @@
         && _hasMorePages()
       ) {
         const prevHitCount = state.hits.length;
-        // Gallery mode uses cursor-based pagination (no offset increment)
+        // Derive the append offset from what is actually loaded instead of
+        // incrementing a counter: this loop's awaited executeSearch runs
+        // nested load-more paths (scroll handler / advanceToNext) that ALSO
+        // increment state.offset, and double increments skipped pages
+        // (offset 51 became 102, the remainder page never loaded).
         if (state.mode !== 'gallery') {
-          state.offset += state.limit;
+          state.offset = state.hits.length;
         }
         await executeSearch(true);
 
@@ -2882,6 +2886,10 @@
     if (!append) {
       _preloadCache.clear();
       resetNsfwLevelVisible();
+      // A fresh search invalidates any auto-load loop still marching on
+      // the previous result set. Bump the generation so the loop breaks
+      // at its next check instead of interleaving with this fresh load.
+      state._autoLoadToken = (state._autoLoadToken || 0) + 1;
     }
     const savedOffset = state.offset;
 

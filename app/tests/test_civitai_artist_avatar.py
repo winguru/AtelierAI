@@ -59,6 +59,17 @@ class FakeCivitaiApi:
         self.calls += 1
         return self.images[image_id]
 
+    # Cache-first variants used by the image-detail endpoint. The fake has
+    # no cache, so these delegate to the uncached fakes (always a "miss").
+    def fetch_basic_info_cached(self, image_id, max_age=None, cache_only=False, strict=False):
+        return self.fetch_basic_info(image_id)
+
+    def fetch_generation_data_cached(self, image_id, max_age=None, cache_only=False, strict=False):
+        return self.fetch_generation_data(image_id)
+
+    def fetch_image_tag_records_cached(self, image_id, max_age=None, cache_only=False, strict=False):
+        return self.fetch_image_tag_records(image_id)
+
     def fetch_user_by_id(self, user_id):
         return self.profiles.get(user_id, {})
 

@@ -241,14 +241,25 @@ def _build_cdn_urls(
 def _build_video_url(uuid: str) -> str | None:
     """Build a directly-playable URL for a CivitAI video asset.
 
-    Video content (``type: video``) cannot use the image CDN — that endpoint
-    serves the raw MP4 regardless of the width/quality parameters.  The B2
-    media cache serves the original file with correct ``video/mp4`` headers
-    that a ``<video>`` element can play.
+    Videos use the image CDN's **transcode** route — the same URL the
+    civitai.red image page uses for its <video> element:
+
+        /{uuid}/transcode=true,width=450,optimized=true/{uuid}.mp4
+
+    This 301-redirects to a playable blobs-b2 MP4 (correct headers) and
+    works for ALL videos. The previously-used B2 media-cache ``/original``
+    URL 404s for a large share of videos whose underlying file name is not
+    the bare uuid (e.g. ``pixverse2Fmedia2Fori2F..._seed....mp4``) — those
+    assets simply do not exist under ``civitai-media-cache/{uuid}/original``,
+    which is why some tiles showed blank thumbnails/previews while the
+    CivitAI page itself played fine.
     """
     if not uuid or "/" in uuid:
         return None
-    return f"{_CIVITAI_B2_MEDIA}/{uuid}/original"
+    return (
+        f"{_CIVITAI_IMAGE_CDN}/{uuid}/"
+        f"transcode=true,width=450,optimized=true/{uuid}.mp4"
+    )
 
 
 def _is_video_hit(raw: dict) -> bool:

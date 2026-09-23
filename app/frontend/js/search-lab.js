@@ -2740,7 +2740,8 @@
       if (count === 0 && !append) {
         setStatus(`No ${state.reviewRating === 'any' ? '' : state.reviewRating + ' '}images found. Rate some images first!`, '');
       } else if (append) {
-        setStatus(`Loaded ${state.hits.length} of ${state.total} rated images.`, '');
+        const rLabel = state.reviewRating === 'any' ? '' : state.reviewRating + ' ';
+        setStatus(`Loaded ${state.hits.length} of ${state.total} ${rLabel}images.`, '');
       } else {
         const rLabel = state.reviewRating === 'any' ? '' : state.reviewRating + ' ';
         setStatus(`Showing ${state.hits.length} of ${state.total} ${rLabel}images.`, '');

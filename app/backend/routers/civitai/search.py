@@ -462,7 +462,22 @@ def _get_civitai_search_client():
             return _civitai_search_client
         from atelierai.civitai.civitai_search import CivitaiSearchClient
 
-        _civitai_search_client = CivitaiSearchClient()
+        # The tRPC search fallback (image.getInfinite) requires the session
+        # cookie — pull it from the CivitaiAPI singleton (cache-file backed,
+        # refreshed from the browser bridge).
+        session_cookie = None
+        try:
+            from atelierai.civitai.civitai_api import CivitaiAPI
+
+            session_cookie = (
+                getattr(CivitaiAPI.get_instance(), "session_cookie", "") or None
+            )
+        except Exception:  # noqa: BLE001 — cookie is optional
+            session_cookie = None
+
+        _civitai_search_client = CivitaiSearchClient(
+            session_cookie=session_cookie
+        )
         return _civitai_search_client
 
 

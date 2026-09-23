@@ -15,6 +15,7 @@ full endpoint documentation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -353,6 +354,32 @@ class CivitaiSearchClient:
                                 "proceeding to REST fallback check."
                             )
 
+                    # tRPC search (site's own path) supports cursor
+                    # pagination — try it BEFORE the offset-limited REST
+                    # fallback. It covers paginated queries too.
+                    try:
+                        result = self._trpc_search(
+                            query=query,
+                            tags=tags,
+                            sort_by=sort_by,
+                            limit=limit,
+                            nsfw_levels=nsfw_levels,
+                            base_models=base_models,
+                            exclude_poi=exclude_poi,
+                            exclude_minor=exclude_minor,
+                            username=username,
+                        )
+                        result["backend"] = "trpc"
+                        _log.warning(
+                            "Meilisearch unusable (index config changed); "
+                            "served by tRPC image.getInfinite fallback."
+                        )
+                        return result
+                    except CivitaiRequestError as trpc_exc:
+                        _log.warning(
+                            "tRPC search fallback also failed: %s", trpc_exc
+                        )
+
                     # REST API does not support offset pagination — falling
                     # back for offset > 0 would return wrong (first-page)
                     # results.  Raise the original error instead.
@@ -541,6 +568,136 @@ class CivitaiSearchClient:
     # ------------------------------------------------------------------
     # REST API backend
     # ------------------------------------------------------------------
+
+    def _trpc_search(
+        self,
+        *,
+        query: str = "",
+        tags: Optional[list[str]] = None,
+        sort_by: str = _DEFAULT_SORT,
+        limit: int = _DEFAULT_LIMIT,
+        nsfw_levels: Optional[list[int]] = None,
+        base_models: Optional[list[str]] = None,
+        exclude_poi: bool = True,
+        exclude_minor: bool = True,
+        username: Optional[str] = None,
+        cursor: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Search via tRPC ``image.getInfinite`` — the site's own search path.
+
+        As of 2026-09-23 CivitAI dropped Meilisearch filterable attributes
+        (the images_v6 index config was wiped: every filter expression now
+        400s).  The site's own frontend now searches through
+        ``/api/trpc/image.getInfinite`` with a ``query`` param and standard
+        browse parameters — this method mirrors that call.  Requires the
+        session cookie (same as the browser lane); tags/base-model filters
+        are folded into the free-text query (best effort).
+
+        Returns a Meilisearch-shaped result dict with ``backend``-neutral
+        keys (``hits``, ``nextCursor``, no facets — facet counts are not
+        available from tRPC).
+        """
+        payload: dict[str, Any] = {
+            "query": query or "",
+            "authed": True,
+            "sort": _SORT_MAP.get(sort_by, "Most Reactions"),
+            "period": "AllTime",
+            "browsingLevel": max(nsfw_levels or [31]),
+            "include": ["cosmetics"],
+            "limit": max(1, min(int(limit), 200)),
+        }
+        if cursor is not None:
+            payload["cursor"] = cursor
+        if tags:
+            payload["query"] = " ".join(filter(None, [query or "", *tags])).strip()
+        if base_models:
+            payload["baseModels"] = base_models
+
+        url = (
+            f"https://civitai.red/api/trpc/image.getInfinite"
+            f"?input={requests.utils.quote(json.dumps({'json': payload}))}"
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Origin": "https://civitai.red",
+            "Referer": "https://civitai.red/",
+        }
+        cookie = self._session_cookie
+        if cookie:
+            # The site's session cookie is __Secure-civ-token (JWT); older
+            # fallbacks kept civitai_session_token. Send the current name.
+            headers["Cookie"] = f"__Secure-civ-token={cookie}"
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=self._timeout)
+        except requests.RequestException as exc:
+            raise CivitaiRequestError(
+                f"tRPC search request failed: {exc}", retryable=True
+            ) from exc
+
+        self._record_search_response(
+            endpoint="trpc.image.getInfinite",
+            method="GET",
+            url=url,
+            request=payload,
+            response=resp.text[:2000],
+            status_code=resp.status_code,
+        )
+        if resp.status_code != 200:
+            raise CivitaiRequestError(
+                f"tRPC search returned HTTP {resp.status_code}: {resp.text[:300]}",
+                status_code=resp.status_code,
+                retryable=resp.status_code >= 500,
+            )
+
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise CivitaiRequestError(
+                f"tRPC search returned invalid JSON: {exc}",
+                status_code=resp.status_code,
+            ) from exc
+
+        parsed = self._trpc_parse_infinite(body)
+        hits = [_trpc_item_to_meili_hit(item) for item in parsed["items"]]
+        next_cursor = parsed.get("nextCursor")
+        return {
+            "hits": hits,
+            "estimatedTotalHits": None,
+            "offset": 0,
+            "limit": limit,
+            "processingTimeMs": 0,
+            "facetDistribution": None,
+            "facetStats": None,
+            "nextCursor": next_cursor,
+            "backend": "trpc",
+        }
+
+    @staticmethod
+    def _trpc_parse_infinite(body: dict[str, Any]) -> dict[str, Any]:
+        """Parse an ``image.getInfinite`` envelope into ``{items, nextCursor}``.
+
+        The columnar double-encoded format (``result.data`` is a stringified
+        flat array) is delegated to ``CivitaiAPI._deserialize_trpc_flat_array``
+        — the same deserializer the harvester feed path uses.  ``nextCursor``
+        is a feed-cursor STRING like ``"feed:27405:12097475"`` (opaque; pass
+        back verbatim for the next page), NOT an int.
+        """
+        if not isinstance(body, dict):
+            return {"items": [], "nextCursor": None}
+        try:
+            from .civitai_api import CivitaiAPI
+
+            parsed = CivitaiAPI._deserialize_trpc_flat_array(body)
+            if isinstance(parsed, dict):
+                return {
+                    "items": [i for i in (parsed.get("items") or []) if isinstance(i, dict)],
+                    "nextCursor": parsed.get("nextCursor"),
+                }
+        except Exception:  # noqa: BLE001, S110 — best-effort parse
+            pass
+        return {"items": [], "nextCursor": None}
 
     def _rest_search(
         self,
@@ -872,6 +1029,60 @@ def _build_nsfw_filter(
     parts.append(f"({level_expr})")
 
     return " AND ".join(parts)
+
+
+def _trpc_item_to_meili_hit(item: dict[str, Any]) -> dict[str, Any]:
+    """Map a tRPC ``image.getInfinite`` item to a Meilisearch-like hit.
+
+    Field names mirror the endpoint's own schema (id/name/url/nsfwLevel/
+    width/height/hash/type/postId/baseModel/user/stats/tags/reactions);
+    stats arrive as flat ``*AllTime`` keys.
+    """
+    user = item.get("user") or {}
+    stats = item.get("stats") or {}
+    meta = item.get("meta") or {}
+
+    def _reactions(stats: dict[str, Any]) -> int:
+        return sum(
+            int(stats.get(k) or 0)
+            for k in ("likeCountAllTime", "laughCountAllTime",
+                      "heartCountAllTime", "cryCountAllTime")
+        )
+
+    # tags may be a list, a columnar sentinel (-1), or absent — coerce.
+    raw_tags = item.get("tags")
+    if not isinstance(raw_tags, list):
+        raw_tags = []
+    tag_names = [
+        t.get("name") if isinstance(t, dict) else t
+        for t in raw_tags if t
+    ]
+
+    return {
+        "id": item.get("id"),
+        "url": item.get("url", ""),
+        "hash": item.get("hash", ""),
+        "width": item.get("width"),
+        "height": item.get("height"),
+        "nsfwLevel": item.get("nsfwLevel"),
+        "type": item.get("type", "image"),
+        "baseModel": item.get("baseModel"),
+        "username": user.get("username", ""),
+        "postId": item.get("postId"),
+        "createdAt": item.get("createdAt", ""),
+        "browsingLevel": item.get("nsfwLevel"),
+        "stats": {
+            "reactionCountAllTime": _reactions(stats),
+            "commentCountAllTime": stats.get("commentCountAllTime", 0),
+            "collectedCountAllTime": stats.get("collectedCountAllTime", 0),
+            "likeCountAllTime": stats.get("likeCountAllTime", 0),
+        },
+        "reactions": item.get("reactions"),
+        "meta": meta,
+        "prompt": meta.get("prompt", ""),
+        "tagNames": tag_names,
+        "generationProcess": meta.get("Version") or "Unknown",
+    }
 
 
 def _rest_item_to_meili_hit(item: dict[str, Any]) -> dict[str, Any]:

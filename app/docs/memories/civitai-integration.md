@@ -448,6 +448,23 @@ is broken.
 - Sync Lab Steps 5–7 support stage-level subset execution with candidate selection + optional per-stage `limit`; empty selections still run as no-op completions so sessions can finish through Step 7.
 - Stage 6 download now retries alternate image URLs on 404 (raw page-render URL and `image-b2 ... /original` UUID endpoint) because some CivitAI image pages remain visible while a direct CDN filename URL returns `File with such name does not exist`.
 
+### Meilisearch index wiped → tRPC search fallback (2026-09-23)
+- CivitAI removed ALL filterable attributes from `images_v6` (every filter
+  400s; unfiltered queries return total=0). The site's own frontend now
+  searches via tRPC `image.getInfinite` with a `query` param.
+- `CivitaiSearchClient._trpc_search` mirrors the site's call: payload
+  `{query, authed:true, sort:"Most Reactions", period:"AllTime",
+  browsingLevel, limit, cursor}`; auth via `__Secure-civ-token` cookie
+  (pulled from CivitaiAPI singleton in the router's client factory) —
+  the endpoint 401s with "Please use the public API instead" without it.
+- Response is the columnar double-encoded flat array → reuse
+  `CivitaiAPI._deserialize_trpc_flat_array`. `nextCursor` is an opaque
+  STRING ("feed:27405:…"), pass back verbatim. `tags` may be the -1
+  columnar sentinel — coerce. Fallback chain: meilisearch → tRPC → REST.
+- When CivitAI's public contracts break, capture the site's OWN working
+  request through the browser bridge first (`/api/browser-bridge/fetch`)
+  — it reveals the new schema empirically.
+
 ### Video URLs must use the CDN transcode route (fixed 2026-09-23)
 - B2 `image-b2.civitai.com/file/civitai-media-cache/{uuid}/original` 404s for
   ANY video whose underlying file name is not the bare uuid (e.g.

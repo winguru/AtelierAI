@@ -1942,18 +1942,31 @@
     if (state.autoLoading) return;
     if (state.hits.length === 0) return;
 
+    // Re-entrancy-safe guard: the awaited executeSearch() below runs its
+    // own checkAutoLoadIfAllHidden() (via renderResults → fetchLibraryStatus
+    // → applyHideFilters) BEFORE this invocation's loop finishes — with a
+    // plain boolean that nested call saw autoLoading=false mid-loop and
+    // started a SECOND loader. Two interleaved loaders double-fetched every
+    // offset and skipped pages. The token makes the guard hold for the
+    // entire lifetime of this invocation: nested calls (older token) bail.
+    const token = (state._autoLoadToken = (state._autoLoadToken || 0) + 1);
     state.autoLoading = true;
     try {
       // Keep loading pages while:
       //   • we haven't reached a full page of visible tiles, AND
       //   • there are more pages available
-      // NOTE: for review/unrated the goal is to surface every remaining
-      // image — a lone remainder page (total % limit == 1) must still be
-      // fetched even when some tiles are already visible, otherwise the
-      // final item can never be reached (grid doesn't scroll when full).
+      // NOTE: in review/unrated mode, also chase a lone TRAILING remainder
+      // (fewer than one page left) so the final images are reachable when
+      // the grid doesn't scroll — but never the whole queue: chasing
+      // `countVisibleTiles() < total` made the loader fetch EVERY page on
+      // view load (27 fetches for a 1367-item queue), clobbering state and
+      // starving fresh searches.
       const chaseRemainder = state.mode === 'review' && state.reviewRating === 'unrated';
       while (
-        (countVisibleTiles() < state.limit || (chaseRemainder && countVisibleTiles() < state.total))
+        (countVisibleTiles() < state.limit
+          || (chaseRemainder
+            && state.total - state.hits.length > 0
+            && state.total - state.hits.length < state.limit))
         && _hasMorePages()
       ) {
         const prevHitCount = state.hits.length;
@@ -1962,6 +1975,11 @@
           state.offset += state.limit;
         }
         await executeSearch(true);
+
+        // A fresh search (Show new images / re-search) resets hits mid-loop;
+        // appending at the loop's stale offset would splice foreign tiles
+        // into the fresh result set. Bail and let the fresh view drive.
+        if (state.hits.length < prevHitCount) break;
 
         // Re-apply filters after the new hits are loaded so
         // countVisibleTiles() reflects the updated state.
@@ -1972,9 +1990,14 @@
         // post-filtering removed all hits for this page), bail out to
         // avoid an infinite loop even when state.total hasn't been capped.
         if (state.hits.length === prevHitCount) break;
+        // Superseded (a fresh search started): stop appending at the stale
+        // offset — the fresh view owns loading now.
+        if (token !== state._autoLoadToken) break;
       }
     } finally {
-      state.autoLoading = false;
+      // Only the CURRENT generation may release the flag; a superseded
+      // invocation leaving it true would wedge auto-loading forever.
+      if (token === state._autoLoadToken) state.autoLoading = false;
     }
   }
 

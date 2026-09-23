@@ -430,6 +430,19 @@ is broken.
 - Sync Lab Steps 5–7 support stage-level subset execution with candidate selection + optional per-stage `limit`; empty selections still run as no-op completions so sessions can finish through Step 7.
 - Stage 6 download now retries alternate image URLs on 404 (raw page-render URL and `image-b2 ... /original` UUID endpoint) because some CivitAI image pages remain visible while a direct CDN filename URL returns `File with such name does not exist`.
 
+### Video URLs must use the CDN transcode route (fixed 2026-09-23)
+- B2 `image-b2.civitai.com/file/civitai-media-cache/{uuid}/original` 404s for
+  ANY video whose underlying file name is not the bare uuid (e.g.
+  `pixverse2Fmedia2Fori2F..._seed....mp4`) — those assets don't exist under
+  that path. Symptom: some video tiles blank while the civitai.red page plays.
+- Correct URL = what the site's own <video> uses (scrape it from the page
+  HTML when in doubt):
+  `https://image.civitai.com/xG1nkqKTMzGDvpLrqDT7WA/{uuid}/transcode=true,width=450,optimized=true/{uuid}.mp4`
+  → 301 → blobs-b2 MP4, works for every video. `_build_video_url` in
+  search.py owns this.
+- Video detection in `_build_hit_from_search_image` also accepts stored
+  legacy B2/transcode full URLs (uuid-extractor recovers the bare uuid).
+
 ### Broken `original=true` CDN route (May 2025)
 Some CivitAI images have a UUID for which the `original=true` CDN route returns HTTP 404 (`"File with such name does not exist"`), while the image is still perfectly visible on civitai.com via width-transformed routes. This appears to be a CivitAI CDN storage issue where the original file wasn't properly stored but derived transforms were generated.
 

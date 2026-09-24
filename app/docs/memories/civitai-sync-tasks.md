@@ -129,3 +129,62 @@ Gotchas:
 Tests: `app/tests/test_sync_lab_download_resume.py` — 4 tests (restore with
 intact/missing temp; variant fetch fail-open; variant success path writes
 sidecar metadata).
+
+## Sync Lab download+ingest pipeline (added 2026-09-17)
+
+Motivation: 5,322-image collection at ~1-2s/download meant hours of stage-6
+waiting before ANY image reached the library under the strict 6-then-7
+staging.
+
+Design:
+- `sync_lab_download(auto_ingest=True, collection_id=...)` (step 6) feeds
+  each completed download (fresh OR resumed-with-intact-temp) straight to a
+  single background ingest consumer thread via a queue; downloads keep
+  their CDN pacing untouched (downloads remain the bottleneck — ingest is
+  local CPU/DB/file work that fully overlaps). One consumer only: more would
+  contend on SQLite write locks without speeding anything up.
+- **Collection must be created BEFORE the first ingest** (fixed 2026-09-18):
+  `_ensure_image_in_collection` resolves the CivitAI collection id via the
+  junction table and SILENTLY SKIPS the membership when no local collection
+  exists (SQLite does not enforce FKs; it logs a warning). Standalone step 7
+  creates the collection upfront; the pipeline originally didn't — the
+  2026-09-17 5322-image MLP run ingested everything into the library with
+  ZERO collection attachments, making the images invisible in the collection
+  view (looked like "not imported"; step 4 correctly showed them existing).
+  The pipeline now calls `_get_or_create_collection` before starting the
+  download loop. Backfilled via `_ensure_image_in_collection` for the
+  affected window; same-named CivitAI collections share one local collection
+  via junction mapping by design (MLP 11284204 + 16393805 → collection 8).
+- Ingest runs `_ingest_prepared_for_pipeline` (extracted shared helper —
+  same reconciliation order as step 7: source-URL match → hash-duplicate →
+  normal ingest). On success the prepared entry is popped (ingest MOVES the
+  temp file into the library via `save_to_library`; a stale reference would
+  point at a dead path).
+- **No duplicated work**: `_sync_lab_auto_ingested` (image_id → result dict)
+  is persisted into `SyncSession.step_7_data` after every ingest
+  (`_persist_sync_lab_auto_ingested`, fail-open) and restored on pipeline
+  start (`_restore_sync_lab_auto_ingested`). An ID present in that set skips
+  BOTH download and ingest on resume/re-run.
+- SSE: ingest events ride the download stream as `type: "ingested"` /
+  `type: "ingest_failed"` events; the completion payload gains
+  `auto_ingest/ingested/ingest_failed/already_ingested` counts. Frontend
+  shows live dual-stage status and finalizes steps 6+7 together (checkbox
+  "Auto-ingest on download" in step 6 controls; requires a selected
+  collection).
+- Completion: sentinel `None` → consumer exits; drain via thread join
+  BEFORE checkpointing, then steps 6 AND 7 are checkpointed complete.
+- Ingest failures never break the pipeline (recorded + streamed; retried by
+  re-running — failed IDs stay out of the skip set unless already ingested).
+- Standalone step 7 (no checkbox) behaves exactly as before.
+
+Gotchas:
+- Tests must monkeypatch the SAME module object they call — `import main`
+  (not `backend.main`) when both app/ and app/backend are on PYTHONPATH, or
+  patches land on a stale duplicate module.
+- `sync_lab_download`'s StreamingResponse generator is async; SSE draining
+  in tests needs an async-capable iterator helper.
+
+Tests: `app/tests/test_sync_lab_auto_ingest_pipeline.py` — 6 tests (400
+without collection_id; immediate pipelined ingest; ingest failure
+non-fatal; already-ingested skips both stages; persist/restore; merge
+semantics).

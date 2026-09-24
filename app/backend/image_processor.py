@@ -1395,7 +1395,24 @@ class ImageProcessor:
             db.refresh(artist_obj)
             return artist_obj
 
-        # Update existing record with CivitAI identity info
+        # Update existing record with CivitAI identity info.
+        # When the CivitAI id is already owned by a DIFFERENT artist row
+        # (account rename creates a second name-matched row), return the
+        # canonical owner instead of stamping the id onto this row — a
+        # direct assignment violates the civitai_user_id UNIQUE constraint
+        # (observed 2026-09-20: IntegrityError on artists UPDATE).
+        if (
+            civitai_user_id is not None
+            and artist_obj.civitai_user_id != civitai_user_id
+        ):
+            canonical = (
+                db.query(Artist)
+                .filter(Artist.civitai_user_id == civitai_user_id)
+                .first()
+            )
+            if canonical is not None and canonical.id != artist_obj.id:
+                return canonical
+
         dirty = False
         if civitai_user_id is not None and artist_obj.civitai_user_id is None:
             artist_obj.civitai_user_id = civitai_user_id

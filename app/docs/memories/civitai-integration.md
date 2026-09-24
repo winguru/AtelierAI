@@ -448,6 +448,16 @@ is broken.
 - Sync Lab Steps 5–7 support stage-level subset execution with candidate selection + optional per-stage `limit`; empty selections still run as no-op completions so sessions can finish through Step 7.
 - Stage 6 download now retries alternate image URLs on 404 (raw page-render URL and `image-b2 ... /original` UUID endpoint) because some CivitAI image pages remain visible while a direct CDN filename URL returns `File with such name does not exist`.
 
+### Background-jobs panel (added 2026-09-24)
+- `shared/background-task-panel.js` — lightweight jobs strip for lab pages
+  (search-lab mounts it above the grid). Progress/rate/ETA are parsed from
+  the backend task message string ("N/M (R/min, ETA hh:mm)") — no client
+  math. Auto-open on activity, 3s/15s adaptive polling.
+- Task registry is IN-MEMORY: every uvicorn --reload wipes queued/running
+  jobs (2026-09-24 incident: 36-image import vanished silently). The panel
+  flags known ids that disappear as LOST. Re-running the import is always
+  the recovery — ratings/caches survive, only the runner dies.
+
 ### Preview capture via CDP browser lane (2026-09-24)
 - Fullscreen original loads trigger `_capturePreviewOriginal` → POST
   `/image/{id}/preserve-via-bridge`: bridge `fetch_binary` (chunked base64

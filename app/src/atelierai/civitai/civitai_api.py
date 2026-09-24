@@ -294,6 +294,15 @@ class CivitaiAPI:
                 self.http_client.activate_global_backoff(
                     90.0, reason="HTTP 403 (Cloudflare)"
                 )
+            # Tombstone terminal 404s so dead ids aren't re-fetched live
+            # forever. Payload-level 404s (tRPC error envelopes) are
+            # tombstoned in _make_request, but HTTP-level 404s raised by the
+            # transport (strict callers like fetch_basic_info_cached →
+            # CivitaiRequestError) bypassed this — observed 2026-09-18: an
+            # invalid image id was 404'd live twice, 30s apart, because no
+            # tombstone existed for cached callers to hit.
+            if e.status_code == 404:
+                self._record_to_db_cache(endpoint, payload_data, None, 404)
             self._record_response_archive(
                 endpoint=endpoint,
                 payload_data=payload_data,

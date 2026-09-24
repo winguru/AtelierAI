@@ -283,10 +283,15 @@ class CivitaiHttpClient:
     #      rejections at near-zero request rates that persist 20-40 min
     #      while retry probes keep the flag alive. Global rate never
     #      mattered here, and tRPC kept working while the CDN was flagged.
-    # Mode 2 is handled by a CDN-scoped cooldown: N consecutive CDN 503s
-    # pause CDN downloads only (tRPC continues), with escalating durations
-    # matching the observed 20-40 min flag lifetime.
-    _CDN_503_CONSECUTIVE: int = 0  # consecutive CDN 503s (reset on success)
+    # Mode 2 is handled by a CDN-scoped cooldown: N consecutive failing CDN
+    # requests pause CDN downloads only (tRPC continues), with escalating
+    # durations matching the observed 20-40 min flag lifetime. Only the
+    # FIRST 503 of each request counts toward the streak — inner retries
+    # hit the same URL, so a single dead asset must not look like N
+    # distinct rejections (observed 2026-09-17: one culled filename-keyed
+    # route 503ing on 3 attempts tripped the flag and paused ALL CDN
+    # downloads for 300s during a 10-item sync).
+    _CDN_503_CONSECUTIVE: int = 0  # failing CDN requests in a row (reset on success)
     _CDN_FLAG_STRIKE_COUNT: int = 0  # cooldown activations this session
     _CDN_FLAG_COOLDOWN_UNTIL: float = 0.0  # wall-clock epoch; past/0 = inactive
     _CDN_FLAG_REASON: str = ""
@@ -642,6 +647,60 @@ class CivitaiHttpClient:
         except Exception:
             pass
 
+    def _record_cdn_503_for_flag_streak(
+        self,
+        *,
+        envelope: "_RequestEnvelope",
+        attempt_started: float,
+        already_counted: bool,
+        label_suffix: str,
+        timing: Optional[dict[str, Any]],
+    ) -> bool:
+        """Feed one CDN 503 into the flag-cooldown streak; return counted-yet.
+
+        Only the FIRST qualifying 503 of each request (envelope) counts
+        toward the streak: inner retries hit the same URL, so a single
+        permanently-dead asset (edge-cached fast 503 on a culled
+        filename-keyed route) must not be mistaken for N distinct edge
+        rejections and trip the flag alone (observed 2026-09-17: one dead
+        asset tripped the flag and paused ALL CDN downloads for 300s
+        during a 10-item sync — at 35 RPM, well below any rate cap).
+
+        Slow 503s (>10s elapsed) are per-asset ORIGIN failures — CivitAI's
+        on-demand transcoder timing out on raw webm assets — NOT edge
+        rejections of our traffic pattern. They must not feed the "sticky
+        flag" streak (observed 2026-09-08: 44% webm failure rate at
+        near-zero rpm vs ~0% for mp4/images; browser traffic to the same
+        assets succeeds via pre-warmed quality=90 variants).
+
+        Best-effort envelopes (enrichment previews) never feed the streak.
+        """
+        if already_counted or envelope.best_effort:
+            return already_counted
+        elapsed = time.monotonic() - attempt_started
+        if elapsed > self.__class__._CDN_SLOW_503_ELAPSED_SECONDS:
+            return False
+        with self.__class__._REQUEST_COUNTER_LOCK:
+            self.__class__._CDN_503_CONSECUTIVE += 1
+            consecutive = self.__class__._CDN_503_CONSECUTIVE
+            trip = (
+                consecutive >= self.__class__._CDN_503_FLAG_THRESHOLD
+                and time.time() >= self.__class__._CDN_FLAG_COOLDOWN_UNTIL
+            )
+        if trip:
+            cooldown_s = self.__class__.activate_cdn_flag_cooldown()
+            if timing is not None:
+                timing["cdn_flag_tripped"] = True
+            print(
+                f"🚩 CivitAI CDN flag suspected after "
+                f"{consecutive} consecutive failing CDN requests on "
+                f"{envelope.endpoint}{label_suffix}; pausing CDN downloads "
+                f"for {cooldown_s:.0f}s (strike "
+                f"{self.__class__._CDN_FLAG_STRIKE_COUNT}) — tRPC requests "
+                f"continue\n{self.__class__._format_tpm_table()}"
+            )
+        return True
+
     def _execute_envelope_request(
         self, envelope: _RequestEnvelope, *, timing: Optional[dict[str, Any]] = None
     ) -> requests.Response:
@@ -661,6 +720,10 @@ class CivitaiHttpClient:
         last_error: Optional[Exception] = None
         attempts_log: list[dict[str, Any]] = []
         http_started = time.monotonic()
+        # Whether this request already contributed to the CDN 503 streak.
+        # Only the first 503 per request counts: inner retries hit the same
+        # URL, so one dead asset must not inflate the streak N-fold.
+        counted_503_for_streak = False
 
         def _note_attempt(
             attempt: int,
@@ -794,9 +857,14 @@ class CivitaiHttpClient:
                             f"{self.__class__._format_tpm_table()}"
                         )
                         # ── CDN flag detection ─────────────────────────
-                        # Count consecutive CDN 503 responses. Once the
+                        # Count consecutive FAILING CDN requests. Once the
                         # threshold is reached (and no cooldown is already
-                        # running), trip a CDN-scoped cooldown.
+                        # running), trip a CDN-scoped cooldown. Only the
+                        # first 503 of each request counts — inner retries
+                        # hit the same URL, so a single permanently-dead
+                        # asset (edge-cached fast 503 on a culled
+                        # filename-keyed route) must not be mistaken for N
+                        # distinct edge rejections and trip the flag alone.
                         #
                         # Slow 503s (>10s elapsed) are per-asset ORIGIN
                         # failures — CivitAI's on-demand transcoder timing
@@ -806,44 +874,47 @@ class CivitaiHttpClient:
                         # webm failure rate at near-zero rpm vs ~0% for
                         # mp4/images; browser traffic to the same assets
                         # succeeds via pre-warmed quality=90 variants).
-                        _slow_503 = (
-                            attempt_started is not None
-                            and (
-                                time.monotonic() - attempt_started
-                                > self.__class__._CDN_SLOW_503_ELAPSED_SECONDS
-                            )
-                        )
                         if (
                             envelope.request_type == RequestType.CDN_DOWNLOAD
-                            and not _slow_503
+                            and not counted_503_for_streak
                             and not envelope.best_effort
                         ):
-                            trip = False
-                            consecutive = 0
-                            with self.__class__._REQUEST_COUNTER_LOCK:
-                                self.__class__._CDN_503_CONSECUTIVE += 1
-                                consecutive = self.__class__._CDN_503_CONSECUTIVE
-                                trip = (
-                                    consecutive
-                                    >= self.__class__._CDN_503_FLAG_THRESHOLD
-                                    and time.time()
-                                    >= self.__class__._CDN_FLAG_COOLDOWN_UNTIL
+                            _slow_503 = (
+                                attempt_started is not None
+                                and (
+                                    time.monotonic() - attempt_started
+                                    > self.__class__._CDN_SLOW_503_ELAPSED_SECONDS
                                 )
-                            if trip:
-                                cooldown_s = (
-                                    self.__class__.activate_cdn_flag_cooldown()
-                                )
-                                if timing is not None:
-                                    timing["cdn_flag_tripped"] = True
-                                print(
-                                    f"🚩 CivitAI CDN flag suspected after "
-                                    f"{consecutive} consecutive 503s on "
-                                    f"{envelope.endpoint}{_label_suffix}; pausing CDN "
-                                    f"downloads for {cooldown_s:.0f}s "
-                                    f"(strike {self.__class__._CDN_FLAG_STRIKE_COUNT}) "
-                                    f"— tRPC requests continue\n"
-                                    f"{self.__class__._format_tpm_table()}"
-                                )
+                            )
+                            if not _slow_503:
+                                counted_503_for_streak = True
+                                trip = False
+                                consecutive = 0
+                                with self.__class__._REQUEST_COUNTER_LOCK:
+                                    self.__class__._CDN_503_CONSECUTIVE += 1
+                                    consecutive = self.__class__._CDN_503_CONSECUTIVE
+                                    trip = (
+                                        consecutive
+                                        >= self.__class__._CDN_503_FLAG_THRESHOLD
+                                        and time.time()
+                                        >= self.__class__._CDN_FLAG_COOLDOWN_UNTIL
+                                    )
+                                if trip:
+                                    cooldown_s = (
+                                        self.__class__.activate_cdn_flag_cooldown()
+                                    )
+                                    if timing is not None:
+                                        timing["cdn_flag_tripped"] = True
+                                    print(
+                                        f"🚩 CivitAI CDN flag suspected after "
+                                        f"{consecutive} consecutive failing CDN "
+                                        f"requests on {envelope.endpoint}"
+                                        f"{_label_suffix}; pausing CDN "
+                                        f"downloads for {cooldown_s:.0f}s "
+                                        f"(strike {self.__class__._CDN_FLAG_STRIKE_COUNT}) "
+                                        f"— tRPC requests continue\n"
+                                        f"{self.__class__._format_tpm_table()}"
+                                    )
                     if attempt >= self._max_attempts:
                         raise last_error
                     # While the CDN flag cooldown is active, stop probing —

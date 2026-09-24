@@ -8,10 +8,11 @@ Covers the two observability/prevention features added to
 
 * Per-endpoint 503 counters (``_ENDPOINT_503_COUNTS``) surfaced through
   ``get_request_metrics`` / ``_build_tpm_breakdown`` / ``_format_tpm_table``.
-* CDN 503 flag detection: N consecutive CDN 503s trip a CDN-scoped
-  escalating cooldown (300→600→1200s capped), inner retry probes abort
-  while the cooldown is active, a CDN success resets the streak, and
-  tRPC traffic is never paused by the CDN flag.
+* CDN 503 flag detection: N consecutive failing CDN requests trip a
+  CDN-scoped escalating cooldown (300→600→1200s capped). Only the first
+  503 of each request counts (inner retries hit the same URL), inner
+  retry probes abort while the cooldown is active, a CDN success resets
+  the streak, and tRPC traffic is never paused by the CDN flag.
 
 These tests call ``_execute_envelope_request`` directly (no FIFO queue),
 so no consumer-thread timing is involved.
@@ -163,21 +164,27 @@ class TestPerEndpoint503Counts:
 
 
 class TestCdnFlagTripAndAbort:
-    def test_consecutive_503s_trip_flag_and_abort_retries(self, monkeypatch):
-        # Always-503 CDN envelope: attempts 1-2 count toward the streak,
-        # attempt 3 trips the cooldown and the abort check raises immediately.
-        client = _make_client(
-            monkeypatch, [_FakeResponse(503)], max_attempts=4
-        )
+    def test_consecutive_503s_trip_flag_and_abort(self, monkeypatch):
+        # Three consecutive failing CDN REQUESTS (not retry attempts of a
+        # single request) trip the cooldown. The tripping request aborts
+        # immediately instead of burning its remaining attempts.
+        client = _make_client(monkeypatch, [_FakeResponse(503)], max_attempts=4)
+
+        for expected_streak in (1, 2):
+            with pytest.raises(CivitaiRequestError):
+                client._execute_envelope_request(_cdn_envelope(), timing={})
+            assert CivitaiHttpClient._CDN_503_CONSECUTIVE == expected_streak
+            assert not CivitaiHttpClient.is_cdn_flag_active()
+
         timing: dict = {}
         with pytest.raises(CivitaiRequestError) as excinfo:
             client._execute_envelope_request(_cdn_envelope(), timing=timing)
 
         assert excinfo.value.retryable is True  # soft-skip → retried next sync
         assert timing.get("cdn_flag_tripped") is True
+        # Tripped on the request's first 503 and aborted before attempt 2.
         assert timing.get("cdn_flag_abort") is True
-        # Aborted at attempt 3 (threshold), not the full 4 attempts.
-        assert timing["attempts_used"] == 3
+        assert timing["attempts_used"] == 1
 
         assert CivitaiHttpClient._CDN_FLAG_STRIKE_COUNT == 1
         assert CivitaiHttpClient.is_cdn_flag_active()
@@ -192,6 +199,25 @@ class TestCdnFlagTripAndAbort:
         assert metrics["cdn_flag_strikes"] == 1
         assert metrics["cdn_503_consecutive"] == 3
 
+    def test_single_dead_url_retries_do_not_inflate_streak(self, monkeypatch):
+        """One permanently-dead CDN URL must look like ONE failing request.
+
+        Inner-loop retries hit the same URL, so a single culled asset
+        (edge-cached fast 503 on a filename-keyed route) previously reached
+        the threshold alone and paused ALL CDN downloads for 300s mid-sync
+        (observed 2026-09-17: dead `%20copy` route on a 10-item sync at
+        35 RPM — far below any rate cap).
+        """
+        client = _make_client(monkeypatch, [_FakeResponse(503)], max_attempts=4)
+        timing: dict = {}
+        with pytest.raises(CivitaiRequestError):
+            client._execute_envelope_request(_cdn_envelope(), timing=timing)
+
+        assert timing["attempts_used"] == 4  # full retry budget burned
+        assert CivitaiHttpClient._CDN_503_CONSECUTIVE == 1  # counted once
+        assert not CivitaiHttpClient.is_cdn_flag_active()
+        assert CivitaiHttpClient._CDN_FLAG_STRIKE_COUNT == 0
+
     def test_below_threshold_does_not_trip(self, monkeypatch):
         client = _make_client(
             monkeypatch, [_FakeResponse(503)], max_attempts=2
@@ -203,7 +229,8 @@ class TestCdnFlagTripAndAbort:
         assert "cdn_flag_tripped" not in timing
         assert "cdn_flag_abort" not in timing
         assert not CivitaiHttpClient.is_cdn_flag_active()
-        assert CivitaiHttpClient._CDN_503_CONSECUTIVE == 2
+        # One failing request — its retries do not inflate the streak.
+        assert CivitaiHttpClient._CDN_503_CONSECUTIVE == 1
         assert CivitaiHttpClient._CDN_FLAG_STRIKE_COUNT == 0
 
     def test_best_effort_503s_do_not_trip_flag(self, monkeypatch):

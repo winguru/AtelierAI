@@ -139,7 +139,11 @@ from services.gallery_query import GalleryQuery
 from services.gallery_tag_service import GalleryTagService
 from services.image_query_service import ImageQueryService
 from services.metadata_extraction import extract_civitai_nsfw_level
-from services.civitai_search_media import get_preserved_search_media
+from services.civitai_search_media import (
+    get_cached_media_path,
+    get_preserved_search_media,
+    record_ingested_media,
+)
 from services.model_reference_service import ModelReferenceService
 from services.taxonomy_service import TaxonomyService
 from services.db_migrations import (
@@ -2275,6 +2279,37 @@ def _download_civitai_image_with_validation(
     declared_video = declared_mime.startswith("video/")
     declared_file_size = target.get("declared_file_size")
 
+    # ── CDN media cache read-through ─────────────────────────────────────
+    # Search Lab preserve / prior ingest downloads land in the per-image
+    # media cache (image_resources/civitai_search_media/<id>/original.*).
+    # A hit means verified bytes already on disk — skip the CDN entirely
+    # (zero rate-limit pressure, instant "download"). Ingest moves its temp
+    # file into the library, so hand the caller a COPY of the cached bytes.
+    cached = get_cached_media_path(image_id)
+    if cached is not None:
+        cached_path, cached_mime = cached
+        cached_category, detected_cached_mime = _detect_downloaded_media(cached_path)
+        if cached_category not in ("unknown",) and (
+            not declared_video or cached_category == "video"
+        ):
+            suffix = cached_path.suffix or _guess_suffix(cached_mime)
+            temp_cached = Path(
+                tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f"temp_civitai_{image_id}_cached_",
+                    suffix=suffix,
+                    dir=IMAGE_LIBRARY_PATH,
+                    delete=False,
+                ).name
+            )
+            shutil.copy2(cached_path, temp_cached)
+            return _CivitaiDownloadResult(
+                temp_path=temp_cached,
+                selected_url=f"cache://civitai_search_media/{image_id}",
+                selected_category=cached_category,
+                selected_mime_type=detected_cached_mime or cached_mime,
+            )
+
     candidate_urls = (
         _build_civitai_video_candidate_urls(target)
         if declared_video
@@ -2316,6 +2351,26 @@ def _download_civitai_image_with_validation(
 
         media_category, media_mime = _detect_downloaded_media(temp_path)
 
+        # ── PNG structure guard ────────────────────────────────────────────
+        # Some CivitAI fallback routes serve spec-invalid PNGs (tEXt before
+        # IHDR) that PIL ingests but browsers refuse to render — the image
+        # then shows broken in the UI until a manual Repair repacks it
+        # (observed 2026-09-17 on a filename-with-spaces asset whose primary
+        # route 503s permanently). Repack here so ingested bytes are always
+        # renderable; keep the same temp file so callers stay unaffected.
+        try:
+            media_category, media_mime = _repack_downloaded_png_if_needed(
+                temp_path, media_category, media_mime
+            )
+        except CivitaiRequestError:
+            raise
+        except Exception as exc:
+            _cleanup_temp_file(temp_path)
+            raise CivitaiRequestError(
+                f"Downloaded PNG failed structural repair: {exc}",
+                retryable=False,
+            ) from exc
+
         if declared_video and media_category != "video":
             if media_category == "image" and mismatch_temp_path is None:
                 mismatch_temp_path = temp_path
@@ -2325,6 +2380,21 @@ def _download_civitai_image_with_validation(
             else:
                 _cleanup_temp_file(temp_path)
             continue
+
+        # ── CDN media cache write-through ───────────────────────────────
+        # Record the verified download so Search Lab views, review flows,
+        # and any future re-download of this asset hit the cache instead
+        # of the CDN. Fail-open: a cache write must never fail the ingest.
+        try:
+            record_ingested_media(
+                image_id=image_id,
+                media_path=temp_path,
+                mime_type=media_mime or declared_mime,
+                sha256=_sha256_file(temp_path),
+                source_url=image_url,
+            )
+        except Exception:
+            pass
 
         return _CivitaiDownloadResult(
             temp_path=temp_path,
@@ -2362,6 +2432,40 @@ def _download_civitai_image_with_validation(
             "Ingestion aborted to avoid storing a static image as the primary asset."
         ),
     )
+
+
+def _repack_downloaded_png_if_needed(
+    temp_path: Path,
+    media_category: str,
+    media_mime: Optional[str],
+) -> tuple[str, Optional[str]]:
+    """Repack a structurally damaged PNG download in place; return (category, mime).
+
+    Uses :class:`PngRepacker` to detect damage browsers care about but PIL
+    tolerates (misordered chunks like tEXt-before-IHDR, bad CRCs) and rewrite
+    the temp file with a spec-valid chunk layout, preserving text/EXIF
+    metadata. Non-PNG downloads and healthy PNGs pass through untouched.
+
+    Raises ValueError when the bytes are not a parseable PNG (the caller maps
+    that to a non-retryable download error).
+    """
+    if media_category != "image" or (media_mime or "") != "image/png":
+        return media_category, media_mime
+
+    raw_bytes = temp_path.read_bytes()
+    repacker = PngRepacker(copy_exif=True, copy_text=True)
+    inspection = repacker.inspect_bytes(raw_bytes)
+    if not inspection.is_damaged:
+        return media_category, media_mime
+
+    result = repacker.repack_bytes(raw_bytes)
+    temp_path.write_bytes(result.output_bytes)
+    print(
+        f"🔧 Repacked damaged PNG from CivitAI download ({inspection.parse_error} "
+        f"or {inspection.bad_crc_count} bad CRC chunk(s), "
+        f"{len(raw_bytes)} → {len(result.output_bytes)} bytes): {temp_path.name}"
+    )
+    return media_category, media_mime
 
 
 def _download_civitai_image(
@@ -2863,6 +2967,20 @@ def _ingest_civitai_duplicate_asset(
 
         db.add(new_image)
         db.flush()
+
+        # Same-hash images must share a hash_duplicate variant group so the
+        # UI can present them as one group of interchangeable assets. The
+        # ensure-helper re-sorts members by civitai_image_id ascending, which
+        # keeps the earliest-published CivitAI asset first regardless of the
+        # order rows were ingested in.
+        try:
+            ImageCollection(db).ensure_hash_duplicate_group(new_image)
+        except Exception as group_exc:
+            # Fail open — grouping must never block the duplicate import.
+            print(
+                "Warning: could not add duplicate asset to hash variant "
+                f"group: {group_exc}"
+            )
 
         # Attach to collection if specified
         if attach_collection_id is not None:
@@ -11028,6 +11146,62 @@ def _ingest_prepared_civitai_import(
     attach_collection_id: Optional[int] = None,
     recovered_existing: bool = False,
 ) -> dict:
+    # Cross-asset duplicate handling (2026-09-20): when the downloaded bytes
+    # hash-match an existing image that represents a DIFFERENT CivitAI asset
+    # (no source-URL identity match and no row carrying this civitai_image_id),
+    # create an independent duplicate-asset record instead of letting the
+    # hash-only lookup inside ingest_uploaded_file swallow the import as an
+    # "existing_file_hash" skip. Same-id hash matches still take the normal
+    # path below so metadata backfill on the existing row is preserved.
+    if not recovered_existing and prepared.image_id is not None:
+        existing_by_source = _find_existing_image_by_source_url(
+            db, prepared.source_url
+        )
+        if existing_by_source is None:
+            temp_hash = _sha256_file(prepared.temp_path)
+            existing_records = _find_existing_by_file_hash(db, temp_hash)
+            if existing_records and not any(
+                getattr(record, "civitai_image_id", None) == prepared.image_id
+                for record in existing_records
+            ):
+                duplicate_result = _ingest_civitai_duplicate_asset(
+                    db,
+                    prepared=prepared,
+                    existing_records=existing_records,
+                    attach_collection_id=attach_collection_id,
+                )
+                _commit_with_lock_retry(
+                    db,
+                    context=(
+                        "Duplicate-asset commit for image "
+                        f"{prepared.image_id}"
+                    ),
+                )
+                merged_result = {
+                    "image_id": prepared.image_id,
+                    "image_db_id": duplicate_result.get("image_db_id"),
+                    "images_added": 1,
+                    "images_skipped": 0,
+                    "images_recovered": 0,
+                    "json_files_created": 1,
+                    "metadata_backfilled": False,
+                    "skip_reason": None,
+                    "existing_image_id": None,
+                    "existing_file_hash": None,
+                    "existing_file_path": None,
+                    "existing_source_url": None,
+                    "error": None,
+                    "cancelled": False,
+                }
+                merged_result.update(
+                    {
+                        key: value
+                        for key, value in duplicate_result.items()
+                        if key not in merged_result
+                    }
+                )
+                return merged_result
+
     ingest_result = ImageCollection(db).ingest_uploaded_file(
         uploaded_file_path=prepared.temp_path,
         original_filename=prepared.original_filename,
@@ -11182,20 +11356,48 @@ def _ingest_prepared_civitai_import(
         # Update artist with CivitAI identity if we have author_id
         if image is not None and prepared.author_id is not None:
             if image.artist_id is not None:
-                # Update existing artist with CivitAI identity
-                artist_obj = db.query(Artist).filter(Artist.id == image.artist_id).first()
-                if artist_obj is not None:
-                    dirty = False
-                    if artist_obj.civitai_user_id is None:
+                # Update existing artist with CivitAI identity. Never
+                # blindly assign the id: if ANOTHER artist already owns it
+                # (account rename, or a name-match picked the wrong row
+                # during ingest), re-point the image to the canonical owner
+                # instead — a direct assignment violates the artists'
+                # civitai_user_id UNIQUE constraint and rolls back the
+                # whole ingest (observed 2026-09-20: image 18140614's
+                # artist 'iamabot000' vs renamed 'VeryDumb', same CivitAI
+                # user 931699).
+                artist_obj = (
+                    db.query(Artist).filter(Artist.id == image.artist_id).first()
+                )
+                target_artist = artist_obj
+                if (
+                    artist_obj is not None
+                    and artist_obj.civitai_user_id != prepared.author_id
+                ):
+                    canonical = (
+                        db.query(Artist)
+                        .filter(Artist.civitai_user_id == prepared.author_id)
+                        .first()
+                    )
+                    if canonical is not None:
+                        image.artist_id = canonical.id
+                        target_artist = canonical
+                        db.flush()
+                    elif artist_obj.civitai_user_id is None:
+                        # Id is unowned — safe for this artist to claim.
                         artist_obj.civitai_user_id = prepared.author_id
-                        dirty = True
-                    if prepared.author_deleted and artist_obj.civitai_user_deleted is not True:
-                        artist_obj.civitai_user_deleted = True
+                        db.flush()
+                if target_artist is not None:
+                    dirty = False
+                    if (
+                        prepared.author_deleted
+                        and target_artist.civitai_user_deleted is not True
+                    ):
+                        target_artist.civitai_user_deleted = True
                         if (
                             prepared.author_original_name
-                            and artist_obj.civitai_user_original_name is None
+                            and target_artist.civitai_user_original_name is None
                         ):
-                            artist_obj.civitai_user_original_name = (
+                            target_artist.civitai_user_original_name = (
                                 prepared.author_original_name
                             )
                         dirty = True
@@ -24552,6 +24754,103 @@ def taxonomy_tag_maint_backfill_civitai_tag_ids(
 # In-memory session store for prepared downloads (keyed by image_id).
 _sync_lab_prepared: dict[int, _PreparedCivitaiImport] = {}
 
+# CivitAI image IDs already ingested during the CURRENT download+ingest
+# pipeline run (auto-ingest mode). Survives UI reconnects (persisted into
+# SyncSession.step_7_data every batch) so a resumed run never re-ingests.
+_sync_lab_auto_ingested: dict[str, dict[str, Any]] = {}
+# Guards _sync_lab_auto_ingested + pipeline counters shared between the
+# download thread and the auto-ingest consumer threads.
+_PIPELINE_STATE_LOCK = threading.RLock()
+
+
+def _persist_sync_lab_auto_ingested(session_id: Optional[str]) -> None:
+    """Persist the auto-ingested ID set to SyncSession.step_7_data (fail-open)."""
+    if not session_id:
+        return
+    try:
+        db = SessionLocal()
+        try:
+            sess = db.query(SyncSession).filter(SyncSession.id == session_id).first()
+            if sess is None:
+                return
+            payload = {
+                "auto_ingested_ids": sorted(_sync_lab_auto_ingested.keys()),
+                "results": dict(_sync_lab_auto_ingested),
+            }
+            sess.step_7_data = payload
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass  # Persistence must never block the pipeline
+
+
+def _restore_sync_lab_auto_ingested(session_id: Optional[str]) -> None:
+    """Restore the auto-ingested set from a prior pipeline run (fail-open).
+
+    Merges persisted IDs into the in-memory store so a resumed run (page
+    reconnect, backend restart mid-pipeline) skips already-ingested images.
+    """
+    if not session_id:
+        return
+    try:
+        db = SessionLocal()
+        try:
+            sess = db.query(SyncSession).filter(SyncSession.id == session_id).first()
+            if sess is None:
+                return
+            payload = getattr(sess, "step_7_data", None) or {}
+            if not isinstance(payload, dict):
+                return
+            persisted_results = payload.get("results") or {}
+            if not isinstance(persisted_results, dict):
+                return
+            for key, value in persisted_results.items():
+                if isinstance(value, dict):
+                    _sync_lab_auto_ingested.setdefault(str(key), value)
+        finally:
+            db.close()
+    except Exception:
+        pass  # Restore is best-effort
+
+
+def _ingest_prepared_for_pipeline(
+    db: Session,
+    *,
+    prepared: _PreparedCivitaiImport,
+    attach_collection_id: Optional[int],
+) -> dict[str, Any]:
+    """Ingest one prepared import; return a per-image result dict.
+
+    Shared by the standalone ingest step (step 7) and the download+ingest
+    pipeline so both follow identical reconciliation rules: source-URL match
+    first, then file-hash duplicate handling, then normal ingest.
+    """
+    existing_by_source = _find_existing_image_by_source_url(db, prepared.source_url)
+    if existing_by_source is not None:
+        ingest_result = _ingest_prepared_civitai_import(
+            db,
+            prepared=prepared,
+            attach_collection_id=attach_collection_id,
+        )
+    else:
+        temp_hash = _sha256_file(prepared.temp_path)
+        existing_records = _find_existing_by_file_hash(db, temp_hash)
+        if existing_records:
+            ingest_result = _ingest_civitai_duplicate_asset(
+                db,
+                prepared=prepared,
+                existing_records=existing_records,
+                attach_collection_id=attach_collection_id,
+            )
+        else:
+            ingest_result = _ingest_prepared_civitai_import(
+                db,
+                prepared=prepared,
+                attach_collection_id=attach_collection_id,
+            )
+    return ingest_result
+
 
 def _restore_sync_lab_prepared_from_session(session_id: Optional[str]) -> int:
     """Restore prepared imports from a persisted sync session into memory.
@@ -25135,11 +25434,20 @@ def _parse_sync_lab_image_ids(raw_ids: Optional[str]) -> list[int]:
     parsed_ids: list[int] = []
     for part in str(raw_ids or "").split(","):
         part = part.strip()
-        if part:
-            try:
-                parsed_ids.append(int(part))
-            except ValueError:
-                continue
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        # Plausibility floor: real CivitAI image ids are well into the
+        # millions. Tiny integers (1, 2, …) are UI/state artifacts (array
+        # indices, counters) — feeding them to the API wastes live requests
+        # on guaranteed 404s (observed 2026-09-18: image id 1 was submitted
+        # from a stale step-6 plan and 404'd live twice).
+        if value < 1000:
+            continue
+        parsed_ids.append(value)
     return parsed_ids
 
 
@@ -25327,11 +25635,29 @@ def sync_lab_download(
         ge=1,
         description="Optional max number of IDs to process",
     ),
+    auto_ingest: bool = Query(
+        False,
+        description=(
+            "Pipeline mode: ingest each image as soon as its download completes "
+            "(collection_id is required). Ingest progress streams alongside "
+            "download progress."
+        ),
+    ),
+    collection_id: Optional[int] = Query(
+        None,
+        description="CivitAI collection ID to attach when auto_ingest=true",
+    ),
     session_id: Optional[str] = None,
 ):
     """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
     import queue
     import threading
+
+    if auto_ingest and collection_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="auto_ingest=true requires collection_id for library attachment.",
+        )
 
     parsed_ids, input_counts = _resolve_sync_lab_stage_inputs(
         image_ids=image_ids,
@@ -25345,6 +25671,51 @@ def sync_lab_download(
     # download run (e.g. interrupted by an app restart before ingest).
     # Restored entries with intact temp files skip re-downloading.
     _restore_sync_lab_prepared_from_session(session_id)
+    if auto_ingest:
+        _checkpoint_sync_step(session_id, 7, "in_progress")
+        _restore_sync_lab_auto_ingested(session_id)
+        # ── Ensure the local collection exists BEFORE any ingest ────────
+        # _ensure_image_in_collection resolves the CivitAI id against the
+        # junction table; when no local collection exists it silently skips
+        # the membership (SQLite does not enforce FKs). Standalone step 7
+        # creates the collection upfront for exactly this reason — the
+        # pipeline must too, or every image ingests into the library with
+        # NO collection attachment (observed 2026-09-17: 5321 images
+        # ingested, zero memberships, invisible in the collection view).
+        _coll_name = f"CivitAI Collection {collection_id}"
+        try:
+            _name_db = SessionLocal()
+            try:
+                _sess = (
+                    _name_db.query(SyncSession)
+                    .filter(SyncSession.id == session_id)
+                    .first()
+                )
+                _sess_name = (
+                    getattr(_sess, "collection_name", None)
+                    if _sess is not None
+                    else None
+                )
+                if _sess_name:
+                    _coll_name = _sess_name
+            finally:
+                _name_db.close()
+        except Exception:
+            pass  # Name lookup is best-effort; fall back to the default
+        try:
+            _pipeline_db = SessionLocal()
+            try:
+                _get_or_create_collection(
+                    _pipeline_db,
+                    _coll_name,
+                    source="civitai",
+                    civitai_collection_id=collection_id,
+                )
+                _pipeline_db.commit()
+            finally:
+                _pipeline_db.close()
+        except Exception:
+            pass  # Collection creation is best-effort; ingest continues
 
     def _sse(data: dict) -> str:
         return f"data: {json.dumps(data)}\n\n"
@@ -25357,6 +25728,76 @@ def sync_lab_download(
             api = CivitaiAPI.get_instance()
             results: dict[str, dict[str, Any]] = {}
             errors: list[dict] = []
+            # ── Auto-ingest pipeline state ────────────────────────────────
+            # Ingest progress counters ride the download SSE stream as
+            # "ingested" events so the frontend can show both stages live.
+            # One consumer: ingest is local CPU/DB work (hash, PIL, SQLite
+            # commit, file move) that fully overlaps the CDN-paced downloads;
+            # more consumers would contend on SQLite write locks without
+            # speeding anything up while downloads remain the bottleneck.
+            ingest_done = 0
+            ingest_ok = 0
+            ingest_failed = 0
+            ingest_q: "queue.Queue[Optional[_PreparedCivitaiImport]]" = queue.Queue()
+
+            def _ingest_worker():
+                nonlocal ingest_done, ingest_ok, ingest_failed
+                db = SessionLocal()
+                try:
+                    while True:
+                        prepared = ingest_q.get()
+                        if prepared is None:
+                            return
+                        img_id = prepared.image_id
+                        try:
+                            _ingest_prepared_for_pipeline(
+                                db,
+                                prepared=prepared,
+                                attach_collection_id=collection_id,
+                            )
+                            db.commit()
+                            # Ingest moved the temp file into the library —
+                            # drop the prepared entry (mirrors step 7) so the
+                            # serialized handoff never references a dead path.
+                            with _PIPELINE_STATE_LOCK:
+                                _sync_lab_prepared.pop(img_id, None)
+                                _sync_lab_auto_ingested[str(img_id)] = {
+                                    "image_id": img_id,
+                                    "status": "ingested",
+                                    "auto": True,
+                                }
+                                ingest_ok += 1
+                            q.put(("ingested", img_id, prepared.original_filename))
+                        except Exception as exc:
+                            db.rollback()
+                            with _PIPELINE_STATE_LOCK:
+                                _sync_lab_auto_ingested[str(img_id)] = {
+                                    "image_id": img_id,
+                                    "status": "failed",
+                                    "auto": True,
+                                    "error": str(exc),
+                                }
+                                ingest_failed += 1
+                            q.put(("ingest_failed", img_id, str(exc)))
+                        finally:
+                            with _PIPELINE_STATE_LOCK:
+                                ingest_done += 1
+                            _persist_sync_lab_auto_ingested(session_id)
+                            ingest_q.task_done()
+                finally:
+                    db.close()
+
+            ingest_threads: list[threading.Thread] = []
+            if auto_ingest:
+                ingest_threads.append(
+                    threading.Thread(
+                        target=_ingest_worker,
+                        name="sync-lab-auto-ingest",
+                        daemon=True,
+                    )
+                )
+                for t in ingest_threads:
+                    t.start()
 
             for idx, img_id in enumerate(parsed_ids, 1):
                 id_t0 = time.monotonic()
@@ -25366,6 +25807,19 @@ def sync_lab_download(
                     "timing_ms": 0,
                     "error": None,
                 }
+                # ── Already-ingested fast-path (pipeline resume) ──────────
+                # A previous pipeline run ingested this image (tracked in
+                # the session-persisted auto-ingested set) — skip BOTH the
+                # download and the ingest so no work is duplicated.
+                already = _sync_lab_auto_ingested.get(str(img_id))
+                if auto_ingest and already is not None:
+                    result["status"] = already.get("status") or "ingested"
+                    result["already_ingested"] = True
+                    result["error"] = already.get("error")
+                    result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
+                    results[str(img_id)] = result
+                    q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
+                    continue
                 # ── Resume fast-path ─────────────────────────────────────────
                 # A prior download run already fetched this image and its
                 # temp file is still on disk — reuse it instead of hitting
@@ -25382,6 +25836,10 @@ def sync_lab_download(
                     result["mime_type"] = resumed.mime_type
                     result["selected_url"] = resumed.image_url
                     result["resumed"] = True
+                    # Pipeline mode: a resumed-but-not-yet-ingested download
+                    # still flows to the ingest queue.
+                    if auto_ingest:
+                        ingest_q.put(resumed)
                     result["timing_ms"] = round((time.monotonic() - id_t0) * 1000)
                     results[str(img_id)] = result
                     q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
@@ -25434,6 +25892,13 @@ def sync_lab_download(
                     result["temp_path"] = str(download_result.temp_path)
                     result["mime_type"] = download_result.selected_mime_type
                     result["selected_url"] = download_result.selected_url
+                    if str(download_result.selected_url or "").startswith("cache://"):
+                        result["from_cache"] = True
+                    # Pipeline mode: hand the completed download straight to
+                    # the ingest consumer — stage 7 work starts while the next
+                    # download streams from the CDN.
+                    if auto_ingest:
+                        ingest_q.put(prepared)
 
                 except _CivitaiImageUnavailableError as exc:
                     result["status"] = "unavailable"
@@ -25451,6 +25916,16 @@ def sync_lab_download(
 
                 q.put(("progress", img_id, idx, result["timing_ms"], result.get("status"), result.get("error")))
 
+            # ── Pipeline drain ────────────────────────────────────────────
+            # Signal the ingest consumer to stop once the download loop is
+            # done, then wait for in-flight ingests to finish so the final
+            # checkpoint reflects the true library state.
+            if auto_ingest:
+                ingest_q.put(None)
+                for t in ingest_threads:
+                    t.join()
+                _persist_sync_lab_auto_ingested(session_id)
+
             elapsed_ms = round((time.monotonic() - t0) * 1000)
             ok_count = sum(1 for v in results.values() if v.get("status") == "downloaded")
             complete_payload = {
@@ -25466,6 +25941,14 @@ def sync_lab_download(
                     "failed": sum(1 for v in results.values() if v.get("status") == "failed"),
                     "results": results,
                     "input_counts": input_counts,
+                    **({
+                        "auto_ingest": True,
+                        "ingested": ingest_ok,
+                        "ingest_failed": ingest_failed,
+                        "already_ingested": sum(
+                            1 for v in results.values() if v.get("already_ingested")
+                        ),
+                    } if auto_ingest else {}),
                 },
                 "errors": errors,
             }
@@ -25501,6 +25984,16 @@ def sync_lab_download(
                         "total": len(parsed_ids),
                         "downloaded": ok_count,
                     })
+                    # Pipeline mode: step 7 ran alongside step 6 — mark it
+                    # complete too (ingest_done == downloaded count because
+                    # the queue drained above) and keep the auto-ingested
+                    # ID set for resume dedup.
+                    if auto_ingest:
+                        _checkpoint_sync_step(session_id, 7, "complete", data={
+                            "total": ingest_done,
+                            "ingested": ingest_ok,
+                            "auto": True,
+                        })
                     # Store prepared_imports separately on the session
                     _db = SessionLocal()
                     try:
@@ -25534,6 +26027,20 @@ def sync_lab_download(
                     "timing_ms": timing_ms,
                     "status": status,
                     "error": err,
+                })
+            elif kind == "ingested":
+                _, img_id, filename = msg
+                yield _sse({
+                    "type": "ingested",
+                    "image_id": img_id,
+                    "filename": filename,
+                })
+            elif kind == "ingest_failed":
+                _, img_id, error = msg
+                yield _sse({
+                    "type": "ingest_failed",
+                    "image_id": img_id,
+                    "error": error,
                 })
             elif kind == "complete":
                 yield _sse({

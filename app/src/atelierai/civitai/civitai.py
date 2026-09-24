@@ -1,6 +1,7 @@
 import os
 import json
 import time
+from datetime import timedelta
 from typing import Callable, Dict, List, Optional
 
 # ── Memory ───────────────────────────────────────────────────────────────────
@@ -57,10 +58,68 @@ class CivitaiPrivateScraper:
                     f"{len(self.api.session_cookie)}"
                 )
 
+    @staticmethod
+    def _collection_page_cache_ttl() -> timedelta:
+        """Freshness window for cached collection pages (minutes → timedelta).
+
+        Short by design: the first page of a collection changes as items are
+        added, so a long TTL would hide new additions from the Sync Lab. 15
+        minutes keeps re-fetches (page refresh, step re-run) free while still
+        discovering changes promptly. Override via
+        ``CIVITAI_COLLECTION_PAGE_CACHE_TTL_MINUTES``.
+        """
+        raw = os.environ.get("CIVITAI_COLLECTION_PAGE_CACHE_TTL_MINUTES", "15")
+        try:
+            minutes = max(1, int(float(raw)))
+        except (TypeError, ValueError):
+            minutes = 15
+        return timedelta(minutes=minutes)
+
+    @staticmethod
+    def _normalize_collection_page(payload: object) -> dict | None:
+        """Coerce a cached getInfinite payload back into page shape.
+
+        Cache rows store the deserialized page dict (``items``/``nextCursor``
+        at top level, or CivitAI's ``result.data.json`` wrapper). Returns
+        None when the payload isn't a usable page — the caller then falls
+        through to a live fetch.
+        """
+        if not isinstance(payload, dict):
+            return None
+        if "nextCursor" in payload or "items" in payload:
+            return payload
+        result = payload.get("result")
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict):
+                inner = data.get("json")
+                if isinstance(inner, dict) and (
+                    "nextCursor" in inner or "items" in inner
+                ):
+                    return inner
+        return None
+
     def _make_collection_request(
-        self, collection_id: int, cursor: Optional[str], debug: bool
+        self,
+        collection_id: int,
+        cursor: Optional[str],
+        debug: bool,
+        *,
+        use_cache: bool = True,
     ) -> tuple:
         """Make a single API request for collection items.
+
+        Cache-first: the DB cache (``civitai_api_cache``) is checked before
+        the live call, and every live page is written through. Collection
+        listings paginate via cursor — each (collectionId, cursor) pair is a
+        distinct cache row — so re-fetching a recently-synced collection
+        replays from cache instead of hammering ``image.getInfinite`` (a
+        919-page fetch previously cost 919 live requests on EVERY re-run;
+        observed 2026-09-18: zero cache rows recorded for collection pages).
+        The freshness window is short (default 15 min, configurable via
+        ``CIVITAI_COLLECTION_PAGE_CACHE_TTL_MINUTES``) so genuinely new
+        collection additions surface on the next fetch without a manual
+        purge; pass ``use_cache=False`` to force a live re-fetch.
 
         Returns:
             tuple: (response_data, next_cursor) or (None, None) on error
@@ -75,6 +134,22 @@ class CivitaiPrivateScraper:
             print(f"  DEBUG: Request URL: {self.api.base_url}/{endpoint}")
             print(f"  DEBUG: Payload Data: {json.dumps(payload_data, indent=2)}")
             print(f"  DEBUG: TRPC Payload: {params}")
+
+        if use_cache:
+            # Cache probe ONLY — a plain get_cached_or_fetch would itself
+            # perform the live fetch via _make_request, and the flat-array
+            # handling below would then fetch a SECOND time. On a miss we
+            # fetch once here and record to the cache ourselves.
+            cached = self.api.get_cached_or_fetch(
+                endpoint,
+                payload_data,
+                max_age=self._collection_page_cache_ttl(),
+                cache_only=True,
+            )
+            if cached is not None:
+                page = self._normalize_collection_page(cached)
+                if page is not None:
+                    return page, page.get("nextCursor")
 
         try:
             data = self.api._make_raw_request(endpoint, payload_data, strict=True)
@@ -93,11 +168,16 @@ class CivitaiPrivateScraper:
         )
         deserialized = self.api._deserialize_trpc_flat_array(flat_array_response)
         if deserialized is not None:
+            self.api._record_to_db_cache(endpoint, payload_data, deserialized, 200)
             return deserialized, deserialized.get("nextCursor")
 
         if not isinstance(data, dict):
+            self.api._record_to_db_cache(endpoint, payload_data, data, 200)
             return None, None
 
+        # Legacy dict-shaped responses are cached identically so both
+        # serialization formats replay from the cache.
+        self.api._record_to_db_cache(endpoint, payload_data, data, 200)
         # Legacy responses are also unwrapped by _make_raw_request.
         next_cursor = data.get("nextCursor")
         return data, next_cursor
@@ -129,6 +209,7 @@ class CivitaiPrivateScraper:
         initial_items: Optional[List[Dict]] = None,
         initial_cursor: Optional[str] = None,
         should_stop: Callable[[], bool] | None = None,
+        use_cache: bool = True,
     ) -> List[Dict]:
         """Fetch collection items with full pagination support.
 
@@ -144,6 +225,9 @@ class CivitaiPrivateScraper:
             should_stop: Optional predicate polled between pages; when it
                 returns True, pagination stops early and items collected so
                 far are returned. Used for cooperative task cancellation.
+            use_cache: Serve pages from the DB cache when fresh (default).
+                Pass False to force live requests (e.g. right after adding
+                items to the collection on CivitAI).
 
         Returns:
             List of collection items
@@ -176,7 +260,7 @@ class CivitaiPrivateScraper:
 
             # Make API request
             data, next_cursor = self._make_collection_request(
-                collection_id, cursor, debug
+                collection_id, cursor, debug, use_cache=use_cache
             )
             if data is None:
                 break

@@ -35,7 +35,7 @@ def test_fetch_collection_items_should_stop_halts_pagination(monkeypatch):
 
     request_count = {"n": 0}
 
-    def fake_request(collection_id, cursor, debug):
+    def fake_request(collection_id, cursor, debug, *, use_cache=True):
         request_count["n"] += 1
         return [
             {"id": 100 + request_count["n"], "type": "Image"},

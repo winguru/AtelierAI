@@ -124,6 +124,10 @@
           </div>
           <div class="step-actions">
             <span class="step-timing" id="step3-timing"></span>
+            <label class="toggle-wrap" for="step3-force-refresh" title="Bypass the page cache and fetch live from CivitAI (use after adding items to the collection)">
+              <input id="step3-force-refresh" type="checkbox">
+              <span>Force refresh</span>
+            </label>
             <button class="btn primary" id="btn-fetch-items" disabled>Fetch Items</button>
           </div>
         </div>
@@ -220,6 +224,10 @@
         <div class="step-body" id="step6-body">
           <div class="step-status" id="step6-status"></div>
           <div class="stage-controls" id="step6-controls">
+            <label class="toggle-wrap" for="step6-auto-ingest" title="Ingest each image as soon as its download completes — stage 7 runs alongside stage 6">
+              <input id="step6-auto-ingest" type="checkbox">
+              <span>Auto-ingest on download</span>
+            </label>
             <label class="toggle-wrap" for="step6-show-extra">
               <input id="step6-show-extra" type="checkbox">
               <span>Show non-eligible items</span>

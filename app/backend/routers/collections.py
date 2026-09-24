@@ -1013,6 +1013,10 @@ def sync_lab_fetch_collection_items(
     collection_id: int,
     limit: int = Query(default=None, ge=1),
     collection_type: str = Query(default="image", pattern="^(image|post)$"),
+    force_refresh: bool = Query(
+        False,
+        description="Bypass the page cache and fetch live from CivitAI",
+    ),
 ):
     """Step 3: Fetch all items for a specific CivitAI collection (SSE streaming).
 
@@ -1098,6 +1102,7 @@ def sync_lab_fetch_collection_items(
                         limit=limit,
                         progress_callback=on_progress,
                         collection_type=collection_type.capitalize() if collection_type else None,
+                        use_cache=not force_refresh,
                     )
                 q.put(("result", items))
             except CivitaiRequestError as exc:
@@ -1253,6 +1258,18 @@ def sync_lab_download(
         ge=1,
         description="Optional max number of IDs to process",
     ),
+    auto_ingest: bool = Query(
+        False,
+        description=(
+            "Pipeline mode: ingest each image as soon as its download completes "
+            "(collection_id is required). Ingest progress streams alongside "
+            "download progress."
+        ),
+    ),
+    collection_id: Optional[int] = Query(
+        None,
+        description="CivitAI collection ID to attach when auto_ingest=true",
+    ),
     session_id: Optional[str] = Query(None, description="Sync session ID for resumability"),
 ):
     """Step 6: Download images for specified CivitAI image IDs (SSE streaming)."""
@@ -1262,6 +1279,8 @@ def sync_lab_download(
         image_ids=image_ids,
         selected_ids=selected_ids,
         limit=limit,
+        auto_ingest=auto_ingest,
+        collection_id=collection_id,
         session_id=session_id,
     )
 

@@ -542,6 +542,9 @@
       if (state.selectedCollectionType && state.selectedCollectionType !== 'image') {
         params.set('collection_type', state.selectedCollectionType);
       }
+      if (el('step3-force-refresh')?.checked) {
+        params.set('force_refresh', 'true');
+      }
       const url = `/api/sync-lab/collection-items/${state.selectedCollectionId}${params.toString() ? '?' + params.toString() : ''}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
@@ -1081,12 +1084,28 @@
 
     const plan = getStageExecutionPlan(6);
     const imageIds = plan.ids;
+    const autoIngest = !!el('step6-auto-ingest')?.checked && !!state.selectedCollectionId;
+
+    // Pipeline-mode live state: step 7 runs alongside step 6.
+    let ingestedCount = 0;
+    let ingestFailCount = 0;
+    const ingestedRows = [];
+    const ingestErrors = [];
+    if (autoIngest) {
+      setStepState(7, 'active');
+      clearStatus(7);
+      el('step7-results').innerHTML = '';
+    }
 
     try {
       const params = new URLSearchParams();
       params.set('image_ids', imageIds.join(','));
       if (plan.limit != null) params.set('limit', String(plan.limit));
       if (state.sessionId) params.set('session_id', state.sessionId);
+      if (autoIngest) {
+        params.set('auto_ingest', 'true');
+        params.set('collection_id', String(state.selectedCollectionId));
+      }
       const url = `/api/sync-lab/download?${params.toString()}`;
       const result = await new Promise((resolve, reject) => {
         const es = new EventSource(url);
@@ -1097,8 +1116,19 @@
 
           if (data.type === 'progress') {
             const errSuffix = data.error ? ' ⚠' : '';
+            const ingestSuffix = autoIngest
+              ? ` · Ingested: ${ingestedCount}${ingestFailCount ? ` (+${ingestFailCount} failed)` : ''}`
+              : '';
             setStatus(6, 'info',
-              `Downloading… ${data.done}/${data.total} — #${data.image_id} (${fmtMs(data.timing_ms)})${errSuffix}`);
+              `Downloading… ${data.done}/${data.total} — #${data.image_id} (${fmtMs(data.timing_ms)})${errSuffix}${ingestSuffix}`);
+          } else if (data.type === 'ingested') {
+            ingestedCount += 1;
+            ingestedRows.push({ image_id: data.image_id, status: 'ingested' });
+            setStatus(7, 'info', `Ingesting (pipeline)… ${ingestedCount} done — #${data.image_id}`);
+          } else if (data.type === 'ingest_failed') {
+            ingestFailCount += 1;
+            ingestErrors.push({ image_id: data.image_id, error: data.error });
+            setStatus(7, 'warning', `Ingest failures: ${ingestFailCount} — #${data.image_id}: ${data.error}`);
           } else if (data.type === 'complete') {
             es.close();
             resolve(data);
@@ -1123,31 +1153,63 @@
 
       const ok = state.downloadResults.filter(r => r.status === 'downloaded').length;
       const resumed = state.downloadResults.filter(r => r.resumed).length;
+      const fromCache = state.downloadResults.filter(r => r.from_cache).length;
       const failed = state.downloadResults.filter(r => r.error).length;
 
       if (!imageIds.length) {
         setStatus(6, 'info', 'No new items to download.');
       } else {
         const resumedSuffix = resumed > 0 ? ` (${resumed} reused from previous run)` : '';
+        const cacheSuffix = fromCache > 0 ? `, ${fromCache} from local cache` : '';
+        const ingestSuffix = autoIngest
+          ? ` · Ingested: ${result.data?.ingested ?? ingestedCount}`
+          : '';
         setStatus(6, 'success',
-          `Downloaded: ${ok} OK${resumedSuffix}, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}`
+          `Downloaded: ${ok} OK${cacheSuffix}${resumedSuffix}, ${failed} failed in ${fmtMs(result.timing?.duration_ms)}${ingestSuffix}`
         );
       }
 
       renderDownloadDetails();
-      resetStageSelection(7);
-      renderStageCandidates(7);
       setStepState(6, 'complete');
 
-      const flowLabel = ok > 0
-        ? `${ok} image(s) ready to ingest`
-        : 'No new items to ingest.';
-      setFlowState('flow-6-7', true, flowLabel);
+      if (autoIngest) {
+        // Pipeline mode: stage 7 already ran alongside stage 6 — finalize
+        // its results from the streamed events + completion payload.
+        state.ingestResults = ingestedRows.concat(
+          ingestErrors.map((e) => ({ image_id: e.image_id, status: 'failed', error: e.error }))
+        );
+        const alreadyIngested = result.data?.already_ingested || 0;
+        const backendIngestOk = result.data?.ingested ?? ingestedCount;
+        const backendIngestFailed = result.data?.ingest_failed ?? ingestFailCount;
+        let msg = `Ingested (pipeline): ${backendIngestOk} OK`;
+        if (alreadyIngested) msg += `, ${alreadyIngested} already ingested (skipped)`;
+        if (backendIngestFailed) msg += `, ${backendIngestFailed} failed`;
+        msg += ` in ${fmtMs(result.timing?.duration_ms)}`;
+        setStatus(7, backendIngestFailed ? 'warning' : 'success', msg);
+        renderIngestDetails();
+        setStepState(7, 'complete');
+        setFlowState('flow-6-7', true, 'Download + ingest pipeline complete');
+        enableStep(7);
+        enableBtn('btn-ingest');
+
+        // Session is complete — clear from state
+        state.sessionId = null;
+        hideResumeBanner();
+        return;
+      }
+
+      resetStageSelection(7);
+      renderStageCandidates(7);
+      setFlowState('flow-6-7', true, ok > 0 ? `${ok} image(s) ready to ingest` : 'No new items to ingest.');
       enableStep(7);
       enableBtn('btn-ingest');
     } catch (err) {
       setStepState(6, 'error');
       setStatus(6, 'error', err.detail || `Network error: ${err.message || err}`);
+      if (autoIngest) {
+        setStepState(7, 'error');
+        setStatus(7, 'error', 'Pipeline interrupted — re-run to resume; already-ingested images are skipped.');
+      }
     } finally {
       btnLoading(btn, false);
     }
@@ -1166,7 +1228,9 @@
       const size = r.file_size ? ` (${(r.file_size / 1024).toFixed(0)}KB)` : '';
       const resumedTag = r.resumed ? ' ↻' : '';
       const resumedTitle = r.resumed ? ' — reused temp file from previous run' : '';
-      html += `<span class="item-chip ${cls}" data-idx="${i}" title="Click to inspect download details${resumedTitle}${r.error ? ' — ' + escHtml(r.error) : ''}${size}">#${id}${resumedTag}</span>`;
+      const cacheTag = r.from_cache ? ' ⚡' : '';
+      const cacheTitle = r.from_cache ? ' — served from local media cache (no CDN request)' : '';
+      html += `<span class="item-chip ${cls}" data-idx="${i}" title="Click to inspect download details${resumedTitle}${cacheTitle}${r.error ? ' — ' + escHtml(r.error) : ''}${size}">#${id}${resumedTag}${cacheTag}</span>`;
     });
     html += '</div>';
 

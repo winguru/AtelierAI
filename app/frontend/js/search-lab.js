@@ -3820,6 +3820,7 @@
         retryImageLoad(cdnOriginal, `full_${hit.id}`).then((ok) => {
           if (!ok || loadGeneration !== _fullscreenLoadGeneration) return;
           _applySource('original', cdnOriginal, 2);
+          _capturePreviewOriginal(hit, cdnOriginal);
         });
       }
     }
@@ -3831,6 +3832,36 @@
         _applySource('thumbnail', thumbUrl, 1);
       });
     }
+  }
+
+  // ── Bridge preview capture ────────────────────────────────────────────
+  // When a fullscreen original successfully loads (the user is LOOKING at
+  // it), ask the backend to fetch THE SAME URL through the CDP sidecar
+  // browser and cache the bytes in the preserved-media store. One request
+  // per viewed image, human-paced — imports later hit cache:// instead of
+  // the CDN. Best-effort: failures are silent (preview already works).
+  const _bridgeCaptureSeen = new Set(); // civitaiId → already captured/skipped
+  let _bridgeCaptureTimer = null;
+
+  function _capturePreviewOriginal(hit, url) {
+    if (!hit?.id || !url) return;
+    if (hit.preserved_url || _preloadCache.has(hit.id)) return; // already local
+    if (_bridgeCaptureSeen.has(hit.id)) return;
+    _bridgeCaptureSeen.add(hit.id);
+
+    // Debounce rapid navigation — only settle on images actually dwelled on.
+    if (_bridgeCaptureTimer) clearTimeout(_bridgeCaptureTimer);
+    _bridgeCaptureTimer = setTimeout(() => {
+      fetch(`/api/civitai-search/image/${hit.id}/preserve-via-bridge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: hit.id, uuid: hit.uuid, name: hit.name }),
+      }).then(r => r.ok ? r.json() : null).then(d => {
+        if (d && d.preserved) {
+          _preloadCache.set(hit.id, d.preserved_url);
+        }
+      }).catch(() => { /* silent */ });
+    }, 1200);
   }
 
   function openFullscreen() {

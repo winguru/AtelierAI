@@ -334,6 +334,90 @@ class CivitaiBrowserBridge:
     }
     """
 
+    _FETCH_BINARY_JS = """
+    async ({url}) => {
+        const resp = await fetch(url, { credentials: 'include' });
+        if (!resp.ok) {
+            return { status: resp.status, contentType: resp.headers.get('content-type') || '', base64: null };
+        }
+        const buf = await resp.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        // Chunked base64: btoa on >~30MB strings can blow the call stack;
+        // 32KB chunks keep each call small and the join cheap.
+        let binary = '';
+        const CHUNK = 32768;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+        return {
+            status: resp.status,
+            contentType: resp.headers.get('content-type') || '',
+            base64: btoa(binary),
+            byteLength: bytes.length,
+        };
+    }
+    """
+
+    async def fetch_binary(
+        self,
+        url: str,
+        *,
+        max_bytes: int = 80 * 1024 * 1024,
+    ) -> dict[str, Any]:
+        """Fetch a binary asset (e.g. CDN image/video) through the sidecar
+        browser session and return raw bytes.
+
+        Same fail-open contract as :meth:`fetch`. The response carries the
+        real Chromium TLS fingerprint and cookies — the browser lane, not
+        the server HTTP client — so media fetched here never touches the
+        shared rate-limited queue. ``data`` is ``bytes`` on success.
+
+        ``max_bytes`` guards against absurd payloads; larger responses are
+        truncated-refused (ok=False, reason=too-large).
+        """
+        started = time.time()
+        ok = await self._ensure_connected()
+        if not ok:
+            return {"ok": False, "bridge": "unavailable",
+                    "error": self._state.last_error}
+
+        page = await self._pick_page()
+        if page is None:
+            return {"ok": False, "bridge": "no-page",
+                    "error": "No usable civitai page context available"}
+
+        try:
+            result = await page.evaluate(self._FETCH_BINARY_JS, {"url": url})
+        except Exception as exc:  # noqa: BLE001 — fail-open contract
+            return {"ok": False, "bridge": "evaluate-failed",
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+        status = int(result.get("status") or 0)
+        byte_length = int(result.get("byteLength") or 0)
+        if status != 200:
+            return {"ok": False, "bridge": "http-error",
+                    "status": status, "url": url}
+        if byte_length > max_bytes:
+            return {"ok": False, "bridge": "too-large",
+                    "byte_length": byte_length, "url": url}
+
+        import base64 as _b64
+
+        try:
+            data = _b64.b64decode(result.get("base64") or "")
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            return {"ok": False, "bridge": "decode-failed",
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+        return {
+            "ok": True,
+            "status": 200,
+            "content_type": result.get("contentType") or "",
+            "data": data,
+            "byte_length": len(data),
+            "elapsed_seconds": round(time.time() - started, 3),
+        }
+
     async def fetch(
         self,
         url: str,

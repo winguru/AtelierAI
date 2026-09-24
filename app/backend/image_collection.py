@@ -1471,6 +1471,13 @@ class ImageCollection:
 
         return candidates
 
+    def ensure_hash_duplicate_group(self, new_image: ImageModel) -> None:
+        """Public wrapper so non-collection code paths (e.g. the CivitAI
+        duplicate-asset importer in ``main.py``) can attach an image to its
+        ``hash_duplicate`` variant group without reaching into private
+        helpers."""
+        self._ensure_variant_group_for_hash(new_image)
+
     def _ensure_variant_group_for_hash(self, new_image: ImageModel) -> None:
         """Auto-create a hash_duplicate variant group when file_hash matches an existing image.
 
@@ -1535,23 +1542,55 @@ class ImageCollection:
                 .first()
             )
             if existing_membership is None:
-                # Get next sort index
-                max_sort = (
-                    self.db.query(func.max(ImageVariantGroupMembership.sort_index))
-                    .filter(
-                        ImageVariantGroupMembership.group_id == existing_group.id
-                    )
-                    .scalar()
-                ) or 0
-
                 new_membership = ImageVariantGroupMembership(
                     image_id=new_image.id,
                     group_id=existing_group.id,
                     role_in_group="member",
-                    sort_index=max_sort + 1,
+                    sort_index=0,
                     source="auto_hash",
                 )
                 self.db.add(new_membership)
+
+            # Re-order every member by CivitAI image id ascending (lowest
+            # first). Lower CivitAI ids were published earlier, so this gives
+            # the group a stable chronological order regardless of the order
+            # rows were ingested in. Members without a civitai_image_id sort
+            # last; ties fall back to the local db id.
+            memberships = (
+                self.db.query(ImageVariantGroupMembership)
+                .filter(ImageVariantGroupMembership.group_id == existing_group.id)
+                .all()
+            )
+            member_images = (
+                {
+                    image.id: image
+                    for image in self.db.query(ImageModel)
+                    .filter(
+                        ImageModel.id.in_([m.image_id for m in memberships])
+                    )
+                    .all()
+                }
+                if memberships
+                else {}
+            )
+
+            def _hash_member_sort_key(
+                membership: ImageVariantGroupMembership,
+            ) -> tuple:
+                image = member_images.get(membership.image_id)
+                civ_id = (
+                    getattr(image, "civitai_image_id", None) if image else None
+                )
+                return (civ_id is None, civ_id or 0, membership.image_id)
+
+            memberships.sort(key=_hash_member_sort_key)
+            for index, membership in enumerate(memberships):
+                membership.sort_index = index
+                membership.role_in_group = "primary" if index == 0 else "member"
+
+            # Cover image defaults to the lowest CivitAI id (first member).
+            if existing_group.cover_image_id is None and memberships:
+                existing_group.cover_image_id = memberships[0].image_id
 
             self.db.flush()
             print(

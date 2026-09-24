@@ -1338,6 +1338,57 @@ def preserve_civitai_search_image(
     }
 
 
+@router.post("/image/{image_id}/preserve-via-bridge", response_model=dict)
+def preserve_civitai_image_via_bridge(
+    image_id: int,
+    hit: dict[str, Any] = Body(default_factory=dict),
+):
+    """Cache the fullscreen-previewed original through the CDP browser lane.
+
+    Fire-and-forget capture for review flows: when the user previews an
+    image in fullscreen, the frontend posts here; the sidecar browser
+    (real Chromium session) fetches the SAME original URL the viewer is
+    displaying — exactly one request, no candidate ladder — and the bytes
+    land in the preserved-media cache with a sha256 sidecar. Subsequent
+    imports are served cache:// (zero CDN traffic).
+
+    Never raises on bridge unavailability: returns preserved=false so the
+    caller can silently skip (preview stays on the direct CDN path).
+    """
+    from services.civitai_search_media import preserve_search_media_via_bridge
+
+    metadata = dict(hit)
+    with SessionLocal() as db:
+        stored = (
+            db.query(CivitaiSearchImage)
+            .filter(CivitaiSearchImage.civitai_image_id == image_id)
+            .first()
+        )
+        if stored is not None:
+            metadata = {
+                "uuid": stored.uuid,
+                "file_name": stored.file_name,
+                "image_url": stored.image_url,
+                **metadata,
+            }
+
+    try:
+        record = preserve_search_media_via_bridge(image_id, metadata)
+    except Exception:  # noqa: BLE001 — capture is best-effort
+        record = None
+    if record is None:
+        return {"ok": True, "preserved": False}
+
+    return {
+        "ok": True,
+        "preserved": True,
+        "preserved_url": f"/api/civitai-search/image/{image_id}/preserved",
+        "mime_type": record.mime_type,
+        "size": record.size,
+        "sha256": record.sha256,
+    }
+
+
 @router.get("/image/{image_id}/preserved")
 def get_civitai_search_preserved_image(image_id: int):
     preserved = get_preserved_search_media(image_id)

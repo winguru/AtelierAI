@@ -297,16 +297,29 @@ def preserve_search_media_via_bridge(
     if not _is_allowed_media_url(url):
         return None
 
+    # The caller decides sync vs async: run the bridge fetch on a private
+    # loop in a worker thread so this stays callable from sync contexts
+    # WITHOUT poisoning the server's running event loop (asyncio.run inside
+    # a threadpool endpoint can deadlock Playwright's attached loop).
     import asyncio
+    import concurrent.futures as _cf
 
     from atelierai.civitai.browser_bridge import get_browser_bridge
 
-    async def _fetch() -> dict[str, Any] | None:
+    def _fetch_sync() -> dict[str, Any] | None:
         bridge = get_browser_bridge()
-        return await bridge.fetch_binary(url)
+
+        async def _fetch() -> dict[str, Any] | None:
+            return await bridge.fetch_binary(url)
+
+        try:
+            return asyncio.run(_fetch())
+        except Exception:  # noqa: BLE001 — browser lane is best-effort
+            return None
 
     try:
-        result = asyncio.run(_fetch())
+        with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(_fetch_sync).result(timeout=120)
     except Exception:  # noqa: BLE001 — browser lane is best-effort
         return None
     if not isinstance(result, dict) or not result.get("ok"):

@@ -490,6 +490,13 @@
     createImportUI();
     void checkNsfwBackfillNeed();
 
+    // Lightweight background-jobs strip (active imports w/ progress + ETA).
+    // Auto-opens when work is running; flags jobs lost to a --reload.
+    const bgMount = document.getElementById('bg-tasks-mount');
+    if (bgMount && window.BackgroundTaskPanel) {
+      window.BackgroundTaskPanel.create({ container: bgMount });
+    }
+
     // Restore state from URL if present — just repopulate form and search
     const saved = loadStateFromUrl();
     if (saved) {

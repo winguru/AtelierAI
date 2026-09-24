@@ -448,6 +448,22 @@ is broken.
 - Sync Lab Steps 5–7 support stage-level subset execution with candidate selection + optional per-stage `limit`; empty selections still run as no-op completions so sessions can finish through Step 7.
 - Stage 6 download now retries alternate image URLs on 404 (raw page-render URL and `image-b2 ... /original` UUID endpoint) because some CivitAI image pages remain visible while a direct CDN filename URL returns `File with such name does not exist`.
 
+### Preview capture via CDP browser lane (2026-09-24)
+- Fullscreen original loads trigger `_capturePreviewOriginal` → POST
+  `/image/{id}/preserve-via-bridge`: bridge `fetch_binary` (chunked base64
+  in-page) fetches EXACTLY the URL being displayed — one request, no
+  candidate ladder (the 9-URL preserve flood must never return).
+- **asyncio.run inside a threadpool (sync def) endpoint DEADLOCKS
+  Playwright's attached loop** and wedges the bridge singleton for every
+  other caller (status endpoint hangs). Bridge calls from sync endpoints
+  must run on a PRIVATE loop in a worker thread (ThreadPoolExecutor).
+- Bytes are magic-sniffed before caching (HTML error pages served with
+  media Content-Type otherwise poison the cache).
+- Sidecar DevTools wedge signature: ws connects, session handshake times
+  out, `/json/version` still answers. Recovery is HOST-side
+  `docker restart chrome-sidecar-1` — no docker socket inside the
+  devcontainer.
+
 ### Meilisearch index wiped → tRPC search fallback (2026-09-23)
 - CivitAI removed ALL filterable attributes from `images_v6` (every filter
   400s; unfiltered queries return total=0). The site's own frontend now

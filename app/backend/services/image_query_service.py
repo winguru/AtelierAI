@@ -199,6 +199,19 @@ class ImageQueryService:
                 normalized.append(next_value)
         return normalized
 
+    @staticmethod
+    def _taxonomy_normalize(value: str) -> str:
+        """Canonical taxonomy normalization (taxonomy_service.normalize_text).
+
+        strip → underscores→spaces → lowercase → collapse whitespace. This
+        MUST mirror the writer transform so queries hit the indexed
+        ``normalized_external_name`` / ``normalized_alias`` columns exactly.
+        """
+        import re as _re
+
+        text = (value or "").strip().replace("_", " ").lower()
+        return _re.sub(r"\s+", " ", text)
+
     def read_generation_software_for_image(self, image: Any) -> Optional[str]:
         """Return generation software from DB columns only (no sidecar file I/O)."""
         # Primary: dedicated generation_software column
@@ -385,10 +398,15 @@ class ImageQueryService:
             # Primary path: AuthorityTerm -> ImageConceptObservation
             # All tag authorities (civitai, danbooru, user, prompt, ai_agent)
             # store their tags as authority_terms with observations.
+            # Use the INDEXED normalized_external_name column — func.lower()
+            # on external_name defeats the index and full-scans 120k rows
+            # per tag, which (during imports, with WAL churn + cold cache)
+            # stretched gallery queries to seconds and blocked the UI.
+            canonical = self._taxonomy_normalize(tag_name)
             at_ids = [
                 row[0]
                 for row in session.query(AuthorityTerm.id).filter(
-                    func.lower(AuthorityTerm.external_name) == tag_name
+                    AuthorityTerm.normalized_external_name == canonical
                 )
             ]
             if at_ids:
@@ -403,12 +421,12 @@ class ImageQueryService:
             # canonical name or alias than the authority_term external_name.
             concept_ids: set[int] = set()
             for row in session.query(Concept.id).filter(
-                func.lower(Concept.canonical_name) == tag_name
+                Concept.canonical_name == tag_name
             ):
                 concept_ids.add(row[0])
 
             for row in session.query(ConceptAlias.concept_id).filter(
-                func.lower(ConceptAlias.normalized_alias) == tag_name
+                ConceptAlias.normalized_alias == canonical
             ):
                 concept_ids.add(row[0])
 

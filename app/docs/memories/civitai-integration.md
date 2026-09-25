@@ -448,6 +448,22 @@ is broken.
 - Sync Lab Steps 5–7 support stage-level subset execution with candidate selection + optional per-stage `limit`; empty selections still run as no-op completions so sessions can finish through Step 7.
 - Stage 6 download now retries alternate image URLs on 404 (raw page-render URL and `image-b2 ... /original` UUID endpoint) because some CivitAI image pages remain visible while a direct CDN filename URL returns `File with such name does not exist`.
 
+### Tag-filter gallery queries must use normalized indexes (fixed 2026-09-25)
+- `filter_image_ids_by_tag_names` used `func.lower(external_name)` etc. —
+  unindexable, full-scanning authority_terms per tag. Idle ~0.3s/tag;
+  during bulk imports (WAL churn + cold cache on 2.16M-row observations)
+  gallery /api/images stretched to 4s+ until frontend fetches timed out
+  ("Failed to fetch"). Fixed via indexed `normalized_external_name` with
+  taxonomy-canonical normalization mirrored from
+  `taxonomy_service.normalize_text` (strip → _→space → lower → collapse).
+  4.0s → 26ms. ANY new tag-ish query should compare against the
+  normalized_* columns, never lower(raw).
+- Bulk imports also balloon the WAL (178MB observed); readers don't block
+  in WAL mode, but cache pressure amplifies unindexed scans.
+- Wedged-worker recovery: uvicorn reload parent survives a hung worker
+  (SIGABRT to the worker → parent respawns it; port-8000 parent untouched).
+  Task registry wipes on respawn — re-run imports.
+
 ### Background-jobs panel (added 2026-09-24)
 - `shared/background-task-panel.js` — lightweight jobs strip for lab pages
   (search-lab mounts it above the grid). Progress/rate/ETA are parsed from
